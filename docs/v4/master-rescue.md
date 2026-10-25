@@ -16,7 +16,7 @@ Rules live in `aiflow/master_rescue.py` (pure), the handover in `aiflow/rescue.p
 | `rework_wait_minutes` | 0 | Blocked (Rework) |
 | `unclear_wait_minutes` | 30 | Blocked (Unclear) |
 | `in_progress_minutes` | 60 | In Progress this long in one stretch: rescue |
-| `total_work_minutes` | 120 | total work time of the ticket (In Progress and In Review; CI and the pull-request gate are not work time) |
+| `total_work_minutes` | 120 | accumulated In Progress and In Review time, retained after later status moves; CI and the pull-request gate are not work time |
 | `master_minutes` | 60 | Claude's own rescue budget |
 | `total_cap_minutes` | 180 | the ticket's cap: must cover `total_work_minutes` + `master_minutes` |
 | `model` | empty | `Claude[:model[:effort]]` of the rescue, the strongest configured one; empty uses Claude's entry in `agent_models` |
@@ -28,11 +28,14 @@ a cap below the work limit plus the rescue budget, a model that is not Claude) a
 
 ## What happens
 
-1. **Qualifies.** The supervisor records work time per ticket (`worked:<KEY>`, added when In Progress or In Review is left). The
-   operator turns a qualifying ticket into the incident `rescue:<KEY>`, instead of the generic `blocked` / `stuck` one.
+1. **Qualifies.** The supervisor records work time per ticket (`worked:<KEY>`, added when In Progress or In Review is left).
+   Reaching `total_work_minutes` qualifies even after the ticket moves to QA or another status; the continuous 60-minute trigger
+   applies only while In Progress. The operator turns a qualifying ticket into the incident `rescue:<KEY>`, instead of the generic
+   `blocked` / `stuck` one.
 2. **Owner at once**, without waiting: owner-only terms are checked in the summary, Blocked reason, description, and the last
    three comments, even when the ticket is only one minute into In Progress. This includes money, credentials, deleting data,
-   a release, the requirements, merging by hand, runtime setup, or installed software. If Jira cannot provide the description
+   a release, adding or changing requirements, merging by hand, runtime setup, or installed software. Ordinary phrasing such as
+   “Add a new requirement,” “Remove production data,” and “Set up the runtime” is covered. If Jira cannot provide the description
    or recent comments, the safety review is incomplete and the ticket goes to the owner. A ticket with no budget left under its
    cap or Claude unavailable (no machine has Claude: offline; Claude cooling down after a usage limit: quota) also goes to the
    owner. The ticket gets `needs-owner` and the usual question comment.
@@ -52,9 +55,10 @@ a cap below the work limit plus the rescue budget, a model that is not Claude) a
    successfully. Failed doctor comments or transitions stay pending and retry on later operator passes. An unsuccessful rescue is
    not escalated to a person and gets no `needs-owner`.
 
-The Command Center shows the label and the status changes; the audit comments are the operator's usual ones. A failed Handover
-transition does not add a rescue label or record, so the same incident becomes eligible again after its temporary operator
-cooldown. Temporary `Taken by` and model fields are cleared; if Jira refuses a cleanup write, the operator retries it. When
+The Command Center shows the label and the status changes; the audit comments are the operator's usual ones. If a Handover
+transition returns an error, the operator reads the Jira status before deciding: a confirmed Handover is recorded and completed,
+a confirmed refusal clears temporary fields and permits a retry after a short cooldown, and an unreadable status remains pending for
+reconciliation. Temporary `Taken by` and model fields are cleared after a confirmed refusal; if Jira refuses a cleanup write, the operator retries it. When
 Handover succeeds but a later Jira label update fails, the rescue record keeps the label write pending and the operator retries
 it without delaying flow-doctor handling. A failed handover audit comment stays pending and is retried; reconciliation checks for
 its marker first so an accepted comment is not posted twice.
@@ -64,7 +68,7 @@ its marker first so an accepted comment is not posted twice.
 This code records the `Handover` status, `Taken by = Claude`, AI Model field, and rescue budget; it does not start a Claude worker.
 The legacy supervisor's worker stages do not include `Handover`. Rescue therefore depends on JAIF-102's Jira workflow/automation
 to pick up a Handover ticket for Claude, use the AI Model field, and enforce the `master_minutes` budget while Claude is working.
-The rescue timer here starts after Jira accepts Handover. If JAIF-102 only adds the status without that pickup behavior, rescue
+The rescue timer is recorded immediately before the Handover request so an ambiguous response cannot extend the budget. If JAIF-102 only adds the status without that pickup behavior, rescue
 execution is not active until that dependency is supplied.
 
 What AI Flow checks after the merge: the `Handover` status and the `Taken by` field exist in the Jira projects (JAIF-102), and

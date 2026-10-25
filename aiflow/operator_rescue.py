@@ -6,7 +6,7 @@ import math
 import subprocess
 from typing import Any
 
-from . import events, master_rescue
+from . import master_rescue
 from .jira import JiraError
 from .lock import RedisError
 
@@ -104,21 +104,3 @@ def _number(value: Any) -> float:
         return max(0.0, parsed) if math.isfinite(parsed) else 0.0
     except (TypeError, ValueError):
         return 0.0
-
-
-def add_work_time(redis: Any, key: str, previous: str, since: Any, now: float) -> None:
-    """Accumulate completed In Progress/In Review time; CI and other statuses do not count."""
-    if previous not in master_rescue.WORK_STATUSES or not since:
-        return
-    try:
-        worked = float(redis.get(f"worked:{key}") or 0) + max(0.0, now - float(since)) / 60
-    except (TypeError, ValueError):
-        return
-    redis.set_persistent(f"worked:{key}", str(round(worked, 2)))
-
-
-def record_status_change(redis: Any, key: str, to: str, previous: str, source: str, since: Any, now: float) -> None:
-    """Emit a status event and persist completed work time before the next status snapshot."""
-    events.emit("ticket.status", ticket=key, to_status=to, from_status=previous, source=source,
-                minutes_in_from=round((now - float(since)) / 60, 2) if since else None)
-    add_work_time(redis, key, previous, since, now)

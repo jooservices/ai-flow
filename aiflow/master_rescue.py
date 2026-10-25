@@ -25,8 +25,9 @@ WAIT_DEFAULTS = {"Config": 10, "Attempts": 0, "Rework": 0, "Unclear": 30}
 NEVER_RESCUED = ("Quota", "Offline")  # they return by themselves when an AI is back
 NUMBERS = {"in_progress_minutes": 60, "total_work_minutes": 120, "master_minutes": 60, "total_cap_minutes": 180}
 TEXTS = {"model": "", "taken_by_field": "Taken by"}
-_REQUIREMENT_ACTION = (r"change|changed|changes|changing|update|updated|updates|updating|modify|modified|modifies|modifying|"
-                       r"revise|revised|revises|revising|alter|altered|alters|altering|rewrite|rewrote|rewritten|rewriting")
+_REQUIREMENT_ACTION = (r"add|added|adds|adding|create|created|creates|creating|change|changed|changes|changing|"
+                       r"update|updated|updates|updating|modify|modified|modifies|modifying|revise|revised|revises|"
+                       r"revising|alter|altered|alters|altering|rewrite|rewrote|rewritten|rewriting")
 _REQUIREMENT_TARGET = r"requirements?|product direction|acceptance criteria"
 _REQUIREMENT_CHANGE = (rf"\b(?:{_REQUIREMENT_ACTION})\b.{{0,40}}\b(?:{_REQUIREMENT_TARGET})\b|"
                        rf"\b(?:{_REQUIREMENT_TARGET})\b.{{0,40}}\b(?:{_REQUIREMENT_ACTION})\b")
@@ -36,11 +37,13 @@ _INSTALLED_TARGET = r"(?:installed\s+)?(?:software|packages?|tools?|binar(y|ies)
 OWNER_ONLY = (
     ("spending money", r"\b(pay|payment|billing|invoice|purchase|spend(ing)?|subscription|money|paid plan)\b"),
     ("credentials, tokens or secrets", r"\b(credentials?|secrets?|tokens?|passwords?|api[ _-]?keys?|private key)\b"),
-    ("deleting data", r"\b(delet(e|ing)|drop|purge|wipe|truncate)\b.{0,40}\b(data|databases?|tables?|repositor(y|ies)|branch(es)?|records?)\b|force-push"),
+    ("deleting data", r"\b(delet(e|ed|ing)|remov(e|ed|ing)|drop(ped|ping)?|purge(d|s|ing)?|wipe(d|s|ing)?|truncate(d|s|ing)?)\b"
+                       r".{0,40}\b((production\s+)?data|databases?|tables?|repositor(y|ies)|branch(es)?|records?)\b|force-push"),
     ("a release", r"\breleas(e|es|ing)\b|\bproduction deploy"),
     ("changing the requirements", _REQUIREMENT_CHANGE),
     ("merging by hand", r"\bmerg(e|ing)\b.{0,15}\b(by hand|manually)\b|\bmanual(ly)? merge"),
-    ("runtime setup", r"\b(runtime|server|host|network|systemd|environment)\b.{0,15}\b(set ?up|configuration|provisioning)\b|\bprovision"),
+    ("runtime setup", r"\b(set[ -]?up|configure|configuration|provision(?:ing)?)\b.{0,40}\b(runtime|server|host|network|systemd|environment)\b|"
+                      r"\b(runtime|server|host|network|systemd|environment)\b.{0,40}\b(set[ -]?up|configure|configuration|provision(?:ing)?)\b|\bprovision"),
     ("changing installed software", rf"\b(?:{_INSTALLED_ACTION})\b.{{0,40}}\b{_INSTALLED_TARGET}\b|missing tool|not installed"),
 )
 OWNER_PATTERNS = tuple((topic, re.compile(pattern, re.I)) for topic, pattern in OWNER_ONLY)
@@ -119,7 +122,7 @@ def check_line(settings: MasterSettings) -> str:
 
 def owner_only_topic(*texts: Any) -> str:
     """The first owner-only topic the texts mention, or an empty string."""
-    text = " ".join(str(item) for item in texts if item)
+    text = "\n".join(str(item) for item in texts if item)
     return next((topic for topic, pattern in OWNER_PATTERNS if pattern.search(text)), "")
 
 
@@ -146,7 +149,7 @@ def trigger_of(ticket: dict[str, Any], settings: MasterSettings, minutes_in_stat
         return f"Blocked ({kind}) for {int(minutes_in_status)} min, wait {wait} min" if minutes_in_status >= wait else ""
     if status == "In Progress" and ticket.get("stretch_minutes", 0) >= settings.in_progress_minutes:
         return f"In Progress for {int(ticket['stretch_minutes'])} min in one stretch (limit {settings.in_progress_minutes})"
-    if status in WORK_STATUSES and ticket.get("worked_minutes", 0) >= settings.total_work_minutes:
+    if ticket.get("worked_minutes", 0) >= settings.total_work_minutes:
         return f"{int(ticket['worked_minutes'])} min of total work time (limit {settings.total_work_minutes})"
     return ""
 

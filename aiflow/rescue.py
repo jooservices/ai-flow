@@ -11,6 +11,7 @@ The rescue record `rescue:<KEY>` (Redis, kept) holds the state, the start, Claud
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from typing import Any
 
@@ -89,35 +90,78 @@ class Rescue:
                 f"total_cap_minutes {self.settings.total_cap_minutes})"]
 
     def hand_over(self, incident: Incident) -> bool:
-        key, facts = incident.ticket, incident.facts
+        key = incident.ticket
         model, effort = self.model()
         try:
             self.jira.set_field(key, self.settings.taken_by_field, {"value": master_rescue.RESCUE_AGENT})
             if model:
                 self.jira.set_field(key, self.cfg.model_field, {"value": f"{master_rescue.RESCUE_AGENT}:{model}"})
+        except JiraError as error:
+            self.op.sup_log(f"master rescue of {key} could not set the handover fields: {error}")
+            self.rollback_handover(key, incident.id, bool(model))
+            return True
+        started = int(time.time())
+        try:
             moved = self.jira.transition(key, master_rescue.HANDOVER)
         except JiraError as error:
-            self.op.sup_log(f"master rescue of {key} failed: {error}")
+            self.op.sup_log(f"master rescue of {key} got an uncertain Handover response: {error}")
             moved = False
         if not moved:
-            if not self.clear_handover_fields(key, bool(model)):
-                self.redis.set_persistent(f"operator:rescue-cleanup:{key}", json.dumps({"model": bool(model)}))
-            self.redis.set(f"operator:cool:{incident.id}", "1", 600)  # retry after the temporary cooldown
-            return True
-        self.redis.delete(f"lease:{key}")  # a worker still holding the ticket stops at its next heartbeat
+            status = self.current_status(key)
+            if status is None:
+                self.redis.delete(f"lease:{key}")
+                self.finish(key, self.handover_record(incident, model, effort, started), "handover_pending")
+                return True
+            if status.casefold() != master_rescue.HANDOVER.casefold():
+                self.rollback_handover(key, incident.id, bool(model))
+                return True
+        self.activate_handover(key, incident, model, effort, started)
+        return True
+
+    def handover_record(self, incident: Incident, model: str, effort: str, started: int) -> dict[str, Any]:
+        key, facts = incident.ticket, incident.facts
         findings = self.lines(incident)
         extra = [f"Master rescue handover audit: rescue:{key}", *findings,
                  f"Taken by: {master_rescue.RESCUE_AGENT}, model {model or 'default'}" +
                  (f" (effort {effort})" if effort else "")]
-        record = dict(state="active", started=int(time.time()), budget=facts.get("remaining_minutes", 0), model=f"{model}:{effort}".strip(":"),
-                      stuck=facts.get("trigger", ""), findings=findings, label_pending=True,
-                      handover_audit_pending=True, handover_audit_attempts=0,
-                      handover_audit=dict(summary=incident.summary, extra=extra,
-                                          done=["handover", f"label {master_rescue.RESCUE_LABEL}"]))
-        self.redis.set_persistent(f"rescue:{key}", json.dumps(record))
+        return dict(state="active", started=started, budget=facts.get("remaining_minutes", 0),
+                    model=f"{model}:{effort}".strip(":"), stuck=facts.get("trigger", ""), findings=findings,
+                    label_pending=True, handover_audit_pending=True, handover_audit_attempts=0,
+                    handover_audit=dict(summary=incident.summary, extra=extra,
+                                        done=["handover", f"label {master_rescue.RESCUE_LABEL}"]))
+
+    def activate_handover(self, key: str, incident: Incident, model: str, effort: str, started: int) -> None:
+        record = self.handover_record(incident, model, effort, started)
+        self.redis.delete(f"lease:{key}")  # a worker still holding the ticket stops at its next heartbeat
+        self.finish(key, record, "active")
         self.ensure_label(key, record)
         self.ensure_handover_audit(key, record)
         events.emit("operator.rescue", ticket=key, outcome="handover", budget=record["budget"], model=record["model"])
+
+    def rollback_handover(self, key: str, incident_id: str, model: bool) -> None:
+        if not self.clear_handover_fields(key, model):
+            self.redis.set_persistent(f"operator:rescue-cleanup:{key}", json.dumps({"model": model}))
+        self.redis.delete(f"rescue:{key}")
+        self.redis.set(f"operator:cool:{incident_id}", "1", 600)
+
+    def current_status(self, key: str) -> str | None:
+        """Read Jira's status; None means the transition outcome is still uncertain."""
+        try:
+            issue = self.jira.view(key)
+        except (JiraError, ValueError, TypeError, OSError, subprocess.TimeoutExpired):
+            return None
+        status = issue.get("status") if isinstance(issue, dict) else None
+        return status if isinstance(status, str) and status else None
+
+    def reconcile_handover(self, key: str, record: dict[str, Any]) -> bool:
+        status = self.current_status(key)
+        if status is None:
+            return False
+        if status.casefold() != master_rescue.HANDOVER.casefold():
+            self.rollback_handover(key, f"rescue:{key}", bool(record.get("model")))
+            return False
+        record["state"] = "active"
+        self.finish(key, record, "active")
         return True
 
     def ensure_label(self, key: str, record: dict[str, Any]) -> bool:
@@ -245,6 +289,8 @@ class Rescue:
         return record if isinstance(record, dict) else None
 
     def check_rescue(self, key: str, record: dict[str, Any]) -> None:
+        if record.get("state") == "handover_pending" and not self.reconcile_handover(key, record):
+            return
         if record.get("handover_audit_pending"):
             self.ensure_handover_audit(key, record)
         if record.get("label_pending", True):
@@ -270,10 +316,7 @@ class Rescue:
                      findings=self.recent_findings(key, record))
 
     def rescue_status(self, key: str) -> str:
-        try:
-            return str(self.jira.view(key).get("status", "") or "")
-        except JiraError:
-            return ""
+        return self.current_status(key) or ""
 
     def recent_findings(self, key: str, record: dict[str, Any]) -> str:
         """Include recent Claude or operator findings in the flow-doctor return comment."""

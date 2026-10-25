@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agents, deploy, events, github, operator_rescue, operator_status, rework_rounds, runner, usage
+from . import agents, deploy, events, github, operator_status, rework_rounds, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
@@ -25,7 +25,6 @@ from .project_database import ProjectDatabase, ticket_database_id
 
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
           "Human review": "human", "Ready to merge": "finalize"}
-OBSERVED_STATUSES = (*STAGES, "Blocked")  # Blocked is tracked for owner moves but never assigned to a worker
 PR_STAGES = ("In QA", "Human review", "Ready to merge")  # checked on GitHub by the supervisor, no AI to pick
 ANY_AI = "Any"  # developer = "Any": the least busy AI takes the step
 DAY = 86400
@@ -177,10 +176,9 @@ class Supervisor:
     # ---- selection -------------------------------------------------------------------------------------------
     def candidates(self) -> list[dict[str, Any]]:
         projects = ", ".join(self.cfg.projects)
-        statuses = ", ".join(f'"{s}"' for s in OBSERVED_STATUSES)
+        statuses = ", ".join(f'"{s}"' for s in (*STAGES, "Blocked"))
         jql = f"project in ({projects}) AND status in ({statuses}) AND issuetype != Epic ORDER BY priority DESC, created ASC"
-        found = self.jira.search(jql)
-        self.observe(found)
+        self.observe(found := self.jira.search(jql))
         found = [issue for issue in found if issue.get("status") in STAGES]
         found = [issue for issue in found if issue["key"] not in self.parents_of_open_work(found)]  # containers are never worked
         if self.cfg.home and self.cfg.slot == 1:  # worker 1 of a project serves only its own project, so it always has a free hand for it
@@ -213,7 +211,7 @@ class Supervisor:
         since = self.redis.get(f"statussince:{key}")
         if previous == to:
             return
-        operator_rescue.record_status_change(self.redis, key, to, previous, source, since, now)
+        operator_status.record_status_change(self.redis, key, to, previous, source, since, now)
         self.redis.set_persistent(f"status:{key}", to)
         self.redis.set_persistent(f"statussince:{key}", str(now))
 

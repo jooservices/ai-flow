@@ -95,7 +95,11 @@ class RulesTests(unittest.TestCase):
         self.assertIsNone(verdict("In Progress", 59, stretch_minutes=59, worked_minutes=59))
         self.assertIn("one stretch", verdict("In Progress", 60, stretch_minutes=60, worked_minutes=60).trigger)
         self.assertIn("total work time", verdict("In Progress", 10, stretch_minutes=10, worked_minutes=120).trigger)
-        self.assertIsNone(verdict("In QA", 500, stretch_minutes=0, worked_minutes=500))  # CI / the gate is not work time
+        self.assertIsNone(verdict("In QA", 500, stretch_minutes=0, worked_minutes=0))  # CI / the gate is not work time
+
+    def test_accumulated_work_still_qualifies_after_moving_into_qa(self):
+        found = verdict("In QA", 30, stretch_minutes=0, worked_minutes=120)
+        self.assertIn("total work time", found.trigger)
 
     def test_the_limits_are_configurable(self):
         custom = MasterSettings(in_progress_minutes=20, total_work_minutes=30)
@@ -130,6 +134,20 @@ class RulesTests(unittest.TestCase):
         self.assertEqual(owner_only_topic("a failing unit test"), "")
         self.assertEqual(owner_only_topic("Update the ticket documentation"), "")
         self.assertEqual(verdict("In Progress", 70, stretch_minutes=70, summary="Rotate the credentials").mode, "owner")
+
+    def test_ordinary_owner_only_actions_are_detected_in_descriptions_and_comments(self):
+        cases = (
+            (ticket("JAIF-1", "In Progress", 1, summary="Routine task", description="Add a new requirement"),
+             "changing the requirements"),
+            (ticket("JAIF-2", "In Progress", 1, summary="Routine task", description="Routine task",
+                    last_comments=[{"author": "Owner", "body": "Remove production data"}]), "deleting data"),
+            (ticket("JAIF-3", "In Progress", 1, summary="Routine task", description="Set up the runtime"),
+             "runtime setup"),
+        )
+        for item, topic in cases:
+            with self.subTest(ticket=item["key"]):
+                found = evaluate(item, SETTINGS, 1)
+                self.assertEqual((found.mode, found.topic), ("owner", topic))
 
     def test_acceptance_criteria_template_heading_is_not_a_requirement_change(self):
         description = """## Business requirement
@@ -386,6 +404,37 @@ class RescueRunTests(unittest.TestCase):
         self.assertIsNone(sup.jira.fields[("JAIF-1", "AI Model")])
         retry = find_incidents(state([ticket("JAIF-1", "Blocked", 40, blocked_kind="Config")], master=SETTINGS))
         self.assertEqual([(item.id, item.kind) for item in retry], [(incident.id, "rescue")])
+
+    def test_lost_handover_response_is_reconciled_from_jira_status(self):
+        op, sup, redis = self.build()
+
+        def accepted_then_lost(key, status):
+            sup.jira.status = status
+            raise JiraError("response was lost after Jira accepted the transition")
+
+        sup.jira.transition = accepted_then_lost
+        self.assertTrue(op.handle(self.incident()))
+        record = json.loads(redis.get("rescue:JAIF-1"))
+
+        self.assertEqual(record["state"], "active")
+        self.assertEqual(sup.jira.moves, [])
+        self.assertIn(("JAIF-1", "master-rescue"), sup.jira.added)
+        self.assertTrue(any("Master rescue handover audit: rescue:JAIF-1" in body for _, body in sup.jira.comments))
+
+    def test_uncertain_handover_is_persisted_until_status_can_be_checked(self):
+        op, sup, redis = self.build()
+        sup.jira.transition = mock.Mock(side_effect=JiraError("ambiguous response"))
+        sup.jira.view = mock.Mock(side_effect=JiraError("status unavailable"))
+        self.assertTrue(op.handle(self.incident()))
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertEqual(record["state"], "handover_pending")
+        self.assertNotIn(("JAIF-1", "master-rescue"), sup.jira.added)
+
+        sup.jira.view = lambda key, full=False: {"status": "Handover"}
+        op.check_rescues()
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertEqual(record["state"], "active")
+        self.assertIn(("JAIF-1", "master-rescue"), sup.jira.added)
 
     def test_failed_handover_retries_cleanup_of_temporary_fields(self):
         op, sup, redis = self.build()

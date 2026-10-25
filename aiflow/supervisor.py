@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agents, deploy, events, github, operator_status, rework_rounds, runner, usage
+from . import agents, deploy, events, github, master_rescue, operator_status, rework_rounds, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
@@ -213,6 +213,9 @@ class Supervisor:
             return
         events.emit("ticket.status", ticket=key, to_status=to, from_status=previous, source=source,
                     minutes_in_from=round((now - float(since)) / 60, 2) if since else None)
+        if previous in master_rescue.WORK_STATUSES and since:  # work time for the master rescue limits; CI (the gate) is not counted
+            worked = float(self.redis.get(f"worked:{key}") or 0) + max(0.0, now - float(since)) / 60
+            self.redis.set_persistent(f"worked:{key}", str(round(worked, 2)))
         self.redis.set_persistent(f"status:{key}", to)
         self.redis.set_persistent(f"statussince:{key}", str(now))
 
@@ -813,7 +816,7 @@ class Supervisor:
             self.redis.delete(name % key)  # the owner who unblocks the ticket gets a fresh start, not an instant second block
         try:
             status = str(self.jira.view(key).get("status", ""))
-            blocked = {"status": status, "kind": kind}
+            blocked = {"status": status, "kind": kind, "reason": reason[:500]}
             if rework_rounds:
                 blocked["rework_rounds"] = rework_rounds
             self.redis.set(f"blocked:{key}", json.dumps(blocked), 30 * DAY)
@@ -1889,6 +1892,7 @@ def main(argv: list[str] | None = None) -> int:
                   + ("" if memory.get('AIFLOW_MEMORY_TOKEN') else " (needs AIFLOW_MEMORY_TOKEN in Workspaces/.env)")
                   + ("" if memory.get('AIFLOW_MEMORY_AI_TOKEN') else "; the AIs get no aiflow-mem access without AIFLOW_MEMORY_AI_TOKEN"))
             print(operator_status.check_line(config, Redis, RedisError))
+            print(master_rescue.check_line(config.registry.master))
             for project in config.registry.projects.values():
                 deploy_setting = (f"configured (timeout {project.deploy_timeout_minutes} min, on {project.deploy_on})"
                                   if project.deploy_command.strip() else "disabled")

@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import master_rescue
+
 WORKED = ("In Progress", "In Review", "Review passed", "In QA", "Ready to merge")  # Human review waits for the owner by design
 RETURNS_BY_ITSELF = ("Quota", "Offline")
 
@@ -14,7 +16,7 @@ RETURNS_BY_ITSELF = ("Quota", "Offline")
 @dataclass(frozen=True)
 class Incident:
     id: str
-    kind: str       # blocked | stuck | ci | worker | ai_pool | rework
+    kind: str       # blocked | stuck | ci | worker | ai_pool | rework | rescue
     subject: str    # ticket key, worker slot or `all`
     summary: str
     facts: dict[str, Any] = field(default_factory=dict)
@@ -59,6 +61,15 @@ def find_incidents(state: dict[str, Any]) -> list[Incident]:
             "ci_state": ticket.get("ci_state", "unknown"),
         }
         blocked_kind = ticket.get("blocked_kind", "")
+        verdict = master_rescue.evaluate(ticket, state["master"], minutes) if state.get("master") else None
+        if verdict:  # the master takes the ticket before the generic blocked / stuck incidents
+            found.append(Incident(f"rescue:{key}", "rescue", key, f"{key} qualifies for a master rescue: {verdict.trigger}",
+                                  {**facts, "blocked_kind": blocked_kind, "reason": ticket.get("reason", ""), "summary": ticket.get("summary", ""),
+                                   "mode": verdict.mode, "trigger": verdict.trigger, "topic": verdict.topic,
+                                   "stretch_minutes": int(ticket.get("stretch_minutes", 0)),
+                                   "worked_minutes": int(ticket.get("worked_minutes", 0)),
+                                   "remaining_minutes": verdict.remaining_minutes}))
+            continue
         pr_state = pull_request.get("state", "") if isinstance(pull_request, dict) else ""
         ci_waiting = (status == "In QA" and not ticket.get("leased") and pull_request
                       and pr_state in ("", "OPEN") and ticket.get("ci_state") in ("none", "pending"))

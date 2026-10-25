@@ -1,0 +1,140 @@
+"""Master AI rescue (JAIF-92): when Claude takes a long Blocked or over-time ticket before a person is involved.
+
+Pure rules: `evaluate` takes the facts of one ticket and the `[master]` settings of `aiflow.toml` and returns what to do, it reads
+and writes nothing. The operator (`operator.py`) queues the result as a `rescue` incident and performs it.
+
+    Blocked Config | Attempts | Rework | Unclear for its wait  -> rescue    (Quota and Offline are never handed to Claude)
+    In Progress for one stretch, or total work time over limit -> rescue    (CI time is not work time)
+    money, credentials, deleting data, release, requirements,
+    merging by hand, runtime setup, installed software          -> owner, at once
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+from .config import ConfigError
+
+HANDOVER = "Handover"            # the status defined by JAIF-102
+RESCUE_LABEL = "master-rescue"
+RESCUE_AGENT = "Claude"
+WORK_STATUSES = ("In Progress", "In Review")  # their time is work time; the pull-request gate (CI) is not
+WAIT_DEFAULTS = {"Config": 10, "Attempts": 0, "Rework": 0, "Unclear": 30}
+NEVER_RESCUED = ("Quota", "Offline")  # they return by themselves when an AI is back
+NUMBERS = {"in_progress_minutes": 60, "total_work_minutes": 120, "master_minutes": 60, "total_cap_minutes": 180}
+TEXTS = {"model": "", "taken_by_field": "Taken by"}
+OWNER_ONLY = (
+    ("spending money", r"\b(pay|payment|billing|invoice|purchase|spend(ing)?|subscription|money|paid plan)\b"),
+    ("credentials, tokens or secrets", r"\b(credentials?|secrets?|tokens?|passwords?|api[ _-]?keys?|private key)\b"),
+    ("deleting data", r"\b(delet(e|ing)|drop|purge|wipe|truncate)\b.{0,40}\b(data|databases?|tables?|repositor(y|ies)|branch(es)?|records?)\b|force-push"),
+    ("a release", r"\breleas(e|es|ing)\b|\bproduction deploy"),
+    ("changing the requirements", r"\b(requirements?|product direction|acceptance criteria)\b"),
+    ("merging by hand", r"\bmerg(e|ing)\b.{0,15}\b(by hand|manually)\b|\bmanual(ly)? merge"),
+    ("runtime setup", r"\b(runtime|server|host|network|systemd|environment)\b.{0,15}\b(set ?up|configuration|provisioning)\b|\bprovision"),
+    ("changing installed software", r"\b(install(ing|ed)?|uninstall|upgrade)\b.{0,40}\b(software|packages?|tools?|binar(y|ies)|cli)\b|missing tool|not installed"),
+)
+OWNER_PATTERNS = tuple((topic, re.compile(pattern, re.I)) for topic, pattern in OWNER_ONLY)
+
+
+@dataclass(frozen=True)
+class MasterSettings:
+    waits: dict[str, int] = field(default_factory=lambda: dict(WAIT_DEFAULTS))  # Blocked kind -> minutes before the rescue
+    in_progress_minutes: int = 60    # In Progress this long in one stretch
+    total_work_minutes: int = 120    # total work time, CI excluded
+    master_minutes: int = 60         # Claude's own rescue budget
+    total_cap_minutes: int = 180     # work limit + rescue budget; a ticket never gets more
+    model: str = ""                  # Claude[:model[:effort]] of the rescue; empty = the model configured for Claude in agent_models
+    taken_by_field: str = "Taken by"
+
+
+def parse(table: dict[str, Any], where: str) -> MasterSettings:
+    """The `[master]` table of aiflow.toml; anything not understood stops the worker with a clear message."""
+    waits = dict(WAIT_DEFAULTS)
+    values: dict[str, Any] = {}
+    known = [f"{kind.lower()}_wait_minutes" for kind in WAIT_DEFAULTS] + list(NUMBERS) + list(TEXTS)
+    for name, value in table.items():
+        kind = name.removesuffix("_wait_minutes").capitalize()
+        if name.endswith("_wait_minutes") and kind in NEVER_RESCUED:
+            raise ConfigError(f"{where}: `{name}` is not allowed: Quota and Offline are never handed to Claude.")
+        if name.endswith("_wait_minutes") and kind in WAIT_DEFAULTS:
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ConfigError(f"{where}: `{name}` must be a whole number of 0 or more.")
+            waits[kind] = value
+        elif name in NUMBERS:
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ConfigError(f"{where}: `{name}` must be a whole number of at least 1.")
+            values[name] = value
+        elif name in TEXTS:
+            if not isinstance(value, str) or (name == "taken_by_field" and not value.strip()):
+                raise ConfigError(f"{where}: `{name}` must be text.")
+            values[name] = value.strip()
+        else:
+            raise ConfigError(f"{where}: unknown setting `{name}` (known: {', '.join(known)}).")
+    settings = MasterSettings(waits=waits, **values)
+    if settings.model and settings.model.split(":")[0] != RESCUE_AGENT:
+        raise ConfigError(f"{where}: `model` must name Claude, as Claude[:model[:effort]].")
+    if settings.total_cap_minutes < settings.total_work_minutes + settings.master_minutes:
+        raise ConfigError(f"{where}: `total_cap_minutes` ({settings.total_cap_minutes}) must cover `total_work_minutes` "
+                          f"+ `master_minutes` ({settings.total_work_minutes + settings.master_minutes}).")
+    return settings
+
+
+def check_line(settings: MasterSettings) -> str:
+    """The `[master]` settings as `aiflow-work check` shows them."""
+    waits = ", ".join(f"{kind} {minutes} min" for kind, minutes in settings.waits.items())
+    return (f"  master rescue: waits before Claude takes a Blocked ticket: {waits} (Quota and Offline never); In Progress "
+            f"{settings.in_progress_minutes} min in one stretch or {settings.total_work_minutes} min of work; Claude budget "
+            f"{settings.master_minutes} min, total cap {settings.total_cap_minutes} min")
+
+
+def owner_only_topic(*texts: str) -> str:
+    """The first owner-only topic the texts mention, or an empty string."""
+    text = " ".join(texts)
+    return next((topic for topic, pattern in OWNER_PATTERNS if pattern.search(text)), "")
+
+
+@dataclass(frozen=True)
+class Verdict:
+    mode: str                  # rescue | owner
+    trigger: str               # why the ticket qualifies
+    topic: str = ""            # the owner-only topic, when mode is owner
+    remaining_minutes: int = 0  # Claude's budget for this ticket
+
+
+def remaining_budget(settings: MasterSettings, worked_minutes: float) -> int:
+    """Claude's minutes: `master_minutes`, but never beyond the ticket's total cap."""
+    return max(0, min(settings.master_minutes, int(settings.total_cap_minutes - worked_minutes)))
+
+
+def trigger_of(ticket: dict[str, Any], settings: MasterSettings, minutes_in_status: float) -> str:
+    """Why this ticket qualifies for a rescue ('' when it does not)."""
+    status, kind = ticket["status"], ticket.get("blocked_kind", "")
+    if status == "Blocked":
+        wait = settings.waits.get(kind)
+        if kind in NEVER_RESCUED or wait is None:
+            return ""
+        return f"Blocked ({kind}) for {int(minutes_in_status)} min, wait {wait} min" if minutes_in_status >= wait else ""
+    if status == "In Progress" and ticket.get("stretch_minutes", 0) >= settings.in_progress_minutes:
+        return f"In Progress for {int(ticket['stretch_minutes'])} min in one stretch (limit {settings.in_progress_minutes})"
+    if status in WORK_STATUSES and ticket.get("worked_minutes", 0) >= settings.total_work_minutes:
+        return f"{int(ticket['worked_minutes'])} min of total work time (limit {settings.total_work_minutes})"
+    return ""
+
+
+def evaluate(ticket: dict[str, Any], settings: MasterSettings, minutes_in_status: float) -> Verdict | None:
+    """What the master does with one ticket: None, a rescue by Claude, or the owner. One rescue per ticket."""
+    if RESCUE_LABEL in ticket.get("labels", []) or ticket.get("rescued"):
+        return None
+    trigger = trigger_of(ticket, settings, minutes_in_status)
+    kind = ticket.get("blocked_kind", "")
+    blocked_for_rescue = ticket["status"] == "Blocked" and kind in settings.waits  # owner-only work does not wait for the wait time
+    topic = owner_only_topic(ticket.get("reason", ""), ticket.get("summary", "")) if trigger or blocked_for_rescue else ""
+    if topic:
+        return Verdict("owner", trigger or f"Blocked ({kind}) for {int(minutes_in_status)} min", topic)
+    if not trigger:
+        return None
+    remaining = remaining_budget(settings, ticket.get("worked_minutes", 0))
+    if remaining <= 0:
+        return Verdict("owner", trigger, "no rescue budget left under the ticket's total cap")
+    return Verdict("rescue", trigger, remaining_minutes=remaining)

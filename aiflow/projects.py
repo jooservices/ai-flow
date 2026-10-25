@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .config import ConfigError
+from .master_rescue import MasterSettings, parse as parse_master
 
 SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, "qa": str, "require_human": bool,
             "human_on_deployment": bool, "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int,
@@ -87,6 +88,7 @@ class Registry:
     ai_limits: dict[str, dict[str, int]] = field(default_factory=dict)  # machine -> AI name -> concurrent session limit
     runtime: dict[str, str] = field(default_factory=dict)  # AIFLOW_* name -> value, from [runtime] of aiflow.toml
     max_workers: dict[str, int] = field(default_factory=dict)  # machine -> most workers (shared + all projects) it may run
+    master: MasterSettings = field(default_factory=MasterSettings)  # [master] of aiflow.toml: the rescue by Claude (JAIF-92)
 
     def get(self, key: str) -> Project | None:
         return self.projects.get(key)
@@ -168,8 +170,8 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
         return None
     general = _read(general_file)
     for section in general:
-        if section not in ("defaults", "machines", "runtime"):
-            raise ConfigError(f"{general_file}: unknown section `{section}` (known: defaults, machines, runtime).")
+        if section not in ("defaults", "machines", "runtime", "master"):
+            raise ConfigError(f"{general_file}: unknown section `{section}` (known: defaults, machines, runtime, master).")
     defaults = replace(fallback, **_typed(_project_settings(general.get("defaults", {}), f"{general_file} [defaults]"),
                                            SETTINGS, f"{general_file} [defaults]"))
     if defaults.loop_limit is not None and defaults.loop_limit < 0:
@@ -226,7 +228,8 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
     if not projects:
         raise ConfigError(f"No project file in {config_dir / 'aiflow'}.")
     runtime = _runtime(general.get("runtime", {}), f"{general_file} [runtime]")
-    registry = Registry(projects, workers, from_files=True, ai_limits=ai_limits, runtime=runtime, max_workers=max_workers)
+    registry = Registry(projects, workers, from_files=True, ai_limits=ai_limits, runtime=runtime, max_workers=max_workers,
+                        master=parse_master(general.get("master", {}), f"{general_file} [master]"))
     for machine, cap in max_workers.items():
         total = len(desired_ids(registry, machine))
         if total > cap:

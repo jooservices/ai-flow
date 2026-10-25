@@ -13,12 +13,13 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from . import agents, events, github, notify, runner, usage
+from . import agents, events, github, master_rescue, notify, runner, usage
 from .config import PROJECT_DIR
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
 from .incidents import WORKED, Incident, find_incidents
 from .jira import JiraError
+from .rescue import Rescue
 
 DAY = 86400
 MAX_ACTIONS = 5
@@ -50,6 +51,13 @@ def parse_output(text: str) -> tuple[tuple[str, str] | None, list[tuple[str, dic
     return result, actions, options[-1].strip() if options else "", recommend[-1].strip() if recommend else ""
 
 
+def _number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def epoch(value: str, default: float) -> float:
     try:
         return datetime.fromisoformat(value).timestamp()
@@ -65,6 +73,13 @@ class Operator:
         self.run_ai = run_ai or self._run_ai
         self.redis, self.jira, self.cfg = sup.redis, sup.jira, sup.cfg
         self._run_id = ""
+        self.rescue = Rescue(self)
+
+    def handle_rescue(self, incident: Incident) -> bool:
+        return self.rescue.handle(incident)
+
+    def check_rescues(self) -> None:
+        self.rescue.check_rescues()
 
     # ---- switches --------------------------------------------------------------------------------------------
     def active(self) -> bool:
@@ -83,12 +98,14 @@ class Operator:
         blocked = self.redis.get_many([f"blocked:{i['key']}" for i in issues]) if issues else []
         cycles = self.redis.get_many([f"cycles:{i['key']}" for i in issues]) if issues else []
         status_times = self.redis.get_many([f"statussince:{i['key']}" for i in issues]) if issues else []
+        worked_times = self.redis.get_many([f"worked:{i['key']}" for i in issues]) if issues else []
+        rescued = self.redis.get_many([f"rescue:{i['key']}" for i in issues]) if issues else []
         pull_request_numbers = self.redis.get_many([f"pr:{i['key']}" for i in issues]) if issues else []
         gate_entries = self.redis.get_many([f"gateentry:{i['key']}" for i in issues]) if issues else []
         pushed_times = self.redis.get_many([f"pushed:{i['key']}" for i in issues]) if issues else []
         tickets = []
-        for issue, why, rounds, since, number, entry, pushed in zip(issues, blocked, cycles, status_times,
-                                                                     pull_request_numbers, gate_entries, pushed_times):
+        for issue, why, rounds, since, number, entry, pushed, worked, rescue in zip(
+                issues, blocked, cycles, status_times, pull_request_numbers, gate_entries, pushed_times, worked_times, rescued):
             key, status = issue["key"], issue["status"]
             labels = issue.get("labels", [])
             is_leased = key in leased
@@ -118,12 +135,18 @@ class Operator:
             except (TypeError, ValueError):
                 rework_rounds = 0
             blocked_kind = blocked_data.get("kind", "")
+            stretch_minutes = minutes_in_status if status == "In Progress" else 0
+            worked_minutes = _number(worked) + (minutes_in_status if status in master_rescue.WORK_STATUSES else 0)
+            master = self.cfg.registry.master
+            rescue_possible = ((status == "Blocked" and blocked_kind in master.waits) or stretch_minutes >= master.in_progress_minutes
+                               or worked_minutes >= master.total_work_minutes)
             potential = "aiflow-hold" not in labels and "needs-owner" not in labels and (
                 (status == "Blocked" and minutes_in_status >= self.policy.blocked_minutes)
                 or (status == "In QA" and not is_leased and
                     (minutes_waiting_for_ci >= self.policy.ci_wait_minutes or minutes_in_status >= self.policy.stuck_minutes))
                 or (status in WORKED and status != "In QA" and not is_leased and minutes_in_status >= self.policy.stuck_minutes)
                 or rework_rounds > self.cfg.loop_limit_for(key)
+                or rescue_possible
             )
             last_comments = []
             if potential:
@@ -146,7 +169,9 @@ class Operator:
                     # Missing repository or GitHub data is not evidence that CI is still waiting.
                     pass
             tickets.append(dict(key=key, status=status, status_since=status_since, updated=updated, labels=labels,
-                                leased=is_leased, blocked_kind=blocked_kind, reason=issue.get("summary", ""),
+                                leased=is_leased, blocked_kind=blocked_kind, reason=blocked_data.get("reason") or issue.get("summary", ""),
+                                summary=issue.get("summary", ""), stretch_minutes=stretch_minutes, worked_minutes=worked_minutes,
+                                rescued=rescue is not None,
                                 cycles=rework_rounds, rework_rounds=rework_rounds, last_comments=last_comments,
                                 loop_limit=self.cfg.loop_limit_for(key),
                                 pull_request=pull_request, ci_state=ci_state, ci_since=gate_since,
@@ -156,7 +181,7 @@ class Operator:
         role_pools = {role: self.sup.eligible_agents(role, "", None, pool) for role in ("developer", "reviewer", "qa")}
         thresholds = {name: getattr(self.policy, name) for name in ("blocked_minutes", "stuck_minutes", "ci_wait_minutes", "rework_limit")}
         return dict(now=now, tickets=tickets, heartbeats=beats, stale_seconds=self.cfg.heartbeat_stale_seconds,
-                    role_pools=role_pools, thresholds=thresholds)
+                    role_pools=role_pools, thresholds=thresholds, master=self.cfg.registry.master)
 
     def sync_queue(self, incidents: list[Incident]) -> None:
         """Queue each new incident once; forget the ones that no longer exist."""
@@ -202,6 +227,7 @@ class Operator:
             return False
         self.sync_queue(find_incidents(self.state()))
         self.flush_notifications()
+        self.check_rescues()
         return self.run_next()
 
     def count(self, name: str) -> int:
@@ -236,6 +262,8 @@ class Operator:
         return False
 
     def handle(self, incident: Incident) -> bool:
+        if incident.kind == "rescue":  # the master rescue has its own budget; it is not an operator AI run
+            return self.handle_rescue(incident)
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
         limit = self.global_limit()
         if limit:
@@ -396,8 +424,9 @@ class Operator:
         log(message)
 
     # ---- audit and escalation --------------------------------------------------------------------------------------
-    def audit(self, incident: Incident, agent: str, outcome: str, done: list[str], refused: list[str]) -> None:
+    def audit(self, incident: Incident, agent: str, outcome: str, done: list[str], refused: list[str], extra: list[str] | None = None) -> None:
         lines = [f"AI Flow operator ({agent}) on {self.cfg.machine} handled `{incident.id}`.", f"Saw: {incident.summary}", f"Outcome: {outcome}"]
+        lines += extra or []
         lines.append("Did: " + ("; ".join(done) if done else "nothing"))
         if refused:
             lines.append("Refused: " + "; ".join(refused))

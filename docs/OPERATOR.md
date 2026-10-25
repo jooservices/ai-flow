@@ -18,6 +18,7 @@ The owner is not in the loop. When a ticket is Blocked, a pull request is stuck,
 | `stuck` | a worked ticket has no lease and no change for `stuck_minutes` |
 | `ci` | a pull request waits in QA with no change for `ci_wait_minutes` |
 | `rework` | a ticket went through more than `rework_limit` rework rounds |
+| `rescue` | a Blocked (Config, Attempts, Rework, Unclear) ticket waited its `[master]` time, or a ticket ran over its work limits: Claude takes it, or the owner does; it replaces `blocked`/`stuck` for that ticket (see [master rescue](v4/master-rescue.md)) |
 | `worker` | a worker of this machine sends no heartbeat |
 | `ai_pool` | no AI is usable on any machine |
 

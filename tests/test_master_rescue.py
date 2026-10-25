@@ -1,0 +1,274 @@
+import io
+import json
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from aiflow import master_rescue
+from aiflow.config import ConfigError, load
+from aiflow.incidents import find_incidents
+from aiflow.master_rescue import MasterSettings, evaluate, owner_only_topic, parse
+from aiflow.operator import Operator
+from aiflow.operator_policy import Policy
+from aiflow.supervisor import main
+from tests.test_operator import JiraWithLabels, Notifier, state, ticket
+
+NOW = 1_000_000.0
+SETTINGS = MasterSettings()
+
+
+def verdict(status, minutes, **extra):
+    item = ticket("JAIF-1", status, minutes, **extra)
+    return evaluate(item, SETTINGS, minutes)
+
+
+class SettingsTests(unittest.TestCase):
+    def test_defaults_are_the_ticket_values(self):
+        self.assertEqual(SETTINGS.waits, {"Config": 10, "Attempts": 0, "Rework": 0, "Unclear": 30})
+        self.assertEqual((SETTINGS.in_progress_minutes, SETTINGS.total_work_minutes, SETTINGS.master_minutes, SETTINGS.total_cap_minutes),
+                         (60, 120, 60, 180))
+
+    def test_valid_settings_are_read(self):
+        found = parse({"config_wait_minutes": 5, "attempts_wait_minutes": 1, "in_progress_minutes": 45, "total_work_minutes": 100,
+                       "master_minutes": 30, "total_cap_minutes": 200, "model": "Claude:opus:max", "taken_by_field": "Taken by"}, "x")
+        self.assertEqual((found.waits["Config"], found.waits["Attempts"], found.waits["Unclear"]), (5, 1, 30))
+        self.assertEqual((found.in_progress_minutes, found.total_work_minutes, found.master_minutes, found.total_cap_minutes), (45, 100, 30, 200))
+        self.assertEqual(found.model, "Claude:opus:max")
+
+    def test_invalid_settings_are_rejected(self):
+        for table in ({"config_wait_minutes": -1}, {"config_wait_minutes": "10"}, {"rework_wait_minutes": True}, {"quota_wait_minutes": 5},
+                      {"offline_wait_minutes": 5}, {"in_progress_minutes": 0}, {"master_minutes": 1.5}, {"unknown": 1},
+                      {"model": "Codex:gpt"}, {"model": 3}, {"taken_by_field": " "}, {"total_cap_minutes": 100}):
+            with self.subTest(table=table), self.assertRaises(ConfigError):
+                parse(table, "aiflow.toml [master]")
+
+    def test_the_file_is_validated_by_the_configuration_load_and_the_check(self):
+        folder = Path(tempfile.mkdtemp())
+        (folder / "aiflow").mkdir()
+        (folder / "aiflow" / "a.toml").write_text('[project]\njira_key = "JAIF"\nrepo = "ai-flow"\n')
+        (folder / "aiflow.toml").write_text("[master]\nconfig_wait_minutes = 3\nmaster_minutes = 20\n")
+        config = load(env={"AIFLOW_MACHINE": "wsl"}, config_dir=folder)
+        self.assertEqual((config.registry.master.waits["Config"], config.registry.master.master_minutes), (3, 20))
+        redis = mock.MagicMock()
+        redis.get.return_value = None
+        with mock.patch("aiflow.config.load", return_value=config), mock.patch("aiflow.supervisor.Redis", return_value=redis), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(main(["check"]), 0)
+        self.assertIn("master rescue: waits", output.getvalue())
+        self.assertIn("Config 3 min", output.getvalue())
+        (folder / "aiflow.toml").write_text("[master]\nquota_wait_minutes = 3\n")
+        with self.assertRaises(ConfigError):
+            load(env={"AIFLOW_MACHINE": "wsl"}, config_dir=folder)
+        (folder / "aiflow.toml").write_text("[master]\nmaster_minutes = 0\n")
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as errors, mock.patch("aiflow.config.load", side_effect=ConfigError("bad")):
+            self.assertEqual(main(["check"]), 2)
+        self.assertIn("CONFIG ERROR", errors.getvalue())
+
+    def test_the_example_configuration_is_valid(self):
+        folder = Path(tempfile.mkdtemp())
+        (folder / "aiflow").mkdir()
+        (folder / "aiflow" / "a.toml").write_text('[project]\njira_key = "JAIF"\nrepo = "ai-flow"\n')
+        (folder / "aiflow.toml").write_text((Path(__file__).parent.parent / "config.example" / "aiflow.toml").read_text())
+        self.assertEqual(load(env={"AIFLOW_MACHINE": "wsl"}, config_dir=folder).registry.master, MasterSettings(model="Claude:opus:max"))
+
+
+class RulesTests(unittest.TestCase):
+    def test_blocked_kinds_wait_their_own_time(self):
+        for kind, wait in (("Config", 10), ("Attempts", 0), ("Rework", 0), ("Unclear", 30)):
+            with self.subTest(kind=kind):
+                self.assertEqual(verdict("Blocked", wait, blocked_kind=kind).mode, "rescue")
+                if wait:
+                    self.assertIsNone(verdict("Blocked", wait - 1, blocked_kind=kind))
+
+    def test_quota_offline_and_other_kinds_are_never_handed_to_claude(self):
+        for kind in ("Quota", "Offline", "CI", "Human", "Other", ""):
+            with self.subTest(kind=kind):
+                self.assertIsNone(verdict("Blocked", 999, blocked_kind=kind))
+
+    def test_in_progress_stretch_and_total_work_limits(self):
+        self.assertIsNone(verdict("In Progress", 59, stretch_minutes=59, worked_minutes=59))
+        self.assertIn("one stretch", verdict("In Progress", 60, stretch_minutes=60, worked_minutes=60).trigger)
+        self.assertIn("total work time", verdict("In Progress", 10, stretch_minutes=10, worked_minutes=120).trigger)
+        self.assertIsNone(verdict("In QA", 500, stretch_minutes=0, worked_minutes=500))  # CI / the gate is not work time
+
+    def test_the_limits_are_configurable(self):
+        custom = MasterSettings(in_progress_minutes=20, total_work_minutes=30)
+        item = ticket("JAIF-1", "In Progress", 20, stretch_minutes=20, worked_minutes=20)
+        self.assertEqual(evaluate(item, custom, 20).mode, "rescue")
+        self.assertIsNone(evaluate(item, SETTINGS, 20))
+
+    def test_budget_is_master_minutes_under_the_total_cap(self):
+        self.assertEqual(verdict("Blocked", 10, blocked_kind="Config", worked_minutes=120).remaining_minutes, 60)
+        self.assertEqual(verdict("Blocked", 10, blocked_kind="Config", worked_minutes=150).remaining_minutes, 30)
+        spent = verdict("Blocked", 10, blocked_kind="Config", worked_minutes=181)
+        self.assertEqual((spent.mode, spent.remaining_minutes), ("owner", 0))
+
+    def test_one_rescue_per_ticket(self):
+        self.assertIsNone(verdict("Blocked", 99, blocked_kind="Config", labels=["master-rescue"]))
+        self.assertIsNone(verdict("Blocked", 99, blocked_kind="Config", rescued=True))
+
+    def test_owner_only_work_goes_to_the_owner_without_waiting(self):
+        topics = {"Pay the invoice for the licence": "spending money", "Rotate the API key": "credentials, tokens or secrets",
+                  "Delete the database": "deleting data", "Cut a release": "a release", "The requirements changed": "changing the requirements",
+                  "Merge it by hand": "merging by hand", "Runtime setup of the host": "runtime setup",
+                  "Install the missing tool": "changing installed software"}
+        for text, topic in topics.items():
+            with self.subTest(text=text):
+                found = verdict("Blocked", 0, blocked_kind="Config", reason=text)  # even before the 10 minute wait
+                self.assertEqual((found.mode, found.topic), ("owner", topic))
+        self.assertEqual(owner_only_topic("a failing unit test"), "")
+        self.assertEqual(verdict("In Progress", 70, stretch_minutes=70, summary="Rotate the credentials").mode, "owner")
+
+    def test_incident_replaces_the_generic_blocked_incident(self):
+        found = find_incidents(state([ticket("A-1", "Blocked", 40, blocked_kind="Config")], master=SETTINGS))
+        self.assertEqual([(i.id, i.kind) for i in found], [("rescue:A-1", "rescue")])
+        self.assertEqual(found[0].facts["mode"], "rescue")
+        plain = find_incidents(state([ticket("A-1", "Blocked", 40, blocked_kind="Config")]))
+        self.assertEqual([i.id for i in plain], ["blocked:A-1"])
+
+
+class RescueRunTests(unittest.TestCase):
+    def build(self, settings=SETTINGS):
+        from tests.test_supervisor import FakeRedis, make
+        redis = FakeRedis()
+        sup = make(redis=redis)
+        sup.jira = JiraWithLabels()
+        sup.online_pool = lambda: ["Claude", "Codex"]
+        sup.usable_ais = lambda: ["Claude"]
+        object.__setattr__(sup.cfg.registry, "master", settings)
+        object.__setattr__(sup.cfg, "agent_models", {"Claude": ("opus", "max")})
+        op = Operator(sup, Policy(enabled=True), Notifier(), lambda *a: ("ok", "", False))
+        return op, sup, redis
+
+    def incident(self, **extra):
+        item = ticket("JAIF-1", "Blocked", 40, blocked_kind="Config", reason="the test setup fails", worked_minutes=130.0,
+                      last_comments=[{"author": "AI Flow", "created": "", "body": "tried twice"}], **extra)
+        return find_incidents(state([item], master=SETTINGS))[0]
+
+    def test_handover_sets_status_taken_by_label_model_and_audit(self):
+        op, sup, redis = self.build()
+        redis.set("lease:JAIF-1", "w", 60)
+        self.assertTrue(op.handle(self.incident()))
+        jira = sup.jira
+        self.assertEqual(jira.moves, [("JAIF-1", "Handover")])
+        self.assertIn(("JAIF-1", "master-rescue"), jira.added)
+        self.assertEqual(jira.fields[("JAIF-1", "Taken by")], {"value": "Claude"})
+        self.assertEqual(jira.fields[("JAIF-1", "AI Model")], {"value": "Claude:opus"})
+        self.assertIsNone(redis.get("lease:JAIF-1"))
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertEqual((record["state"], record["budget"], record["model"]), ("active", 50, "opus:max"))
+        body = [b for k, b in jira.comments if k == "JAIF-1"][0]
+        self.assertIn("Stuck: Blocked for 40 min (Config: the test setup fails)", body)
+        self.assertIn("Tried:", body)
+        self.assertIn("tried twice", body)
+        self.assertIn("Remaining budget: 50 min", body)
+        self.assertIn("Taken by: Claude, model opus (effort max)", body)
+
+    def test_only_one_rescue_per_ticket(self):
+        op, sup, redis = self.build()
+        op.handle(self.incident())
+        again = find_incidents(state([ticket("JAIF-1", "Blocked", 80, blocked_kind="Config", labels=["master-rescue"], rescued=True)], master=SETTINGS))
+        self.assertEqual([i.kind for i in again], ["blocked"])
+
+    def test_unavailable_claude_goes_to_the_owner_at_once(self):
+        for reason, setup in (("quota", lambda sup, redis: redis.set("cooldown:Claude", "1", 60)),
+                              ("offline", lambda sup, redis: setattr(sup, "online_pool", lambda: ["Codex"]))):
+            with self.subTest(reason=reason):
+                op, sup, redis = self.build()
+                setup(sup, redis)
+                op.handle(self.incident())
+                self.assertEqual(sup.jira.moves, [])
+                self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
+                self.assertTrue(any(f"Claude is unavailable ({reason})" in b for _, b in sup.jira.comments))
+                self.assertIsNone(redis.get("rescue:JAIF-1"))
+
+    def test_owner_only_work_is_never_handed_over(self):
+        op, sup, redis = self.build()
+        item = ticket("JAIF-1", "Blocked", 1, blocked_kind="Config", reason="needs a new API token")
+        op.handle(find_incidents(state([item], master=SETTINGS))[0])
+        self.assertEqual(sup.jira.moves, [])
+        self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
+        self.assertTrue(any("credentials, tokens or secrets" in b for _, b in sup.jira.comments))
+
+    def test_failed_handover_leaves_no_record_and_retries_later(self):
+        op, sup, redis = self.build()
+        sup.jira.transition = lambda key, status: False
+        incident = self.incident()
+        op.handle(incident)
+        self.assertIsNone(redis.get("rescue:JAIF-1"))
+        self.assertIsNotNone(redis.get(f"operator:cool:{incident.id}"))
+
+    def test_rescue_without_a_result_goes_through_the_flow_doctor_to_development(self):
+        op, sup, redis = self.build()
+        op.handle(self.incident())
+        sup.jira.status = "Handover"
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        op.check_rescues()  # the budget is not used up yet
+        self.assertEqual(sup.jira.moves, [("JAIF-1", "Handover")])
+        record["started"] = int(time.time()) - 51 * 60
+        redis.set_persistent("rescue:JAIF-1", json.dumps(record))
+        redis.set("blocked:JAIF-1", "{}", 60)
+        op.check_rescues()
+        self.assertEqual(sup.jira.moves[-1], ("JAIF-1", "To Do"))
+        self.assertNotIn(("JAIF-1", "needs-owner"), sup.jira.added)
+        self.assertIsNone(sup.jira.fields[("JAIF-1", "Taken by")])
+        body = [b for k, b in sup.jira.comments if b.startswith("AI Flow doctor")][0]
+        self.assertIn("rescue budget of 50 min ran out without a result", body)
+        self.assertIn("Stuck: Blocked for 40 min", body)
+        self.assertIn("not escalated to a person", body)
+        self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "failed")
+        op.check_rescues()  # handled once
+        self.assertEqual(len(sup.jira.moves), 2)
+
+    def test_end_without_a_result_reports_the_cause_and_findings(self):
+        op, sup, redis = self.build()
+        op.handle(self.incident())
+        op.rescue.end("JAIF-1", ok=False, cause="Claude hit a usage limit", findings="the fixture is missing")
+        body = [b for k, b in sup.jira.comments if b.startswith("AI Flow doctor")][0]
+        self.assertIn("Cause: Claude hit a usage limit", body)
+        self.assertIn("Findings: the fixture is missing", body)
+        self.assertEqual(sup.jira.moves[-1], ("JAIF-1", "To Do"))
+
+    def test_a_rescue_with_a_result_is_closed_without_the_doctor(self):
+        op, sup, redis = self.build()
+        op.handle(self.incident())
+        op.rescue.end("JAIF-1", ok=True)
+        self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "finished")
+        self.assertEqual(sup.jira.moves, [("JAIF-1", "Handover")])
+
+    def test_the_operator_state_carries_work_time_and_the_blocked_reason(self):
+        op, sup, redis = self.build()
+        now = time.time()
+        sup.jira.found = [{"key": "JAIF-1", "status": "In Progress", "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+                           "labels": [], "summary": "A ticket"},
+                          {"key": "JAIF-2", "status": "Blocked", "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+                           "labels": [], "summary": "Other"}]
+        redis.set("statussince:JAIF-1", str(now - 15 * 60), 60)
+        redis.set("worked:JAIF-1", "100", 60)
+        redis.set("lease:JAIF-1", "w", 60)
+        redis.set("blocked:JAIF-2", json.dumps({"kind": "Config", "reason": "env missing"}), 60)
+        redis.set("statussince:JAIF-2", str(now - 20 * 60), 60)
+        sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
+        snapshot = op.state()
+        first, second = snapshot["tickets"]
+        self.assertEqual((round(first["stretch_minutes"]), round(first["worked_minutes"])), (15, 115))
+        self.assertEqual((second["reason"], second["blocked_kind"]), ("env missing", "Config"))
+        self.assertEqual(find_incidents({**snapshot, "now": now})[0].id, "rescue:JAIF-2")
+
+    def test_work_time_accumulates_when_a_work_status_is_left_and_ci_is_not_counted(self):
+        from tests.test_supervisor import FakeRedis, make
+        redis = FakeRedis()
+        sup = make(redis=redis)
+        now = time.time()
+        for status, minutes, to in (("In Progress", 30, "In Review"), ("In Review", 10, "In QA"), ("In QA", 500, "In Review")):
+            redis.set_persistent("status:JAIF-1", status)
+            redis.set_persistent("statussince:JAIF-1", str(time.time() - minutes * 60))
+            sup.record_status("JAIF-1", to, "test")
+        self.assertAlmostEqual(float(redis.get("worked:JAIF-1")), 40, delta=0.2)
+        self.assertLess(time.time() - now, 5)
+
+
+if __name__ == "__main__":
+    unittest.main()

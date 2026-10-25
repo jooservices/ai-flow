@@ -128,10 +128,14 @@ def blocking_ticket(footprint: dict[str, Any], in_flight: dict[str, Iterable[str
 
 
 def in_flight_hot_files(db, footprint_of: Callable[[dict], dict], exclude: str = "") -> dict[str, list[str]]:
-    """Hot files of active development tickets and tickets whose pull request is still open."""
+    """Hot files of tickets that are being worked on: a running development run, or waiting in verification or review.
+
+    A ticket sent back for rework that still has an open pull request holds nothing while it waits: it updates its
+    branch when it resumes. Counting it deadlocked the flow (thirteen waiting tickets, each blocked by the open pull
+    requests of the others, and nothing could start)."""
     rows = db.all(
         "SELECT * FROM tickets WHERE key <> %s AND (status IN ('In Verify', 'Human review', 'Ready to merge')"
-        " OR pr_state='open' OR EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
+        " OR EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
         " AND r.step = 'dev' AND r.status = 'running'))",
         (exclude,))
     return {t["key"]: footprint_of(t)["hot"] for t in rows}
@@ -168,7 +172,7 @@ def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str]) -> tuple[str, 
                 "DELETE FROM hot_file_reservations h WHERE h.reserved_at < now() - %s * interval '1 second'"
                 " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.id::text = h.run_id AND r.status = 'running')"
                 " AND NOT EXISTS (SELECT 1 FROM tickets t WHERE t.key = h.ticket_key AND ("
-                " t.status IN ('In Verify', 'Human review', 'Ready to merge') OR t.pr_state='open'))",
+                " t.status IN ('In Verify', 'Human review', 'Ready to merge')))",
                 (RESERVATION_GRACE_S,))
             held = conn.execute("SELECT path, ticket_key FROM hot_file_reservations"
                                 " WHERE path = ANY(%s) AND ticket_key <> %s ORDER BY path",

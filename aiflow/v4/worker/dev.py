@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
+from ..core import handover
 from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
@@ -100,7 +101,9 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci
     rework = ""
     if c.findings:
         rework += ("\nThis is a rework: the branch already holds your earlier work and a reviewer sent it back. Fix every"
-                   " finding below, keep what was right, and run the checks again.\nFindings:\n" + c.findings.strip() + "\n")
+                   " finding below, keep what was right, and run the checks again. Before you change code, list each finding"
+                   " with its number and, for each, ask whether the same kind of defect exists elsewhere in the change;"
+                   " fix those too. Then update your AC-MAP and SELF-REVIEW.\nFindings:\n" + c.findings.strip() + "\n")
     if c.triage_answer:
         rework += ("\nAn earlier run on this ticket stopped with a question and the master AI answered it. Use this"
                    " answer and continue; do not stop on the same question again.\n"
@@ -312,6 +315,8 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         summary = summary_m.group(1).strip() if summary_m else ((res.final_text or "").strip()[-600:] or res.error_message)
         tests = tests_m.group(1).strip() if tests_m else ""
         result["summary"] = summary
+        handed = handover.parse(res.final_text or "", c.ticket.get("description") or "")
+        result.setdefault("details", {}).update(handed)
 
         if res.error_kind in ("quota", "auth"):
             result["outcome"] = "quota"
@@ -464,6 +469,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                         pr_body = (f"Jira: {key}\n\n## Summary\nThe existing ticket branch already contains the work; "
                                    "this developer run made no additional changes.\n\n"
                                    f"## Tests\n{tests or 'see the existing branch history'}\n\n"
+                                   f"{handover.pr_sections(handed)}"
                                    "## Run\n"
                                    f"- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
                                    f"- run: {c.run_id}, fence {c.fence}\n"
@@ -514,6 +520,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         token = credential["token"]
         git.push(wt, branch, token)
         body = (f"Jira: {key}\n\n## Summary\n{summary}\n\n## Tests\n{tests or 'see the run log'}\n\n"
+                f"{handover.pr_sections(handed)}"
                 f"## Run\n- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
                 f"- run: {c.run_id}, fence {c.fence}\n- files changed: {len(changed)}\n\n"
                 "Opened as a draft by AI Flow v4; verification runs next (In Verify).")

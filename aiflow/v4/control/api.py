@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 
 from .. import VERSION
 from ..core.controlrepo import Account, ControlRepo, epic_for_ticket
-from ..core import backups as control_backups, log_sources as log_sources_core
+from ..core import backups as control_backups, handover, log_sources as log_sources_core
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import normalize_services, service_gaps
@@ -4998,7 +4998,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.step == "verify" and dev:
             extra["pr"] = {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
                            "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],
-                           "dev_summary": dev["summary"]}
+                           "dev_summary": (dev["summary"] or "") + handover.render(dev.get("details"))}
         if body.step == "dev":
             v = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s"
                            " AND step IN ('verify','qa')"

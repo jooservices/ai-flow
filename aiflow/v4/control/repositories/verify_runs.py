@@ -29,23 +29,6 @@ FROM runs WHERE ticket_key = %s AND step = 'verify' AND status <> 'running'
 ORDER BY started_at DESC
 """
 
-_SLOW_SQL = """
-SELECT t.key, t.project, t.summary, coalesce(d.ended_at, t.jira_updated, t.synced_at) AS since
-FROM tickets t LEFT JOIN LATERAL (SELECT ended_at FROM runs WHERE ticket_key=t.key AND step='dev'
-  AND outcome='done' ORDER BY started_at DESC LIMIT 1) d ON true
-WHERE t.status='In Verify' AND lower(coalesce(t.type,'')) <> 'epic'
-  AND NOT ('aiflow-hold' = ANY(t.labels))
-  AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key=t.key AND r.status='running')
-  AND coalesce(d.ended_at, t.jira_updated, t.synced_at) <= now() - %s * interval '1 minute'
-ORDER BY since
-"""
-
-_CANDIDATES_SQL = """
-SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'
-  AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'
-"""
-
-
 class VerifyRunsRepository:
     def __init__(self, db) -> None:
         self.db = db
@@ -67,28 +50,9 @@ class VerifyRunsRepository:
         return self.db.one("SELECT account_id, pr_url, details FROM runs WHERE ticket_key=%s AND step='dev'"
                            " AND outcome='done' ORDER BY started_at DESC LIMIT 1", (ticket_key,))
 
-    def verification_candidates(self, projects: list[str]) -> list[dict]:
-        return self.db.all(_CANDIDATES_SQL, (projects,))
-
-    def candidate_node(self, node: str) -> dict:
-        return self.db.one("SELECT name,status,last_heartbeat,projects,dynamic,tools,metrics,accepting_work,"
-                           "release_version FROM nodes WHERE name=%s AND removed_at IS NULL", (node,)) or {}
-
     def running_project_count(self, project: str) -> int:
         row = self.db.one("SELECT count(*) AS count FROM runs WHERE status='running' AND project=%s", (project,))
         return int((row or {}).get("count", 0))
-
-    def tickets_in_verify(self) -> list[dict]:
-        return self.db.all("SELECT key, project, status, summary, labels, type FROM tickets WHERE status='In Verify'"
-                           " AND lower(coalesce(type,'')) <> 'epic'")
-
-    def open_incident_subjects(self, kind: str) -> list[str]:
-        return [r["subject"] for r in self.db.all(
-            "SELECT subject FROM incidents WHERE kind=%s AND closed_at IS NULL", (kind,))]
-
-    def waiting_tickets(self, minutes: int) -> list[dict]:
-        """Tickets in verification with no running work for longer than `minutes`."""
-        return self.db.all(_SLOW_SQL, (minutes,))
 
     def now(self):
         return self.db.one("SELECT now() AS t")["t"]

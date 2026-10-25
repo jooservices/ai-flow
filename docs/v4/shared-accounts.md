@@ -70,7 +70,6 @@ codes are visible only to console users with `nodes.manage`; read-only leads can
 | `POST /v1/work/claim` | Claim checks the account total, the machine share and free worker slots under the account lock. |
 | `POST /v1/version-releases/claim` | A version release claim obeys the same account and machine limits. |
 | `GET /v1/version-releases/candidates` | Candidates go to a signed-in peer machine with free capacity when the source account is at quota risk. |
-
 | `GET /v1/master/candidate` | An account counts as ready when any assigned, signed-in, online machine has it. |
 | `POST /v1/accounts/{account_id}/probe` | A probe result is recorded per machine: an auth failure returns only that machine to *Sign-in needed*; quota cooldown stays account-wide. |
 | `GET /v1/accounts/{account_id}/spec` | The node reads the account spec for its own assignment. |

@@ -22,6 +22,9 @@ from ..core.services import service_gaps
 from ..core.toolchains import CONTAINER_RUNTIME_TOOL, toolchain_gaps
 from . import environment, licensing, role_health, rollout, shared_accounts, tooling
 from .incidents import close_incident, open_incident
+from .repositories.incidents import IncidentsRepository
+from .repositories.nodes import NodesRepository
+from .repositories.tickets import TicketsRepository
 from .repositories.verify_runs import VerifyRunsRepository
 from . import work_eligibility
 
@@ -86,21 +89,27 @@ def candidates(ctx, projects: list[str], account, held: set[str], offers, can_ha
     repository = VerifyRunsRepository(ctx.db)
     cooling_tickets = repository.cooling_tickets("verify")
     out = []
-    for ticket in repository.verification_candidates(projects):
-        if ticket["key"] in held or ticket["key"] in cooling_tickets or not can_handle(ticket):
-            continue
-        dev = repository.latest_dev_with_pr(ticket["key"])
-        if not dev or not dev["pr_url"] or dev["account_id"] == account.id:
-            continue
-        if account.explicit_only and f"ai-{account.provider}" not in ticket["labels"]:
-            continue
-        if not allowed("verify", ticket):
-            continue
-        if retry_guard and not may_take(
-                ctx, ticket, account.id, dev["account_id"], lambda peer, node: offers(peer, node)):
+    for ticket in TicketsRepository(ctx.db).verification_candidates(projects):
+        if _skip_candidate(ctx, repository, ticket, account, held, cooling_tickets, offers,
+                           can_handle, allowed, retry_guard):
             continue
         out.append({**ticket, "step": "verify", "probation": probation("verify")})
     return out
+
+
+def _skip_candidate(ctx, repository, ticket: dict, account, held: set[str], cooling: set[str], offers,
+                    can_handle, allowed, retry_guard: bool) -> bool:
+    if ticket["key"] in held or ticket["key"] in cooling or not can_handle(ticket):
+        return True
+    dev = repository.latest_dev_with_pr(ticket["key"])
+    if not dev or not dev["pr_url"] or dev["account_id"] == account.id:
+        return True
+    if account.explicit_only and f"ai-{account.provider}" not in ticket["labels"]:
+        return True
+    if not allowed("verify", ticket):
+        return True
+    return bool(retry_guard and not may_take(
+        ctx, ticket, account.id, dev["account_id"], lambda peer, node: offers(peer, node)))
 
 
 def pool(ctx, ticket: dict, dev_account: str, offers=None, releases: Path | None = None) -> list[str]:
@@ -147,29 +156,55 @@ def _offered(offers, account_id: str, node: str, key: str) -> bool:
 
 def candidate_offer(ctx, ticket: dict, account_id: str, node: str, releases: Path | None = None) -> bool:
     """Ticket-specific normal verify eligibility used by the watchdog when no API request is present."""
-    repo, repository = ctx.repo(), VerifyRunsRepository(ctx.db)
+    repo = ctx.repo()
     account = repo.account(account_id)
     project = repo.projects.get(str(ticket.get("project") or ""))
-    node_row = repository.candidate_node(node)
+    node_row = NodesRepository(ctx.db).candidate_node(node)
+    if not _account_can_verify(ctx, ticket, account, node):
+        return False
+    if not _project_node_can_verify(ctx, repo, project, node, node_row):
+        return False
+    if not _ticket_capacity_can_verify(ctx, ticket, project, node_row):
+        return False
+    if not _license_allows_verify(ctx, account, project, node):
+        return False
+    return bool(rollout.node_compatible(ctx, node, releases)["compatible"])
+
+
+def _account_can_verify(ctx, ticket: dict, account, node: str) -> bool:
+    if not work_eligibility.can_take_work(ctx.db, ctx.leases, account, node):
+        return False
+    repository = VerifyRunsRepository(ctx.db)
+    if account.id == repository.last_dev_account(ticket["key"]):
+        return False
+    if "verify" not in role_health.account_roles(account):
+        return False
     labels = set(ticket.get("labels") or [])
-    if (not work_eligibility.can_take_work(ctx.db, ctx.leases, account, node)
-            or account.id == repository.last_dev_account(ticket["key"])
-            or "verify" not in role_health.account_roles(account)
-            or (account.explicit_only and f"ai-{account.provider}" not in labels)):
-        return False
-    if (not project or project.paused or not node_row.get("accepting_work", True)
-            or node not in shared_accounts.online_nodes(ctx.db)
-            or project.key not in repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))):
-        return False
-    if project.parallel_limit and repository.running_project_count(project.key) >= project.parallel_limit:
+    if account.explicit_only and f"ai-{account.provider}" not in labels:
         return False
     mode = role_health.modes(ctx.db, account.id, ["verify"])["verify"]
-    if mode != "on" and not (mode == "probation" and role_health.probation_ticket(ticket)):
+    return mode == "on" or (mode == "probation" and role_health.probation_ticket(ticket))
+
+
+def _project_node_can_verify(ctx, repo, project, node: str, node_row: dict) -> bool:
+    if not project or project.paused or not node_row.get("accepting_work", True):
         return False
-    if ticket["key"] in set(ctx.leases.held_keys()):
+    if node not in shared_accounts.online_nodes(ctx.db):
         return False
-    if ticket["key"] in cooling(ctx.db) or not _node_ready_for_ticket(ctx, ticket, project, node_row):
+    return project.key in repo.projects_for_node(
+        node, node_row.get("projects") or [], node_row.get("dynamic", False))
+
+
+def _ticket_capacity_can_verify(ctx, ticket: dict, project, node_row: dict) -> bool:
+    repository = VerifyRunsRepository(ctx.db)
+    if project.parallel_limit and repository.running_project_count(project.key) >= project.parallel_limit:
         return False
+    if ticket["key"] in set(ctx.leases.held_keys()) or ticket["key"] in cooling(ctx.db):
+        return False
+    return _node_ready_for_ticket(ctx, ticket, project, node_row)
+
+
+def _license_allows_verify(ctx, account, project, node: str) -> bool:
     try:
         license_state = licensing.enforce_work_entitlement(
             ctx, account.id, node, public_key=ctx.settings.license_public_key)
@@ -177,7 +212,7 @@ def candidate_offer(ctx, ticket: dict, account_id: str, node: str, releases: Pat
                                               state=license_state)
     except licensing.LicenseError:
         return False
-    return bool(rollout.node_compatible(ctx, node, releases)["compatible"])
+    return True
 
 
 def _node_ready_for_ticket(ctx, ticket: dict, project, node_row: dict) -> bool:
@@ -188,18 +223,26 @@ def _node_ready_for_ticket(ctx, ticket: dict, project, node_row: dict) -> bool:
             return False
     if service_gaps((node_row.get("metrics") or {}).get("services"), project.required_services):
         return False
-    prior = VerifyRunsRepository(ctx.db).latest_dev_with_pr(ticket["key"]) or {}
-    details = prior.get("details") or {}
-    repository_name = str(details.get("repository") or "")
-    saved_settings = details.get("repository_settings")
-    selected = (dict(saved_settings) if isinstance(saved_settings, dict) else
-                project.settings_for_repo(repository_name) if repository_name else
-                project.settings_for_ticket(ticket))
-    if selected.get("containers") and toolchain_gaps(node_tools, [CONTAINER_RUNTIME_TOOL], ctx.repo().versions):
+    if _ticket_uses_containers(ctx, ticket, project) and toolchain_gaps(
+            node_tools, [CONTAINER_RUNTIME_TOOL], ctx.repo().versions):
         return False
     if ticket["key"] in tooling.parked_tickets(ctx, node_row):
         return False
     return ticket["key"] not in environment.parked_tickets(ctx)
+
+
+def _ticket_uses_containers(ctx, ticket: dict, project) -> bool:
+    prior = VerifyRunsRepository(ctx.db).latest_dev_with_pr(ticket["key"]) or {}
+    details = prior.get("details") or {}
+    repository = str(details.get("repository") or "")
+    saved = details.get("repository_settings")
+    if isinstance(saved, dict):
+        selected = dict(saved)
+    elif repository:
+        selected = project.settings_for_repo(repository)
+    else:
+        selected = project.settings_for_ticket(ticket)
+    return bool(selected.get("containers"))
 
 
 def exhausted(ctx, ticket: dict, offers=None, releases: Path | None = None) -> list[str]:
@@ -220,10 +263,9 @@ def exhaustion_state(ctx, ticket: dict, offers=None, releases: Path | None = Non
 
 def check_incidents(ctx, releases: Path | None = None) -> None:
     """Watchdog: one incident per ticket whose eligible accounts all ended verification without a verdict."""
-    repo = VerifyRunsRepository(ctx.db)
-    already_open = set(repo.open_incident_subjects(KIND))
+    already_open = set(IncidentsRepository(ctx.db).open_subjects(KIND))
     open_now = set()
-    for ticket in repo.tickets_in_verify():
+    for ticket in TicketsRepository(ctx.db).tickets_in_verify():
         accounts, failed, runs = exhaustion_state(ctx, ticket, releases=releases)
         if not failed:
             if ticket["key"] in already_open and not any(not barred(runs.get(account, []))
@@ -243,18 +285,29 @@ def check_incidents(ctx, releases: Path | None = None) -> None:
             close_incident(ctx, KIND, subject, "the ticket can be verified again or left verification")
 
 
-def slow_verifications(db, minutes: int = SLOW_MINUTES) -> list[dict]:
+def slow_verifications(db, minutes: int = SLOW_MINUTES, now=None) -> list[dict]:
     """Tickets waiting for verification longer than `minutes`, with the accounts that tried."""
     repo = VerifyRunsRepository(db)
+    checked_at = now or repo.now()
     out = []
-    for ticket in repo.waiting_tickets(minutes):
+    for ticket in TicketsRepository(db).waiting_verifications(minutes, now=checked_at):
         tried = []
         for account, runs in history(db, ticket["key"]).items():
             tried.append({"account": account, "runs": len(runs), "no_verdict": sum(runs), "barred": barred(runs)})
         out.append({"key": ticket["key"], "project": ticket["project"], "summary": ticket["summary"],
-                    "waiting_minutes": int((repo.now() - ticket["since"]).total_seconds() // 60),
+                    "waiting_minutes": int((checked_at - ticket["since"]).total_seconds() // 60),
                     "accounts": sorted(tried, key=lambda item: item["account"])})
     return out
+
+
+def attach_slow_verifications(db, tickets: list[dict]) -> list[dict]:
+    """Attach each slow-verification summary to its ticket and return the complete Dashboard list."""
+    slow = slow_verifications(db)
+    by_ticket = {item["key"]: item for item in slow}
+    for ticket in tickets:
+        item = by_ticket.get(ticket["key"])
+        ticket["slow_verify"] = describe(item) if item else None
+    return slow
 
 
 def describe(slow: dict) -> str:

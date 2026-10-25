@@ -38,6 +38,10 @@ def _new_active_child(epic: dict, children: list[dict], changed: set[str], first
                (child["key"] not in first_seen or epic["key"] in preexisting) for child in children)
 
 
+def _is_epic(ticket: dict) -> bool:
+    return str(ticket.get("type") or "").strip().casefold() == "epic"
+
+
 GUARDS = {"all_children_finished": _all_children_finished,
           "first_child_started": _first_child_started,
           "new_active_child": _new_active_child}
@@ -63,7 +67,7 @@ def is_under_epic(ticket: dict, epic_key: str, by_key: dict[str, dict]) -> bool:
 
 
 def children_for(epic: dict, rows: list[dict], by_key: dict[str, dict]) -> list[dict]:
-    return [row for row in rows if row["type"] != "Epic" and is_under_epic(row, epic["key"], by_key)]
+    return [row for row in rows if not _is_epic(row) and is_under_epic(row, epic["key"], by_key)]
 
 
 def next_transition(epic: dict, children: list[dict], changed: set[str], first_seen: set[str],
@@ -142,7 +146,7 @@ def reconcile(ctx, projects: list[str], changed: set[str], first_seen: set[str],
     for project in projects:
         rows = repository.project_epic_rows(project)
         by_key = {row["key"]: row for row in rows}
-        epics = [row for row in rows if row["type"] == "Epic"]
+        epics = [row for row in rows if _is_epic(row)]
         for epic in epics:
             children = children_for(epic, rows, by_key)
             transition = next_transition(epic, children, changed, first_seen, preexisting)

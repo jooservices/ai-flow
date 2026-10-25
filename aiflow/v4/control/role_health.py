@@ -64,33 +64,54 @@ def classify(run: dict) -> Scored | None:
     details = run.get("details") or {}
     if outcome == "merged":
         return Scored("merged", 0.0)
-    if details.get("no_verdict") is True and run.get("step") == "verify":
-        # Counts against the verify role only as the second no-verdict result in a row of this account on this
-        # ticket (docs/v4/verify-no-verdict.md); the first is retried on another account and not scored.
-        return Scored("failed", 1.0) if run.get("prev_no_verdict") else Scored("excluded", None)
-    no_work_failure = outcome == "failed" and kind == "no_work" and details.get("no_changes") is True
-    legacy_no_changes = (run.get("step") == "dev" and outcome == "failed" and not kind
-                         and summary.startswith(("no changes", "nothing to change")))
-    if outcome == "no_changes" or no_work_failure or legacy_no_changes:
+    no_verdict = _score_no_verdict(run, outcome, details)
+    if no_verdict is not None:
+        return no_verdict
+    no_changes = _score_no_changes(run, outcome, kind, summary, details)
+    if no_changes:
         return Scored("no_changes", 0.0)
     if outcome == "quota" or kind in UNSCORED_KINDS:
         return Scored("excluded", None)
     if outcome == "tool_missing":
-        if not _valid_tool_missing_evidence(run):
-            # Old classifier rows often only stored the AI's prose. With no explicit marker or normalized command
-            # result, they cannot safely remain failures in today's score.
-            return Scored("excluded", None)
-        return Scored("tool_missing", 1.0)
+        return _score_tool_missing(run)
     if outcome == "done" and run["step"] == "dev":
-        details = run.get("details") or {}
-        if run.get("pr_url") and details.get("pr_url_source") == "current":
-            return Scored("finished", 0.0)
-        decision = run.get("decision")
-        if decision in ("merged", "human"):
-            return Scored("finished", 0.0)
-        if decision == "rework":
-            return Scored("sent_back", 0.5, rework=True)
+        return _score_development(run, details)
+    return _score_other(outcome, kind)
+
+
+def _score_no_verdict(run: dict, outcome: str, details: dict) -> Scored | None:
+    if details.get("no_verdict") is not True or run.get("step") != "verify":
         return None
+    # Only the second consecutive no-verdict result for this account and ticket counts against verify health.
+    return Scored("failed", 1.0) if run.get("prev_no_verdict") else Scored("excluded", None)
+
+
+def _score_no_changes(run: dict, outcome: str, kind: str, summary: str, details: dict) -> bool:
+    no_work_failure = outcome == "failed" and kind == "no_work" and details.get("no_changes") is True
+    legacy_no_changes = (run.get("step") == "dev" and outcome == "failed" and not kind
+                         and summary.startswith(("no changes", "nothing to change")))
+    return outcome == "no_changes" or no_work_failure or legacy_no_changes
+
+
+def _score_tool_missing(run: dict) -> Scored:
+    if not _valid_tool_missing_evidence(run):
+        # Old classifier rows often only stored prose, which is not verifiable evidence of a missing tool.
+        return Scored("excluded", None)
+    return Scored("tool_missing", 1.0)
+
+
+def _score_development(run: dict, details: dict) -> Scored | None:
+    if run.get("pr_url") and details.get("pr_url_source") == "current":
+        return Scored("finished", 0.0)
+    decision = run.get("decision")
+    if decision in ("merged", "human"):
+        return Scored("finished", 0.0)
+    if decision == "rework":
+        return Scored("sent_back", 0.5, rework=True)
+    return None
+
+
+def _score_other(outcome: str, kind: str) -> Scored:
     if outcome == "rework":  # the verifier delivered its verdict; the work it judged is the developer's
         return Scored("finished", 0.0, rework=True)
     if outcome == "done" or outcome in SUCCESS_OUTCOMES:

@@ -4,6 +4,24 @@ from __future__ import annotations
 from ..db import J
 
 
+_SLOW_VERIFICATIONS_SQL = """
+SELECT t.key, t.project, t.summary, coalesce(d.ended_at, t.jira_updated, t.synced_at) AS since
+FROM tickets t LEFT JOIN LATERAL (SELECT ended_at FROM runs WHERE ticket_key=t.key AND step='dev'
+  AND outcome='done' ORDER BY started_at DESC LIMIT 1) d ON true
+WHERE t.status='In Verify' AND lower(coalesce(t.type,'')) <> 'epic'
+  AND NOT ('aiflow-hold' = ANY(t.labels))
+  AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key=t.key AND r.status='running')
+  AND coalesce(d.ended_at, t.jira_updated, t.synced_at)
+      < coalesce(%s::timestamptz, now()) - %s * interval '1 minute'
+ORDER BY since
+"""
+
+_VERIFY_CANDIDATES_SQL = """
+SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'
+  AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'
+"""
+
+
 class TicketsRepository:
     def __init__(self, db) -> None:
         self.db = db
@@ -12,6 +30,19 @@ class TicketsRepository:
         """Ticket rows needed to reconcile parent epic lifecycle state."""
         return self.db.all("SELECT key, project, status, type, parent_key, labels FROM tickets"
                            " WHERE project=%s ORDER BY key", (project,))
+
+    def verification_candidates(self, projects: list[str]) -> list[dict]:
+        """Tickets in verification that are not on hold or epics."""
+        return self.db.all(_VERIFY_CANDIDATES_SQL, (projects,))
+
+    def tickets_in_verify(self) -> list[dict]:
+        """Ticket subjects watched for verification exhaustion."""
+        return self.db.all("SELECT key, project, status, summary, labels, type FROM tickets WHERE status='In Verify'"
+                           " AND lower(coalesce(type,'')) <> 'epic'")
+
+    def waiting_verifications(self, minutes: int, now=None) -> list[dict]:
+        """Tickets in verification with no running work for longer than `minutes`."""
+        return self.db.all(_SLOW_VERIFICATIONS_SQL, (now, minutes))
 
     def record_epic_transition(self, key: str, status: str, changed_at, guard: str, reason: str,
                                child_count: int, audit: bool) -> None:

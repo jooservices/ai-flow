@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from .. import VERSION
@@ -27,215 +28,445 @@ def _iso(ts: datetime | None) -> str | None:
 
 def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
     from . import api as control_api, release_progress, release_readiness, rollout
-    db = ctx.db
     repo = ctx.repo()
-    releases = control_api.RELEASES
-    sa_thresholds = thresholds(repo)
-    nodes = []
-    assigned: dict[str, int] = {}
-    for a in repo.accounts:
-        for machine in a.machines:
-            assigned[machine] = assigned.get(machine, 0) + 1
-    active_by_node = {row["node"]: int(row["busy"]) for row in db.all(
-        "SELECT node,count(*) AS busy FROM runs WHERE status='running' GROUP BY node")}
-    for n in db.all("SELECT * FROM nodes WHERE removed_at IS NULL ORDER BY role DESC, name"):
-        age = _age(n["last_heartbeat"])
-        status = n["status"]
-        if status == "online" and (age is None or age > NODE_OFFLINE_S):
-            status = "offline"
-        projects = repo.projects_for_node(n["name"], n["projects"], n["dynamic"])
-        required = repo.tools_for_node(n["name"], projects)
-        configured = repo.nodes.get(n["name"])
-        stack_gaps = {tool for project in (configured.projects if configured else [])
-                      if project in repo.projects for tool in toolchain_gaps(
-                          n["tools"], repo.projects[project].tools, repo.versions, repo.projects[project].stacks,
-                          require_pins=bool(repo.projects[project].stacks))}
-        desired_services = [s for s in (configured.services or []) if isinstance(s, dict)] if configured else []
-        reported_services = (n["metrics"] or {}).get("services") or {}
-        declared: dict[str, list[str]] = {}
-        for project in projects:
-            for service in repo.projects[project].required_services if project in repo.projects else []:
-                declared.setdefault(service, []).append(project)
-        gaps = service_gaps(reported_services, list(declared))
-        node_services = [{"name": svc, "projects": declared.get(svc, []), "healthy": svc not in gaps,
-                          "state": (reported_services.get(svc) or {}).get("state", "unknown"),
-                          "endpoint": (reported_services.get(svc) or {}).get("endpoint") or endpoint(svc),
-                          "image": (reported_services.get(svc) or {}).get("image", ""),
-                          "detail": gaps.get(svc) or (reported_services.get(svc) or {}).get("detail", "")}
-                         for svc in sorted(set(declared) | set(reported_services)) if svc in SERVICES]
-        nodes.append({"name": n["name"], "ip": n["ip"], "services": node_services,
-                      "role": n["role"], "status": status,
-                      "accepting_work": bool(n["accepting_work"]),
-                      "sessions_busy": active_by_node.get(n["name"], int(n["slots_used"] or 0)),
-                      "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
-                      "metrics": n["metrics"], "tools": n["tools"],
-                      "has_agent": bool(n["token_hash"]), "required_tools": required,
-                      "desired_services": [{"name": str(s.get("name") or s.get("unit") or "service"),
-                                            "unit": str(s.get("unit") or ""),
-                                            "healthcheck_configured": bool(s.get("healthcheck"))}
-                                           for s in desired_services],
-                      "missing_tools": sorted(set(missing_tools(n["tools"], required)) | stack_gaps),
-                      "heartbeat_age_s": age,
-                      "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
-                      "last_heartbeat": _iso(n["last_heartbeat"]),
-                      "idle_since": _iso(n["idle_since"]),
-                      "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",
-                      "notes": getattr(repo.nodes.get(n["name"]), "notes", "") or "",
-                      "capabilities": getattr(repo.nodes.get(n["name"]), "capabilities", []) or [],
-                      "projects": projects,
-                      "version_policy": rollout.node_policy(ctx, n["name"], n["release_version"], releases),
-                      "joined_at": n["created_at"]})
-    node_status = {n["name"]: n["status"] for n in nodes}
-    runs_per_account: dict[str, int] = {}
-    for r in db.all("SELECT account_id FROM runs WHERE status='running'"):
-        runs_per_account[r["account_id"]] = runs_per_account.get(r["account_id"], 0) + 1
-    running = {r["account_id"]: r for r in db.all(
-        "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
-    accounts = []
-    account_rows = db.all("SELECT * FROM accounts ORDER BY node, provider, id")
-    quota_by_account = quota_assessments(db, account_rows)
-    today_by_account = {row["account_id"]: row for row in db.all(
-        "SELECT account_id,coalesce(sum(tokens_in),0) AS tokens_in,coalesce(sum(tokens_out),0) AS tokens_out,"
-        "coalesce(sum(cost_usd),0) AS cost_usd FROM runs WHERE started_at >= date_trunc('day',now()) "
-        "GROUP BY account_id")}
-    sign_in_states = {row["id"]: row["sign_in_status"] for row in db.all(
-        "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
-    shared_managed = {row["id"] for row in db.all("SELECT id FROM shared_accounts WHERE managed")}
-    for a in account_rows:
-        cool = ctx.leases.cooling(a["id"])
-        r = running.get(a["id"])
-        model, effort = repo.model_for(a["provider"], a["tier"])
-        acc = repo.account(a["id"])
-        if not acc:
-            continue
-        expiry = a["credential_expires_at"]
-        expiry_warning = bool(expiry and expiry <= datetime.now(timezone.utc) + timedelta(
-            days=sa_thresholds["credential_expiry_days"]))
-        status = "stopped" if acc.paused else ("signed_out" if a["status"] == "signed_out" else ("cooldown" if cool else ("working" if r else (
-            "node_offline" if not any(node_status.get(machine, "offline") == "online" for machine in acc.machines)
-            and a["status"] not in ("signed_out", "error", "cooldown") else a["status"]))))
-        probe = (a["worker_state"] or {}).get("probe") or {}
-        windows = (a["quota"] or {}).get("windows") or {}
-        used_windows = [window for window in windows.values()
-                        if isinstance(window, dict) and window.get("utilization") is not None]
-        resets = [window.get("resets_at") for window in used_windows if window.get("resets_at")]
-        usage = today_by_account.get(a["id"], {})
-        accounts.append({
-            "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc.machines else ""),
-            "tier": a["tier"], "roles": acc.roles,
-            "machines": machines_view(db, acc, node_status, include_signin=include_signin),
-            "session_limit": acc.sessions, "shared": len(acc.machines) > 1,
-            "shared_managed": a["id"] in shared_managed,
-            "explicit_only": bool(acc and acc.explicit_only),
-            "paused": bool(acc.paused), "jobs": [job for job, role in
-                (("develop", "dev"), ("verify", "verify"), ("intake", "intake_refiner"), ("master", "master"))
-                if role in (acc.roles or [])],
-            "sign_in_pending": a["id"] in sign_in_states,
-            "sign_in_status": sign_in_states.get(a["id"], "idle"),
-            "status": status, "provider_status": (a["status"] if a["status"] in ("signed_out", "error")
-                                                    else "cooldown" if cool else a["status"]),
-            "cooldown": {"reason": cool[0], "seconds_left": cool[1]} if cool else None,
-            "cooldown_until": a["cooldown_until"], "cooldown_since": _iso(a["cooldown_since"]),
-            "idle_since": _iso(a["idle_since"]), "credential_expires_at": _iso(expiry) or "unknown",
-            "credential_expiry_warning": expiry_warning, "check_failed": probe.get("ok") is False or a["status"] == "error",
-            "quota": a["quota"], "quota_awareness": quota_by_account.get(a["id"], {}),
-            "quota_used": max((float(w["utilization"]) for w in used_windows), default=None),
-            "quota_resets_at": min(resets) if resets else None,
-            "tokens_today": int(usage.get("tokens_in", 0)) + int(usage.get("tokens_out", 0)),
-            "cost_today": float(usage.get("cost_usd", 0)), "last_error": a["last_error"],
-            "worker": a["worker_state"], "model": model, "effort": effort,
-            "runs_active": runs_per_account.get(a["id"], 0), "parallel": acc.sessions if acc else 1,
-            "run": None if not r else {"id": str(r["id"]), "ticket": r["ticket_key"], "summary": r["summary"],
-                                        "step": r["step"], "elapsed_s": _age(r["started_at"]), "fence": r["fence"],
-                                        "progress": r["progress"]},
-        })
-    active = []
-    for r in db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
-                    " WHERE r.status='running' ORDER BY r.started_at"):
-        active.append({"id": str(r["id"]), "ticket": r["ticket_key"], "project": r["project"], "summary": r["summary"],
-                       "step": r["step"], "account": r["account_id"], "provider": r["provider"], "model": r["model"],
-                       "node": r["node"], "fence": r["fence"], "elapsed_s": _age(r["started_at"]),
-                       "heartbeat_age_s": _age(r["heartbeat_at"]), "lease_ms": ctx.leases.ttl_ms(r["ticket_key"]),
-                       "progress": r["progress"]})
-    recent = []
-    for r in db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
-                    " WHERE r.status<>'running' ORDER BY r.started_at DESC LIMIT 30"):
-        dur = int((r["ended_at"] - r["started_at"]).total_seconds()) if r["ended_at"] else None
-        recent.append({"id": str(r["id"]), "ticket": r["ticket_key"], "summary": r["summary"], "step": r["step"],
-                       "account": r["account_id"], "provider": r["provider"], "model": r["model"], "node": r["node"],
-                       "outcome": r["outcome"] or r["status"], "error_kind": r["error_kind"], "duration_s": dur,
-                       "cost_usd": float(r["cost_usd"]), "tokens_in": r["tokens_in"], "tokens_out": r["tokens_out"],
-                       "pr_url": r["pr_url"], "already_done": bool((r["details"] or {}).get("already_done")),
-                       "ended_age_s": _age(r["ended_at"])})
-    tickets = db.all("SELECT key, project, status, type, priority, labels, summary, parent_key, blocked_by, done_at, jira_updated"
-                     " FROM tickets ORDER BY project, key")
-    ticket_index = {ticket["key"]: ticket for ticket in tickets}
-    for ticket in tickets:
-        ticket["epic"] = epic_for_ticket(ticket, ticket_index)
-        project = repo.projects.get(ticket["project"])
-        ticket["repository"] = project.repo_for(ticket) if project else ""
-    by_status: dict[str, dict[str, int]] = {}
-    for t in tickets:
-        by_status.setdefault(t["project"], {}).setdefault(t["status"], 0)
-        by_status[t["project"]][t["status"]] += 1
-    run_by_ticket = {a["ticket"]: a for a in active}
-    last_by_ticket: dict[str, dict] = {}
-    for r in recent:
-        last_by_ticket.setdefault(r["ticket"], r)
-    # The marker comes from the ticket's latest successful developer run, so a later verifier run that ends
-    # without a verdict (quota, timeout) does not hide it while the ticket stays in verification.
-    already_done = {}
-    for r in db.all("SELECT DISTINCT ON (ticket_key) id, ticket_key, pr_url, details FROM runs"
-                    " WHERE step='dev' AND outcome='done' ORDER BY ticket_key, started_at DESC"):
-        if (r["details"] or {}).get("already_done"):
-            already_done[r["ticket_key"]] = {"pr_url": r["pr_url"] or "", "run_id": str(r["id"])}
-    slow = {v["key"]: v for v in verify_retry.slow_verifications(db)}
-    for t in tickets:
-        t["slow_verify"] = verify_retry.describe(slow[t["key"]]) if t["key"] in slow else None
-        t["already_done"] = already_done.get(t["key"]) if t["status"] == "In Verify" else None
-        t["run"] = run_by_ticket.get(t["key"])
-        t["last_run"] = last_by_ticket.get(t["key"])
-        t["done_at"] = _iso(t["done_at"])
-        t["updated_age_s"] = _age(t.pop("jira_updated"))
-    today = db.one("SELECT count(*) AS runs, coalesce(sum(cost_usd),0) AS cost, coalesce(sum(tokens_in),0) AS tin,"
-                   " coalesce(sum(tokens_out),0) AS tout, count(*) FILTER (WHERE outcome='done') AS done,"
-                   " count(*) FILTER (WHERE outcome IN ('failed','blocked','timeout','lost')) AS failed"
-                   " FROM runs WHERE started_at > now() - interval '24 hours'")
-    incidents = db.all("SELECT id, opened_at, severity, kind, subject, title, detail FROM incidents"
-                       " WHERE closed_at IS NULL ORDER BY opened_at DESC")
-    incidents_recent = db.all("SELECT id, opened_at, closed_at, severity, kind, subject, title, detail FROM incidents"
-                              " WHERE closed_at > now() - interval '24 hours' ORDER BY closed_at DESC LIMIT 20")
-    events = db.all("SELECT ts, type, ticket, account, node, outcome, reason FROM events"
-                    " WHERE type <> 'node.heartbeat' ORDER BY id DESC LIMIT 60")
-    lifecycle = {row["project"]: row for row in db.all(
-        "SELECT project, status, closed_at, closed_by, version FROM project_lifecycle")}
-    projects = []
-    for p in repo.projects.values():
-        counts = by_status.get(p.key, {})
-        total = sum(counts.values())
-        current = lifecycle.get(p.key, {})
-        closed = current.get("status") == "closed"
-        projects.append({"key": p.key, "repo": p.repo, "repositories": p.configured_repositories,
-                         "base": p.base, "environments": p.environments,
-                         "work_minutes": p.work_minutes(), "counts": counts,
-                         "status": "closed" if closed else "open", "closed": closed,
-                         "closed_at": _iso(current.get("closed_at")), "closed_by": current.get("closed_by", ""),
-                         "report_version": int(current.get("version", 0)),
-                         "close_suggested": bool(total and counts.get("Done", 0) == total and not closed)})
-    sa = dashboard_data(ctx, nodes, accounts)
+    nodes = _nodes(ctx, repo, control_api.RELEASES)
+    node_status = {node["name"]: node["status"] for node in nodes}
+    runs_per_account, running, active, recent = _runs(ctx)
+    accounts = _accounts(ctx, repo, node_status, runs_per_account, running, include_signin)
+    tickets, slow_verifications = _tickets(ctx, repo, active, recent)
+    result = _dashboard_summary(ctx, repo, nodes, accounts, tickets)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(), "env": ctx.settings.env,
         "control_repo": repo.ref, "versions": repo.versions, "version": VERSION,
         "links": {"o2": "/o2/", "mail": "/mail/", "gatus": ctx.settings.gatus_url},
         "tool_waits": tooling.waiting_summary(ctx),
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
-        "projects": projects, "tickets": tickets,
-        "slow_verifications": list(slow.values()),
-        "release_readiness": release_readiness.all_versions(db, repo.projects),
-        "release_progress": release_progress.all_versions(db, repo.projects), "incidents": incidents, "incidents_recent": incidents_recent,
-        "events": events, "sa": sa, "role_health": role_health.summary(ctx), "rollout": rollout.summary(db),
+        "projects": result["projects"], "tickets": tickets,
+        "slow_verifications": slow_verifications,
+        "release_readiness": release_readiness.all_versions(ctx.db, repo.projects),
+        "release_progress": release_progress.all_versions(ctx.db, repo.projects),
+        "incidents": result["incidents"], "incidents_recent": result["incidents_recent"],
+        "events": result["events"], "sa": dashboard_data(ctx, nodes, accounts),
+        "role_health": role_health.summary(ctx), "rollout": rollout.summary(ctx.db),
         "version_policy": {"control": ctx.settings.control_version or VERSION,
                            "max_minor_lag": ctx.settings.version_max_minor_lag},
-        "totals": {"runs_24h": today["runs"], "cost_24h": float(today["cost"]), "tokens_in_24h": int(today["tin"]),
-                   "tokens_out_24h": int(today["tout"]), "done_24h": today["done"], "failed_24h": today["failed"]},
+        "totals": result["totals"],
     }
+
+
+def scope_snapshot(ctx, data: dict, visible_projects: list[str] | None, reveal_accounts: bool,
+                   redact_machine_data: bool) -> dict:
+    """Apply the Dashboard's project and machine-identity permissions to a fresh snapshot."""
+    verify_retry.scope_dashboard(data, visible_projects, reveal_accounts)
+    if visible_projects is not None:
+        _scope_projects(ctx, data, set(visible_projects))
+    if redact_machine_data:
+        _redact_machine_data(data)
+    return data
+
+
+def _scope_projects(ctx, data: dict, visible: set[str]) -> None:
+    data["projects"] = [project for project in data["projects"] if project["key"] in visible]
+    data["tickets"] = [ticket for ticket in data["tickets"] if ticket["project"] in visible]
+    ticket_keys = {ticket["key"] for ticket in data["tickets"]}
+    _scope_project_activity(data, ticket_keys, visible)
+    _scope_project_rollups(ctx, data, visible)
+    _scope_project_resources(data, visible)
+    data["sa"] = {}
+    data["version_policy"] = {}
+
+
+def _scope_project_activity(data: dict, ticket_keys: set[str], visible: set[str]) -> None:
+    data["active_runs"] = [run for run in data["active_runs"] if run.get("project") in visible]
+    data["recent_runs"] = [run for run in data["recent_runs"] if run.get("ticket") in ticket_keys]
+    data["events"] = [event for event in data["events"] if event.get("ticket") in ticket_keys]
+
+
+def _scope_project_rollups(ctx, data: dict, visible: set[str]) -> None:
+    # Project-level artifacts carry different shapes across releases; omit aggregates for restricted users.
+    data["release_readiness"] = []
+    data["release_progress"] = []
+    data["rollout"] = {}
+    data["totals"] = _visible_totals(ctx, visible)
+
+
+def _visible_totals(ctx, visible: set[str]) -> dict:
+    totals = ctx.db.one(
+        "SELECT count(*) FILTER (WHERE started_at > now()-interval '24 hours') AS runs_24h,"
+        " coalesce(sum(cost_usd) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS cost_24h,"
+        " coalesce(sum(tokens_in) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_in_24h,"
+        " coalesce(sum(tokens_out) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_out_24h,"
+        " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome='done') AS done_24h,"
+        " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome = ANY(%s)) AS failed_24h"
+        " FROM runs WHERE project=ANY(%s)", (["failed", "blocked", "timeout", "lost"], list(visible)))
+    integer_fields = {"runs_24h", "tokens_in_24h", "tokens_out_24h", "done_24h", "failed_24h"}
+    return {key: int(value) if key in integer_fields else float(value) for key, value in totals.items()}
+
+
+def _scope_project_resources(data: dict, visible: set[str]) -> None:
+    visible_nodes = {node["name"] for node in data["nodes"] if visible.intersection(node.get("projects") or [])}
+    data["nodes"] = [node for node in data["nodes"] if node["name"] in visible_nodes]
+    data["accounts"] = [account for account in data["accounts"] if _account_has_visible_node(account, visible_nodes)]
+    data["incidents"] = _visible_incidents(data["incidents"], visible, visible_nodes)
+    data["incidents_recent"] = _visible_incidents(data["incidents_recent"], visible, visible_nodes)
+
+
+def _account_has_visible_node(account: dict, visible_nodes: set[str]) -> bool:
+    return any(machine.get("node") in visible_nodes for machine in account.get("machines") or [])
+
+
+def _visible_incidents(incidents: list[dict], visible: set[str], visible_nodes: set[str]) -> list[dict]:
+    return [item for item in incidents if item.get("subject") in visible | visible_nodes]
+
+
+def _redact_machine_data(data: dict) -> None:
+    data["nodes"] = []
+    data["accounts"] = []
+    data["sa"] = {}
+    data["role_health"] = {"roles": [], "settings": {}}
+    data["version_policy"] = {}
+    data["incidents"] = []
+    data["incidents_recent"] = []
+    data["events"] = [_pick(event, ("ts", "type", "ticket", "outcome", "reason")) for event in data["events"]]
+    data["active_runs"] = [_pick(run, ("id", "ticket", "project", "summary", "step", "elapsed_s",
+                                        "heartbeat_age_s", "lease_ms", "progress")) for run in data["active_runs"]]
+    data["recent_runs"] = [_pick(run, ("id", "ticket", "summary", "step", "outcome", "error_kind",
+                                        "duration_s", "pr_url", "already_done", "ended_age_s"))
+                           for run in data["recent_runs"]]
+    for ticket in data["tickets"]:
+        _redact_ticket_runs(ticket)
+
+
+def _pick(data: dict, keys: tuple[str, ...]) -> dict:
+    return {key: data.get(key) for key in keys}
+
+
+def _redact_ticket_runs(ticket: dict) -> None:
+    if ticket.get("run"):
+        ticket["run"] = _pick(ticket["run"], ("id", "ticket", "project", "summary", "step", "elapsed_s", "progress"))
+    if ticket.get("last_run"):
+        ticket["last_run"] = _pick(ticket["last_run"], ("id", "ticket", "summary", "step", "outcome",
+                                                           "error_kind", "duration_s", "pr_url", "already_done",
+                                                           "ended_age_s"))
+
+
+def _nodes(ctx, repo, releases: Path) -> list[dict]:
+    assigned = _assigned_accounts(repo)
+    active_by_node = {row["node"]: int(row["busy"]) for row in ctx.db.all(
+        "SELECT node,count(*) AS busy FROM runs WHERE status='running' GROUP BY node")}
+    rows = ctx.db.all("SELECT * FROM nodes WHERE removed_at IS NULL ORDER BY role DESC, name")
+    return [_node_entry(ctx, repo, row, assigned, active_by_node, releases) for row in rows]
+
+
+def _assigned_accounts(repo) -> dict[str, int]:
+    assigned: dict[str, int] = {}
+    for account in repo.accounts:
+        for machine in account.machines:
+            assigned[machine] = assigned.get(machine, 0) + 1
+    return assigned
+
+
+def _node_entry(ctx, repo, row: dict, assigned: dict[str, int], active_by_node: dict[str, int],
+                releases: Path) -> dict:
+    age = _age(row["last_heartbeat"])
+    status = row["status"]
+    if status == "online" and (age is None or age > NODE_OFFLINE_S):
+        status = "offline"
+    projects = repo.projects_for_node(row["name"], row["projects"], row["dynamic"])
+    required = repo.tools_for_node(row["name"], projects)
+    configured = repo.nodes.get(row["name"])
+    stack_gaps = _node_stack_gaps(repo, configured, row["tools"])
+    desired_services = [s for s in (configured.services or []) if isinstance(s, dict)] if configured else []
+    node_services = _node_services(repo, projects, row["metrics"])
+    return {"name": row["name"], "ip": row["ip"], "services": node_services,
+            "role": row["role"], "status": status, "accepting_work": bool(row["accepting_work"]),
+            "sessions_busy": active_by_node.get(row["name"], int(row["slots_used"] or 0)),
+            "slots_total": row["slots_total"], "slots_used": row["slots_used"], "release": row["release_version"],
+            "metrics": row["metrics"], "tools": row["tools"], "has_agent": bool(row["token_hash"]),
+            "required_tools": required, "desired_services": _desired_service_rows(desired_services),
+            "missing_tools": sorted(set(missing_tools(row["tools"], required)) | stack_gaps),
+            "heartbeat_age_s": age, "accounts_assigned": assigned.get(row["name"], 0),
+            "in_control_repo": row["name"] in repo.nodes, "last_heartbeat": _iso(row["last_heartbeat"]),
+            "idle_since": _iso(row["idle_since"]), "purpose": getattr(configured, "purpose", "") or "",
+            "notes": getattr(configured, "notes", "") or "",
+            "capabilities": getattr(configured, "capabilities", []) or [], "projects": projects,
+            "version_policy": rollout_policy(ctx, row, releases), "joined_at": row["created_at"]}
+
+
+def _node_stack_gaps(repo, configured, tools: dict) -> set[str]:
+    gaps = set()
+    for key in configured.projects if configured else []:
+        project = repo.projects.get(key)
+        if project:
+            gaps.update(toolchain_gaps(tools, project.tools, repo.versions, project.stacks,
+                                       require_pins=bool(project.stacks)))
+    return gaps
+
+
+def _node_services(repo, projects: list[str], metrics: dict | None) -> list[dict]:
+    reported = (metrics or {}).get("services") or {}
+    declared = _declared_services(repo, projects)
+    gaps = service_gaps(reported, list(declared))
+    return [_service_entry(name, declared, reported, gaps)
+            for name in sorted(set(declared) | set(reported)) if name in SERVICES]
+
+
+def _declared_services(repo, projects: list[str]) -> dict[str, list[str]]:
+    declared: dict[str, list[str]] = {}
+    for key in projects:
+        project = repo.projects.get(key)
+        for service in project.required_services if project else []:
+            declared.setdefault(service, []).append(key)
+    return declared
+
+
+def _service_entry(name: str, declared: dict[str, list[str]], reported: dict, gaps: dict) -> dict:
+    current = reported.get(name) or {}
+    return {"name": name, "projects": declared.get(name, []), "healthy": name not in gaps,
+            "state": current.get("state", "unknown"), "endpoint": current.get("endpoint") or endpoint(name),
+            "image": current.get("image", ""), "detail": gaps.get(name) or current.get("detail", "")}
+
+
+def _desired_service_rows(services: list[dict]) -> list[dict]:
+    return [{"name": str(service.get("name") or service.get("unit") or "service"),
+             "unit": str(service.get("unit") or ""),
+             "healthcheck_configured": bool(service.get("healthcheck"))} for service in services]
+
+
+def rollout_policy(ctx, node: dict, releases: Path) -> dict:
+    from . import rollout
+    return rollout.node_policy(ctx, node["name"], node["release_version"], releases)
+
+
+def _runs(ctx) -> tuple[dict[str, int], dict[str, dict], list[dict], list[dict]]:
+    db = ctx.db
+    runs_per_account: dict[str, int] = {}
+    for row in db.all("SELECT account_id FROM runs WHERE status='running'"):
+        runs_per_account[row["account_id"]] = runs_per_account.get(row["account_id"], 0) + 1
+    running = {row["account_id"]: row for row in db.all(
+        "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
+    active = [_active_run(ctx, row) for row in db.all(
+        "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
+        " WHERE r.status='running' ORDER BY r.started_at")]
+    recent = [_recent_run(row) for row in db.all(
+        "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
+        " WHERE r.status<>'running' ORDER BY r.started_at DESC LIMIT 30")]
+    return runs_per_account, running, active, recent
+
+
+def _active_run(ctx, row: dict) -> dict:
+    return {"id": str(row["id"]), "ticket": row["ticket_key"], "project": row["project"],
+            "summary": row["summary"], "step": row["step"], "account": row["account_id"],
+            "provider": row["provider"], "model": row["model"], "node": row["node"], "fence": row["fence"],
+            "elapsed_s": _age(row["started_at"]), "heartbeat_age_s": _age(row["heartbeat_at"]),
+            "lease_ms": ctx.leases.ttl_ms(row["ticket_key"]), "progress": row["progress"]}
+
+
+def _recent_run(row: dict) -> dict:
+    duration = int((row["ended_at"] - row["started_at"]).total_seconds()) if row["ended_at"] else None
+    return {"id": str(row["id"]), "ticket": row["ticket_key"], "summary": row["summary"], "step": row["step"],
+            "account": row["account_id"], "provider": row["provider"], "model": row["model"], "node": row["node"],
+            "outcome": row["outcome"] or row["status"], "error_kind": row["error_kind"], "duration_s": duration,
+            "cost_usd": float(row["cost_usd"]), "tokens_in": row["tokens_in"], "tokens_out": row["tokens_out"],
+            "pr_url": row["pr_url"], "already_done": bool((row["details"] or {}).get("already_done")),
+            "ended_age_s": _age(row["ended_at"])}
+
+
+def _accounts(ctx, repo, node_status: dict[str, str], runs_per_account: dict[str, int],
+              running: dict[str, dict], include_signin: bool) -> list[dict]:
+    db = ctx.db
+    thresholds_value = thresholds(repo)
+    rows = db.all("SELECT * FROM accounts ORDER BY node, provider, id")
+    quota_by_account = quota_assessments(db, rows)
+    today = {row["account_id"]: row for row in db.all(
+        "SELECT account_id,coalesce(sum(tokens_in),0) AS tokens_in,coalesce(sum(tokens_out),0) AS tokens_out,"
+        "coalesce(sum(cost_usd),0) AS cost_usd FROM runs WHERE started_at >= date_trunc('day',now()) "
+        "GROUP BY account_id")}
+    sign_in = {row["id"]: row["sign_in_status"] for row in db.all(
+        "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
+    managed = {row["id"] for row in db.all("SELECT id FROM shared_accounts WHERE managed")}
+    out = []
+    for row in rows:
+        account = _account_entry(ctx, repo, row, node_status, runs_per_account, running,
+                                 quota_by_account, today, sign_in, managed, thresholds_value, include_signin)
+        if account:
+            out.append(account)
+    return out
+
+
+def _account_entry(ctx, repo, row: dict, node_status: dict[str, str], runs_per_account: dict[str, int],
+                   running: dict[str, dict], quota_by_account: dict, today: dict, sign_in: dict,
+                   managed: set[str], thresholds_value: dict, include_signin: bool) -> dict | None:
+    account = repo.account(row["id"])
+    if not account:
+        return None
+    cooling = ctx.leases.cooling(row["id"])
+    active = running.get(row["id"])
+    model, effort = repo.model_for(row["provider"], row["tier"])
+    return {**_account_identity(ctx, account, row, node_status, sign_in, managed, include_signin),
+            **_account_usage(row, quota_by_account, today, thresholds_value),
+            **_account_runtime(account, row, cooling, active, node_status, model, effort,
+                               runs_per_account),
+            "last_error": row["last_error"]}
+
+
+def _account_identity(ctx, account, row: dict, node_status: dict[str, str], sign_in: dict,
+                      managed: set[str], include_signin: bool) -> dict:
+    return {"id": row["id"], "provider": row["provider"], "node": _primary_machine(account),
+            "tier": row["tier"], "roles": account.roles,
+            "machines": machines_view(ctx.db, account, node_status, include_signin=include_signin),
+            "session_limit": account.sessions, "shared": len(account.machines) > 1,
+            "shared_managed": row["id"] in managed, "explicit_only": bool(account.explicit_only),
+            "paused": bool(account.paused), "jobs": _account_jobs(account.roles),
+            "sign_in_pending": row["id"] in sign_in, "sign_in_status": sign_in.get(row["id"], "idle")}
+
+
+def _primary_machine(account) -> str:
+    return account.machines[0] if account.machines else ""
+
+
+def _account_usage(row: dict, quota_by_account: dict, today: dict, thresholds_value: dict) -> dict:
+    expiry = row["credential_expires_at"]
+    expiry_warning = bool(expiry and expiry <= datetime.now(timezone.utc) + timedelta(
+        days=thresholds_value["credential_expiry_days"]))
+    windows = (row["quota"] or {}).get("windows") or {}
+    used = [window for window in windows.values()
+            if isinstance(window, dict) and window.get("utilization") is not None]
+    resets = [window.get("resets_at") for window in used if window.get("resets_at")]
+    usage = today.get(row["id"], {})
+    return {"credential_expires_at": _iso(expiry) or "unknown", "credential_expiry_warning": expiry_warning,
+            "quota": row["quota"], "quota_awareness": quota_by_account.get(row["id"], {}),
+            "quota_used": max((float(window["utilization"]) for window in used), default=None),
+            "quota_resets_at": min(resets) if resets else None,
+            "tokens_today": int(usage.get("tokens_in", 0)) + int(usage.get("tokens_out", 0)),
+            "cost_today": float(usage.get("cost_usd", 0))}
+
+
+def _account_runtime(account, row: dict, cooling, active: dict | None, node_status: dict[str, str],
+                     model: str, effort: str, runs_per_account: dict[str, int]) -> dict:
+    probe = (row["worker_state"] or {}).get("probe") or {}
+    return {"status": _account_status(account, row, cooling, active, node_status),
+            "provider_status": _provider_status(row, cooling),
+            "cooldown": {"reason": cooling[0], "seconds_left": cooling[1]} if cooling else None,
+            "cooldown_until": row["cooldown_until"], "cooldown_since": _iso(row["cooldown_since"]),
+            "idle_since": _iso(row["idle_since"]),
+            "check_failed": probe.get("ok") is False or row["status"] == "error",
+            "worker": row["worker_state"], "model": model, "effort": effort,
+            "runs_active": runs_per_account.get(row["id"], 0), "parallel": account.sessions,
+            "run": _account_run(active)}
+
+
+def _account_jobs(roles: list[str] | None) -> list[str]:
+    return [job for job, role in (("develop", "dev"), ("verify", "verify"),
+                                  ("intake", "intake_refiner"), ("master", "master"))
+            if role in (roles or [])]
+
+
+def _account_status(account, row: dict, cooling, running: dict | None, nodes: dict[str, str]) -> str:
+    if account.paused:
+        return "stopped"
+    if row["status"] == "signed_out":
+        return "signed_out"
+    if cooling:
+        return "cooldown"
+    if running:
+        return "working"
+    online = any(nodes.get(machine, "offline") == "online" for machine in account.machines)
+    if not online and row["status"] not in ("signed_out", "error", "cooldown"):
+        return "node_offline"
+    return row["status"]
+
+
+def _provider_status(row: dict, cooling) -> str:
+    if row["status"] in ("signed_out", "error"):
+        return row["status"]
+    return "cooldown" if cooling else row["status"]
+
+
+def _account_run(run: dict | None) -> dict | None:
+    if not run:
+        return None
+    return {"id": str(run["id"]), "ticket": run["ticket_key"], "summary": run["summary"], "step": run["step"],
+            "elapsed_s": _age(run["started_at"]), "fence": run["fence"], "progress": run["progress"]}
+
+
+def _tickets(ctx, repo, active: list[dict], recent: list[dict]) -> tuple[list[dict], list[dict]]:
+    db = ctx.db
+    tickets = db.all("SELECT key, project, status, type, priority, labels, summary, parent_key, blocked_by, done_at, jira_updated"
+                     " FROM tickets ORDER BY project, key")
+    by_key = {ticket["key"]: ticket for ticket in tickets}
+    for ticket in tickets:
+        ticket["epic"] = epic_for_ticket(ticket, by_key)
+        project = repo.projects.get(ticket["project"])
+        ticket["repository"] = project.repo_for(ticket) if project else ""
+    active_by_ticket = {row["ticket"]: row for row in active}
+    recent_by_ticket = _latest_runs_by_ticket(recent)
+    already_done = _already_done_tickets(db)
+    slow = verify_retry.attach_slow_verifications(db, tickets)
+    for ticket in tickets:
+        ticket["already_done"] = already_done.get(ticket["key"]) if ticket["status"] == "In Verify" else None
+        ticket["run"] = active_by_ticket.get(ticket["key"])
+        ticket["last_run"] = recent_by_ticket.get(ticket["key"])
+        ticket["done_at"] = _iso(ticket["done_at"])
+        ticket["updated_age_s"] = _age(ticket.pop("jira_updated"))
+    return tickets, slow
+
+
+def _latest_runs_by_ticket(recent: list[dict]) -> dict[str, dict]:
+    latest: dict[str, dict] = {}
+    for run in recent:
+        latest.setdefault(run["ticket"], run)
+    return latest
+
+
+def _already_done_tickets(db) -> dict[str, dict]:
+    out = {}
+    for row in db.all("SELECT DISTINCT ON (ticket_key) id, ticket_key, pr_url, details FROM runs"
+                      " WHERE step='dev' AND outcome='done' ORDER BY ticket_key, started_at DESC"):
+        if (row["details"] or {}).get("already_done"):
+            out[row["ticket_key"]] = {"pr_url": row["pr_url"] or "", "run_id": str(row["id"])}
+    return out
+
+
+def _dashboard_summary(ctx, repo, nodes: list[dict], accounts: list[dict], tickets: list[dict]) -> dict:
+    counts = _ticket_counts(tickets)
+    lifecycle = {row["project"]: row for row in ctx.db.all(
+        "SELECT project, status, closed_at, closed_by, version FROM project_lifecycle")}
+    projects = [_project_summary(project, counts.get(project.key, {}), lifecycle.get(project.key, {}))
+                for project in repo.projects.values()]
+    today = ctx.db.one(
+        "SELECT count(*) AS runs, coalesce(sum(cost_usd),0) AS cost, coalesce(sum(tokens_in),0) AS tin,"
+        " coalesce(sum(tokens_out),0) AS tout, count(*) FILTER (WHERE outcome='done') AS done,"
+        " count(*) FILTER (WHERE outcome IN ('failed','blocked','timeout','lost')) AS failed"
+        " FROM runs WHERE started_at > now() - interval '24 hours'")
+    return {"projects": projects, "incidents": ctx.db.all(
+                "SELECT id, opened_at, severity, kind, subject, title, detail FROM incidents"
+                " WHERE closed_at IS NULL ORDER BY opened_at DESC"),
+            "incidents_recent": ctx.db.all(
+                "SELECT id, opened_at, closed_at, severity, kind, subject, title, detail FROM incidents"
+                " WHERE closed_at > now() - interval '24 hours' ORDER BY closed_at DESC LIMIT 20"),
+            "events": ctx.db.all("SELECT ts, type, ticket, account, node, outcome, reason FROM events"
+                                 " WHERE type <> 'node.heartbeat' ORDER BY id DESC LIMIT 60"),
+            "totals": {"runs_24h": today["runs"], "cost_24h": float(today["cost"]),
+                       "tokens_in_24h": int(today["tin"]), "tokens_out_24h": int(today["tout"]),
+                       "done_24h": today["done"], "failed_24h": today["failed"]}}
+
+
+def _ticket_counts(tickets: list[dict]) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+    for ticket in tickets:
+        counts.setdefault(ticket["project"], {}).setdefault(ticket["status"], 0)
+        counts[ticket["project"]][ticket["status"]] += 1
+    return counts
+
+
+def _project_summary(project, counts: dict[str, int], lifecycle: dict) -> dict:
+    total = sum(counts.values())
+    closed = lifecycle.get("status") == "closed"
+    return {"key": project.key, "repo": project.repo, "repositories": project.configured_repositories,
+            "base": project.base, "environments": project.environments,
+            "work_minutes": project.work_minutes(), "counts": counts,
+            "status": "closed" if closed else "open", "closed": closed,
+            "closed_at": _iso(lifecycle.get("closed_at")), "closed_by": lifecycle.get("closed_by", ""),
+            "report_version": int(lifecycle.get("version", 0)),
+            "close_suggested": bool(total and counts.get("Done", 0) == total and not closed)}

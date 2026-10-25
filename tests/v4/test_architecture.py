@@ -108,6 +108,17 @@ def test_architecture_contract_and_readme_registration_are_present():
     assert "[v4 control plane architecture](../../docs/v4/architecture.md)" in topics
 
 
+def test_verify_run_repository_keeps_ticket_node_and_incident_queries_in_their_repositories():
+    verify_runs = (ROOT / "aiflow/v4/control/repositories/verify_runs.py").read_text(encoding="utf-8")
+    assert not any(table in verify_runs for table in ("FROM tickets", "FROM nodes", "FROM incidents"))
+    tickets = (ROOT / "aiflow/v4/control/repositories/tickets.py").read_text(encoding="utf-8")
+    nodes = (ROOT / "aiflow/v4/control/repositories/nodes.py").read_text(encoding="utf-8")
+    incidents = (ROOT / "aiflow/v4/control/repositories/incidents.py").read_text(encoding="utf-8")
+    assert "def verification_candidates" in tickets and "def waiting_verifications" in tickets
+    assert "def candidate_node" in nodes
+    assert "def open_subjects" in incidents
+
+
 def test_developer_and_verify_prompts_use_architecture_document():
     developer = (ROOT / "prompts/v4/dev.md").read_text(encoding="utf-8")
     verify = (ROOT / "prompts/v4/verify.md").read_text(encoding="utf-8")

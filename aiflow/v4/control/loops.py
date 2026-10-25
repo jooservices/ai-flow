@@ -275,9 +275,9 @@ def watchdog(ctx: Ctx) -> None:
     try:
         check_stack_pins(ctx)
         check_idle_flow(ctx)
-        verify_retry.check_incidents(ctx, control_api.RELEASES)
     except Exception as e:  # noqa: BLE001 - a failing check must not stop the rest of the watchdog
         log.warning("idle and pin checks failed: %s", e)
+    _check_verify_incidents(ctx, control_api.RELEASES)
     # runs whose lease disappeared (worker died, node down, network split)
     for r in ctx.db.all("SELECT * FROM runs WHERE status='running'"):
         holder = ctx.leases.holder(r["ticket_key"])
@@ -392,6 +392,13 @@ def watchdog(ctx: Ctx) -> None:
                           f"{account_providers.get(account_id, 'AI')} accounts first.")
         else:
             close_incident(ctx, "quota_prediction", account_id, "quota forecast is no longer before reset")
+
+
+def _check_verify_incidents(ctx: Ctx, releases) -> None:
+    try:
+        verify_retry.check_incidents(ctx, releases)
+    except Exception as exc:  # noqa: BLE001 - verification exhaustion must not stop other watchdog work
+        log.warning("verify no-verdict check failed: %s", exc)
 
 
 def fleet_rollout(ctx: Ctx) -> dict | None:

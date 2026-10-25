@@ -8,7 +8,9 @@ from __future__ import annotations
 import math
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
+
+from fastapi import HTTPException
 
 from ..core.quota import as_utc
 
@@ -249,6 +251,73 @@ def choose_account(candidates: list[dict[str, Any]], ticket: dict[str, Any],
 
     best = sorted(safe, key=rank, reverse=True)[0]
     return str(best["id"]), fits
+
+
+def route_candidates(ctx, account_id: str, node: str, offered: list[dict], eligible: Callable,
+                     online_nodes: Callable, verify_retry_guard: bool = True) -> list[dict]:
+    """Route development tickets to the quota-safest eligible account when multiple can take them."""
+    development = [ticket for ticket in offered if ticket.get("step") == "dev"]
+    if not development:
+        return offered
+    rows = ctx.db.all("SELECT id,provider,tier,roles,quota_forecast FROM accounts ORDER BY id")
+    accounts = {str(row["id"]): row for row in rows}
+    forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in rows}
+    by_ticket = _eligible_by_ticket(ctx, account_id, node, offered, eligible, online_nodes,
+                                    verify_retry_guard, accounts)
+    selected = _select_capacity_accounts(development, by_ticket, forecasts, history(ctx.db))
+    return [ticket for ticket in offered if ticket.get("step") != "dev"
+            or (ticket["key"], ticket["step"]) not in selected
+            or selected[(ticket["key"], ticket["step"])] == account_id]
+
+
+def _eligible_by_ticket(ctx, account_id: str, node: str, offered: list[dict], eligible: Callable,
+                        online_nodes: Callable, verify_retry_guard: bool,
+                        accounts: dict[str, dict]) -> dict[tuple[str, str], dict[str, dict]]:
+    available = set(online_nodes(ctx.db))
+    out: dict[tuple[str, str], dict[str, dict]] = {}
+    for account in ctx.repo().accounts:
+        if account.id not in accounts:
+            continue
+        machines = [node] if account.id == account_id else account.machines
+        for machine in dict.fromkeys(machines):
+            if account.id != account_id and machine not in available:
+                continue
+            offers = _account_offers(account, machine, account_id, node, offered, eligible,
+                                     verify_retry_guard)
+            _index_development_offers(out, accounts[account.id], account, offers)
+    return out
+
+
+def _account_offers(account, machine: str, account_id: str, node: str, offered: list[dict], eligible: Callable,
+                    verify_retry_guard: bool) -> list[dict]:
+    if account.id == account_id and machine == node:
+        return offered
+    try:
+        return eligible(account.id, machine, capacity_routing=False,
+                        verify_retry_guard=verify_retry_guard)
+    except HTTPException:
+        return []
+
+
+def _index_development_offers(out: dict, account_row: dict, account, offers: list[dict]) -> None:
+    for ticket in offers:
+        if ticket.get("step") == "dev":
+            out.setdefault((ticket["key"], ticket["step"]), {})[account.id] = {
+                **account_row, "tier": account.tier}
+
+
+def _select_capacity_accounts(development: list[dict], eligible: dict[tuple[str, str], dict[str, dict]],
+                              forecasts: dict[str, dict], samples: list[dict]) -> dict[tuple[str, str], str]:
+    selected = {}
+    for ticket in development:
+        key = (ticket["key"], ticket["step"])
+        candidates = list(eligible.get(key, {}).values())
+        if len(candidates) < 2:
+            continue
+        account, _fits = choose_account(candidates, ticket, estimate(ticket, samples), forecasts)
+        if account:
+            selected[key] = account
+    return selected
 
 
 def weekly_tokens(forecast: dict[str, Any], quota: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:

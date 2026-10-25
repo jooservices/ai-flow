@@ -60,16 +60,18 @@ def test_epic_with_ready_label_is_never_offered(client, ctx):
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-63'")
     add_ticket(ctx.db, "TESTWP-64", "Needs owner", labels=())
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-64'")
+    add_ticket(ctx.db, "TESTWP-65", "To Do", labels=("aiflow-ready",))
+    ctx.db.run("UPDATE tickets SET type='epic' WHERE key='TESTWP-65'")
     seen = offered(client, cc, "claude-01")
     assert ("TESTWP-60", "dev") in seen
-    assert not {key for key, _ in seen} & {"TESTWP-61", "TESTWP-62", "TESTWP-63", "TESTWP-64"}
+    assert not {key for key, _ in seen} & {"TESTWP-61", "TESTWP-62", "TESTWP-63", "TESTWP-64", "TESTWP-65"}
     assert client.post("/v1/work/claim", json={"ticket": "TESTWP-61", "account": "claude-01"},
                        headers=cc).status_code == 409
 
 
 def test_epic_follows_its_children(ctx):
     add_ticket(ctx.db, "TESTWP-70", "To Do", labels=())
-    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-70'")
+    ctx.db.run("UPDATE tickets SET type='epic' WHERE key='TESTWP-70'")
     for key, status in (("TESTWP-71", "To Do"), ("TESTWP-72", "To Do")):
         add_ticket(ctx.db, key, status, labels=())
         ctx.db.run("UPDATE tickets SET type='Story', parent_key='TESTWP-70' WHERE key=%s", (key,))
@@ -190,6 +192,24 @@ def test_failure_on_all_eligible_accounts_raises_one_incident_and_the_dashboard_
                       " AND closed_at IS NULL")["n"] == 0
 
 
+def test_unrelated_watchdog_check_failure_does_not_skip_verify_exhaustion(client, ctx, monkeypatch):
+    import aiflow.v4.control.loops as loops
+
+    join(client, "cc"), join(client, "node1")
+    in_verify(ctx)
+    for account in ("codex-01", "claude-01"):
+        for minutes in (8, 2):
+            no_verdict(ctx, "TESTWP-50", account, minutes_ago=minutes)
+
+    def fail_idle_check(_ctx):
+        raise RuntimeError("injected unrelated watchdog failure")
+
+    monkeypatch.setattr(loops, "check_idle_flow", fail_idle_check)
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict'"
+                      " AND subject='TESTWP-50' AND closed_at IS NULL")["n"] == 1
+
+
 def test_exhaustion_incident_stays_open_across_offline_and_return_cycle(client, ctx):
     cc, node1 = join(client, "cc"), join(client, "node1")
     in_verify(ctx)
@@ -228,8 +248,13 @@ def test_exhaustion_incident_stays_open_across_offline_and_return_cycle(client, 
 def test_dashboard_lists_only_tickets_waiting_longer_than_30_minutes(ctx):
     in_verify(ctx, "TESTWP-80")
     add_ticket(ctx.db, "TESTWP-81", "In Verify")
-    insert_run(ctx, "TESTWP-81", "dev", "opencode-01", "done", pr_url=PR, minutes_ago=5)
-    assert [v["key"] for v in verify_retry.slow_verifications(ctx.db)] == ["TESTWP-80"]
+    insert_run(ctx, "TESTWP-81", "dev", "opencode-01", "done", pr_url=PR, minutes_ago=60)
+    checked_at = ctx.db.one("SELECT now() AS t")["t"]
+    ctx.db.run("UPDATE runs SET ended_at=%s-interval '31 minutes' WHERE ticket_key='TESTWP-80' AND step='dev'",
+               (checked_at,))
+    ctx.db.run("UPDATE runs SET ended_at=%s-interval '30 minutes' WHERE ticket_key='TESTWP-81' AND step='dev'",
+               (checked_at,))
+    assert [v["key"] for v in verify_retry.slow_verifications(ctx.db, now=checked_at)] == ["TESTWP-80"]
 
 
 def test_dashboard_describes_tried_account_without_no_verdict_details(ctx):

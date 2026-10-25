@@ -603,3 +603,17 @@ def test_two_failures_and_seven_timeouts_stay_under_the_threshold():
     score, _ = role_health.failure_score(history, window=10)
 
     assert score < role_health.DEFAULT_FAILURE_PERCENT / 100
+
+
+def test_a_run_that_failed_with_the_timeout_error_kind_is_scored_as_stopped():
+    scored = role_health.classify({"step": "dev", "outcome": "failed", "error_kind": "timeout",
+                                   "summary": "timeout: the suite is at 40 percent"})
+
+    assert scored.label == "stopped" and scored.failure == role_health.STOPPED_WEIGHT
+
+
+def test_other_failed_runs_still_score_as_failures():
+    scored = role_health.classify({"step": "dev", "outcome": "failed", "error_kind": "",
+                                   "summary": "worker error: git add failed"})
+
+    assert scored.label == "failed" and scored.failure == 1.0

@@ -25,15 +25,23 @@ WAIT_DEFAULTS = {"Config": 10, "Attempts": 0, "Rework": 0, "Unclear": 30}
 NEVER_RESCUED = ("Quota", "Offline")  # they return by themselves when an AI is back
 NUMBERS = {"in_progress_minutes": 60, "total_work_minutes": 120, "master_minutes": 60, "total_cap_minutes": 180}
 TEXTS = {"model": "", "taken_by_field": "Taken by"}
+_REQUIREMENT_ACTION = (r"change|changed|changes|changing|update|updated|updates|updating|modify|modified|modifies|modifying|"
+                       r"revise|revised|revises|revising|alter|altered|alters|altering|rewrite|rewrote|rewritten|rewriting")
+_REQUIREMENT_TARGET = r"requirements?|product direction|acceptance criteria"
+_REQUIREMENT_CHANGE = (rf"\b(?:{_REQUIREMENT_ACTION})\b.{{0,40}}\b(?:{_REQUIREMENT_TARGET})\b|"
+                       rf"\b(?:{_REQUIREMENT_TARGET})\b.{{0,40}}\b(?:{_REQUIREMENT_ACTION})\b")
+_INSTALLED_ACTION = (r"install(?:ing|ed)?|uninstall(?:ing|ed)?|upgrad(?:e|ed|ing)|updat(?:e|ed|ing)|"
+                     r"modif(?:y|ied|ying)|chang(?:e|ed|ing)|remov(?:e|ed|ing)|patch(?:ed|ing)?")
+_INSTALLED_TARGET = r"(?:installed\s+)?(?:software|packages?|tools?|binar(y|ies)|cli|dependencies|runtimes?)"
 OWNER_ONLY = (
     ("spending money", r"\b(pay|payment|billing|invoice|purchase|spend(ing)?|subscription|money|paid plan)\b"),
     ("credentials, tokens or secrets", r"\b(credentials?|secrets?|tokens?|passwords?|api[ _-]?keys?|private key)\b"),
     ("deleting data", r"\b(delet(e|ing)|drop|purge|wipe|truncate)\b.{0,40}\b(data|databases?|tables?|repositor(y|ies)|branch(es)?|records?)\b|force-push"),
     ("a release", r"\breleas(e|es|ing)\b|\bproduction deploy"),
-    ("changing the requirements", r"\b(requirements?|product direction|acceptance criteria)\b"),
+    ("changing the requirements", _REQUIREMENT_CHANGE),
     ("merging by hand", r"\bmerg(e|ing)\b.{0,15}\b(by hand|manually)\b|\bmanual(ly)? merge"),
     ("runtime setup", r"\b(runtime|server|host|network|systemd|environment)\b.{0,15}\b(set ?up|configuration|provisioning)\b|\bprovision"),
-    ("changing installed software", r"\b(install(ing|ed)?|uninstall|upgrade)\b.{0,40}\b(software|packages?|tools?|binar(y|ies)|cli)\b|missing tool|not installed"),
+    ("changing installed software", rf"\b(?:{_INSTALLED_ACTION})\b.{{0,40}}\b{_INSTALLED_TARGET}\b|missing tool|not installed"),
 )
 OWNER_PATTERNS = tuple((topic, re.compile(pattern, re.I)) for topic, pattern in OWNER_ONLY)
 

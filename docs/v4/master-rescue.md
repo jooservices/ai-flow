@@ -38,8 +38,9 @@ a cap below the work limit plus the rescue budget, a model that is not Claude) a
    owner. The ticket gets `needs-owner` and the usual question comment.
 3. **Handover** otherwise: status `Handover` (JAIF-102), `Taken by = Claude`, the AI Model field set to the rescue model, the label
    `master-rescue`, and the lease of a running worker is released. The rescue record is stored as soon as Jira accepts Handover,
-   so a failed label write is retried on later operator passes. The label and record `rescue:<KEY>` make it one rescue per ticket;
-   a later problem follows the normal operator path.
+   so failed label writes and the handover audit comment are retried on later operator passes. The saved audit marker prevents
+   duplicate comments when Jira accepted a comment but its response was lost. The label and record `rescue:<KEY>` make it one
+   rescue per ticket; a later problem follows the normal operator path.
 4. **Audit comment** on the ticket: where it is stuck (status, time, and Blocked kind), what was tried (trigger, failed
    attempts or rework rounds, and whether recent comments were reviewed), the work time and the remaining budget
    (`min(master_minutes, total_cap_minutes - work time)`), and the model. Raw Blocked reasons and comment excerpts are omitted
@@ -55,7 +56,8 @@ The Command Center shows the label and the status changes; the audit comments ar
 transition does not add a rescue label or record, so the same incident becomes eligible again after its temporary operator
 cooldown. Temporary `Taken by` and model fields are cleared; if Jira refuses a cleanup write, the operator retries it. When
 Handover succeeds but a later Jira label update fails, the rescue record keeps the label write pending and the operator retries
-it without delaying flow-doctor handling.
+it without delaying flow-doctor handling. A failed handover audit comment stays pending and is retried; reconciliation checks for
+its marker first so an accepted comment is not posted twice.
 
 ### Handover pickup dependency
 

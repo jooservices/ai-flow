@@ -120,13 +120,34 @@ class RulesTests(unittest.TestCase):
         topics = {"Pay the invoice for the licence": "spending money", "Rotate the API key": "credentials, tokens or secrets",
                   "Delete the database": "deleting data", "Cut a release": "a release", "The requirements changed": "changing the requirements",
                   "Merge it by hand": "merging by hand", "Runtime setup of the host": "runtime setup",
-                  "Install the missing tool": "changing installed software"}
+                  "Install the missing tool": "changing installed software",
+                  "Update the installed package": "changing installed software",
+                  "Modify installed software": "changing installed software"}
         for text, topic in topics.items():
             with self.subTest(text=text):
                 found = verdict("Blocked", 0, blocked_kind="Config", reason=text)  # even before the 10 minute wait
                 self.assertEqual((found.mode, found.topic), ("owner", topic))
         self.assertEqual(owner_only_topic("a failing unit test"), "")
+        self.assertEqual(owner_only_topic("Update the ticket documentation"), "")
         self.assertEqual(verdict("In Progress", 70, stretch_minutes=70, summary="Rotate the credentials").mode, "owner")
+
+    def test_acceptance_criteria_template_heading_is_not_a_requirement_change(self):
+        description = """## Business requirement
+Add a status filter to the ticket list.
+
+## Acceptance criteria
+- AC1: The filter can be selected.
+
+## Technical notes
+Use the existing list endpoint.
+"""
+        item = ticket("JAIF-1", "In Progress", 1, summary="Add a status filter", description=description)
+        self.assertIsNone(evaluate(item, SETTINGS, 1))
+
+    def test_explicit_requirement_changes_are_owner_only(self):
+        for text in ("Update the requirements", "Modify acceptance criteria", "Requirements changed after review"):
+            with self.subTest(text=text):
+                self.assertEqual(owner_only_topic(text), "changing the requirements")
 
     def test_owner_only_work_is_checked_before_work_limits_in_description_and_comments(self):
         description = ticket("JAIF-1", "In Progress", 1, summary="Routine maintenance", description="Rotate the API key")
@@ -411,6 +432,54 @@ class RescueRunTests(unittest.TestCase):
         self.assertFalse(record["label_pending"])
         self.assertEqual(calls, [("JAIF-1", "master-rescue"), ("JAIF-1", "master-rescue")])
         self.assertIn(("JAIF-1", "master-rescue"), sup.jira.added)
+
+    def test_temporary_handover_audit_comment_failure_is_retried(self):
+        op, sup, redis = self.build()
+        posted, attempts = [], []
+
+        def comment(key, body):
+            attempts.append(body)
+            if len(attempts) == 1:
+                raise JiraError("temporary comment failure")
+            posted.append((key, body))
+
+        sup.jira.comment = comment
+        sup.jira.comments = lambda key, last=10: [{"body": body} for _, body in posted]
+        op.handle(self.incident())
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertTrue(record["handover_audit_pending"])
+        self.assertEqual(record["handover_audit_attempts"], 1)
+
+        sup.jira.status = "Handover"
+        op.check_rescues()
+
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertFalse(record["handover_audit_pending"])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(posted), 1)
+        self.assertIn("Master rescue handover audit: rescue:JAIF-1", posted[0][1])
+        self.assertIn("Remaining budget: 50 min", posted[0][1])
+
+    def test_handover_audit_retry_detects_a_comment_accepted_before_timeout(self):
+        op, sup, redis = self.build()
+        posted, attempts = [], []
+
+        def comment(key, body):
+            attempts.append(body)
+            posted.append((key, body))
+            if len(attempts) == 1:
+                raise JiraError("comment response was lost")
+
+        sup.jira.comment = comment
+        sup.jira.comments = lambda key, last=10: [{"body": body} for _, body in posted]
+        op.handle(self.incident())
+        sup.jira.status = "Handover"
+        op.check_rescues()
+
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertFalse(record["handover_audit_pending"])
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(len(posted), 1)
 
     def test_label_retry_failure_does_not_block_the_flow_doctor(self):
         op, sup, redis = self.build()

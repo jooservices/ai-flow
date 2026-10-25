@@ -105,13 +105,18 @@ class Rescue:
             self.redis.set(f"operator:cool:{incident.id}", "1", 600)  # retry after the temporary cooldown
             return True
         self.redis.delete(f"lease:{key}")  # a worker still holding the ticket stops at its next heartbeat
+        findings = self.lines(incident)
+        extra = [f"Master rescue handover audit: rescue:{key}", *findings,
+                 f"Taken by: {master_rescue.RESCUE_AGENT}, model {model or 'default'}" +
+                 (f" (effort {effort})" if effort else "")]
         record = dict(state="active", started=int(time.time()), budget=facts.get("remaining_minutes", 0), model=f"{model}:{effort}".strip(":"),
-                      stuck=facts.get("trigger", ""), findings=self.lines(incident), label_pending=True)
+                      stuck=facts.get("trigger", ""), findings=findings, label_pending=True,
+                      handover_audit_pending=True, handover_audit_attempts=0,
+                      handover_audit=dict(summary=incident.summary, extra=extra,
+                                          done=["handover", f"label {master_rescue.RESCUE_LABEL}"]))
         self.redis.set_persistent(f"rescue:{key}", json.dumps(record))
         self.ensure_label(key, record)
-        extra = self.lines(incident) + [f"Taken by: {master_rescue.RESCUE_AGENT}, model {model or 'default'}" + (f" (effort {effort})" if effort else "")]
-        self.op.audit(incident, "master", f"HANDOVER to {master_rescue.RESCUE_AGENT}: status {master_rescue.HANDOVER}, label {master_rescue.RESCUE_LABEL}",
-                      ["handover", f"label {master_rescue.RESCUE_LABEL}"], [], extra)
+        self.ensure_handover_audit(key, record)
         events.emit("operator.rescue", ticket=key, outcome="handover", budget=record["budget"], model=record["model"])
         return True
 
@@ -127,6 +132,66 @@ class Rescue:
         record["label_pending"] = False
         self.finish(key, record, record.get("state", "active"))
         return True
+
+    def ensure_handover_audit(self, key: str, record: dict[str, Any]) -> bool:
+        """Post the saved handover audit once; keep it pending across Jira comment failures."""
+        if not record.get("handover_audit_pending"):
+            return True
+        payload = self.handover_audit_payload(record)
+        if payload is None:
+            return False
+        audit, extra, done, marker, attempts = payload
+        if attempts:
+            existing = self.find_handover_audit(key, marker)
+            if existing is None:
+                return False
+            if existing:
+                self.complete_handover_audit(key, record)
+                return True
+        record["handover_audit_attempts"] = attempts + 1
+        self.finish(key, record, record.get("state", "active"))
+        incident = Incident(f"rescue:{key}", "rescue", key, str(audit.get("summary", "")), {})
+        outcome = f"HANDOVER to {master_rescue.RESCUE_AGENT}: status {master_rescue.HANDOVER}, label {master_rescue.RESCUE_LABEL}"
+        try:
+            self.op.audit(incident, "master", outcome, done, [], extra)
+        except JiraError:
+            self.op.sup_log(f"master rescue handover audit for {key} is pending a retry")
+            return False
+        self.complete_handover_audit(key, record)
+        return True
+
+    def handover_audit_payload(self, record: dict[str, Any]) -> tuple[dict[str, Any], list[Any], list[Any], str, int] | None:
+        audit = record.get("handover_audit")
+        if not isinstance(audit, dict):
+            return None
+        extra, done = audit.get("extra"), audit.get("done")
+        if not isinstance(extra, list) or not isinstance(done, list):
+            return None
+        marker = next((line for line in extra if isinstance(line, str)
+                       and line.startswith("Master rescue handover audit:")), "")
+        if not marker:
+            return None
+        try:
+            attempts = max(0, int(record.get("handover_audit_attempts", 0) or 0))
+        except (TypeError, ValueError):
+            attempts = 0
+        return audit, extra, done, marker, attempts
+
+    def find_handover_audit(self, key: str, marker: str) -> bool | None:
+        """True if Jira already has the audit, False if safe to retry, None if comments could not be checked."""
+        try:
+            comments = self.jira.comments(key, 10)
+        except JiraError:
+            return None
+        if not isinstance(comments, list):
+            return None
+        return any(isinstance(comment, dict) and marker in str(comment.get("body", ""))
+                   for comment in comments)
+
+    def complete_handover_audit(self, key: str, record: dict[str, Any]) -> None:
+        record["handover_audit_pending"] = False
+        record.pop("handover_audit", None)
+        self.finish(key, record, record.get("state", "active"))
 
     def clear_taken_by(self, key: str) -> bool:
         """Clear Claude as the temporary owner after a refused Handover or unsuccessful rescue."""
@@ -180,6 +245,8 @@ class Rescue:
         return record if isinstance(record, dict) else None
 
     def check_rescue(self, key: str, record: dict[str, Any]) -> None:
+        if record.get("handover_audit_pending"):
+            self.ensure_handover_audit(key, record)
         if record.get("label_pending", True):
             self.ensure_label(key, record)
         if record.get("state") == "doctor_pending":

@@ -8,16 +8,14 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from . import agents, events, github, notify, operator_rescue, runner, usage
+from . import agents, events, notify, operator_state, runner, usage
 from .config import PROJECT_DIR
-from .github import GitHub, GitHubError
-from .gitops import GitError, Repo
-from .incidents import WORKED, Incident, find_incidents
+from .gitops import Repo
+from .incidents import Incident, find_incidents
 from .jira import JiraError
 from .rescue import Rescue
 
@@ -51,13 +49,6 @@ def parse_output(text: str) -> tuple[tuple[str, str] | None, list[tuple[str, dic
     return result, actions, options[-1].strip() if options else "", recommend[-1].strip() if recommend else ""
 
 
-def epoch(value: str, default: float) -> float:
-    try:
-        return datetime.fromisoformat(value).timestamp()
-    except (TypeError, ValueError):
-        return default
-
-
 class Operator:
     def __init__(self, sup: Any, policy: Any, notifier: notify.Notifier | None = None,
                  run_ai: Callable[[str, str, str], tuple[str, str, bool]] | None = None) -> None:
@@ -82,77 +73,7 @@ class Operator:
     # ---- detection ---------------------------------------------------------------------------------------------
     def state(self) -> dict[str, Any]:
         now = time.time()
-        projects = ", ".join(self.cfg.projects)
-        statuses = ", ".join(f'"{s}"' for s in ("Blocked", *WORKED))
-        issues = self.jira.search(f"project in ({projects}) AND status in ({statuses}) AND issuetype != Epic ORDER BY created ASC", 200)
-        parents = self.sup.parents_of_open_work(issues)
-        issues = [i for i in issues if i["key"] not in parents]
-        leased = {name.split(":", 1)[1] for name in self.redis.scan("lease:*")}
-        blocked = self.redis.get_many([f"blocked:{i['key']}" for i in issues]) if issues else []
-        cycles = self.redis.get_many([f"cycles:{i['key']}" for i in issues]) if issues else []
-        status_times = self.redis.get_many([f"statussince:{i['key']}" for i in issues]) if issues else []
-        worked_times = self.redis.get_many([f"worked:{i['key']}" for i in issues]) if issues else []
-        rescued = self.redis.get_many([f"rescue:{i['key']}" for i in issues]) if issues else []
-        pull_request_numbers = self.redis.get_many([f"pr:{i['key']}" for i in issues]) if issues else []
-        gate_entries = self.redis.get_many([f"gateentry:{i['key']}" for i in issues]) if issues else []
-        pushed_times = self.redis.get_many([f"pushed:{i['key']}" for i in issues]) if issues else []
-        tickets = []
-        for issue, why, rounds, since, number, entry, pushed, worked, rescue_record in zip(
-                issues, blocked, cycles, status_times, pull_request_numbers, gate_entries, pushed_times, worked_times, rescued):
-            key, status = issue["key"], issue["status"]
-            labels = issue.get("labels", [])
-            is_leased = key in leased
-            updated = epoch(issue.get("updated", ""), now)
-            try:
-                status_since = float(since) if since else updated
-            except (TypeError, ValueError):
-                status_since = updated
-            minutes_in_status = max(0, (now - status_since) / 60)
-            gate_times = []
-            for value in (entry, pushed):
-                try:
-                    if value:
-                        gate_times.append(float(value))
-                except (TypeError, ValueError):
-                    continue
-            gate_since = max(gate_times) if gate_times else status_since
-            minutes_waiting_for_ci = max(0, (now - gate_since) / 60)
-            try:
-                blocked_data = json.loads(why) if why else {}
-            except (TypeError, ValueError):
-                blocked_data = {}
-            if not isinstance(blocked_data, dict):
-                blocked_data = {}
-            try:
-                rework_rounds = int(rounds or blocked_data.get("rework_rounds", 0) or 0)
-            except (TypeError, ValueError):
-                rework_rounds = 0
-            rescue = operator_rescue.ticket_snapshot(issue, blocked_data, rework_rounds, minutes_in_status,
-                                                       worked, rescue_record, self.redis, self.jira)
-            pull_request = {"number": number} if number else None
-            ci_state = "unknown"
-            inspect_ci = minutes_waiting_for_ci >= self.policy.ci_wait_minutes or minutes_in_status >= self.policy.stuck_minutes
-            if status == "In QA" and not is_leased and number and inspect_ci:
-                try:
-                    project = self.cfg.project(key)
-                    repo = Repo(self.cfg.root, project.repo, project.company)
-                    pr = GitHub(repo.github_slug()).view(int(number))
-                    ci_state, failing = github.checks_state(pr.get("statusCheckRollup"))
-                    pull_request = {"number": int(number), "url": pr.get("url", ""), "state": pr.get("state", ""),
-                                    "head": pr.get("headRefName", ""), "ci_state": ci_state, "failing_checks": failing}
-                except (GitError, GitHubError, subprocess.TimeoutExpired, ValueError, OSError):
-                    # Missing repository or GitHub data is not evidence that CI is still waiting.
-                    pass
-            tickets.append(dict(key=key, status=status, status_since=status_since, updated=updated, labels=labels,
-                                leased=is_leased, blocked_kind=rescue["blocked_kind"], reason=rescue["reason"],
-                                summary=rescue["summary"], description=rescue["description"],
-                                stretch_minutes=rescue["stretch_minutes"], worked_minutes=rescue["worked_minutes"],
-                                rescued=rescue["rescued"], context_complete=rescue["context_complete"],
-                                cycles=rework_rounds, rework_rounds=rework_rounds,
-                                last_comments=rescue["last_comments"],
-                                loop_limit=self.cfg.loop_limit_for(key),
-                                pull_request=pull_request, ci_state=ci_state, ci_since=gate_since,
-                                minutes_waiting_for_ci=int(minutes_waiting_for_ci)))
+        tickets = operator_state.tickets(self, now)
         beats = {slot: (int(v) if (v := self.redis.get(f"hb:{slot}")) else None) for slot in self.cfg.expected_slots}
         pool = self.sup.online_pool()
         role_pools = {role: self.sup.eligible_agents(role, "", None, pool) for role in ("developer", "reviewer", "qa")}

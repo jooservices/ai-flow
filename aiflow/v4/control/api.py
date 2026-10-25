@@ -472,6 +472,7 @@ class Ctx:
     github: GitHubApp | None = None
     refresh_repo: Callable[[], None] | None = None
     jira_auth: Any = None  # jira_connect.JiraAuth: the Jira credential connected on the Integrations screen
+    candidate_offers: Callable[[str, str], list[dict]] | None = None
 
 
 github_connection_used: ContextVar[str] = ContextVar("github_connection_used", default="")
@@ -4564,6 +4565,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                 allowed.append(ticket)
         reason = refused[0] if candidates and not allowed and refused else ""
         return allowed, reason
+
+    def final_candidate_offers(account: str, node: str) -> list[dict]:
+        """Use the complete candidate endpoint path for watchdog eligibility probes."""
+        if node not in shared_accounts.online_nodes(ctx.db):
+            return []
+        return verify_retry.final_offers(ctx, account, node, entitled_candidates,
+                                        rollout.node_compatible, RELEASES, licensing.LicenseError)
+
+    ctx.candidate_offers = final_candidate_offers
 
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:

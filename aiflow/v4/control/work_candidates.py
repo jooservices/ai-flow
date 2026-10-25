@@ -9,7 +9,7 @@ from fastapi import HTTPException
 
 from ..core.services import service_gaps
 from ..core.toolchains import CONTAINER_RUNTIME_TOOL, toolchain_gaps
-from . import environment as environment_reports, hotfiles, role_health, tooling, verify_retry
+from . import environment as environment_reports, hotfiles, role_health, tooling, verify_retry, work_eligibility
 from .repositories.runs import RunsRepository
 from .repositories.tickets import TicketsRepository
 
@@ -41,6 +41,138 @@ class CandidateContext:
     entitled_candidates: Callable
     releases: Any
     license_error: Any
+
+
+@dataclass(frozen=True)
+class CandidateStrategy:
+    name: str
+    role: str
+    phase: int
+    collect: Callable[[CandidateContext], list[dict]]
+
+
+_ROLE_STRATEGIES: dict[str, CandidateStrategy] = {}
+_STEP_ROLE = {"dev": "dev", "verify": "verify", "triage": "master", "intake": "intake_refiner",
+              "impact": "intake_refiner", "post_merge": "release"}
+_RULES_BY_STEP = {
+    "post_merge": ("not_epic", "not_held", "not_cooling", "provider_label", "role_enabled"),
+    "triage": ("not_epic", "not_held", "not_cooling", "runtime_ready", "not_same_dev", "provider_label",
+               "role_enabled"),
+    "intake": ("not_epic", "not_held", "not_cooling", "runtime_ready", "provider_label", "role_enabled"),
+    "impact": ("not_epic", "not_held", "not_cooling", "runtime_ready", "provider_label", "role_enabled"),
+    "dev": ("not_epic", "not_held", "not_cooling", "runtime_ready", "not_parked", "blockers_done",
+            "senior_tier", "provider_label", "role_enabled", "hot_file_capacity"),
+}
+
+
+def register_strategy(name: str, role: str, phase: int, collect: Callable[[CandidateContext], list[dict]]) -> None:
+    """Register a role strategy by name; collection order is controlled by its phase."""
+    if name in _ROLE_STRATEGIES:
+        raise ValueError(f"candidate strategy is already registered: {name}")
+    _ROLE_STRATEGIES[name] = CandidateStrategy(name, role, phase, collect)
+
+
+def _register_rules() -> None:
+    for name, check in (("not_epic", _reject_epic), ("not_held", _reject_held),
+                        ("not_cooling", _reject_cooling), ("runtime_ready", _reject_runtime),
+                        ("not_same_dev", _reject_same_dev), ("provider_label", _reject_provider_label),
+                        ("role_enabled", _reject_role_mode), ("not_parked", _reject_parked),
+                        ("blockers_done", _reject_blockers), ("senior_tier", _reject_tier),
+                        ("hot_file_capacity", _reject_hot_file), ("quota_peer_route", _reject_quota_peer),
+                        ("quota_capacity_route", _reject_capacity_route)):
+        work_eligibility.register_candidate_rule(name, check)
+
+
+def _reject_epic(_state, ticket: dict, _facts: dict) -> str | None:
+    return "epics are lifecycle containers and cannot be offered as work" if verify_retry.is_epic(ticket) else None
+
+
+def _reject_held(state: CandidateContext, ticket: dict, _facts: dict) -> str | None:
+    return "ticket is held by an active lease" if ticket["key"] in state.held else None
+
+
+def _reject_cooling(_state, ticket: dict, facts: dict) -> str | None:
+    return "ticket is cooling down after a failed run" if ticket["key"] in facts.get("cooling", set()) else None
+
+
+def _reject_runtime(state: CandidateContext, ticket: dict, facts: dict) -> str | None:
+    step = str(facts.get("step") or "")
+    return "the node is missing the container runtime required by this ticket" \
+        if _needs_missing_runtime(state, ticket, step) else None
+
+
+def _reject_same_dev(state: CandidateContext, ticket: dict, _facts: dict) -> str | None:
+    dev = state.last_dev(ticket["key"])
+    return "the development account cannot triage its own ticket" if dev and dev["account_id"] == state.account.id else None
+
+
+def _reject_provider_label(state: CandidateContext, ticket: dict, _facts: dict) -> str | None:
+    required = f"ai-{state.account.provider}"
+    return f"ticket does not carry the required provider label {required}" \
+        if state.account.explicit_only and required not in ticket["labels"] else None
+
+
+def _reject_role_mode(state: CandidateContext, ticket: dict, facts: dict) -> str | None:
+    role = _STEP_ROLE[str(facts["step"])]
+    mode = state.modes.get(role)
+    if mode == "on" or (mode == "probation" and role_health.probation_ticket(ticket)):
+        return None
+    return f"{role} role is {mode or 'off'} for this account"
+
+
+def _reject_parked(_state, ticket: dict, facts: dict) -> str | None:
+    return "ticket is parked pending a tool or environment fix" if ticket["key"] in facts["parked"] else None
+
+
+def _reject_blockers(_state, ticket: dict, facts: dict) -> str | None:
+    waiting = [key for key in ticket["blocked_by"] if key not in facts["done"]]
+    return f"ticket is blocked by unfinished work: {', '.join(waiting)}" if waiting else None
+
+
+def _reject_tier(state: CandidateContext, ticket: dict, _facts: dict) -> str | None:
+    return "ticket requires a senior account" if "tier-senior" in ticket["labels"] \
+        and state.account.tier != "senior" else None
+
+
+def _reject_hot_file(state: CandidateContext, ticket: dict, facts: dict) -> str | None:
+    if facts["flying"] is None:
+        facts["flying"] = hotfiles.in_flight_hot_files(state.ctx.db, facts["footprint"])
+    prediction = facts["footprint"](ticket)
+    blocked = hotfiles.blocking_ticket(prediction, {key: value for key, value in facts["flying"].items()
+                                                     if key != ticket["key"]},
+                                       slots=state.ctx.settings.hot_file_slots)
+    if blocked:
+        hotfiles.mark_blocked(state.ctx.db, ticket["key"])
+        return f"hot files are held by {blocked[0]}: {', '.join(blocked[1])}"
+    hotfiles.clear_blocked(state.ctx.db, ticket["key"])
+    return None
+
+
+def _reject_quota_peer(_state, ticket: dict, facts: dict) -> str | None:
+    return "an eligible same-provider peer can take this ticket" \
+        if (ticket["key"], ticket["step"]) in facts["peer_offers"] else None
+
+
+def _reject_capacity_route(_state, ticket: dict, facts: dict) -> str | None:
+    key = (ticket["key"], ticket["step"])
+    if ticket["step"] == "dev" and key not in facts["selected"]:
+        return "a quota-safer eligible account was selected for this ticket"
+    return None
+
+
+def _eligible(state: CandidateContext, ticket: dict, step: str, facts: dict) -> bool:
+    facts["step"] = step
+    result = work_eligibility.evaluate_candidate(state, ticket, _RULES_BY_STEP[step], facts)
+    return result.eligible
+
+
+def _register_strategies() -> None:
+    for name, role, phase, gather in (
+        ("verification", "verify", 0, _verify), ("post_merge", "release", 0, _release),
+        ("triage", "master", 0, _triage), ("intake", "intake_refiner", 0, _intake),
+        ("impact", "intake_refiner", 0, _impact), ("development", "dev", 1, _development),
+    ):
+        register_strategy(name, role, phase, gather)
 
 
 def available_projects(ctx, repo, node: str, node_row: dict) -> list[str]:
@@ -86,24 +218,16 @@ def _stack_ready(repo, node_tools: dict, key: str) -> bool:
 def collect(state: CandidateContext) -> list[dict]:
     if not state.projects:
         return []
-    out: list[dict] = []
-    if "verify" in state.roles:
-        out.extend(_verify(state))
-    if "release" in state.roles:
-        out.extend(_release(state))
-    if "master" in state.roles:
-        out.extend(_triage(state))
-    if "intake_refiner" in state.roles:
-        out.extend(_intake(state))
-        out.extend(_impact(state))
-    out.sort(key=lambda ticket: (state.priorities.get(ticket["project"], 5), ticket["jira_created"] or _now()))
-    if "dev" in state.roles:
-        out.extend(_development(state))
+    strategies = [strategy for strategy in _ROLE_STRATEGIES.values() if strategy.role in state.roles]
+    ordinary = [ticket for strategy in strategies if strategy.phase == 0 for ticket in strategy.collect(state)]
+    ordinary.sort(key=lambda ticket: (state.priorities.get(ticket["project"], 5), ticket["jira_created"] or _now()))
+    development = [ticket for strategy in strategies if strategy.phase == 1 for ticket in strategy.collect(state)]
+    out = ordinary + development
     out.sort(key=lambda ticket: "flow-bug" not in (ticket.get("labels") or []))
     if state.quota_at_risk:
-        out = _exclude_peer_offers(state, out)
+        out = _apply_peer_route(state, out)
     if state.capacity_routing and out:
-        out = state.capacity_route(state.account.id, state.node, out, state.verify_retry_guard)
+        out = _apply_capacity_route(state, out)
     return out
 
 
@@ -125,11 +249,7 @@ def _release(state: CandidateContext) -> list[dict]:
     out = []
     for waiting in pending:
         ticket = tickets.by_key(waiting["ticket"])
-        if not ticket or verify_retry.is_epic(ticket) or ticket["key"] in state.held or ticket["key"] in cooling:
-            continue
-        if state.account.explicit_only and f"ai-{state.account.provider}" not in ticket["labels"]:
-            continue
-        if not _allowed(state, "release", ticket):
+        if not ticket or not _eligible(state, ticket, "post_merge", {"cooling": cooling}):
             continue
         out.append({**ticket, "step": "post_merge", "probation": _probation(state, "release")})
     return out
@@ -140,16 +260,7 @@ def _triage(state: CandidateContext) -> list[dict]:
     tickets = TicketsRepository(state.ctx.db).triage_candidates(state.projects)
     out = []
     for ticket in tickets:
-        if _needs_missing_runtime(state, ticket, "triage") or ticket["key"] in state.held:
-            continue
-        if ticket["key"] in cooling:
-            continue
-        dev = state.last_dev(ticket["key"])
-        if dev and dev["account_id"] == state.account.id:
-            continue
-        if state.account.explicit_only and f"ai-{state.account.provider}" not in ticket["labels"]:
-            continue
-        if not _allowed(state, "master", ticket):
+        if not _eligible(state, ticket, "triage", {"cooling": cooling}):
             continue
         out.append({**ticket, "step": "triage", "probation": _probation(state, "master")})
     return out
@@ -170,13 +281,7 @@ def _impact(state: CandidateContext) -> list[dict]:
 def _simple_intake(state: CandidateContext, tickets: list[dict], waiting: set[str], step: str) -> list[dict]:
     out = []
     for ticket in tickets:
-        if _needs_missing_runtime(state, ticket, step) or ticket["key"] in state.held:
-            continue
-        if ticket["key"] in waiting:
-            continue
-        if state.account.explicit_only and f"ai-{state.account.provider}" not in ticket["labels"]:
-            continue
-        if not _allowed(state, "intake_refiner", ticket):
+        if not _eligible(state, ticket, step, {"cooling": waiting}):
             continue
         out.append({**ticket, "step": step, "probation": _probation(state, "intake_refiner")})
     return out
@@ -195,43 +300,17 @@ def _development(state: CandidateContext) -> list[dict]:
             footprints[key] = hotfiles.predict(state.ctx.db, ticket, state.ticket_epic(ticket))
         return footprints[key]
 
-    flying = None
     tickets = tickets_repo.development_candidates(state.projects)
     out = []
+    facts = {"done": done, "cooling": cooling, "parked": parked, "footprint": footprint, "flying": None}
     for ticket in tickets:
-        if _skip_development(state, ticket, done, cooling, parked):
+        if not _eligible(state, ticket, "dev", facts):
             continue
-        if flying is None:
-            flying = hotfiles.in_flight_hot_files(state.ctx.db, footprint)
-        prediction = footprint(ticket)
-        blocked = hotfiles.blocking_ticket(prediction, {key: value for key, value in flying.items()
-                                                        if key != ticket["key"]},
-                                           slots=state.ctx.settings.hot_file_slots)
-        if blocked:
-            hotfiles.mark_blocked(state.ctx.db, ticket["key"])
-            continue
-        hotfiles.clear_blocked(state.ctx.db, ticket["key"])
         out.append({**ticket, "step": "dev", "probation": _probation(state, "dev")})
     out.sort(key=lambda ticket: (state.priorities.get(ticket["project"], 5),
                                  "rework" not in ticket["labels"],
                                  _priority(ticket.get("priority")), ticket["jira_created"] or _now()))
     return out
-
-
-def _skip_development(state: CandidateContext, ticket: dict, done: set[str], cooling: set[str],
-                      parked: set[str]) -> bool:
-    if _needs_missing_runtime(state, ticket, "dev"):
-        return True
-    if ticket["key"] in state.held or ticket["key"] in cooling or ticket["key"] in parked:
-        return True
-    if any(blocker not in done for blocker in ticket["blocked_by"]):
-        return True
-    labels = set(ticket["labels"])
-    if "tier-senior" in labels and state.account.tier != "senior":
-        return True
-    if state.account.explicit_only and f"ai-{state.account.provider}" not in labels:
-        return True
-    return not _allowed(state, "dev", ticket)
 
 
 def _needs_missing_runtime(state: CandidateContext, ticket: dict, step: str) -> bool:
@@ -257,7 +336,7 @@ def _selected_settings_use_containers(state: CandidateContext, ticket: dict, pro
     return bool(selected.get("containers"))
 
 
-def _exclude_peer_offers(state: CandidateContext, offered: list[dict]) -> list[dict]:
+def _apply_peer_route(state: CandidateContext, offered: list[dict]) -> list[dict]:
     available: set[tuple[str, str]] = set()
     for peer in state.quota_peers(state.account.id, state.roles):
         for node in peer["nodes"]:
@@ -265,7 +344,15 @@ def _exclude_peer_offers(state: CandidateContext, offered: list[dict]) -> list[d
                 continue
             available.update((ticket["key"], ticket["step"])
                              for ticket in state.peer_offers(peer["id"], node, state.verify_retry_guard))
-    return [ticket for ticket in offered if (ticket["key"], ticket["step"]) not in available]
+    return [ticket for ticket in offered if work_eligibility.evaluate_candidate(
+        state, ticket, ("quota_peer_route",), {"peer_offers": available}).eligible]
+
+
+def _apply_capacity_route(state: CandidateContext, offered: list[dict]) -> list[dict]:
+    routed = state.capacity_route(state.account.id, state.node, offered, state.verify_retry_guard)
+    selected = {(ticket["key"], ticket["step"]) for ticket in routed}
+    return [ticket for ticket in offered if work_eligibility.evaluate_candidate(
+        state, ticket, ("quota_capacity_route",), {"selected": selected}).eligible]
 
 
 def _allowed(state: CandidateContext, role: str, ticket: dict) -> bool:
@@ -283,3 +370,7 @@ def _priority(value: str | None) -> int:
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+_register_rules()
+_register_strategies()

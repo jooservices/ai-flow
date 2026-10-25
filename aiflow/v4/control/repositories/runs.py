@@ -43,6 +43,17 @@ SELECT ticket_key, fails FROM streak
 WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
 """
 
+_CAPACITY_HISTORY_SQL = (
+    "SELECT t.key,t.project,t.type,t.labels,t.summary,t.description,t.fields,"
+    "sum(greatest(0,r.tokens_in)+greatest(0,r.tokens_out))::bigint AS tokens,"
+    "sum(greatest(0,extract(epoch FROM r.ended_at-r.started_at)))::float8 AS duration_s,"
+    "bool_or(r.outcome='rework') AS reworked "
+    "FROM runs r JOIN tickets t ON t.key=r.ticket_key "
+    "WHERE r.step IN ('dev','verify') AND r.status='finished' AND r.ended_at IS NOT NULL "
+    "AND (%s OR t.project=ANY(%s)) GROUP BY t.key,t.project,t.type,t.labels,t.summary,t.description,t.fields "
+    "HAVING count(*) FILTER (WHERE r.tokens_in>0 OR r.tokens_out>0 OR r.ended_at>r.started_at)>0"
+)
+
 
 class RunsRepository:
     def __init__(self, db) -> None:
@@ -60,3 +71,7 @@ class RunsRepository:
         """Number of active runs in each project for candidate capacity checks."""
         return {row["project"]: int(row["count"]) for row in self.db.all(
             "SELECT project,count(*) AS count FROM runs WHERE status='running' GROUP BY project")}
+
+    def capacity_history(self, project_keys: list[str] | tuple[str, ...] | None = None) -> list[dict]:
+        """Completed ticket-level work samples used by quota-aware capacity estimates."""
+        return self.db.all(_CAPACITY_HISTORY_SQL, (project_keys is None, list(project_keys or ())))

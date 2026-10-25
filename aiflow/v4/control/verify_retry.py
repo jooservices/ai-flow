@@ -14,16 +14,15 @@ All of it is scoped to the current development round: a newer finished dev run s
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from fastapi import HTTPException
 
-from ..core.services import service_gaps
-from ..core.toolchains import CONTAINER_RUNTIME_TOOL, toolchain_gaps
-from . import environment, licensing, role_health, rollout, shared_accounts, tooling
+from . import role_health
 from .incidents import close_incident, open_incident
 from .repositories.incidents import IncidentsRepository
-from .repositories.nodes import NodesRepository
 from .repositories.tickets import TicketsRepository
 from .repositories.verify_runs import VerifyRunsRepository
 from . import work_eligibility
@@ -31,6 +30,77 @@ from . import work_eligibility
 KIND = "verify_no_verdict"
 SLOW_MINUTES = 30
 CONSECUTIVE = 2
+VERIFY_RULES = ("verify_ticket_not_held", "verify_ticket_not_cooling", "verify_machine_ready",
+                "verify_has_other_developer_pr", "verify_provider_label", "verify_role_enabled",
+                "verify_retry_account")
+
+
+@dataclass(frozen=True)
+class VerifyCandidateState:
+    ctx: object
+    repository: VerifyRunsRepository
+    account: object
+    held: set[str]
+    cooling: set[str]
+    offers: Callable
+    can_handle: Callable
+    allowed: Callable
+    retry_guard: bool
+
+
+def _reject_verify_held(state: VerifyCandidateState, ticket: dict, _facts: dict) -> str | None:
+    return "ticket has an active lease" if ticket["key"] in state.held else None
+
+
+def _reject_verify_cooling(state: VerifyCandidateState, ticket: dict, _facts: dict) -> str | None:
+    return "ticket is cooling down after an ordinary verify failure" \
+        if ticket["key"] in state.cooling else None
+
+
+def _reject_verify_machine(state: VerifyCandidateState, ticket: dict, _facts: dict) -> str | None:
+    return "account cannot run the verification checks for this ticket" \
+        if not state.can_handle(ticket) else None
+
+
+def _reject_verify_author(state: VerifyCandidateState, ticket: dict, _facts: dict) -> str | None:
+    dev = state.repository.latest_dev_with_pr(ticket["key"])
+    if not dev or not dev["pr_url"]:
+        return "ticket has no completed development pull request to verify"
+    return "the development account cannot verify its own ticket" if dev["account_id"] == state.account.id else None
+
+
+def _reject_verify_provider(state: VerifyCandidateState, ticket: dict, _facts: dict) -> str | None:
+    required = f"ai-{state.account.provider}"
+    return f"ticket does not carry the required provider label {required}" \
+        if state.account.explicit_only and required not in ticket.get("labels", []) else None
+
+
+def _reject_verify_role(state: VerifyCandidateState, ticket: dict, _facts: dict) -> str | None:
+    return "verify role is off or the ticket is not eligible for probation" \
+        if not state.allowed("verify", ticket) else None
+
+
+def _reject_verify_retry(state: VerifyCandidateState, ticket: dict, _facts: dict) -> str | None:
+    dev = state.repository.latest_dev_with_pr(ticket["key"])
+    if state.retry_guard and not may_take(
+            state.ctx, ticket, state.account.id, dev["account_id"],
+            lambda peer, node: state.offers(peer, node)):
+        return "an eligible account that has not tried this ticket goes first"
+    return None
+
+
+def _register_verify_rules() -> None:
+    for name, check in (("verify_ticket_not_held", _reject_verify_held),
+                        ("verify_ticket_not_cooling", _reject_verify_cooling),
+                        ("verify_machine_ready", _reject_verify_machine),
+                        ("verify_has_other_developer_pr", _reject_verify_author),
+                        ("verify_provider_label", _reject_verify_provider),
+                        ("verify_role_enabled", _reject_verify_role),
+                        ("verify_retry_account", _reject_verify_retry)):
+        work_eligibility.register_candidate_rule(name, check)
+
+
+_register_verify_rules()
 
 
 def is_epic(ticket: dict) -> bool:
@@ -87,43 +157,28 @@ def candidates(ctx, projects: list[str], account, held: set[str], offers, can_ha
                retry_guard: bool = True) -> list[dict]:
     """Build this account's verify offers; `retry_guard=False` probes ordinary eligibility without recursion."""
     repository = VerifyRunsRepository(ctx.db)
-    cooling_tickets = repository.cooling_tickets("verify")
+    state = VerifyCandidateState(ctx, repository, account, held, repository.cooling_tickets("verify"),
+                                 offers, can_handle, allowed, retry_guard)
     out = []
     for ticket in TicketsRepository(ctx.db).verification_candidates(projects):
-        if _skip_candidate(ctx, repository, ticket, account, held, cooling_tickets, offers,
-                           can_handle, allowed, retry_guard):
+        decision = work_eligibility.evaluate_candidate(state, ticket, VERIFY_RULES)
+        if not decision.eligible:
             continue
         out.append({**ticket, "step": "verify", "probation": probation("verify")})
     return out
 
 
-def _skip_candidate(ctx, repository, ticket: dict, account, held: set[str], cooling: set[str], offers,
-                    can_handle, allowed, retry_guard: bool) -> bool:
-    if ticket["key"] in held or ticket["key"] in cooling or not can_handle(ticket):
-        return True
-    dev = repository.latest_dev_with_pr(ticket["key"])
-    if not dev or not dev["pr_url"] or dev["account_id"] == account.id:
-        return True
-    if account.explicit_only and f"ai-{account.provider}" not in ticket["labels"]:
-        return True
-    if not allowed("verify", ticket):
-        return True
-    return bool(retry_guard and not may_take(
-        ctx, ticket, account.id, dev["account_id"], lambda peer, node: offers(peer, node)))
-
-
 def pool(ctx, ticket: dict, dev_account: str, offers=None, releases: Path | None = None) -> list[str]:
-    """Accounts whose normal candidate path can receive this ticket, regardless of no-verdict history."""
+    """Accounts the complete candidate path would offer this ticket, regardless of no-verdict history."""
+    offers = offers or getattr(ctx, "candidate_offers", None)
+    if offers is None:
+        return []
     out = []
     for acc in ctx.repo().accounts:
         if acc.paused or acc.id == dev_account or "verify" not in role_health.account_roles(acc):
             continue
         for node in dict.fromkeys(acc.machines):
-            if offers is not None:
-                eligible = _offered(offers, acc.id, node, ticket["key"])
-            else:
-                eligible = candidate_offer(ctx, ticket, acc.id, node, releases)
-            if eligible:
+            if _offered(offers, acc.id, node, ticket["key"]):
                 out.append(acc.id)
                 break
     return out
@@ -152,97 +207,6 @@ def _offered(offers, account_id: str, node: str, key: str) -> bool:
         return any(t["key"] == key and t.get("step") == "verify" for t in offers(account_id, node))
     except HTTPException:
         return False
-
-
-def candidate_offer(ctx, ticket: dict, account_id: str, node: str, releases: Path | None = None) -> bool:
-    """Ticket-specific normal verify eligibility used by the watchdog when no API request is present."""
-    repo = ctx.repo()
-    account = repo.account(account_id)
-    project = repo.projects.get(str(ticket.get("project") or ""))
-    node_row = NodesRepository(ctx.db).candidate_node(node)
-    if not _account_can_verify(ctx, ticket, account, node):
-        return False
-    if not _project_node_can_verify(ctx, repo, project, node, node_row):
-        return False
-    if not _ticket_capacity_can_verify(ctx, ticket, project, node_row):
-        return False
-    if not _license_allows_verify(ctx, account, project, node):
-        return False
-    return bool(rollout.node_compatible(ctx, node, releases)["compatible"])
-
-
-def _account_can_verify(ctx, ticket: dict, account, node: str) -> bool:
-    if not work_eligibility.can_take_work(ctx.db, ctx.leases, account, node):
-        return False
-    repository = VerifyRunsRepository(ctx.db)
-    if account.id == repository.last_dev_account(ticket["key"]):
-        return False
-    if "verify" not in role_health.account_roles(account):
-        return False
-    labels = set(ticket.get("labels") or [])
-    if account.explicit_only and f"ai-{account.provider}" not in labels:
-        return False
-    mode = role_health.modes(ctx.db, account.id, ["verify"])["verify"]
-    return mode == "on" or (mode == "probation" and role_health.probation_ticket(ticket))
-
-
-def _project_node_can_verify(ctx, repo, project, node: str, node_row: dict) -> bool:
-    if not project or project.paused or not node_row.get("accepting_work", True):
-        return False
-    if node not in shared_accounts.online_nodes(ctx.db):
-        return False
-    return project.key in repo.projects_for_node(
-        node, node_row.get("projects") or [], node_row.get("dynamic", False))
-
-
-def _ticket_capacity_can_verify(ctx, ticket: dict, project, node_row: dict) -> bool:
-    repository = VerifyRunsRepository(ctx.db)
-    if project.parallel_limit and repository.running_project_count(project.key) >= project.parallel_limit:
-        return False
-    if ticket["key"] in set(ctx.leases.held_keys()) or ticket["key"] in cooling(ctx.db):
-        return False
-    return _node_ready_for_ticket(ctx, ticket, project, node_row)
-
-
-def _license_allows_verify(ctx, account, project, node: str) -> bool:
-    try:
-        license_state = licensing.enforce_work_entitlement(
-            ctx, account.id, node, public_key=ctx.settings.license_public_key)
-        licensing.enforce_project_entitlement(ctx, project.key, public_key=ctx.settings.license_public_key,
-                                              state=license_state)
-    except licensing.LicenseError:
-        return False
-    return True
-
-
-def _node_ready_for_ticket(ctx, ticket: dict, project, node_row: dict) -> bool:
-    node_tools = node_row.get("tools") or {}
-    if project.stacks or project.uses_containers:
-        if toolchain_gaps(node_tools, [tool for tool in project.tools if tool != CONTAINER_RUNTIME_TOOL],
-                          ctx.repo().versions, project.stacks, require_pins=bool(project.stacks)):
-            return False
-    if service_gaps((node_row.get("metrics") or {}).get("services"), project.required_services):
-        return False
-    if _ticket_uses_containers(ctx, ticket, project) and toolchain_gaps(
-            node_tools, [CONTAINER_RUNTIME_TOOL], ctx.repo().versions):
-        return False
-    if ticket["key"] in tooling.parked_tickets(ctx, node_row):
-        return False
-    return ticket["key"] not in environment.parked_tickets(ctx)
-
-
-def _ticket_uses_containers(ctx, ticket: dict, project) -> bool:
-    prior = VerifyRunsRepository(ctx.db).latest_dev_with_pr(ticket["key"]) or {}
-    details = prior.get("details") or {}
-    repository = str(details.get("repository") or "")
-    saved = details.get("repository_settings")
-    if isinstance(saved, dict):
-        selected = dict(saved)
-    elif repository:
-        selected = project.settings_for_repo(repository)
-    else:
-        selected = project.settings_for_ticket(ticket)
-    return bool(selected.get("containers"))
 
 
 def exhausted(ctx, ticket: dict, offers=None, releases: Path | None = None) -> list[str]:

@@ -138,8 +138,28 @@ def test_work_candidate_sql_queries_live_in_ticket_and_run_repositories():
                    "development_candidates", "done_keys"):
         assert f"def {method}" in tickets
         assert f".{method}(" in source
-    assert "def running_counts_by_project" in runs
     assert ".running_counts_by_project()" in source
+
+
+def test_capacity_routing_reads_account_and_run_history_through_repositories():
+    capacity_path = ROOT / "aiflow/v4/control/capacity.py"
+    capacity = capacity_path.read_text(encoding="utf-8")
+    tree = ast.parse(capacity, filename=str(capacity_path))
+    route = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "route_candidates")
+    inline_queries = [node.args[0].value for node in ast.walk(route)
+                      if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                      and node.func.attr in {"all", "one"} and node.args
+                      and isinstance(node.args[0], ast.Constant)
+                      and isinstance(node.args[0].value, str)
+                      and node.args[0].value.lstrip().upper().startswith("SELECT")]
+    accounts = (ROOT / "aiflow/v4/control/repositories/accounts.py").read_text(encoding="utf-8")
+    runs = (ROOT / "aiflow/v4/control/repositories/runs.py").read_text(encoding="utf-8")
+
+    assert not inline_queries
+    assert "AccountsRepository(ctx.db).capacity_routing_accounts()" in capacity
+    assert "def capacity_routing_accounts" in accounts
+    assert "def capacity_history" in runs
+    assert "RunsRepository(db).capacity_history(project_keys)" in capacity
 
 
 def test_developer_and_verify_prompts_use_architecture_document():

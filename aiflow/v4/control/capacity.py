@@ -13,6 +13,8 @@ from typing import Any, Callable
 from fastapi import HTTPException
 
 from ..core.quota import as_utc
+from .repositories.accounts import AccountsRepository
+from .repositories.runs import RunsRepository
 
 MIN_HISTORY = 3
 SIZES = ("XS", "S", "M", "L", "XL")
@@ -81,16 +83,7 @@ def ticket_facts(ticket: dict[str, Any]) -> dict[str, str]:
 
 def history(db, project_keys: list[str] | tuple[str, ...] | None = None) -> list[dict[str, Any]]:
     """One completed ticket sample, summing its development and verification runs."""
-    rows = db.all(
-        "SELECT t.key,t.project,t.type,t.labels,t.summary,t.description,t.fields,"
-        "sum(greatest(0,r.tokens_in)+greatest(0,r.tokens_out))::bigint AS tokens,"
-        "sum(greatest(0,extract(epoch FROM r.ended_at-r.started_at)))::float8 AS duration_s,"
-        "bool_or(r.outcome='rework') AS reworked "
-        "FROM runs r JOIN tickets t ON t.key=r.ticket_key "
-        "WHERE r.step IN ('dev','verify') AND r.status='finished' AND r.ended_at IS NOT NULL "
-        "AND (%s OR t.project=ANY(%s)) GROUP BY t.key,t.project,t.type,t.labels,t.summary,t.description,t.fields "
-        "HAVING count(*) FILTER (WHERE r.tokens_in>0 OR r.tokens_out>0 OR r.ended_at>r.started_at)>0",
-        (project_keys is None, list(project_keys or ())))
+    rows = RunsRepository(db).capacity_history(project_keys)
     samples = []
     for row in rows:
         samples.append({**ticket_facts(row), "ticket": row["key"], "tokens": max(0, int(row.get("tokens") or 0)),
@@ -259,7 +252,7 @@ def route_candidates(ctx, account_id: str, node: str, offered: list[dict], eligi
     development = [ticket for ticket in offered if ticket.get("step") == "dev"]
     if not development:
         return offered
-    rows = ctx.db.all("SELECT id,provider,tier,roles,quota_forecast FROM accounts ORDER BY id")
+    rows = AccountsRepository(ctx.db).capacity_routing_accounts()
     accounts = {str(row["id"]): row for row in rows}
     forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in rows}
     by_ticket = _eligible_by_ticket(ctx, account_id, node, offered, eligible, online_nodes,

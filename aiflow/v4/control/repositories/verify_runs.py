@@ -6,15 +6,15 @@ from __future__ import annotations
 VERIFY_BACKOFF_SQL = """
 WITH last AS (
   SELECT ticket_key, outcome, ended_at,
+         coalesce(details->>'no_verdict' = 'true', false) AS no_verdict,
          row_number() OVER (PARTITION BY ticket_key ORDER BY started_at DESC) AS n
   FROM runs WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
-    AND NOT coalesce(details->>'no_verdict' = 'true', false)
 ), streak AS (
   SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
   FROM last l
-  WHERE l.outcome IN ('failed', 'timeout', 'lost', 'no_changes')
+  WHERE l.outcome IN ('failed', 'timeout', 'lost', 'no_changes') AND NOT l.no_verdict
     AND NOT EXISTS (SELECT 1 FROM last g WHERE g.ticket_key = l.ticket_key AND g.n < l.n
-                    AND g.outcome NOT IN ('failed', 'timeout', 'lost', 'no_changes'))
+                    AND (g.no_verdict OR g.outcome NOT IN ('failed', 'timeout', 'lost', 'no_changes')))
   GROUP BY l.ticket_key
 )
 SELECT ticket_key, fails FROM streak

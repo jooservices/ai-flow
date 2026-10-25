@@ -5,8 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from threading import Event
 
-from conftest import add_ticket, join_node
-from aiflow.v4.control import role_health, state, verify_retry
+from conftest import add_open_escalation, add_ticket, join_node
+from aiflow.v4.control import role_health, state, verify_retry, work_candidates, work_eligibility
 from aiflow.v4.control.db import J
 from aiflow.v4.core.controlrepo import Account
 from aiflow.v4.control.loops import _reconcile_epics, watchdog
@@ -49,17 +49,18 @@ def no_verdict(ctx, key, account, minutes_ago=5):
 
 
 def test_epic_with_ready_label_is_never_offered(client, ctx):
-    ctx.repo().account("claude-01").roles.append("intake_refiner")
+    ctx.repo().account("claude-01").roles.extend(("intake_refiner", "master"))
     cc = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-60")  # an ordinary ready ticket is offered
     add_ticket(ctx.db, "TESTWP-61", "To Do", labels=("aiflow-ready",))
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-61'")
-    add_ticket(ctx.db, "TESTWP-62", "Intake", labels=())
+    add_ticket(ctx.db, "TESTWP-62", "Intake", labels=("aiflow-ready",))
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-62'")
     in_verify(ctx, "TESTWP-63")
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-63'")
-    add_ticket(ctx.db, "TESTWP-64", "Needs owner", labels=())
+    add_ticket(ctx.db, "TESTWP-64", "Needs owner", labels=("aiflow-ready",))
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-64'")
+    add_open_escalation(ctx.db, "TESTWP-64")
     add_ticket(ctx.db, "TESTWP-65", "To Do", labels=("aiflow-ready",))
     ctx.db.run("UPDATE tickets SET type='epic' WHERE key='TESTWP-65'")
     seen = offered(client, cc, "claude-01")
@@ -67,6 +68,18 @@ def test_epic_with_ready_label_is_never_offered(client, ctx):
     assert not {key for key, _ in seen} & {"TESTWP-61", "TESTWP-62", "TESTWP-63", "TESTWP-64", "TESTWP-65"}
     assert client.post("/v1/work/claim", json={"ticket": "TESTWP-61", "account": "claude-01"},
                        headers=cc).status_code == 409
+
+
+def test_registered_candidate_rule_names_why_an_epic_is_ineligible():
+    decision = work_eligibility.evaluate_candidate(
+        None, {"key": "TESTWP-66", "type": "Epic"}, ("not_epic",))
+
+    assert not decision.eligible
+    assert decision.rejected_by == "not_epic"
+    assert "cannot be offered as work" in decision.reason
+    assert {strategy.name for strategy in work_candidates._ROLE_STRATEGIES.values()} == {
+        "verification", "post_merge", "triage", "intake", "impact", "development",
+    }
 
 
 def test_epic_follows_its_children(ctx):
@@ -105,6 +118,19 @@ def test_no_verdict_run_goes_to_another_account_at_once(client, ctx):
     no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=3)
     assert ("TESTWP-50", "verify") not in offered(client, n1, "codex-01")
     assert ("TESTWP-50", "verify") in offered(client, cc, "claude-01")
+
+
+def test_newer_no_verdict_breaks_an_ordinary_verify_cooldown(client, ctx):
+    cc, node1 = join(client, "cc"), join(client, "node1")
+    in_verify(ctx)
+    for minutes in (9, 6, 3):
+        insert_run(ctx, "TESTWP-50", "verify", "claude-01", "failed", minutes_ago=minutes)
+    assert "TESTWP-50" in verify_retry.cooling(ctx.db)
+
+    no_verdict(ctx, "TESTWP-50", "claude-01", minutes_ago=1)
+
+    assert "TESTWP-50" not in verify_retry.cooling(ctx.db)
+    assert ("TESTWP-50", "verify") in offered(client, node1, "codex-01")
 
 
 def test_retry_probe_returns_alternate_with_ready_development_work(client, ctx):
@@ -190,6 +216,32 @@ def test_failure_on_all_eligible_accounts_raises_one_incident_and_the_dashboard_
     watchdog(ctx)
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict'"
                       " AND closed_at IS NULL")["n"] == 0
+
+
+def test_watchdog_uses_the_capped_candidate_path_for_exhaustion(client, ctx, monkeypatch):
+    join(client, "cc"), join(client, "node1")
+    in_verify(ctx)
+    for minutes in (8, 2):
+        no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=minutes)
+
+    from aiflow.v4.control import work_candidates
+
+    def ordered_candidates(state_):
+        fillers = [{"key": f"FILLER-{index}", "project": "TESTWP", "step": "verify"} for index in range(20)]
+        target = {"key": "TESTWP-50", "project": "TESTWP", "step": "verify"}
+        return [*fillers, target] if state_.account.id == "claude-01" else [target, *fillers]
+
+    monkeypatch.setattr(work_candidates, "collect", ordered_candidates)
+    ticket = {"key": "TESTWP-50", "project": "TESTWP", "labels": ["aiflow-ready"]}
+
+    assert len(ctx.candidate_offers("claude-01", "cc")) == 20
+    assert "TESTWP-50" not in {item["key"] for item in ctx.candidate_offers("claude-01", "cc")}
+    assert verify_retry.pool(ctx, ticket, "opencode-01") == ["codex-01"]
+    assert verify_retry.exhausted(ctx, ticket) == ["codex-01"]
+
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict'"
+                      " AND subject='TESTWP-50' AND closed_at IS NULL")["n"] == 1
 
 
 def test_unrelated_watchdog_check_failure_does_not_skip_verify_exhaustion(client, ctx, monkeypatch):

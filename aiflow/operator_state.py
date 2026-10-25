@@ -57,6 +57,7 @@ def ticket(operator: Any, issue: dict[str, Any], values: tuple[Any, ...], leased
                 reason=rescue["reason"], summary=rescue["summary"], description=rescue["description"],
                 stretch_minutes=rescue["stretch_minutes"], worked_minutes=rescue["worked_minutes"],
                 rescued=rescue["rescued"], context_complete=rescue["context_complete"],
+                rescue_pending=rescue["rescue_pending"],
                 cycles=rescue_rounds, rework_rounds=rescue_rounds, last_comments=rescue["last_comments"],
                 attempts=rescue["attempts"],
                 loop_limit=operator.cfg.loop_limit_for(key), pull_request=pull_request, ci_state=ci_state,

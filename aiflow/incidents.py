@@ -43,6 +43,8 @@ def _ticket_incidents(ticket: dict[str, Any], state: dict[str, Any], now: float)
     labels = ticket.get("labels", [])
     if "aiflow-hold" in labels or "needs-owner" in labels:
         return []
+    if ticket.get("rescue_pending"):
+        return []
     status_since = ticket.get("status_since", ticket.get("updated", now))
     minutes = max(0, (now - status_since) / 60)
     facts = _ticket_facts(ticket, now, status_since, minutes)

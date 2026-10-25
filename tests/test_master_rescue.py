@@ -8,7 +8,7 @@ from unittest import mock
 
 from aiflow import master_rescue, operator_state
 from aiflow.config import ConfigError, load
-from aiflow.incidents import find_incidents
+from aiflow.incidents import Incident, find_incidents
 from aiflow.jira import JiraError
 from aiflow.master_rescue import MasterSettings, evaluate, owner_only_topic, parse
 from aiflow.operator import Operator
@@ -191,6 +191,11 @@ Use the existing list endpoint.
         self.assertEqual(found[0].facts["mode"], "rescue")
         plain = find_incidents(state([ticket("A-1", "Blocked", 40, blocked_kind="Config")]))
         self.assertEqual([i.id for i in plain], ["blocked:A-1"])
+
+    def test_pending_rescue_suppresses_ordinary_ticket_incidents(self):
+        item = ticket("A-1", "Blocked", 90, blocked_kind="Config", labels=["master-rescue"],
+                      rescued=True, rescue_pending=True)
+        self.assertEqual(find_incidents(state([item], master=SETTINGS)), [])
 
     def test_short_owner_only_in_progress_ticket_is_an_owner_incident(self):
         item = ticket("A-1", "In Progress", 1, summary="Routine maintenance", description="Rotate API key")
@@ -614,6 +619,30 @@ class RescueRunTests(unittest.TestCase):
         self.assertIn("Findings: the fixture is missing", body)
         self.assertEqual(sup.jira.moves[-1], ("JAIF-1", "To Do"))
 
+    def test_run_next_skips_a_stale_ordinary_incident_during_doctor_recovery(self):
+        op, sup, redis = self.build()
+        redis.set_persistent("rescue:JAIF-1", json.dumps({"state": "doctor_pending"}))
+        op.sync_queue([Incident("blocked:JAIF-1", "blocked", "JAIF-1", "stale blocked incident", {})])
+
+        self.assertFalse(op.run_next())
+        self.assertNotIn(("JAIF-1", "needs-owner"), sup.jira.added)
+
+    def test_cycle_recovers_rescues_before_syncing_or_running_ordinary_incidents(self):
+        op, sup, redis = self.build()
+        redis.set_persistent("rescue:JAIF-1", json.dumps({"state": "doctor_pending"}))
+        op.sync_queue([Incident("blocked:JAIF-1", "blocked", "JAIF-1", "stale blocked incident", {})])
+        snapshot = state([ticket("JAIF-1", "Blocked", 40, blocked_kind="Config", labels=["master-rescue"],
+                                 rescued=True, rescue_pending=True)], master=SETTINGS)
+        calls = []
+        op.check_rescues = lambda: calls.append("recover")
+        op.state = lambda: calls.append("state") or snapshot
+
+        self.assertFalse(op.cycle())
+
+        self.assertEqual(calls, ["recover", "state"])
+        self.assertEqual(redis.list_values("operator:queue"), [])
+        self.assertNotIn(("JAIF-1", "needs-owner"), sup.jira.added)
+
     def test_early_unsuccessful_status_uses_the_flow_doctor_and_retries_until_returned(self):
         op, sup, redis = self.build()
         op.handle(self.incident())
@@ -684,6 +713,20 @@ class RescueRunTests(unittest.TestCase):
         self.assertEqual((round(first["stretch_minutes"]), round(first["worked_minutes"])), (15, 115))
         self.assertEqual((second["reason"], second["blocked_kind"]), ("env missing", "Config"))
         self.assertEqual(find_incidents({**snapshot, "now": now})[0].id, "rescue:JAIF-2")
+
+    def test_operator_state_marks_a_pending_flow_doctor_recovery(self):
+        op, sup, redis = self.build()
+        now = time.time()
+        sup.jira.found = [{"key": "JAIF-1", "status": "Blocked",
+                           "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+                           "labels": ["master-rescue"], "summary": "A ticket"}]
+        redis.set_persistent("rescue:JAIF-1", json.dumps({"state": "doctor_pending"}))
+        sup.jira.comments = lambda key, last=3: []
+
+        snapshot = op.state()
+
+        self.assertTrue(snapshot["tickets"][0]["rescue_pending"])
+        self.assertFalse(any(incident.subject == "JAIF-1" for incident in find_incidents({**snapshot, "now": now})))
 
     def test_operator_snapshot_includes_to_do_tickets_with_accumulated_work(self):
         op, sup, redis = self.build()

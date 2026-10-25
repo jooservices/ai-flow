@@ -50,7 +50,8 @@ a cap below the work limit plus the rescue budget, a model that is not Claude) a
    from audit text and logs so ticket content cannot copy credentials into stdout or OpenObserve.
 5. **Unsuccessful rescue**: if the budget expires while rescue is active, or Jira moves the ticket out of the rescue workflow
    without a confirmed result, the flow doctor records the cause and a reference to recent findings (the original comments remain
-   on the ticket; their raw excerpts are omitted), clears `Taken by`, and returns the ticket to
+   on the ticket; their raw excerpts are omitted). The worker also passes a bounded, redacted summary of Claude's actual run
+   findings when it ends early, clears `Taken by`, and returns the ticket to
    development (`To Do`). An explicit successful result or a Jira-confirmed Done, Closed, or Resolved status closes the rescue
    successfully. Failed doctor comments or transitions stay pending and retry on later operator passes. An unsuccessful rescue is
    not escalated to a person and gets no `needs-owner`.
@@ -72,5 +73,21 @@ continues through the normal pull-request path. A run that times out, reports Bl
 through the flow doctor, which records the cause and returns the ticket to To Do with a safe reference to its findings. No
 separate JAIF-102 worker automation is needed; JAIF-102 supplies the Handover status and `Taken by` Jira field.
 
-The rescue timer starts just before the Handover request, so an ambiguous Jira response cannot extend the budget. After merge,
+The rescue timer starts just before the Handover request, so an ambiguous Jira response cannot extend the budget. Prompt, Jira
+context, and environment preparation also consume the budget; the worker recalculates the remaining seconds immediately before
+starting Claude and does not launch if setup exhausts it. After merge,
 AI Flow verifies that the configured Jira projects expose the Handover status and `Taken by` field (JAIF-102).
+
+## Acceptance criteria map
+
+| Criterion | Implementation | Covering test |
+|---|---|---|
+| AC1 | `aiflow/master_rescue.py`: `WAIT_DEFAULTS`, `_parse_wait`, `trigger_of` | `tests/test_master_rescue.py`: `test_blocked_kinds_wait_their_own_time`, `test_quota_offline_and_other_kinds_are_never_handed_to_claude` |
+| AC2 | `aiflow/master_rescue.py`: `trigger_of`; `aiflow/operator_rescue.py`: work-time snapshot | `tests/test_master_rescue.py`: `test_in_progress_stretch_and_total_work_limits`, `test_accumulated_work_still_qualifies_after_moving_into_qa` |
+| AC3 | `aiflow/rescue.py`: `hand_over`; `aiflow/supervisor_flow.py`: Handover pickup | `tests/test_master_rescue.py`: `test_handover_sets_status_taken_by_label_model_and_audit`, `test_only_one_rescue_per_ticket`; `tests/test_supervisor_rescue.py`: `test_handover_stage_dispatches_only_an_active_record_to_a_reserved_claude_worker` |
+| AC4 | `aiflow/rescue.py`: `lines`; `aiflow/master_rescue_worker.py`: saved model | `tests/test_master_rescue.py`: `test_handover_audit_uses_recorded_failed_runs_instead_of_the_attempt_limit`, `test_handover_sets_status_taken_by_label_model_and_audit` |
+| AC5 | `aiflow/master_rescue.py`: budget defaults/cap; `aiflow/master_rescue_worker.py` and `aiflow/supervisor.py`: absolute deadline | `tests/test_master_rescue.py`: `test_budget_is_master_minutes_under_the_total_cap`; `tests/test_supervisor_rescue.py`: `test_executor_recalculates_budget_after_delayed_setup`, `test_executor_does_not_launch_after_setup_uses_the_remaining_budget` |
+| AC6 | `aiflow/rescue.py`: `claude_unavailable`, `handle`, `to_owner` | `tests/test_master_rescue.py`: `test_unavailable_claude_goes_to_the_owner_at_once` |
+| AC7 | `aiflow/master_rescue.py`: `owner_only_topic`, `evaluate` | `tests/test_master_rescue.py`: `test_owner_only_work_goes_to_the_owner_without_waiting`, `test_ordinary_owner_only_actions_are_detected_in_descriptions_and_comments` |
+| AC8 | `aiflow/master_rescue_worker.py`: `finish_attempt`; `aiflow/rescue.py`: `safe_run_findings`, `flow_doctor`; `aiflow/operator.py`: cycle ordering and pending guard | `tests/test_supervisor_rescue.py`: `test_worker_run_findings_reach_the_flow_doctor`; `tests/test_master_rescue.py`: `test_cycle_recovers_rescues_before_syncing_or_running_ordinary_incidents`, `test_run_next_skips_a_stale_ordinary_incident_during_doctor_recovery` |
+| AC9 | `aiflow/config.py`: master registry loading/check line | `tests/test_master_rescue.py`: `test_the_file_is_validated_by_the_configuration_load_and_the_check`, `test_invalid_settings_are_rejected` |

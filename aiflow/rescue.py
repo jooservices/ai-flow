@@ -11,6 +11,7 @@ The rescue record `rescue:<KEY>` (Redis, kept) holds the state, the start, Claud
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from typing import Any
@@ -18,6 +19,9 @@ from typing import Any
 from . import agents, events, master_rescue
 from .incidents import Incident
 from .jira import JiraError
+from .lock import RedisError
+from .memory.guard import Rejected, scan_secrets
+from .project_database import redact as redact_line
 
 DAY = 86400
 DOCTOR_TARGET = "To Do"  # development
@@ -25,10 +29,34 @@ SUCCESS_STATUSES = {"done", "closed", "resolved"}
 ACTIVE_RESCUE_STATUSES = {master_rescue.HANDOVER.casefold(), "in progress"}
 
 
+def safe_run_findings(text: str, verdict: tuple[str, str] | None) -> str:
+    """Summarize this run's finding without copying credentials or an unbounded model response."""
+    source = str(verdict[1]) if verdict and verdict[1].strip() else str(text or "")
+    lines = [redact_line(re.sub(r"[\x00-\x1f\x7f]", " ", line)) for line in source.splitlines() if line.strip()]
+    summary = " ".join(lines)[:600]
+    if not summary:
+        return "Claude produced no final findings."
+    try:
+        scan_secrets(summary)
+    except Rejected:
+        return "Claude's run findings contained sensitive-looking text; raw output was omitted."
+    return summary
+
+
 class Rescue:
     def __init__(self, operator: Any) -> None:
         self.op, self.sup = operator, getattr(operator, "sup", operator)
         self.redis, self.jira, self.cfg = operator.redis, operator.jira, operator.cfg
+
+    def pending(self, key: str) -> bool:
+        """Fail closed while an active rescue or doctor recovery could supersede ordinary incidents."""
+        try:
+            record = json.loads(self.redis.get(f"rescue:{key}") or "{}")
+        except RedisError:
+            return True
+        except (TypeError, ValueError):
+            return False
+        return isinstance(record, dict) and record.get("state") in master_rescue.PENDING_RESCUE_STATES
 
     @property
     def settings(self) -> master_rescue.MasterSettings:

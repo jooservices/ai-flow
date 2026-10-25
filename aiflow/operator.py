@@ -123,9 +123,9 @@ class Operator:
         """Called by every worker loop; True when an operator run happened."""
         if not self.active() or not self.redis.acquire("operator:cycle", self.cfg.owner, 60):
             return False
+        self.check_rescues()
         self.sync_queue(find_incidents(self.state()))
         self.flush_notifications()
-        self.check_rescues()
         return self.run_next()
 
     def count(self, name: str) -> int:
@@ -156,6 +156,9 @@ class Operator:
             if self.redis.get(f"operator:cool:{incident_id}") is not None:
                 continue
             incident = Incident(incident_id, raw["kind"], raw["subject"], raw["summary"], raw.get("facts", {}))
+            if (incident.kind != "rescue" and incident.ticket
+                    and (incident.facts.get("rescue_pending") or self.rescue.pending(incident.ticket))):
+                continue
             return self.handle(incident)
         return False
 

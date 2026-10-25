@@ -21,9 +21,11 @@ def ticket_snapshot(issue: dict[str, Any], blocked: dict[str, Any], rounds: int,
 
     stretch = minutes_in_status if status == "In Progress" else 0
     worked_minutes = _number(worked) + (minutes_in_status if status in master_rescue.WORK_STATUSES else 0)
+    rescue_state = _rescue_state(rescue)
     return {"blocked_kind": blocked.get("kind", ""), "reason": reason, "summary": summary,
             "description": description, "stretch_minutes": stretch, "worked_minutes": worked_minutes,
-            "rescued": rescue is not None, "last_comments": comments,
+            "rescued": rescue is not None, "rescue_pending": rescue_state in master_rescue.PENDING_RESCUE_STATES,
+            "last_comments": comments,
             "context_complete": context_complete,
             "rework_rounds": rounds, "attempts": attempt_history(redis, key)}
 
@@ -124,3 +126,11 @@ def _number(value: Any) -> float:
         return max(0.0, parsed) if math.isfinite(parsed) else 0.0
     except (TypeError, ValueError):
         return 0.0
+
+
+def _rescue_state(value: Any) -> str:
+    try:
+        record = json.loads(value) if value else {}
+    except (TypeError, ValueError):
+        return ""
+    return str(record.get("state", "")) if isinstance(record, dict) else ""

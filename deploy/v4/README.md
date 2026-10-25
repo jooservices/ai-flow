@@ -8,6 +8,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 ## Topics
 
 - [v4 control plane architecture](../../docs/v4/architecture.md): layers, dependency direction, registration points, patterns and architectural checks
+- [Shared worker fairness](../../docs/v4/shared-worker-fairness.md): round-robin ready tickets across projects while preserving rework preference and each project's priority and age order
 
 One line per feature document in `docs/v4/`. Normally add one file `deploy/v4/topics/<topic>.md` holding that single
 line (see [Fewer merge conflicts](../../docs/v4/merge-conflicts.md)); tickets that explicitly require a README link

@@ -1723,14 +1723,27 @@ class FairOrderTests(unittest.TestCase):
     def test_one_worker_serves_both_projects_alternately(self):
         redis = FakeRedis()
         sup = make(redis=redis)
-        found = self.issues("JAVM-1", "JAVM-2", "JOOWT-9", "JOOWT-8")
-        served = []
+        ready = [
+            {"key": "JAVM-1", "status": "To Do", "updated": stamp(0), "labels": [], "parent": None},
+            {"key": "JAVM-2", "status": "To Do", "updated": stamp(0), "labels": [], "parent": None},
+            {"key": "JOOWT-9", "status": "To Do", "updated": stamp(0), "labels": [], "parent": None},
+            {"key": "JOOWT-8", "status": "To Do", "updated": stamp(0), "labels": [], "parent": None},
+        ]  # Jira returns each project's tickets in priority-descending, oldest-created order.
+        sup.jira.search = lambda jql, limit=50: [] if jql.startswith("parent in") else list(ready)
+        sup.jira.view = lambda key, full=False: {"key": key, "status": "To Do", "agent": None}
+        sup.ticket_spec = lambda key: ("", "")
+        sup.reserve_agent = lambda role, key, field_agent: ("Codex", None)
+        picked = []
+
+        def process(issue, view, role, agent, session_owner=None):
+            picked.append(issue["key"])
+            ready.remove(issue)  # This ticket advanced and is no longer ready for another pickup.
+            return True
+
+        sup.process = process
         for _ in range(4):
-            first = self.keys(sup, found)[0]
-            served.append(first)
-            found = [issue for issue in found if issue["key"] != first]
-            redis.set(f"served:{first.rsplit('-', 1)[0]}", str(time.time() + len(served)), 10)
-        self.assertEqual([key.split("-")[0] for key in served], ["JAVM", "JOOWT", "JAVM", "JOOWT"])
+            self.assertTrue(sup.tick())
+        self.assertEqual(picked, ["JAVM-1", "JOOWT-9", "JAVM-2", "JOOWT-8"])
 
 
 class DeveloperPoolTests(unittest.TestCase):

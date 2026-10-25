@@ -1,9 +1,10 @@
 # Observability: every event goes to OpenObserve
 
 Each process (worker, control, operator inside the control, health check, `aiflow-setup`) sends JSON events to one OpenObserve stream (`aiflow_events`),
-next to the journal line it always had. `emit()` only adds a row to a local queue. A background thread writes each batch to a JSONL spool before
-trying OpenObserve, then removes rows only after a successful response. Failed batches stay on disk and are replayed by that process or its next
-start; queue pressure does not discard old events. Shutdown persists queued rows without waiting for OpenObserve. Nothing is sent until
+next to the journal line it always had. `emit()` appends each row to a JSONL spool and calls `fsync` before accepting it. A background thread sends
+batches to OpenObserve and removes rows only after a successful response. Failed batches stay on disk and are replayed by that process or its next
+start; queue pressure does not discard old events. Local spool writes are synchronous so accepted events survive a process exit; OpenObserve network
+delivery remains asynchronous. Nothing is sent until
 `obs_url` ([runtime] of aiflow.toml), `AIFLOW_OBS_USER`, and `AIFLOW_OBS_PASSWORD` (Workspaces/.env) are configured. Which OpenObserve
 organization and account to use is decided at provisioning time.
 

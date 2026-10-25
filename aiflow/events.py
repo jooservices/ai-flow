@@ -3,10 +3,10 @@
     events.configure(settings, worker="JAVM-2")   once per process (worker, control, health)
     events.emit("ticket.transition", ticket="JAVM-1", to="In Review")   anywhere; never raises, never waits for the network
 
-Events are enqueued in memory and handled by a background thread. It writes each batch to a durable JSONL spool before
-delivery and removes rows only after OpenObserve accepts them. A failed delivery stays on disk for retry or replay by the
-next process. `emit()` never waits for the network. With no URL and login configured nothing is sent. Credentials come
-from the environment (`AIFLOW_OBS_USER`, `AIFLOW_OBS_PASSWORD` in Workspaces/.env), never from a repository file."""
+Events are written to a durable JSONL spool before `emit()` accepts them; a background thread sends batches and removes
+rows only after OpenObserve accepts them. A failed delivery stays on disk for retry or replay by the next process.
+`emit()` never waits for the network. With no URL and login configured nothing is sent. Credentials come from the
+environment (`AIFLOW_OBS_USER`, `AIFLOW_OBS_PASSWORD` in Workspaces/.env), never from a repository file."""
 from __future__ import annotations
 
 import atexit
@@ -57,9 +57,9 @@ class Events:
     def enabled(self) -> bool:
         return bool(self.endpoint)
 
-    def emit(self, event: str, **fields: Any) -> None:
+    def emit(self, event: str, **fields: Any) -> bool:
         if not self.endpoint:
-            return
+            return False
         try:
             row: dict[str, Any] = {**self.base, "_timestamp": int(time.time() * 1_000_000), "event": event}
             for name, value in fields.items():
@@ -74,11 +74,20 @@ class Events:
                     row["ticket"] = found.group(1)
             if "ticket" in row and "project" not in row:
                 row["project"] = str(row["ticket"]).rsplit("-", 1)[0]
-            with self.lock:
-                self.queue.append(row)
+            if self.spool:
+                if not self._append_spool([row]):
+                    with self.lock:
+                        self.queue.append(row)
+                    self.failures += 1
+                    self.wakeup.set()
+                    return False
+            else:
+                with self.lock:
+                    self.queue.append(row)
             self.wakeup.set()
+            return True
         except Exception:  # an event never breaks the work
-            pass
+            return False
 
     def flush(self) -> bool:
         """Persist queued rows before sending; a failed send leaves the JSONL spool ready for retry."""
@@ -124,6 +133,15 @@ class Events:
             self.queue.clear()
         if not rows:
             return True
+        if self._append_spool(rows):
+            return True
+        with self.lock:
+            self.queue.extendleft(reversed(rows))
+        return False
+
+    def _append_spool(self, rows: list[dict[str, Any]]) -> bool:
+        if not self.spool:
+            return False
         try:
             with self.spool_lock:
                 self.spool.parent.mkdir(parents=True, exist_ok=True)
@@ -133,8 +151,6 @@ class Events:
                     os.fsync(handle.fileno())
             return True
         except OSError:
-            with self.lock:
-                self.queue.extendleft(reversed(rows))
             return False
 
     def _spool_rows(self) -> list[dict[str, Any]]:
@@ -221,9 +237,8 @@ def configure(obs: dict[str, str], machine: str, worker: str, spool_dir: Path | 
     return _sink
 
 
-def emit(event: str, **fields: Any) -> None:
-    if _sink is not None:
-        _sink.emit(event, **fields)
+def emit(event: str, **fields: Any) -> bool:
+    return _sink.emit(event, **fields) if _sink is not None else False
 
 
 def close() -> None:

@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -88,11 +89,32 @@ class EventTests(unittest.TestCase):
                 sink.emit("first")
                 self.assertTrue(started.wait(1))
                 sink.emit("second")
-                self.assertEqual(len(sink.queue), 1)
+                self.assertEqual([json.loads(line)["event"] for line in sink.spool.read_text().splitlines()], ["first", "second"])
                 self.assertFalse(release.is_set())
             finally:
                 release.set()
                 sink.close()
+
+    def test_emit_fsyncs_the_spool_before_returning_without_waiting_for_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spool = Path(tmp) / "events.jsonl"
+            sink, sender = make(spool=spool)
+            with mock.patch("aiflow.events.os.fsync", wraps=os.fsync) as fsync:
+                self.assertTrue(sink.emit("durable", ticket="JAIF-80"))
+            fsync.assert_called_once()
+            self.assertEqual(sender.calls, [])
+            self.assertEqual([json.loads(line)["event"] for line in spool.read_text().splitlines()], ["durable"])
+
+    def test_emit_reports_spool_failure_and_flush_retries_the_queued_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "not-a-directory"
+            parent.write_text("block spool creation")
+            sink, sender = make(spool=parent / "events.jsonl")
+            self.assertFalse(sink.emit("pending"))
+            self.assertEqual(len(sink.queue), 1)
+            parent.unlink()
+            self.assertTrue(sink.flush())
+            self.assertEqual([row["event"] for row in sender.rows()], ["pending"])
 
     def test_a_failure_keeps_the_rows_for_the_next_try(self):
         sink, sender = make(Sender(fail=1))
@@ -136,7 +158,7 @@ class EventTests(unittest.TestCase):
             sink = events.configure({"AIFLOW_OBS_URL": "http://obs", "AIFLOW_OBS_USER": "u", "AIFLOW_OBS_PASSWORD": "p", "AIFLOW_OBS_STREAM": "dev"},
                                     "wsl", "control")
             sink.sender = sent
-            events.emit("control.start")
+            self.assertTrue(events.emit("control.start"))
             sink.flush()
             events.close()
         self.assertEqual(sent.rows()[0]["worker"], "control")

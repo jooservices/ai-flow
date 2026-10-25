@@ -723,3 +723,24 @@ def test_a_ticket_waiting_for_rework_with_an_open_pull_request_holds_no_hot_file
     assert hotfiles.reserve(db, "TESTWP-3", "run-3", [CONSOLE]) == ("TESTWP-1", [CONSOLE])  # fresh claim still counts
     db.run("UPDATE hot_file_reservations SET reserved_at = now() - interval '1 hour'")
     assert hotfiles.reserve(db, "TESTWP-3", "run-3", [CONSOLE]) is None  # an open pull request alone does not keep it
+
+
+def test_blocking_ticket_waits_until_every_slot_of_the_file_is_taken():
+    footprint = {"hot": [CONSOLE]}
+    in_flight = {"TESTWP-1": [CONSOLE], "TESTWP-2": [CONSOLE]}
+
+    assert hotfiles.blocking_ticket(footprint, in_flight) == ("TESTWP-1", [CONSOLE])  # one slot: blocked
+    assert hotfiles.blocking_ticket(footprint, in_flight, slots=3) is None  # two of three taken
+    assert hotfiles.blocking_ticket(footprint, in_flight, slots=2) == ("TESTWP-1", [CONSOLE])  # both taken
+
+
+def test_reservations_hold_as_many_tickets_as_there_are_slots(db):
+    assert hotfiles.reserve(db, "TESTWP-1", "run-1", [CONSOLE], slots=2) is None
+    assert hotfiles.reserve(db, "TESTWP-2", "run-2", [CONSOLE], slots=2) is None
+    assert hotfiles.reserve(db, "TESTWP-3", "run-3", [CONSOLE], slots=2) == ("TESTWP-1", [CONSOLE])
+    assert hotfiles.reserve(db, "TESTWP-3", "run-3", [CONSOLE], slots=3) is None  # a third slot: taken
+
+    hotfiles.unreserve(db, "run-2")
+
+    assert hotfiles.reserve(db, "TESTWP-4", "run-4", [CONSOLE], slots=3) is None
+    assert db.one("SELECT count(*) AS n FROM hot_file_reservations WHERE path=%s", (CONSOLE,))["n"] == 3

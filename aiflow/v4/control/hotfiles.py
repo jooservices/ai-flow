@@ -117,11 +117,15 @@ def predict(db, ticket: dict[str, Any], epic: str = "", hot: Iterable[str] = HOT
             "sources": {p: files[p] for p in hot_files}}
 
 
-def blocking_ticket(footprint: dict[str, Any], in_flight: dict[str, Iterable[str]]) -> tuple[str, list[str]] | None:
-    """(key, shared hot files) of the first ticket in flight that shares a hot file with the footprint."""
+def blocking_ticket(footprint: dict[str, Any], in_flight: dict[str, Iterable[str]],
+                    slots: int = 1) -> tuple[str, list[str]] | None:
+    """(key, shared hot files) of the first ticket in flight that blocks the footprint.
+
+    A hot file takes `slots` tickets at the same time (default one); it blocks only when that many are in flight."""
     mine = set(footprint.get("hot") or [])
+    full = {path for path in mine if sum(path in set(files) for files in in_flight.values()) >= max(1, slots)}
     for key in sorted(in_flight):
-        shared = sorted(mine & set(in_flight[key]))
+        shared = sorted(full & set(in_flight[key]))
         if shared:
             return key, shared
     return None
@@ -155,7 +159,7 @@ def clear_blocked(db, ticket_key: str) -> None:
 RESERVATION_GRACE_S = 120  # a claim inserts its running run row right after it reserved
 
 
-def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str]) -> tuple[str, list[str]] | None:
+def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str], slots: int = 1) -> tuple[str, list[str]] | None:
     """Reserve the hot files of a claimed dev run, atomically with the claim.
 
     Everything runs in one transaction under an advisory lock, so of two simultaneous claims only the first gets a
@@ -174,16 +178,21 @@ def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str]) -> tuple[str, 
                 " AND NOT EXISTS (SELECT 1 FROM tickets t WHERE t.key = h.ticket_key AND ("
                 " t.status IN ('In Verify', 'Human review', 'Ready to merge')))",
                 (RESERVATION_GRACE_S,))
-            held = conn.execute("SELECT path, ticket_key FROM hot_file_reservations"
-                                " WHERE path = ANY(%s) AND ticket_key <> %s ORDER BY path",
+            rows = conn.execute("SELECT path, ticket_key FROM hot_file_reservations"
+                                " WHERE path = ANY(%s) AND ticket_key <> %s ORDER BY path, reserved_at",
                                 (paths, ticket_key)).fetchall()
-            if held:
-                return held[0]["ticket_key"], [r["path"] for r in held if r["ticket_key"] == held[0]["ticket_key"]]
+            holders: dict[str, list[str]] = {}
+            for r in rows:
+                holders.setdefault(r["path"], []).append(r["ticket_key"])
+            full = {path: keys for path, keys in holders.items() if len(keys) >= max(1, slots)}
+            if full:
+                first = full[min(full)][0]
+                return first, sorted(path for path, keys in full.items() if first in keys)
             for path in paths:
                 conn.execute(
                     "INSERT INTO hot_file_reservations (path, ticket_key, run_id) VALUES (%s,%s,%s)"
-                    " ON CONFLICT (path) DO UPDATE SET ticket_key=EXCLUDED.ticket_key, run_id=EXCLUDED.run_id,"
-                    " reserved_at=now()", (path, ticket_key, run_id))
+                    " ON CONFLICT (path, ticket_key) DO UPDATE SET run_id=EXCLUDED.run_id, reserved_at=now()",
+                    (path, ticket_key, run_id))
     return None
 
 

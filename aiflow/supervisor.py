@@ -213,8 +213,8 @@ class Supervisor:
             return
         events.emit("ticket.status", ticket=key, to_status=to, from_status=previous, source=source,
                     minutes_in_from=round((now - float(since)) / 60, 2) if since else None)
-        self.redis.set(f"status:{key}", to, 30 * DAY)
-        self.redis.set(f"statussince:{key}", str(now), 30 * DAY)
+        self.redis.set_persistent(f"status:{key}", to)
+        self.redis.set_persistent(f"statussince:{key}", str(now))
 
     def observe(self, issues: list[dict[str, Any]]) -> None:
         """Status changes nobody here made (the owner moved a ticket, Jira did): noticed at the next poll, at most one poll late.
@@ -425,7 +425,7 @@ class Supervisor:
         try:
             self.redis.set(f"usage:{day}:{key}:{role}:{agent}:{int(time.time())}",
                            json.dumps({"key": key, "role": role, "ai": agent, "minutes": round(minutes, 1), "why": why, "code": code,
-                                    "tokens": (used or {}).get("total", 0), "cost": (used or {}).get("cost_usd_list", 0), "known": bool((used or {}).get("usage_known"))}), 10 * DAY)
+                                    "tokens": (used or {}).get("total", 0), "cost": (used or {}).get("cost_usd_list") or 0, "known": bool((used or {}).get("usage_known"))}), 10 * DAY)
         except RedisError as error:
             log(f"could not record the usage of {key}: {error}")
 
@@ -1146,8 +1146,7 @@ class Supervisor:
             argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root, self.memory_env(key, repo)),
             idle_seconds=self.cfg.idle_minutes * 60, max_seconds=self.cfg.max_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds,
             heartbeat=beat)
-        used = usage.report(agent, log_file, ticket=key, role=role, model=model, effort=effort, why=why, code=code,
-                            minutes=round((time.monotonic() - began) / 60, 2))
+        used = usage.report(agent, log_file, ticket=key, role=role, model=model, effort=effort, why=why, code=code, minutes=round((time.monotonic() - began) / 60, 2))
         self.log_usage(key, role, agent, (time.monotonic() - began) / 60, why, code, used)
         text = agents.final_text(agent, log_file, result_file)
         found = agents.verdict(text)

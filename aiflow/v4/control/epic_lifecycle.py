@@ -28,7 +28,7 @@ def _all_children_finished(_epic: dict, children: list[dict], *_args) -> bool:
 
 
 def _first_child_started(_epic: dict, children: list[dict], *_args) -> bool:
-    return any(child["status"] not in EPIC_NOT_STARTED and child["status"] not in EPIC_FINISHED
+    return any(child["status"] not in EPIC_NOT_STARTED and child["status"] != "Declined"
                for child in children)
 
 

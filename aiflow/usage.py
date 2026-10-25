@@ -29,9 +29,11 @@ def _events(text: str):
         line = line.strip()
         if line.startswith("{") and line.endswith("}"):
             try:
-                yield json.loads(line)
+                event = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(event, dict):
+                yield event
 
 
 def _row(**kw: Any) -> dict[str, Any]:
@@ -46,12 +48,13 @@ def _row(**kw: Any) -> dict[str, Any]:
 def claude(text: str) -> dict[str, Any] | None:
     result = None
     for event in _events(text):
-        if event.get("type") == "result" and "usage" in event:
+        if event.get("type") == "result" and isinstance(event.get("usage"), dict):
             result = event
     if result is None:
         return None
     use = result["usage"]
-    models = list((result.get("modelUsage") or {}))
+    model_usage = result.get("modelUsage")
+    models = list(model_usage) if isinstance(model_usage, dict) else []
     return _row(input=use.get("input_tokens"), output=use.get("output_tokens"), cache_read=use.get("cache_read_input_tokens"),
                 cache_write=use.get("cache_creation_input_tokens"), reasoning=(use.get("output_tokens_details") or {}).get("thinking_tokens"),
                 total=sum(int(use.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")),
@@ -78,11 +81,12 @@ def codex(text: str, requested_model: str = "") -> dict[str, Any] | None:
     has_cost = False
     priced_models: set[str] = set()
     for event in _events(text):
-        model = str((event.get("usage") or {}).get("model") or event.get("model") or model)
-        if event.get("type") != "turn.completed" or not isinstance(event.get("usage"), dict):
+        use = event.get("usage")
+        reported_model = use.get("model") if isinstance(use, dict) else None
+        model = str(reported_model or event.get("model") or model)
+        if event.get("type") != "turn.completed" or not isinstance(use, dict):
             continue
         seen = True
-        use = event["usage"]
         values = {name: int(use.get(key) or 0) for name, key in (
             ("input", "input_tokens"), ("cached", "cached_input_tokens"), ("cache_write", "cache_write_input_tokens"),
             ("output", "output_tokens"), ("reasoning", "reasoning_output_tokens"))}
@@ -112,10 +116,13 @@ def codex(text: str, requested_model: str = "") -> dict[str, Any] | None:
 def opencode(text: str) -> dict[str, Any] | None:
     total = dict.fromkeys(("total", "input", "output", "reasoning", "read", "write", "cost", "steps"), 0.0)
     for event in _events(text):
-        part = event.get("part") or {}
-        if event.get("type") in ("step_finish", "step-finish") and isinstance(part.get("tokens"), dict):
-            tokens = part["tokens"]
-            cache = tokens.get("cache") or {}
+        part = event.get("part")
+        if not isinstance(part, dict):
+            continue
+        tokens = part.get("tokens")
+        if event.get("type") in ("step_finish", "step-finish") and isinstance(tokens, dict):
+            cache = tokens.get("cache")
+            cache = cache if isinstance(cache, dict) else {}
             total["steps"] += 1
             total["total"] += tokens.get("total") or 0
             total["input"] += tokens.get("input") or 0
@@ -141,7 +148,7 @@ def parse(agent: str, text: str, model: str = "") -> dict[str, Any]:
             found = codex(text, model)
         else:
             found = parser(text) if parser else None
-    except (ValueError, TypeError, KeyError):
+    except (AttributeError, ValueError, TypeError, KeyError):
         found = None
     return found or {"usage_known": False}
 

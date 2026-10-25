@@ -60,6 +60,12 @@ class EventTests(unittest.TestCase):
         self.assertEqual(len(row["text"]), 2000)
         self.assertEqual(row["items"], "[1, 2]")
 
+    def test_ai_run_id_is_derived_from_the_log_file(self):
+        sink, sender = make()
+        sink.emit("ai.run", log_file="/runs/JAIF-1-developer-123.jsonl")
+        sink.flush()
+        self.assertEqual(sender.rows()[0]["run_id"], "JAIF-1-developer-123")
+
     def test_batches_are_sent_in_order(self):
         sink, sender = make(batch=2)
         for n in range(5):

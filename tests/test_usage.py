@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aiflow import agents, events, usage
 from aiflow.events import Events
@@ -58,6 +59,13 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(usage.parse("Codex", "{broken json"), {"usage_known": False})
         self.assertEqual(usage.parse("Nobody", ""), {"usage_known": False})
 
+    def test_malformed_codex_event_shapes_are_unknown(self):
+        for payload in (None, [], "not usage", 7):
+            with self.subTest(payload=payload):
+                text = json.dumps({"type": "turn.completed", "usage": payload})
+                self.assertEqual(usage.parse("Codex", text), {"usage_known": False})
+        self.assertEqual(usage.parse("Codex", "[]"), {"usage_known": False})
+
     def test_report_emits_one_event_with_the_numbers_and_the_run(self):
         sink = Events("http://obs", "default", "s", "u", "p", {}, Sender(), thread=False)
         events._sink = sink
@@ -98,6 +106,11 @@ class ReportWithTheRequestedModelTests(unittest.TestCase):
                 self.assertEqual(row["model_requested"], "sonnet")
                 if answered is not None:
                     self.assertEqual(row["model"], answered)
+
+    def test_malformed_codex_usage_report_is_emitted_as_unknown(self):
+        row = self.run_report("Codex", json.dumps({"type": "turn.completed", "usage": []}))
+        self.assertEqual(row["event"], "ai.usage")
+        self.assertFalse(row["usage_known"])
 
 
 class CommandTests(unittest.TestCase):
@@ -148,6 +161,13 @@ class StatusTests(unittest.TestCase):
         self.sup.record_status("JAIF-1", "To Do", "observed")
         self.sup.record_status("JAIF-1", "To Do", "observed")
         self.assertEqual(len(self.rows()), 1)
+
+    def test_status_and_start_time_are_stored_without_expiry(self):
+        with mock.patch.object(self.sup.redis, "set_persistent", wraps=self.sup.redis.set_persistent) as persistent, \
+                mock.patch.object(self.sup.redis, "set", wraps=self.sup.redis.set) as expiring:
+            self.sup.record_status("JAIF-7", "In Progress", "supervisor")
+        self.assertEqual([call.args[0] for call in persistent.call_args_list], ["status:JAIF-7", "statussince:JAIF-7"])
+        expiring.assert_not_called()
 
     def test_a_move_the_owner_made_is_noticed_once_across_workers(self):
         issue = {"key": "JAIF-2", "status": "To Do", "updated": stamp(0), "labels": []}

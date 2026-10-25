@@ -66,6 +66,8 @@ class Events:
                 if value is None:
                     continue
                 row[name] = value if isinstance(value, (int, float, bool)) else str(value)[:MAX_TEXT]
+            if event == "ai.run" and "run_id" not in row and row.get("log_file"):
+                row["run_id"] = Path(str(row["log_file"])).stem
             if "ticket" not in row:
                 found = TICKET.search(str(row.get("message", "")))
                 if found:

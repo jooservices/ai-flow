@@ -16,11 +16,12 @@ owns an active run.
 
 Choose a provider, one to eight concurrent sessions, and one or more jobs (develop, verify, intake, or master).
 The API enforces a total of at most eight configured sessions per machine. A new account stays in the pending
-sign-in section while the assigned node runs that provider's login command inside the new account's private home.
-The console shows the authorization URL and code emitted by the provider CLI. The owner completes that provider
-flow in a browser, then finishes sign-in on screen after the node's account probe succeeds. Provider credentials
-stay in the account's home on the machine and are not copied to the control plane. The account then appears with
-its live quota and usage. If the handoff fails or expires at the provider, the owner can start a fresh sign-in.
+sign-in section while the assigned node starts that provider's login flow inside the new account's private home.
+The console shows the authorization link and code emitted by the provider CLI. The owner opens the link in a
+browser, enters the code when asked, then finishes sign-in on screen after the node's account probe succeeds.
+Provider credentials stay in the account's home on the machine and are not copied to the control plane. The account
+then appears with its live quota and usage. If the handoff fails or expires at the provider, the owner can start a
+fresh sign-in from the screen.
 
 Owners can pause or resume an account, request another sign-in handoff, change sessions and jobs, or remove it.
 Paused accounts are removed from the node's desired worker set; session and job edits reach the node on its next

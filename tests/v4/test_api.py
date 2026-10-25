@@ -242,9 +242,12 @@ def test_sync_accounts_restores_projects_for_configured_node_rows_without_join_t
 
 def test_command_center_shows_copyable_join_command_and_device_code_sign_in_guide(client):
     page = Path("aiflow/v4/control/ui/console.html").read_text()
-    docs = Path("docs/v4/node-join.md").read_text()
-    assert "Join a node" in page and "join-tokens" in page and "--token ' + d.token" in page
-    assert "AIFLOW4_JOIN_TOKEN" in page and "codex login --device-auth" in docs
+    docs = " ".join(Path("docs/v4/node-join.md").read_text().split())
+    assert "Join a node" in page and "join-command" in page and "Show one-time command" in page
+    assert "--token ' + d.token" not in page and "AIFLOW4_JOIN_TOKEN" not in page
+    assert "AIFLOW4_JOIN_TOKEN" not in docs and "one-use enrollment grant" in docs
+    assert "sign-in link and code" in docs and "browser" in docs
+    assert "provider login commands in a terminal" in docs and "codex login --device-auth" not in docs
     assert "AI provider credential" in docs and "never sent to the control plane" in docs
 
 

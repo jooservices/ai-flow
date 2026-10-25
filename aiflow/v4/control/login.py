@@ -472,6 +472,9 @@ def install_login(app: FastAPI, ctx) -> None:
                              "message": "Account created. Copy the initial password and share it securely."},
                             status_code=201, headers={"Cache-Control": "no-store"})
 
+    from .route_registry import mount_discovered_routers
+    mount_discovered_routers(app)
+
     if not settings.console_login:
         return
 

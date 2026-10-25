@@ -105,8 +105,8 @@ def _steps(ctx, row: dict, admin_exists: bool, stored_url: str, projects: list[s
         "administrator": _step(admin_exists, "Create the first Administrator with an email and password."),
         "jira": _step(jira_connected(ctx), "Connect a Jira account in Integrations."),
         "github": _step(_github_ready(ctx), "Connect a GitHub App or an existing App in Integrations."),
-        "machine": _step(bool(worker_names), "Add a machine and use its one-time join command." if projects
-                         else MACHINE_NEEDS_PROJECT),
+        "machine": _step(bool(worker_names) and bool(projects), "Add a machine and use its one-time join command."
+                         if projects else MACHINE_NEEDS_PROJECT),
         "ai_accounts": _step(_accounts_ready(ctx, worker_names),
                              "Add an AI account to a machine and finish its sign-in."),
         "project": _step(bool(projects), "Add a Jira project and at least one repository in Projects."),
@@ -190,16 +190,19 @@ def _sample_issue_key(connection, ctx, body: SampleBody, actor: str) -> tuple[st
         raise SetupError(409, f"Sample ticket {key} was already sent to Intake. Follow it on the ticket screens.")
     if not jira_connected(ctx) or not ctx.jira:
         raise SetupError(409, "Connect Jira in Integrations before sending the sample ticket.")
+    if key:
+        project = str(row.get("sample_ticket_project") or "").strip().upper()
+        if not project:
+            raise SetupError(409, "The saved sample ticket has no recorded project. Contact an Administrator before retrying.")
+        return key, project, None
     project = body.project.strip().upper()
     if project not in ctx.repo().projects:
         raise SetupError(422, "Choose a project already configured in Projects.")
-    if key:
-        return key, project, None
     try:
         key = ctx.jira.create_issue(project, repo.SAMPLE_SUMMARY, repo.SAMPLE_BODY + "\n\nThis confirms that Jira is "
                                     "connected and this project can receive work in Intake.",
                                     issuetype="Task", labels=["aiflow-setup-sample"])
-        repo.store_sample_key(connection, key)
+        repo.store_sample_key(connection, key, project)
         return key, project, None
     except Exception as exc:  # noqa: BLE001 - return a plain recovery action, never provider internals
         return "", project, exc

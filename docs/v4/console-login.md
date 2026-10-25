@@ -58,6 +58,7 @@ as before.
 | `POST /v1/auth/login` | `{email, password}`; returns the user and sets the HttpOnly `aiflow4_session` cookie (SameSite=Strict, Secure behind HTTPS, 12 hours) |
 | `POST /v1/auth/logout`, `GET /logout` | clears the cookie |
 | `GET /v1/auth/me` | the signed-in user, or 401 |
+| `POST /v1/auth/users` | creates a console user for an Administrator with user-management permission |
 | `GET /v1/console/session` | the signed-in user, assigned roles, effective permissions, role options and sign-in landing page |
 
 Because the cookie is Strict, a console page reached from another site arrives without it; the sign-in page then

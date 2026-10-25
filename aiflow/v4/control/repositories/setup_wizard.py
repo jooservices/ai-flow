@@ -6,13 +6,13 @@ from typing import Callable
 
 from ..db import J
 
-STATE_COLUMNS = "public_url,skipped_steps,sample_ticket_key,sample_confirmed_at,completed_at"
+STATE_COLUMNS = "public_url,skipped_steps,sample_ticket_key,sample_ticket_project,sample_confirmed_at,completed_at"
 SAMPLE_LOCK = "aiflow4-setup-sample-ticket"
 FIRST_ADMIN_LOCK = "aiflow4-first-admin"
 SAMPLE_SUMMARY = "AI Flow setup sample ticket"
 SAMPLE_BODY = "Sample ticket created by the AI Flow first-run setup wizard."
-EMPTY_STATE = {"public_url": "", "skipped_steps": [], "sample_ticket_key": "", "sample_confirmed_at": None,
-               "completed_at": None}
+EMPTY_STATE = {"public_url": "", "skipped_steps": [], "sample_ticket_key": "", "sample_ticket_project": "",
+               "sample_confirmed_at": None, "completed_at": None}
 
 
 def user_count(db) -> int:
@@ -117,12 +117,13 @@ def sample_ticket_lock(db):
 
 
 def lock_sample_state(connection) -> dict:
-    return connection.execute("SELECT completed_at,sample_ticket_key,sample_confirmed_at"
+    return connection.execute("SELECT completed_at,sample_ticket_key,sample_ticket_project,sample_confirmed_at"
                               " FROM setup_wizard_state WHERE id=true FOR UPDATE").fetchone()
 
 
-def store_sample_key(connection, key: str) -> None:
-    connection.execute("UPDATE setup_wizard_state SET sample_ticket_key=%s,updated_at=now() WHERE id=true", (key,))
+def store_sample_key(connection, key: str, project: str) -> None:
+    connection.execute("UPDATE setup_wizard_state SET sample_ticket_key=%s,sample_ticket_project=%s,updated_at=now()"
+                        " WHERE id=true", (key, project))
 
 
 def audit_sample(connection, actor: str, accepted: bool, result: str, project: str, key: str = "") -> None:

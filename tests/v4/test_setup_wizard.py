@@ -176,17 +176,24 @@ def test_remote_http_address_is_refused_even_from_a_loopback_client(ctx):
 
 
 def test_machine_step_waits_for_the_first_project_and_points_to_projects(ctx, monkeypatch):
-    from aiflow.v4.control import setup_service
+    from types import SimpleNamespace
 
     client = make_client(ctx)
     _, created = bootstrap(client)
     assert created.status_code == 200
-    ids = [step["id"] for step in status(client)["steps"]]
+    configured = status(client)
+    ids = [step["id"] for step in configured["steps"]]
     assert ids.index("project") < ids.index("machine") < ids.index("ai_accounts")
-    monkeypatch.setattr(setup_service, "_projects", lambda c: [], raising=False)
-    assert setup_service._action("machine", False)["url"] == "/projects"
-    assert setup_service._action("machine", True)["url"] == "/machines"
-    assert "Projects" in setup_service.MACHINE_NEEDS_PROJECT
+
+    monkeypatch.setattr(ctx, "repo", lambda: SimpleNamespace(projects={}))
+    fresh = status(client)
+    machine = by_id(fresh, "machine")
+    assert fresh["projects"] == []
+    assert machine["ready"] is False
+    assert machine["missing"] == (
+        "Add the first project in Projects before the machine: the one-time join command needs a project to choose."
+    )
+    assert machine["action"]["url"] == "/projects"
 
 
 def test_each_external_step_reports_missing_action_and_skip_can_be_resumed(ctx):
@@ -316,6 +323,19 @@ def test_sample_ticket_failure_says_it_was_not_confirmed_and_keeps_setup_open(ct
     assert current["completed"] is False
     assert by_id(current, "sample_ticket")["ready"] is False
     assert by_id(current, "sample_ticket")["missing"].startswith("Choose a configured project")
+
+    # A retry may submit a different current selection, but Jira must keep the project used at creation.
+    ctx.repo().projects["NEWAPP"] = ctx.repo().projects["TESTWP"]
+    jira.transition_fails = False
+    retry = client.post("/v1/setup/sample-ticket", json={"project": "NEWAPP"})
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["ticket"] == "TESTWP-99"
+    assert len(jira.created) == 1
+    assert jira.transitions == [("TESTWP-99", "Intake"), ("TESTWP-99", "Intake")]
+    state = ctx.db.one("SELECT sample_ticket_key,sample_ticket_project FROM setup_wizard_state WHERE id=true")
+    assert state == {"sample_ticket_key": "TESTWP-99", "sample_ticket_project": "TESTWP"}
+    ticket = ctx.db.one("SELECT project FROM tickets WHERE key='TESTWP-99'")
+    assert ticket["project"] == "TESTWP"
 
 
 def test_sample_ticket_stays_confirmed_after_the_flow_moves_it_and_is_never_re_transitioned(ctx):

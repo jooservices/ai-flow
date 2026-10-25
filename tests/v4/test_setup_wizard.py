@@ -147,9 +147,22 @@ def test_remote_bootstrap_requires_https_but_local_development_can_use_http(ctx)
     assert "HTTPS" in response.json()["detail"]
     assert setup_wizard.user_count(ctx) == 0
 
+    for path in ("/setup", "/login"):
+        refused = remote_http.get(path)
+        assert refused.status_code == 400 and "HTTPS" in refused.text and "<form" not in refused.text
+
     remote_https = make_client(ctx, client_address=("198.51.100.25", 50001), base_url="https://testserver")
+    assert remote_https.get("/setup").status_code == 200 and remote_https.get("/login").status_code == 200
+    challenge = status(remote_https)
+    http_address = remote_https.post("/v1/setup/bootstrap", json={"public_url": "http://console.example.test",
+                                      "email": EMAIL, "password": PASSWORD},
+                                     headers={"X-AIFLOW4-Setup": challenge["bootstrap_token"],
+                                              "X-AIFLOW4-Ownership": OWNERSHIP_CAPABILITY})
+    assert http_address.status_code == 422 and "https://" in http_address.json()["detail"]
+    assert setup_wizard.user_count(ctx) == 0
     _, created = bootstrap(remote_https, url="https://console.example.test")
     assert created.status_code == 200, created.text
+    assert "secure" in created.headers["set-cookie"].lower()
 
 
 def test_each_external_step_reports_missing_action_and_skip_can_be_resumed(ctx):
@@ -234,7 +247,8 @@ def test_sample_ticket_completes_only_after_jira_confirms_intake_and_then_locks_
     ui = Path(__file__).resolve().parents[2] / "aiflow/v4/control/ui"
     console = (ui / "console.html").read_text()
     assert "/ui/setup-progress.js" in console and "AIFlowSetup.panel()" in console
-    assert "<script src" not in console  # the console keeps one inline script; the panel script is added at run time
+    # the panel script is added at run time, never through a static tag
+    assert '<script src="/ui/setup-progress.js"' not in console and "src=\"/ui/setup-progress.js\"" not in console
     assert "data-view=\"integrations\"" in console and "data-view=\"machines\"" in console
     assert "data-view=\"projects\"" in console
     script = client.get("/ui/setup-progress.js")

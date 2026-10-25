@@ -38,7 +38,7 @@ from urllib.parse import quote
 
 import redis
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
 from starlette.routing import Match
@@ -366,10 +366,9 @@ def install_login(app: FastAPI, ctx) -> None:
         return 200, user_json(email, row.get("roles") or [row["role"]], row["display_name"]), {}
 
     @app.get("/login", include_in_schema=False)
-    def login_page() -> HTMLResponse:
+    def login_page(request: Request) -> HTMLResponse:
         if setup_wizard.user_count(ctx) == 0:
-            return FileResponse(setup_wizard.PAGE, media_type="text/html",
-                                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+            return setup_wizard.setup_form_response(request, ctx)
         return HTMLResponse(LOGIN_PAGE, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
     @app.post("/v1/auth/login")

@@ -44,7 +44,7 @@ CROSS_SCREEN_DOCS = {"docs/v4/console-layouts.md": LAYOUT_SCREEN_VIEWS}
 # Ticket-specific v4 topics can be the canonical screen guide when the repository instructions require the
 # feature documentation to live under docs/v4. Keep the generated Help URL available without duplicating it in
 # docs/guide/screens.
-SCREEN_TOPIC_DOCS = {"cc": "docs/v4/first-run-setup.md", "settings": "docs/v4/runtime-settings.md"}
+SCREEN_TOPIC_DOCS = {"settings": "docs/v4/runtime-settings.md"}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,

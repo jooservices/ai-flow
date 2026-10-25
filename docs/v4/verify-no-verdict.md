@@ -57,6 +57,9 @@ is `slow_verifications` in `/v1/state`.
 - `GET /v1/capacity` leaves epics out of the idle and capacity counts.
 - `GET /v1/state` carries `slow_verifications` for the Dashboard.
 - `GET /v1/deploy/state` leaves epics out of the work counts.
+- `GET /v1/master/candidate` polls the master-cycle candidate for an account and node.
+- `GET /v1/version-releases/candidates` lists configured Jira versions eligible for a release worker; `POST /v1/version-releases/claim` validates and claims a version for that worker.
+- `POST /v1/runs/{run_id}/result` records the fenced worker result; a verification with no verdict is marked in the stored run details.
 
 An untried account defers the retry only when the final candidate list (`GET /v1/work/candidates`: entitlement,
 rollout and the 20-ticket limit included) really offers it this ticket. An account that is not barred but has no

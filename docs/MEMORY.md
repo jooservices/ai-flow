@@ -35,9 +35,10 @@ Scope: `global` (every company), `namespace` (one company), `project`, `ticket`.
 Search finds an entry by its words and, when an embedding server is configured, also by its meaning ("automobile" finds a note about a car). The vectors are made by an Ollama server (`/api/embed`) and stored in PostgreSQL (pgvector, `memory_entry.embedding`, 1024 dimensions, cosine HNSW index).
 
 - Settings of the service (`Workspaces/.env`, no secret): `AIFLOW_MEMORY_EMBED_URL` (empty = words only), `AIFLOW_MEMORY_EMBED_MODEL` (default `qwen3-embedding:0.6b`; any model answering 1024 dimensions, e.g. `mxbai-embed-large`), `AIFLOW_MEMORY_EMBED_MIN_SIMILARITY` (default 0.45: related text scored 0.5 to 0.75, unrelated text up to 0.37 with the default model).
-- A background loop of the service gives a vector to every entry that has none, or has one of another model (changing the model fills everything again; old vectors are ignored meanwhile). A write is never refused and never waits for Ollama.
+- A background loop of the service gives a vector to every entry that has none, or has one of another model, including older decayed entries (changing the model fills everything again; old vectors are ignored meanwhile). It works in batches and retries after an Ollama outage. A write is never refused and never waits for Ollama.
 - A search runs the words query and the meaning query inside the same scope and namespace filters, then merges both rankings (reciprocal rank fusion). Ollama down: the answer is the words result, as before.
 - The same holds for the scoped notes (`search`).
+- Embedding URLs, request text, vector values, and exception details are not written to service logs.
 
 ## Run it
 - Database: any PostgreSQL 14+ (the shared Docker of a machine for development: `scripts/docker/shared provision-project ai-memory --postgres`). Extensions `pg_trgm` and `unaccent` (and `vector` of pgvector for the search by meaning; without it the memory works by words only); the service creates its tables when it starts (`schema.sql`).

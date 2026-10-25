@@ -69,6 +69,7 @@ topics.
 - [Release readiness](../../docs/v4/release-readiness.md): a Jira version is ready only when every ticket now in it is Done, verified, out of rework and free of release-qa Bugs, with reasons in Command Center and Business
 - [Release progress screen](../../docs/v4/release-progress.md): per Jira version Done of total, open and late-added tickets, reasons not ready, release steps with run ID and node, tag and GitHub Release link in Command Center and Business
 - [Memory and RAG](../../docs/v4/memory-rag.md): locally embedded multilingual memory combines pgvector similarity with full-text search
+- [Memory vector search](../../docs/v4/memory-vector-search.md): Ollama embeddings, batched backfill, scoped hybrid search and keyword fallback for the shared memory service
 - [OpenObserve event delivery](../../docs/v4/openobserve-delivery.md): lab memtable sizing, bounded event retries and sustained rejection incidents
 - [Fleet upgrade](../../docs/v4/fleet-upgrade.md): rolling node upgrades (canary, waves, automatic rollback), the control/node version skew policy, forward-only migrations and the pre-upgrade check
 - [Connect Jira from the UI](../../docs/v4/jira-connect.md): `integrations.manage` OAuth 2.0 (3LO) or API-token connection for `owner` and `super_admin` on `/integrations`, secret store, automatic refresh, Disconnect and the owner.env migration

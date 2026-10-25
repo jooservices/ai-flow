@@ -9,6 +9,23 @@ Before changing code on every developer run, read `docs/v4/architecture.md` and 
 check layer dependencies, registration points, function size and complexity. Include the architecture document in
 the run notes, together with any architecture checks that found a mismatch.
 {rework}
+How to work, in this order. A change that goes back from review costs a full development run and a full review,
+so the aim is a change a careful reviewer finds nothing in the first time.
+1. Requirements ledger. Before writing code, list every acceptance criterion (AC1, AC2...), every rule, every
+   test case and every definition-of-done item in the ticket, one line each. Nothing in the ticket may be left
+   out of the ledger; a criterion you did not list is one you will not build.
+2. Build and test. For each ledger line, write the code and the tests that prove it. Cover the success path, the
+   failing input, the empty or missing value and the boundary (zero, one, maximum, duplicate, wrong type), and the
+   permission case when the code is reachable by a user.
+3. Self-review against the diff, as a hostile reviewer, before you finish. Read `git diff` and answer each:
+   - Completeness: does each ledger line have code and a test that fails without the code?
+   - Access and security: who may call this, is the input validated, can it leak data, is a secret logged?
+   - Robustness: what happens on error, timeout, concurrent calls, a repeat call and a partial failure?
+   - Scope and structure: does anything outside the ticket change, does a file or function grow past what the
+     architecture document allows, is anything duplicated?
+   - Documentation and checks: are the docs, changelog and configuration the project requires updated, and does
+     every project check below pass?
+   Fix what you find, then run the checks again. Do not hand over a change you would send back yourself.
 Rules:
 - Do not run git commit, git push or anything that changes branches or history. AI Flow commits and pushes your
   work after you finish and opens the pull request. Ending with uncommitted changes (a resolved merge included)
@@ -46,6 +63,10 @@ Ticket description:
 Finish your reply with these lines, exactly:
 SUMMARY: <two or three sentences: what changed and how it meets the acceptance criteria>
 TESTS: <which checks and tests you ran and their result>
+AC-MAP:
+- AC1: <file or function that implements it> | <test that proves it>
+- (one line per acceptance criterion and per rule, in ticket order; write `none` for a part you did not build and why)
+SELF-REVIEW: <what your own review of the diff found and fixed; write `nothing found` only after going through every question>
 RESULT: DONE
 or, only when you cannot finish (requirement conflict, infrastructure change, production release, missing access):
 RESULT: BLOCKED: <the reason and the question that must be answered>

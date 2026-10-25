@@ -9,6 +9,7 @@ from unittest import mock
 from aiflow import master_rescue
 from aiflow.config import ConfigError, load
 from aiflow.incidents import find_incidents
+from aiflow.jira import JiraError
 from aiflow.master_rescue import MasterSettings, evaluate, owner_only_topic, parse
 from aiflow.operator import Operator
 from aiflow.operator_policy import Policy
@@ -40,9 +41,11 @@ class SettingsTests(unittest.TestCase):
     def test_invalid_settings_are_rejected(self):
         for table in ({"config_wait_minutes": -1}, {"config_wait_minutes": "10"}, {"rework_wait_minutes": True}, {"quota_wait_minutes": 5},
                       {"offline_wait_minutes": 5}, {"in_progress_minutes": 0}, {"master_minutes": 1.5}, {"unknown": 1},
-                      {"model": "Codex:gpt"}, {"model": 3}, {"taken_by_field": " "}, {"total_cap_minutes": 100}):
+                      {"model": "Codex:gpt"}, {"model": "Claude:"}, {"model": 3}, {"taken_by_field": " "},
+                      {"total_cap_minutes": 100}, ["not a table"]):
             with self.subTest(table=table), self.assertRaises(ConfigError):
                 parse(table, "aiflow.toml [master]")
+        self.assertEqual(parse({"attempts_wait_minutes": 0}, "x").waits["Attempts"], 0)
 
     def test_the_file_is_validated_by_the_configuration_load_and_the_check(self):
         folder = Path(tempfile.mkdtemp())
@@ -56,6 +59,7 @@ class SettingsTests(unittest.TestCase):
         with mock.patch("aiflow.config.load", return_value=config), mock.patch("aiflow.supervisor.Redis", return_value=redis), \
                 mock.patch("sys.stdout", new_callable=io.StringIO) as output:
             self.assertEqual(main(["check"]), 0)
+        self.assertEqual(config.registry.master.waits["Config"], 3)
         self.assertIn("master rescue: waits", output.getvalue())
         self.assertIn("Config 3 min", output.getvalue())
         (folder / "aiflow.toml").write_text("[master]\nquota_wait_minutes = 3\n")
@@ -102,6 +106,9 @@ class RulesTests(unittest.TestCase):
     def test_budget_is_master_minutes_under_the_total_cap(self):
         self.assertEqual(verdict("Blocked", 10, blocked_kind="Config", worked_minutes=120).remaining_minutes, 60)
         self.assertEqual(verdict("Blocked", 10, blocked_kind="Config", worked_minutes=150).remaining_minutes, 30)
+        self.assertEqual(verdict("Blocked", 10, blocked_kind="Config", worked_minutes=179).remaining_minutes, 1)
+        capped = verdict("Blocked", 10, blocked_kind="Config", worked_minutes=180)
+        self.assertEqual((capped.mode, capped.remaining_minutes), ("owner", 0))
         spent = verdict("Blocked", 10, blocked_kind="Config", worked_minutes=181)
         self.assertEqual((spent.mode, spent.remaining_minutes), ("owner", 0))
 
@@ -121,12 +128,27 @@ class RulesTests(unittest.TestCase):
         self.assertEqual(owner_only_topic("a failing unit test"), "")
         self.assertEqual(verdict("In Progress", 70, stretch_minutes=70, summary="Rotate the credentials").mode, "owner")
 
+    def test_owner_only_work_is_checked_before_work_limits_in_description_and_comments(self):
+        description = ticket("JAIF-1", "In Progress", 1, summary="Routine maintenance", description="Rotate the API key")
+        comment = ticket("JAIF-2", "In Progress", 1, summary="Routine maintenance", description="Routine maintenance",
+                         last_comments=[{"author": "Owner", "body": "Use the new credentials for this task"}])
+        for item, topic in ((description, "credentials, tokens or secrets"), (comment, "credentials, tokens or secrets")):
+            with self.subTest(ticket=item["key"]):
+                found = evaluate(item, SETTINGS, 1)
+                self.assertEqual((found.mode, found.topic), ("owner", topic))
+                self.assertIn("Owner-only work identified", found.trigger)
+
     def test_incident_replaces_the_generic_blocked_incident(self):
         found = find_incidents(state([ticket("A-1", "Blocked", 40, blocked_kind="Config")], master=SETTINGS))
         self.assertEqual([(i.id, i.kind) for i in found], [("rescue:A-1", "rescue")])
         self.assertEqual(found[0].facts["mode"], "rescue")
         plain = find_incidents(state([ticket("A-1", "Blocked", 40, blocked_kind="Config")]))
         self.assertEqual([i.id for i in plain], ["blocked:A-1"])
+
+    def test_short_owner_only_in_progress_ticket_is_an_owner_incident(self):
+        item = ticket("A-1", "In Progress", 1, summary="Routine maintenance", description="Rotate API key")
+        found = find_incidents(state([item], master=SETTINGS))
+        self.assertEqual([(incident.id, incident.facts["mode"]) for incident in found], [("rescue:A-1", "owner")])
 
 
 class RescueRunTests(unittest.TestCase):
@@ -192,6 +214,42 @@ class RescueRunTests(unittest.TestCase):
         self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
         self.assertTrue(any("credentials, tokens or secrets" in b for _, b in sup.jira.comments))
 
+    def test_the_operator_snapshot_checks_description_and_recent_comments_before_thresholds(self):
+        op, sup, redis = self.build()
+        now = time.time()
+        sup.jira.found = [
+            {"key": "JAIF-1", "status": "In Progress", "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+             "labels": [], "summary": "Routine maintenance"},
+            {"key": "JAIF-2", "status": "In Progress", "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+             "labels": [], "summary": "Routine maintenance"},
+        ]
+        view_calls, comment_calls = [], []
+        descriptions = {"JAIF-1": "Rotate the API key", "JAIF-2": "Routine maintenance"}
+        comments = {"JAIF-1": [], "JAIF-2": [{"author": "Owner", "body": "Use the credentials"}]}
+
+        def view(key, full=False):
+            view_calls.append(key)
+            return {"description": descriptions[key]}
+
+        def recent_comments(key, last=3):
+            comment_calls.append(key)
+            return comments[key]
+
+        sup.jira.view = view
+        sup.jira.comments = recent_comments
+        sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
+        snapshot = op.state()
+        incidents = [item for item in find_incidents({**snapshot, "now": now}) if item.kind == "rescue"]
+        self.assertEqual([(item.subject, item.facts["topic"]) for item in incidents],
+                         [("JAIF-1", "credentials, tokens or secrets"), ("JAIF-2", "credentials, tokens or secrets")])
+        op.state()
+        self.assertEqual(view_calls, ["JAIF-1", "JAIF-2"])
+        self.assertEqual(comment_calls, ["JAIF-1", "JAIF-2"])
+        sup.jira.found[0]["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + 2))
+        op.state()
+        self.assertEqual(view_calls, ["JAIF-1", "JAIF-2", "JAIF-1"])
+        self.assertEqual(comment_calls, ["JAIF-1", "JAIF-2", "JAIF-1"])
+
     def test_failed_handover_leaves_no_record_and_retries_later(self):
         op, sup, redis = self.build()
         sup.jira.transition = lambda key, status: False
@@ -201,8 +259,70 @@ class RescueRunTests(unittest.TestCase):
         self.assertIsNotNone(redis.get(f"operator:cool:{incident.id}"))
         self.assertNotIn(("JAIF-1", "master-rescue"), sup.jira.added)
         self.assertIsNone(sup.jira.fields[("JAIF-1", "Taken by")])
+        self.assertIsNone(sup.jira.fields[("JAIF-1", "AI Model")])
         retry = find_incidents(state([ticket("JAIF-1", "Blocked", 40, blocked_kind="Config")], master=SETTINGS))
         self.assertEqual([(item.id, item.kind) for item in retry], [(incident.id, "rescue")])
+
+    def test_failed_handover_retries_cleanup_of_temporary_fields(self):
+        op, sup, redis = self.build()
+        sup.jira.transition = lambda key, status: False
+        set_field = sup.jira.set_field
+        failed_clears = set()
+
+        def fail_first_clear(key, field, value):
+            if value is None and field not in failed_clears:
+                failed_clears.add(field)
+                raise JiraError("temporary field cleanup failure")
+            set_field(key, field, value)
+
+        sup.jira.set_field = fail_first_clear
+        op.handle(self.incident())
+        self.assertIsNone(redis.get("rescue:JAIF-1"))
+        self.assertIsNotNone(redis.get("operator:rescue-cleanup:JAIF-1"))
+        self.assertEqual(sup.jira.fields[("JAIF-1", "Taken by")], {"value": "Claude"})
+        op.check_rescues()
+        self.assertIsNone(redis.get("operator:rescue-cleanup:JAIF-1"))
+        self.assertIsNone(sup.jira.fields[("JAIF-1", "Taken by")])
+        self.assertIsNone(sup.jira.fields[("JAIF-1", "AI Model")])
+
+    def test_accepted_handover_retries_a_failed_label_write(self):
+        op, sup, redis = self.build()
+        add_label = sup.jira.add_label
+        calls = []
+
+        def fail_once(key, label):
+            calls.append((key, label))
+            if len(calls) == 1:
+                raise JiraError("temporary label write failure")
+            add_label(key, label)
+
+        sup.jira.add_label = fail_once
+        op.handle(self.incident())
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertEqual(record["state"], "active")
+        self.assertTrue(record["label_pending"])
+        self.assertEqual(sup.jira.moves, [("JAIF-1", "Handover")])
+        sup.jira.status = "Handover"
+        op.check_rescues()
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertFalse(record["label_pending"])
+        self.assertEqual(calls, [("JAIF-1", "master-rescue"), ("JAIF-1", "master-rescue")])
+        self.assertIn(("JAIF-1", "master-rescue"), sup.jira.added)
+
+    def test_label_retry_failure_does_not_block_the_flow_doctor(self):
+        op, sup, redis = self.build()
+        sup.jira.add_label = mock.Mock(side_effect=JiraError("label service unavailable"))
+        op.handle(self.incident())
+        sup.jira.status = "Handover"
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        record["started"] = int(time.time()) - 60 * 60
+        redis.set_persistent("rescue:JAIF-1", json.dumps(record))
+        op.check_rescues()
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertEqual(record["state"], "failed")
+        self.assertTrue(record["label_pending"])
+        self.assertEqual(sup.jira.moves[-1], ("JAIF-1", "To Do"))
+        self.assertTrue(any(body.startswith("AI Flow doctor") for _, body in sup.jira.comments))
 
     def test_rescue_without_a_result_goes_through_the_flow_doctor_to_development(self):
         op, sup, redis = self.build()
@@ -234,6 +354,39 @@ class RescueRunTests(unittest.TestCase):
         self.assertIn("Cause: Claude hit a usage limit", body)
         self.assertIn("Findings: the fixture is missing", body)
         self.assertEqual(sup.jira.moves[-1], ("JAIF-1", "To Do"))
+
+    def test_early_unsuccessful_status_uses_the_flow_doctor_and_retries_until_returned(self):
+        op, sup, redis = self.build()
+        op.handle(self.incident())
+        sup.jira.status = "Blocked"
+        transition = sup.jira.transition
+        attempts = []
+
+        def fail_doctor_once(key, status):
+            attempts.append((key, status))
+            return False if len(attempts) == 1 else transition(key, status)
+
+        sup.jira.transition = fail_doctor_once
+        op.check_rescues()
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertEqual(record["state"], "doctor_pending")
+        self.assertIn("without a confirmed result", record["doctor_cause"])
+        self.assertEqual(len([body for _, body in sup.jira.comments if body.startswith("AI Flow doctor")]), 1)
+        op.check_rescues()
+        self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "failed")
+        self.assertEqual(len([body for _, body in sup.jira.comments if body.startswith("AI Flow doctor")]), 1)
+        self.assertEqual(sup.jira.moves[-1], ("JAIF-1", "To Do"))
+
+    def test_only_a_confirmed_success_status_finishes_during_reconciliation(self):
+        op, sup, redis = self.build()
+        op.handle(self.incident())
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        record["started"] = int(time.time()) - 100 * 60
+        redis.set_persistent("rescue:JAIF-1", json.dumps(record))
+        sup.jira.status = "Done"
+        op.check_rescues()
+        self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "finished")
+        self.assertFalse(any(body.startswith("AI Flow doctor") for _, body in sup.jira.comments))
 
     def test_a_rescue_with_a_result_is_closed_without_the_doctor(self):
         op, sup, redis = self.build()

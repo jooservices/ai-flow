@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from . import agents, events, github, master_rescue, notify, runner, usage
+from . import agents, events, github, notify, operator_rescue, runner, usage
 from .config import PROJECT_DIR
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
@@ -49,13 +49,6 @@ def parse_output(text: str) -> tuple[tuple[str, str] | None, list[tuple[str, dic
         actions.append((name, args if isinstance(args, dict) else {"_invalid": raw}))
     options, recommend = OPTIONS.findall(text), RECOMMEND.findall(text)
     return result, actions, options[-1].strip() if options else "", recommend[-1].strip() if recommend else ""
-
-
-def _number(value: Any) -> float:
-    try:
-        return float(value or 0)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 def epoch(value: str, default: float) -> float:
@@ -104,7 +97,7 @@ class Operator:
         gate_entries = self.redis.get_many([f"gateentry:{i['key']}" for i in issues]) if issues else []
         pushed_times = self.redis.get_many([f"pushed:{i['key']}" for i in issues]) if issues else []
         tickets = []
-        for issue, why, rounds, since, number, entry, pushed, worked, rescue in zip(
+        for issue, why, rounds, since, number, entry, pushed, worked, rescue_record in zip(
                 issues, blocked, cycles, status_times, pull_request_numbers, gate_entries, pushed_times, worked_times, rescued):
             key, status = issue["key"], issue["status"]
             labels = issue.get("labels", [])
@@ -134,26 +127,8 @@ class Operator:
                 rework_rounds = int(rounds or blocked_data.get("rework_rounds", 0) or 0)
             except (TypeError, ValueError):
                 rework_rounds = 0
-            blocked_kind = blocked_data.get("kind", "")
-            stretch_minutes = minutes_in_status if status == "In Progress" else 0
-            worked_minutes = _number(worked) + (minutes_in_status if status in master_rescue.WORK_STATUSES else 0)
-            master = self.cfg.registry.master
-            rescue_possible = ((status == "Blocked" and blocked_kind in master.waits) or stretch_minutes >= master.in_progress_minutes
-                               or worked_minutes >= master.total_work_minutes)
-            potential = "aiflow-hold" not in labels and "needs-owner" not in labels and (
-                (status == "Blocked" and minutes_in_status >= self.policy.blocked_minutes)
-                or (status == "In QA" and not is_leased and
-                    (minutes_waiting_for_ci >= self.policy.ci_wait_minutes or minutes_in_status >= self.policy.stuck_minutes))
-                or (status in WORKED and status != "In QA" and not is_leased and minutes_in_status >= self.policy.stuck_minutes)
-                or rework_rounds > self.cfg.loop_limit_for(key)
-                or rescue_possible
-            )
-            last_comments = []
-            if potential:
-                try:
-                    last_comments = self.jira.comments(key, 3)
-                except (JiraError, ValueError, TypeError):
-                    pass
+            rescue = operator_rescue.ticket_snapshot(issue, blocked_data, rework_rounds, minutes_in_status,
+                                                       worked, rescue_record, self.redis, self.jira)
             pull_request = {"number": number} if number else None
             ci_state = "unknown"
             inspect_ci = minutes_waiting_for_ci >= self.policy.ci_wait_minutes or minutes_in_status >= self.policy.stuck_minutes
@@ -169,10 +144,11 @@ class Operator:
                     # Missing repository or GitHub data is not evidence that CI is still waiting.
                     pass
             tickets.append(dict(key=key, status=status, status_since=status_since, updated=updated, labels=labels,
-                                leased=is_leased, blocked_kind=blocked_kind, reason=blocked_data.get("reason") or issue.get("summary", ""),
-                                summary=issue.get("summary", ""), stretch_minutes=stretch_minutes, worked_minutes=worked_minutes,
-                                rescued=rescue is not None,
-                                cycles=rework_rounds, rework_rounds=rework_rounds, last_comments=last_comments,
+                                leased=is_leased, blocked_kind=rescue["blocked_kind"], reason=rescue["reason"],
+                                summary=rescue["summary"], description=rescue["description"],
+                                stretch_minutes=rescue["stretch_minutes"], worked_minutes=rescue["worked_minutes"],
+                                rescued=rescue["rescued"], cycles=rework_rounds, rework_rounds=rework_rounds,
+                                last_comments=rescue["last_comments"],
                                 loop_limit=self.cfg.loop_limit_for(key),
                                 pull_request=pull_request, ci_state=ci_state, ci_since=gate_since,
                                 minutes_waiting_for_ci=int(minutes_waiting_for_ci)))

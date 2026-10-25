@@ -50,34 +50,54 @@ class MasterSettings:
 
 def parse(table: dict[str, Any], where: str) -> MasterSettings:
     """The `[master]` table of aiflow.toml; anything not understood stops the worker with a clear message."""
+    if not isinstance(table, dict):
+        raise ConfigError(f"{where}: must be a TOML table.")
     waits = dict(WAIT_DEFAULTS)
     values: dict[str, Any] = {}
     known = [f"{kind.lower()}_wait_minutes" for kind in WAIT_DEFAULTS] + list(NUMBERS) + list(TEXTS)
     for name, value in table.items():
-        kind = name.removesuffix("_wait_minutes").capitalize()
-        if name.endswith("_wait_minutes") and kind in NEVER_RESCUED:
-            raise ConfigError(f"{where}: `{name}` is not allowed: Quota and Offline are never handed to Claude.")
-        if name.endswith("_wait_minutes") and kind in WAIT_DEFAULTS:
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise ConfigError(f"{where}: `{name}` must be a whole number of 0 or more.")
-            waits[kind] = value
-        elif name in NUMBERS:
-            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-                raise ConfigError(f"{where}: `{name}` must be a whole number of at least 1.")
-            values[name] = value
-        elif name in TEXTS:
-            if not isinstance(value, str) or (name == "taken_by_field" and not value.strip()):
-                raise ConfigError(f"{where}: `{name}` must be text.")
-            values[name] = value.strip()
-        else:
-            raise ConfigError(f"{where}: unknown setting `{name}` (known: {', '.join(known)}).")
+        if not _parse_wait(name, value, waits, where):
+            _parse_setting(name, value, values, known, where)
     settings = MasterSettings(waits=waits, **values)
-    if settings.model and settings.model.split(":")[0] != RESCUE_AGENT:
-        raise ConfigError(f"{where}: `model` must name Claude, as Claude[:model[:effort]].")
+    _validate_settings(settings, where)
+    return settings
+
+
+def _parse_wait(name: str, value: Any, waits: dict[str, int], where: str) -> bool:
+    if not name.endswith("_wait_minutes"):
+        return False
+    kind = name.removesuffix("_wait_minutes").capitalize()
+    if kind in NEVER_RESCUED:
+        raise ConfigError(f"{where}: `{name}` is not allowed: Quota and Offline are never handed to Claude.")
+    if kind not in WAIT_DEFAULTS:
+        return False
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ConfigError(f"{where}: `{name}` must be a whole number of 0 or more.")
+    waits[kind] = value
+    return True
+
+
+def _parse_setting(name: str, value: Any, values: dict[str, Any], known: list[str], where: str) -> None:
+    if name in NUMBERS:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigError(f"{where}: `{name}` must be a whole number of at least 1.")
+        values[name] = value
+    elif name in TEXTS:
+        if not isinstance(value, str) or (name == "taken_by_field" and not value.strip()):
+            raise ConfigError(f"{where}: `{name}` must be text.")
+        values[name] = value.strip()
+    else:
+        raise ConfigError(f"{where}: unknown setting `{name}` (known: {', '.join(known)}).")
+
+
+def _validate_settings(settings: MasterSettings, where: str) -> None:
+    if settings.model:
+        parts = settings.model.split(":")
+        if len(parts) < 2 or parts[0] != RESCUE_AGENT or not parts[1].strip():
+            raise ConfigError(f"{where}: `model` must name Claude and a model, as Claude:model[:effort].")
     if settings.total_cap_minutes < settings.total_work_minutes + settings.master_minutes:
         raise ConfigError(f"{where}: `total_cap_minutes` ({settings.total_cap_minutes}) must cover `total_work_minutes` "
                           f"+ `master_minutes` ({settings.total_work_minutes + settings.master_minutes}).")
-    return settings
 
 
 def check_line(settings: MasterSettings) -> str:
@@ -88,9 +108,9 @@ def check_line(settings: MasterSettings) -> str:
             f"{settings.master_minutes} min, total cap {settings.total_cap_minutes} min")
 
 
-def owner_only_topic(*texts: str) -> str:
+def owner_only_topic(*texts: Any) -> str:
     """The first owner-only topic the texts mention, or an empty string."""
-    text = " ".join(texts)
+    text = " ".join(str(item) for item in texts if item)
     return next((topic for topic, pattern in OWNER_PATTERNS if pattern.search(text)), "")
 
 
@@ -122,16 +142,20 @@ def trigger_of(ticket: dict[str, Any], settings: MasterSettings, minutes_in_stat
     return ""
 
 
-def evaluate(ticket: dict[str, Any], settings: MasterSettings, minutes_in_status: float) -> Verdict | None:
+def evaluate(ticket: dict[str, Any], settings: MasterSettings | None, minutes_in_status: float) -> Verdict | None:
     """What the master does with one ticket: None, a rescue by Claude, or the owner. One rescue per ticket."""
+    if settings is None:
+        return None
     if RESCUE_LABEL in ticket.get("labels", []) or ticket.get("rescued"):
         return None
     trigger = trigger_of(ticket, settings, minutes_in_status)
-    kind = ticket.get("blocked_kind", "")
-    blocked_for_rescue = ticket["status"] == "Blocked" and kind in settings.waits  # owner-only work does not wait for the wait time
-    topic = owner_only_topic(ticket.get("reason", ""), ticket.get("summary", "")) if trigger or blocked_for_rescue else ""
+    comments = ticket.get("last_comments", [])
+    if not isinstance(comments, list):
+        comments = []
+    comment_texts = [comment.get("body", "") for comment in comments if isinstance(comment, dict)]
+    topic = owner_only_topic(ticket.get("summary", ""), ticket.get("reason", ""), ticket.get("description", ""), *comment_texts)
     if topic:
-        return Verdict("owner", trigger or f"Blocked ({kind}) for {int(minutes_in_status)} min", topic)
+        return Verdict("owner", trigger or f"Owner-only work identified: {topic}", topic)
     if not trigger:
         return None
     remaining = remaining_budget(settings, ticket.get("worked_minutes", 0))

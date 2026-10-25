@@ -3,7 +3,7 @@
     rescue incident -> Claude available?  yes: Handover status, Taken by = Claude, label master-rescue, audit comment   (one per ticket)
                                           no (quota / offline): the owner at once
                     -> owner-only work or no budget left: the owner at once
-    Claude's rescue budget expires without a result -> the flow doctor records the cause and returns
+    An unsuccessful rescue ends early or uses its budget -> the flow doctor records the cause and returns
     the ticket to development with its findings; it is not escalated to a person.
 
 The rescue record `rescue:<KEY>` (Redis, kept) holds the state, the start, Claude's budget and the model; it is also the
@@ -20,6 +20,8 @@ from .jira import JiraError
 
 DAY = 86400
 DOCTOR_TARGET = "To Do"  # development
+SUCCESS_STATUSES = {"done", "closed", "resolved"}
+ACTIVE_RESCUE_STATUSES = {master_rescue.HANDOVER.casefold(), "in progress"}
 
 
 class Rescue:
@@ -74,7 +76,11 @@ class Rescue:
             tried.append(f"{self.cfg.max_attempts} failed AI attempts")
         if facts.get("blocked_kind") == "Rework" or facts.get("rework_rounds"):
             tried.append(f"{facts.get('rework_rounds') or 'several'} rework round(s)")
-        tried += [f"comment by {c.get('author', '?')}: {str(c.get('body', ''))[:200]}" for c in facts.get("last_comments", [])[-2:]]
+        comments = facts.get("last_comments", [])
+        if not isinstance(comments, list):
+            comments = []
+        tried += [f"comment by {c.get('author', '?')}: {str(c.get('body', ''))[:200]}"
+                  for c in comments[-2:] if isinstance(c, dict)]
         return [f"Stuck: {stuck}",
                 "Tried: " + "; ".join(tried),
                 f"Work time: {facts.get('worked_minutes', 0)} min in total, {facts.get('stretch_minutes', 0)} min in the current stretch",
@@ -93,71 +99,165 @@ class Rescue:
             self.op.sup_log(f"master rescue of {key} failed: {error}")
             moved = False
         if not moved:
-            self.clear_taken_by(key)
+            if not self.clear_handover_fields(key, bool(model)):
+                self.redis.set_persistent(f"operator:rescue-cleanup:{key}", json.dumps({"model": bool(model)}))
             self.redis.set(f"operator:cool:{incident.id}", "1", 600)  # retry after the temporary cooldown
             return True
         self.redis.delete(f"lease:{key}")  # a worker still holding the ticket stops at its next heartbeat
         record = dict(state="active", started=int(time.time()), budget=facts.get("remaining_minutes", 0), model=f"{model}:{effort}".strip(":"),
-                      stuck=facts.get("trigger", ""), findings=self.lines(incident))
+                      stuck=facts.get("trigger", ""), findings=self.lines(incident), label_pending=True)
         self.redis.set_persistent(f"rescue:{key}", json.dumps(record))
-        try:
-            self.jira.add_label(key, master_rescue.RESCUE_LABEL)
-        except JiraError as error:
-            self.op.sup_log(f"master rescue of {key} moved to Handover but could not add its label: {error}")
+        self.ensure_label(key, record)
         extra = self.lines(incident) + [f"Taken by: {master_rescue.RESCUE_AGENT}, model {model or 'default'}" + (f" (effort {effort})" if effort else "")]
         self.op.audit(incident, "master", f"HANDOVER to {master_rescue.RESCUE_AGENT}: status {master_rescue.HANDOVER}, label {master_rescue.RESCUE_LABEL}",
                       ["handover", f"label {master_rescue.RESCUE_LABEL}"], [], extra)
         events.emit("operator.rescue", ticket=key, outcome="handover", budget=record["budget"], model=record["model"])
         return True
 
-    def clear_taken_by(self, key: str) -> None:
-        """Undo the temporary owner field when Jira refuses the Handover transition."""
+    def ensure_label(self, key: str, record: dict[str, Any]) -> bool:
+        """Retry the idempotent label write after Jira accepted Handover but rejected the label update."""
+        if not record.get("label_pending", True):
+            return True
+        try:
+            self.jira.add_label(key, master_rescue.RESCUE_LABEL)
+        except JiraError as error:
+            self.op.sup_log(f"master rescue of {key} moved to Handover but could not add its label: {error}")
+            return False
+        record["label_pending"] = False
+        self.finish(key, record, record.get("state", "active"))
+        return True
+
+    def clear_taken_by(self, key: str) -> bool:
+        """Clear Claude as the temporary owner after a refused Handover or unsuccessful rescue."""
         try:
             self.jira.set_field(key, self.settings.taken_by_field, None)
         except JiraError as error:
             self.op.sup_log(f"master rescue could not clear Taken by on {key}: {error}")
+            return False
+        return True
 
-    # ---- the end of a rescue -----------------------------------------------------------------------------------------
-    def check_rescues(self) -> None:
-        """A rescue whose budget ran out while the ticket is still in Handover ended without a result."""
-        for name in self.redis.scan("rescue:*"):
-            key = name.split(":", 1)[1]
+    def clear_model(self, key: str) -> bool:
+        """Remove the rescue model field when Jira refuses the Handover transition."""
+        try:
+            self.jira.set_field(key, self.cfg.model_field, None)
+        except JiraError as error:
+            self.op.sup_log(f"master rescue could not clear the model field on {key}: {error}")
+            return False
+        return True
+
+    def clear_handover_fields(self, key: str, model: bool) -> bool:
+        taken_by_cleared = self.clear_taken_by(key)
+        model_cleared = self.clear_model(key) if model else True
+        return taken_by_cleared and model_cleared
+
+    def check_cleanup(self) -> None:
+        """Retry temporary-field cleanup after Jira refuses a Handover transition."""
+        for name in self.redis.scan("operator:rescue-cleanup:*"):
+            key = name.split(":", 2)[2]
             try:
                 record = json.loads(self.redis.get(name) or "{}")
             except (TypeError, ValueError):
                 continue
-            if record.get("state") != "active" or time.time() - record.get("started", 0) < record.get("budget", 0) * 60:
-                continue
-            try:
-                status = str(self.jira.view(key).get("status", ""))
-            except JiraError:
-                continue
-            if status == master_rescue.HANDOVER:
-                self.end(key, ok=False, cause=f"the rescue budget of {record.get('budget', 0)} min ran out without a result")
-            else:
-                self.finish(key, record, "finished")
+            if isinstance(record, dict) and self.clear_handover_fields(key, bool(record.get("model"))):
+                self.redis.delete(name)
+
+    # ---- the end of a rescue -----------------------------------------------------------------------------------------
+    def check_rescues(self) -> None:
+        """Reconcile labels and route every unconfirmed rescue outcome through the flow doctor."""
+        self.check_cleanup()
+        for name in self.redis.scan("rescue:*"):
+            key = name.split(":", 1)[1]
+            record = self.load_record(name)
+            if record is not None:
+                self.check_rescue(key, record)
+
+    def load_record(self, name: str) -> dict[str, Any] | None:
+        try:
+            record = json.loads(self.redis.get(name) or "{}")
+        except (TypeError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
+
+    def check_rescue(self, key: str, record: dict[str, Any]) -> None:
+        if record.get("label_pending", True):
+            self.ensure_label(key, record)
+        if record.get("state") == "doctor_pending":
+            self.flow_doctor(key, record, record.get("doctor_cause", "the rescue ended without a result"),
+                             record.get("doctor_findings", ""))
+            return
+        if record.get("state") != "active":
+            return
+        status = self.rescue_status(key)
+        if not status:
+            return
+        if status.casefold() in SUCCESS_STATUSES:
+            self.finish(key, record, "finished")
+            return
+        expired = time.time() - record.get("started", 0) >= record.get("budget", 0) * 60
+        if status.casefold() not in ACTIVE_RESCUE_STATUSES:
+            self.end(key, ok=False, cause=f"the rescue ended early in {status} without a confirmed result",
+                     findings=self.recent_findings(key, record))
+        elif expired:
+            self.end(key, ok=False, cause=f"the rescue budget of {record.get('budget', 0)} min ran out without a result",
+                     findings=self.recent_findings(key, record))
+
+    def rescue_status(self, key: str) -> str:
+        try:
+            return str(self.jira.view(key).get("status", "") or "")
+        except JiraError:
+            return ""
+
+    def recent_findings(self, key: str, record: dict[str, Any]) -> str:
+        """Include recent Claude or operator findings in the flow-doctor return comment."""
+        try:
+            comments = self.jira.comments(key, 3)
+        except (JiraError, ValueError, TypeError):
+            comments = []
+        bodies = [str(item.get("body", "")) for item in comments if isinstance(item, dict)
+                  and item.get("body") and not str(item.get("body", "")).startswith("AI Flow operator (master)")]
+        return "\n".join(bodies) or "; ".join(record.get("findings", [])) or record.get("stuck", "")
 
     def finish(self, key: str, record: dict[str, Any], state: str) -> None:
         self.redis.set_persistent(f"rescue:{key}", json.dumps({**record, "state": state}))
 
-    def end(self, key: str, ok: bool, cause: str = "", findings: str = "") -> None:
-        """Record a terminal rescue outcome; the budget-expiry path sends a missing result to the flow doctor."""
+    def end(self, key: str, ok: bool, cause: str = "", findings: str = "") -> bool:
+        """Record a terminal rescue outcome; failures return to development through the flow doctor."""
         try:
             record = json.loads(self.redis.get(f"rescue:{key}") or "{}")
         except (TypeError, ValueError):
             record = {}
+        if not record:
+            return False
         if ok:
             self.finish(key, record, "finished")
-            return
-        self.flow_doctor(key, record, cause or "the rescue ended without a result", findings)
+            return True
+        return self.flow_doctor(key, record, cause or "the rescue ended without a result", findings)
 
-    def flow_doctor(self, key: str, record: dict[str, Any], cause: str, findings: str) -> None:
+    def flow_doctor(self, key: str, record: dict[str, Any], cause: str, findings: str) -> bool:
         """Record the cause and return the ticket to development with its findings; no escalation to a person."""
-        notes = findings or "; ".join(record.get("findings", [])) or record.get("stuck", "")
-        self.jira.comment(key, f"AI Flow doctor: Claude's rescue of {key} ended without a result.\nCause: {cause}\nFindings: {notes}\n"
-                               f"The ticket returns to development ({DOCTOR_TARGET}); it is not escalated to a person.")
-        self.clear_taken_by(key)
-        self.jira.transition(key, DOCTOR_TARGET)
+        record = {**record, "state": "doctor_pending", "doctor_cause": cause,
+                  "doctor_findings": findings or "; ".join(record.get("findings", [])) or record.get("stuck", ""),
+                  "doctor_commented": record.get("doctor_commented", False)}
+        self.finish(key, record, "doctor_pending")
+        if not record["doctor_commented"]:
+            try:
+                self.jira.comment(key, f"AI Flow doctor: Claude's rescue of {key} ended without a result.\nCause: {cause}\n"
+                                       f"Findings: {record['doctor_findings']}\nThe ticket returns to development ({DOCTOR_TARGET}); "
+                                       "it is not escalated to a person.")
+            except JiraError as error:
+                self.op.sup_log(f"flow doctor could not comment on {key}: {error}")
+                return False
+            record["doctor_commented"] = True
+            self.finish(key, record, "doctor_pending")
+        if not self.clear_taken_by(key):
+            return False
+        try:
+            status = str(self.jira.view(key).get("status", "") or "")
+        except JiraError:
+            return False
+        if status != DOCTOR_TARGET and not self.jira.transition(key, DOCTOR_TARGET):
+            return False
         self.op.sup.clear_block(key)
         self.finish(key, record, "failed")
         events.emit("operator.doctor", ticket=key, cause=cause[:300])
+        return True

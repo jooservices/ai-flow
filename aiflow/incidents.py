@@ -61,7 +61,7 @@ def find_incidents(state: dict[str, Any]) -> list[Incident]:
             "ci_state": ticket.get("ci_state", "unknown"),
         }
         blocked_kind = ticket.get("blocked_kind", "")
-        verdict = master_rescue.evaluate(ticket, state["master"], minutes) if state.get("master") else None
+        verdict = master_rescue.evaluate(ticket, state.get("master"), minutes)
         if verdict:  # the master takes the ticket before the generic blocked / stuck incidents
             found.append(Incident(f"rescue:{key}", "rescue", key, f"{key} qualifies for a master rescue: {verdict.trigger}",
                                   {**facts, "blocked_kind": blocked_kind, "reason": ticket.get("reason", ""), "summary": ticket.get("summary", ""),

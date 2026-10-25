@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .master_rescue import check_line as master_check_line
+
 
 def check_line(config: Any, redis_factory: Callable[..., Any], redis_error: type[Exception]) -> str:
     """Return the check output for policy, runtime switch, flow pause and limits."""
@@ -19,4 +21,5 @@ def check_line(config: Any, redis_factory: Callable[..., Any], redis_error: type
         runtime_redis.close()
     return (f"  operator: policy {'ON' if policy.enabled else 'OFF (config/operator.toml)'}, runtime switch {runtime_switch}, "
             f"flow {flow_pause}, agent {policy.agent}, limits {policy.max_runs_per_hour}/hour "
-            f"{policy.max_runs_per_day}/day, {policy.retries_per_ticket_per_day}/ticket/day; use `aiflow-work operator on|off`")
+            f"{policy.max_runs_per_day}/day, {policy.retries_per_ticket_per_day}/ticket/day; use `aiflow-work operator on|off`\n"
+            f"{master_check_line(config.registry.master)}")

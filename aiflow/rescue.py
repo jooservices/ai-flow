@@ -27,7 +27,8 @@ ACTIVE_RESCUE_STATUSES = {master_rescue.HANDOVER.casefold(), "in progress"}
 
 class Rescue:
     def __init__(self, operator: Any) -> None:
-        self.op, self.redis, self.jira, self.cfg = operator, operator.redis, operator.jira, operator.cfg
+        self.op, self.sup = operator, getattr(operator, "sup", operator)
+        self.redis, self.jira, self.cfg = operator.redis, operator.jira, operator.cfg
 
     @property
     def settings(self) -> master_rescue.MasterSettings:
@@ -75,11 +76,17 @@ class Rescue:
         stuck = f"{facts.get('status')} for {facts['times']['minutes_in_status']} min"
         if facts.get("blocked_kind"):
             stuck += f" ({facts['blocked_kind']})"
-        tried = [f"{facts.get('trigger')}"]
-        if facts.get("blocked_kind") == "Attempts":
-            tried.append(f"{self.cfg.max_attempts} failed AI attempts")
+        tried = []
+        attempts = facts.get("attempts")
+        if isinstance(attempts, dict):
+            for role in ("developer", "reviewer", "qa", "pr"):
+                count = attempts.get(role)
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    tried.append(f"{count} failed {role} run(s) recorded")
+        if not tried:
+            tried.append("no prior failed AI runs recorded")
         if facts.get("blocked_kind") == "Rework" or facts.get("rework_rounds"):
-            tried.append(f"{facts.get('rework_rounds') or 'several'} rework round(s)")
+            tried.append(f"{facts.get('rework_rounds', 0)} rework round(s) recorded")
         comments = facts.get("last_comments", [])
         if isinstance(comments, list) and comments:
             tried.append(f"{len(comments)} recent comment(s) reviewed; raw excerpts omitted")
@@ -97,14 +104,14 @@ class Rescue:
             if model:
                 self.jira.set_field(key, self.cfg.model_field, {"value": f"{master_rescue.RESCUE_AGENT}:{model}"})
         except JiraError as error:
-            self.op.sup_log(f"master rescue of {key} could not set the handover fields: {error}")
+            self.log(f"master rescue of {key} could not set the handover fields: {error}")
             self.rollback_handover(key, incident.id, bool(model))
             return True
         started = int(time.time())
         try:
             moved = self.jira.transition(key, master_rescue.HANDOVER)
         except JiraError as error:
-            self.op.sup_log(f"master rescue of {key} got an uncertain Handover response: {error}")
+            self.log(f"master rescue of {key} got an uncertain Handover response: {error}")
             moved = False
         if not moved:
             status = self.current_status(key)
@@ -171,7 +178,7 @@ class Rescue:
         try:
             self.jira.add_label(key, master_rescue.RESCUE_LABEL)
         except JiraError as error:
-            self.op.sup_log(f"master rescue of {key} moved to Handover but could not add its label: {error}")
+            self.log(f"master rescue of {key} moved to Handover but could not add its label: {error}")
             return False
         record["label_pending"] = False
         self.finish(key, record, record.get("state", "active"))
@@ -199,7 +206,7 @@ class Rescue:
         try:
             self.op.audit(incident, "master", outcome, done, [], extra)
         except JiraError:
-            self.op.sup_log(f"master rescue handover audit for {key} is pending a retry")
+            self.log(f"master rescue handover audit for {key} is pending a retry")
             return False
         self.complete_handover_audit(key, record)
         return True
@@ -242,7 +249,7 @@ class Rescue:
         try:
             self.jira.set_field(key, self.settings.taken_by_field, None)
         except JiraError as error:
-            self.op.sup_log(f"master rescue could not clear Taken by on {key}: {error}")
+            self.log(f"master rescue could not clear Taken by on {key}: {error}")
             return False
         return True
 
@@ -251,7 +258,7 @@ class Rescue:
         try:
             self.jira.set_field(key, self.cfg.model_field, None)
         except JiraError as error:
-            self.op.sup_log(f"master rescue could not clear the model field on {key}: {error}")
+            self.log(f"master rescue could not clear the model field on {key}: {error}")
             return False
         return True
 
@@ -289,6 +296,8 @@ class Rescue:
         return record if isinstance(record, dict) else None
 
     def check_rescue(self, key: str, record: dict[str, Any]) -> None:
+        if record.get("state") == "completing" and self.check_completion(key, record):
+            return
         if record.get("state") == "handover_pending" and not self.reconcile_handover(key, record):
             return
         if record.get("handover_audit_pending"):
@@ -314,6 +323,32 @@ class Rescue:
         elif expired:
             self.end(key, ok=False, cause=f"the rescue budget of {record.get('budget', 0)} min ran out without a result",
                      findings=self.recent_findings(key, record))
+
+    def begin_completion(self, key: str) -> bool:
+        record = self.load_record(f"rescue:{key}")
+        if record is None or record.get("state") != "active":
+            return False
+        self.finish(key, record, "completing")
+        return True
+
+    def check_completion(self, key: str, record: dict[str, Any]) -> bool:
+        """Reconcile a successful worker handoff without racing it into the failure doctor."""
+        status = self.rescue_status(key)
+        if not status:
+            return True
+        completed = SUCCESS_STATUSES | {"in review", "review passed", "in qa", "human review", "ready to merge"}
+        if status.casefold() in completed:
+            self.finish(key, record, "finished")
+        elif status.casefold() == master_rescue.HANDOVER.casefold() and self.redis.get(f"lease:{key}"):
+            return True
+        elif status.casefold() == master_rescue.HANDOVER.casefold():
+            record["state"] = "active"
+            self.finish(key, record, "active")
+            return False
+        else:
+            self.end(key, ok=False, cause=f"Claude's completion handoff ended in {status} without a confirmed result",
+                     findings=self.recent_findings(key, record))
+        return True
 
     def rescue_status(self, key: str) -> str:
         return self.current_status(key) or ""
@@ -358,7 +393,7 @@ class Rescue:
                                        f"Findings: {record['doctor_findings']}\nThe ticket returns to development ({DOCTOR_TARGET}); "
                                        "it is not escalated to a person.")
             except JiraError as error:
-                self.op.sup_log(f"flow doctor could not comment on {key}: {error}")
+                self.log(f"flow doctor could not comment on {key}: {error}")
                 return False
             record["doctor_commented"] = True
             self.finish(key, record, "doctor_pending")
@@ -370,7 +405,15 @@ class Rescue:
             return False
         if status != DOCTOR_TARGET and not self.jira.transition(key, DOCTOR_TARGET):
             return False
-        self.op.sup.clear_block(key)
+        self.sup.clear_block(key)
         self.finish(key, record, "failed")
         events.emit("operator.doctor", ticket=key, cause=cause[:300])
         return True
+
+    def log(self, message: str) -> None:
+        callback = getattr(self.op, "sup_log", None)
+        if callback:
+            callback(message)
+            return
+        from .supervisor import log as supervisor_log
+        supervisor_log(message)

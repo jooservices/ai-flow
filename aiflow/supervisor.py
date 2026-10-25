@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import signal
 import subprocess
@@ -12,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agents, deploy, events, github, operator_status, rework_rounds, runner, usage
+from . import agents, deploy, events, github, master_rescue, operator_status, rework_rounds, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
@@ -24,7 +25,7 @@ from .memory.client import Memory
 from .project_database import ProjectDatabase, ticket_database_id
 
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
-          "Human review": "human", "Ready to merge": "finalize"}
+          "Human review": "human", "Ready to merge": "finalize", master_rescue.HANDOVER: "master_rescue"}
 PR_STAGES = ("In QA", "Human review", "Ready to merge")  # checked on GitHub by the supervisor, no AI to pick
 ANY_AI = "Any"  # developer = "Any": the least busy AI takes the step
 DAY = 86400
@@ -181,9 +182,44 @@ class Supervisor:
         self.observe(found := self.jira.search(jql))
         found = [issue for issue in found if issue.get("status") in STAGES]
         found = [issue for issue in found if issue["key"] not in self.parents_of_open_work(found)]  # containers are never worked
-        if self.cfg.home and self.cfg.slot == 1:  # worker 1 of a project serves only its own project, so it always has a free hand for it
-            found = [issue for issue in found if issue["key"].rsplit("-", 1)[0] == self.cfg.home]
+        if self.cfg.home and self.cfg.slot == 1:  # a Claude worker can rescue a Handover ticket from another project
+            found = [issue for issue in found if self.own_project(issue) or self.active_master_rescue(issue)]
         return self.fair_order(found)
+
+    def own_project(self, issue: dict[str, Any]) -> bool:
+        return issue["key"].rsplit("-", 1)[0] == self.cfg.home
+
+    def active_master_rescue(self, issue: dict[str, Any]) -> dict[str, Any] | None:
+        """Only a recorded, fully audited master Handover may enter the developer worker path."""
+        if issue.get("status") != master_rescue.HANDOVER or master_rescue.RESCUE_LABEL not in issue.get("labels", []):
+            return None
+        try:
+            record = json.loads(self.redis.get(f"rescue:{issue['key']}") or "{}")
+        except (TypeError, ValueError, AttributeError):
+            return None
+        if not self.confirmed_master_record(record):
+            return None
+        times = self.master_rescue_timing(record)
+        if times is None:
+            return None
+        started, budget = times
+        if time.time() >= started + budget * 60:
+            return None
+        return record
+
+    def confirmed_master_record(self, record: Any) -> bool:
+        return (isinstance(record, dict) and record.get("state") == "active"
+                and not record.get("label_pending") and not record.get("handover_audit_pending"))
+
+    def master_rescue_timing(self, record: dict[str, Any]) -> tuple[float, float] | None:
+        try:
+            started_raw, budget_raw = record.get("started"), record.get("budget")
+            if isinstance(started_raw, bool) or isinstance(budget_raw, bool):
+                return None
+            started, budget = float(started_raw), float(budget_raw)
+        except (TypeError, ValueError):
+            return None
+        return (started, budget) if math.isfinite(started) and math.isfinite(budget) and budget > 0 else None
 
     def fair_order(self, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """The worker's own project first (a shared worker has none); then rework; then the projects take turns: the first ticket of
@@ -252,6 +288,8 @@ class Supervisor:
             return False
         if "aiflow-hold" in issue.get("labels", []) or self.redis.get(f"lease:{key}"):
             return False
+        if status == master_rescue.HANDOVER:
+            return self.active_master_rescue(issue) is not None
         if status in ("To Do", "In Progress") and self.at_capacity(key):
             return False
         if status == "To Do":
@@ -389,6 +427,23 @@ class Supervisor:
         except RedisError as error:
             log(f"{key}: could not release the {agent} {role} session slot ({error}); it expires by itself")
 
+    def reserve_master_agent(self, key: str) -> tuple[str | None, str | None]:
+        """Reserve Claude specifically for a rescue, independent of normal role preference."""
+        agent = master_rescue.RESCUE_AGENT
+        if not self.master_agent_online_here() or self.cooling(agent):
+            return None, None
+        owner = f"{self.cfg.owner}:{key}:master_rescue:{uuid.uuid4().hex}"
+        limit = self.cfg.ai_limits.get(agent.casefold())
+        if not self.redis.acquire_session(self.cfg.machine, agent, owner, self.cfg.lease_seconds, limit):
+            return None, None
+        events.emit("ai.assign", ticket=key, role="master_rescue", agent=agent, limit=limit, from_field=True)
+        return agent, owner
+
+    def master_agent_online_here(self) -> bool:
+        agent = master_rescue.RESCUE_AGENT
+        probe = self.redis.get(f"probe:{self.cfg.machine}:{agent}")
+        return agent in agents.available((agent,)) and bool(probe) and not probe.startswith("down")
+
     def usable_ais(self) -> list[str]:
         """The installed AIs of this machine, without those the last probe found signed out or out of balance."""
         installed = agents.available(self.cfg.agent_order)
@@ -399,7 +454,8 @@ class Supervisor:
         """Ask each installed AI for one word every few hours, so one that lost its login leaves the pool before a ticket meets it."""
         if not self.redis.acquire("probing:" + self.cfg.machine, self.cfg.owner, 600):
             return
-        for agent in agents.available(self.cfg.agent_order):
+        probe_order = tuple(dict.fromkeys((*self.cfg.agent_order, master_rescue.RESCUE_AGENT)))
+        for agent in agents.available(probe_order):
             name = f"probe:{self.cfg.machine}:{agent}"
             if self.redis.get(name) is not None:
                 continue
@@ -430,11 +486,16 @@ class Supervisor:
 
     def publish_ais(self) -> None:
         """Tell the other machines which AIs this one has (the entry expires when the machine stops beating)."""
-        self.redis.set(f"ais:{self.cfg.machine}", ",".join(self.usable_ais()), 600)
+        pool = self.usable_ais()
+        if self.master_agent_online_here() and master_rescue.RESCUE_AGENT not in pool:
+            pool.append(master_rescue.RESCUE_AGENT)
+        self.redis.set(f"ais:{self.cfg.machine}", ",".join(pool), 600)
 
     def online_pool(self) -> list[str]:
         """AIs installed on this machine or on any machine that published recently."""
         pool = list(self.usable_ais())
+        if self.master_agent_online_here() and master_rescue.RESCUE_AGENT not in pool:
+            pool.append(master_rescue.RESCUE_AGENT)
         for name in self.redis.scan("ais:*"):
             for ai in (self.redis.get(name) or "").split(","):
                 if ai and ai not in pool:
@@ -485,18 +546,16 @@ class Supervisor:
                         continue
                     view = self.jira.view(issue["key"], full=True)
                     role = STAGES[issue["status"]]
-                    agent = None
-                    if role == "developer":
-                        spec_agent, spec_model = self.ticket_spec(issue["key"])
-                        if spec_agent:
-                            view = {**view, "agent": spec_agent, "spec_model": spec_model, "agent_field": view.get("agent")}
+                    view = self.stage_view(issue["key"], role, view)
+                    if view is None:
+                        continue
                     if not self.redis.acquire(f"lease:{issue['key']}", self.cfg.owner, self.cfg.lease_seconds):
                         continue
                     ticket_lease = True
-                    if role in ("developer", "reviewer"):
-                        agent, session_owner = self.reserve_agent(role, issue["key"], view.get("agent"))
+                    agent = None
+                    if role in ("developer", "reviewer", "master_rescue"):
+                        agent, session_owner = self.reserve_stage_agent(role, issue["key"], view)
                         if agent is None:
-                            self.unserved(issue["key"], role, view.get("agent"))
                             continue
                         session_agent = agent
                 except (JiraError, RuntimeError) as error:
@@ -522,6 +581,25 @@ class Supervisor:
                 self.redis.set(f"served:{issue['key'].rsplit('-', 1)[0]}", str(time.time()), 7 * DAY)
                 return True
         return False
+
+    def stage_view(self, key: str, role: str, view: dict[str, Any]) -> dict[str, Any] | None:
+        if role == "developer":
+            agent, model = self.ticket_spec(key)
+            if agent:
+                return {**view, "agent": agent, "spec_model": model, "agent_field": view.get("agent")}
+        if role == "master_rescue":
+            if view.get("status") != master_rescue.HANDOVER:
+                return None
+            return {**view, "agent_field": view.get("agent")}
+        return view
+
+    def reserve_stage_agent(self, role: str, key: str, view: dict[str, Any]) -> tuple[str | None, str | None]:
+        if role == "master_rescue":
+            return self.reserve_master_agent(key)
+        agent, owner = self.reserve_agent(role, key, view.get("agent"))
+        if agent is None:
+            self.unserved(key, role, view.get("agent"))
+        return agent, owner
 
     def run_forever(self) -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -582,25 +660,53 @@ class Supervisor:
         repo = Repo(self.cfg.root, ticket_field(description, "Repo", project.repo), project.company)
         change = self.change_type(key)
         base, start = branches(project, change, str(view.get("type", "")), description)
+        self.record_process_metadata(key, issue, view, role, agent, change)
+        stopped = self.prepare_process_repository(key, repo, role)
+        if stopped is not None:
+            return stopped
+        if self.reviewer_waits_for_remote_branch(key, role, repo):
+            return False
+        return self.process_stage(key, issue, view, role, agent, session_owner, repo, base, start)
+
+    def record_process_metadata(self, key: str, issue: dict[str, Any], view: dict[str, Any],
+                                role: str, agent: str | None, change: str) -> None:
         if change == "Hotfix":
             self.redis.set(f"ishotfix:{key}", "1", 60 * DAY)
         if str(view.get("type", "")) == "Release":
             self.redis.set(f"isrelease:{key}", "1", 60 * DAY)
-        if role in ("developer", "reviewer"):
+        if role in ("developer", "reviewer", "master_rescue"):
             log(f"{key} [{issue['status']}] {role} -> {agent}")
+
+    def prepare_process_repository(self, key: str, repo: Repo, role: str) -> bool | None:
         if not repo.exists():
+            if role == "master_rescue":
+                return self.end_master_rescue(key, False, "Claude could not find the ticket repository")
             self.block(key, f"Repository `{repo.name}` was not found under JOOservices/projects.", kind="Config")
             return True
         if not repo.has_remote():
+            if role == "master_rescue":
+                return self.end_master_rescue(key, False, "Claude could not access the ticket repository remote")
             self.block(key, f"Repository `{repo.name}` has no remote; the flow needs GitHub pull requests.", kind="Config")
             return True
         self.redis.set(f"repo:{key}", repo.name, 30 * DAY)
+        return None
+
+    def reviewer_waits_for_remote_branch(self, key: str, role: str, repo: Repo) -> bool:
         home = self.redis.get(f"home:{key}")
         if role == "reviewer" and home and home != self.cfg.machine and not repo.remote_branch(key):
             log(f"{key}: worktree lives on {home} and the branch was never pushed; leaving it")
-            return False
+            return True
+        return False
+
+    def process_stage(self, key: str, issue: dict[str, Any], view: dict[str, Any], role: str,
+                      agent: str | None, session_owner: str | None, repo: Repo, base: str, start: str) -> bool:
         if role == "developer":
             return self.develop(key, issue, view, repo, base, agent or "", start, session_owner)
+        if role == "master_rescue":
+            record = self.active_master_rescue(issue)
+            if record is None:
+                return False
+            return self.develop(key, issue, view, repo, base, master_rescue.RESCUE_AGENT, start, session_owner, record)
         if role == "reviewer":
             return self.review(key, view, repo, base, agent or "", session_owner)
         if role == "pr":
@@ -1086,7 +1192,8 @@ class Supervisor:
                 "AIFLOW_MEMORY_PROJECT": project.jira_key, "AIFLOW_MEMORY_REPO": repo.name, "AIFLOW_MEMORY_TICKET": key, "AIFLOW_MEMORY_ACTOR": "ai"}
 
     def execute(self, role: str, agent: str, key: str, view: dict[str, Any], workdir: Path, branch: str, base: str,
-                repo: Repo, slot_owner: str | None = None, session_owner: str | None = None) -> tuple[str, str, tuple[str, str] | None, bool]:
+                repo: Repo, slot_owner: str | None = None, session_owner: str | None = None,
+                model_override: tuple[str, str] | None = None, max_seconds: int | None = None) -> tuple[str, str, tuple[str, str] | None, bool]:
         """Run one AI. Returns (why, final text, verdict, quota)."""
         description = view.get("description", "")
         try:
@@ -1108,7 +1215,7 @@ class Supervisor:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         log_dir = self.cfg.root / ".tmp" / "aiflow" / "logs"
         log_file, result_file = log_dir / f"{key}-{role}-{stamp}.log", log_dir / f"{key}-{role}-{stamp}.result"
-        model, effort = self.model_for(role, agent, key)
+        model, effort = self.execution_model(role, agent, key, model_override)
         argv, stdin_text = agents.build_command(agent, workdir, result_file, prompt, self.cfg.root, model, effort)
         pushed_at = [time.monotonic()]
 
@@ -1143,7 +1250,9 @@ class Supervisor:
             return "lost-lease", "", None, False
         code, why = runner.run(
             argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root, self.memory_env(key, repo)),
-            idle_seconds=self.cfg.idle_minutes * 60, max_seconds=self.cfg.max_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds,
+            idle_seconds=self.cfg.idle_minutes * 60,
+            max_seconds=self.execution_limit(max_seconds),
+            heartbeat_seconds=self.cfg.heartbeat_seconds,
             heartbeat=beat)
         used = usage.report(agent, log_file, ticket=key, role=role, model=model, effort=effort, why=why, code=code, minutes=round((time.monotonic() - began) / 60, 2))
         self.log_usage(key, role, agent, (time.monotonic() - began) / 60, why, code, used)
@@ -1155,6 +1264,12 @@ class Supervisor:
         events.emit("ai.run", ticket=key, role=role, agent=agent, model=model, effort=effort, minutes=round((time.monotonic() - began) / 60, 2), why=why,
                     code=code, verdict=found[0] if found else "", detail=(found[1] if found else "")[:300], quota=quota, log_file=str(log_file))
         return why, text, found, quota
+
+    def execution_model(self, role: str, agent: str, key: str, override: tuple[str, str] | None) -> tuple[str, str]:
+        return override if override is not None else self.model_for(role, agent, key)
+
+    def execution_limit(self, max_seconds: int | None) -> int:
+        return max_seconds if max_seconds is not None else self.cfg.max_minutes * 60
 
     def quota_hit(self, key: str, agent: str, role: str) -> None:
         self.redis.set(f"cooldown:{agent}", "1", self.cfg.quota_cooldown_minutes * 60)
@@ -1173,37 +1288,75 @@ class Supervisor:
 
     # ---- developer -------------------------------------------------------------------------------------------
     def develop(self, key: str, issue: dict[str, Any], view: dict[str, Any], repo: Repo, base: str, agent: str,
-                start: str = "", session_owner: str | None = None) -> bool:
-        if self.attempts(key, "developer") >= self.cfg.max_attempts:
+                start: str = "", session_owner: str | None = None,
+                rescue_record: dict[str, Any] | None = None) -> bool:
+        if self.development_limit(key, repo, rescue_record):
+            return True
+        started, previous = self.start_development(key, issue, view, agent)
+        if not started:
+            return False
+        prepared = self.prepare_development_worktree(key, view, repo, base, start, agent, rescue_record)
+        if prepared is None:
+            return True
+        workdir, branch = prepared
+        self.start_development_run(key, issue, view, agent, previous, workdir, branch)
+        model_override, max_seconds = self.rescue_execution_limit(rescue_record)
+        if rescue_record is not None and max_seconds <= 0:
+            return self.end_master_rescue(key, False, "Claude's rescue budget expired before the worker started")
+        result = self.execute("developer", agent, key, view, workdir, branch, base, repo,
+                              session_owner=session_owner, model_override=model_override, max_seconds=max_seconds)
+        why, text, found, quota = result
+        if why == "lost-lease":
+            return True
+        if rescue_record is not None:
+            return self.finish_master_attempt(key, view, repo, base, agent, workdir, branch, text, why, found, quota)
+        return self.finish_developer_attempt(key, view, repo, base, agent, workdir, branch, text, why, found, quota)
+
+    def development_limit(self, key: str, repo: Repo, rescue_record: dict[str, Any] | None) -> bool:
+        if rescue_record is None and self.attempts(key, "developer") >= self.cfg.max_attempts:
             self.block(key, "Too many failed developer attempts.", kind="Attempts")
             return True
-        if self.state(key, "isrelease") and not self.release_ready(key, repo):
-            return True
+        return self.state(key, "isrelease") and not self.release_ready(key, repo)
+
+    def start_development(self, key: str, issue: dict[str, Any], view: dict[str, Any], agent: str) -> tuple[bool, str]:
         if issue["status"] == "To Do" and not self.jira.transition(key, "In Progress"):
             log(f"{key}: could not start (someone else did?)")
-            return False
+            return False, ""
         if issue["status"] == "To Do":
             self.clear_block(key)
-        if view.get("agent_field", view.get("agent")) != agent:  # keep Agent (AI) equal to the AI that really works (AI Model may differ)
+        if view.get("agent_field", view.get("agent")) != agent:
             self.jira.set_agent(key, agent)
         if view.get("spec_model") and view.get("agent") == agent:
             self.redis.set(f"devmodel:{key}", f"{agent}:{view['spec_model']}", 30 * DAY)
         else:
-            self.redis.delete(f"devmodel:{key}")  # another AI took over: it runs with its own default model
+            self.redis.delete(f"devmodel:{key}")
         self.label_workspace(key)
         if "rework" in issue.get("labels", []):
             self.jira.remove_label(key, "rework")
         previous = self.redis.get(f"dev:{key}")
         self.redis.set(f"dev:{key}", agent, 30 * DAY)
         self.redis.set(f"home:{key}", self.cfg.machine, 30 * DAY)
+        return True, previous or ""
+
+    def prepare_development_worktree(self, key: str, view: dict[str, Any], repo: Repo, base: str, start: str,
+                                    agent: str, rescue_record: dict[str, Any] | None) -> tuple[Path, str] | None:
         try:
             workdir, branch = repo.ensure_worktree(key, view.get("summary", key), start or base)
             repo.adopt_remote(workdir, branch)
         except GitError as error:
-            self.failed(key, "developer", agent, "worktree", str(error))
-            return True
+            if rescue_record is not None:
+                self.end_master_rescue(key, False, f"Claude could not prepare the ticket worktree ({type(error).__name__})")
+            else:
+                self.failed(key, "developer", agent, "worktree", str(error))
+            return None
         if not self.prepare_ticket_database(key, workdir):
-            return True
+            if rescue_record is not None:
+                self.end_master_rescue(key, False, "Claude could not prepare the ticket test database")
+            return None
+        return workdir, branch
+
+    def start_development_run(self, key: str, issue: dict[str, Any], view: dict[str, Any], agent: str,
+                              previous: str, workdir: Path, branch: str) -> None:
         takeover = ""
         if issue["status"] == "In Progress" and previous:
             reason = "hit its usage limit" if self.cooling(previous) else "stopped (died, lost its lease or showed no activity)"
@@ -1212,10 +1365,13 @@ class Supervisor:
         self.jira.comment(key, f"AI: {agent} on {self.cfg.machine}   Branch: {branch}   Worktree: {workdir}\n"
                                f"Now: starting {kind} run (resumes from existing commits if any).{takeover}")
         self.replies_file(key).unlink(missing_ok=True)
-        why, text, found, quota = self.execute("developer", agent, key, view, workdir, branch, base, repo,
-                                               session_owner=session_owner)
-        if why == "lost-lease":
-            return True
+
+    def rescue_execution_limit(self, record: dict[str, Any] | None) -> tuple[tuple[str, str] | None, int | None]:
+        return self.master_runtime(record) if record is not None else (None, None)
+
+    def finish_developer_attempt(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str,
+                                 workdir: Path, branch: str, text: str, why: str,
+                                 found: tuple[str, str] | None, quota: bool) -> bool:
         if quota:
             self.quota_hit(key, agent, "developer")
         elif found and found[0] == "DONE" and repo.ahead(workdir, base) > 0:
@@ -1226,24 +1382,60 @@ class Supervisor:
             self.failed(key, "developer", agent, why if why != "ok" else "no DONE result or no commits", text)
         return True
 
-    def finish_development(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str, workdir: Path, branch: str, text: str) -> None:
+    def master_runtime(self, record: dict[str, Any]) -> tuple[tuple[str, str], int]:
+        """Resolve the saved Claude model and remaining wall-clock seconds for this rescue."""
+        spec = str(record.get("model", "") or "")
+        if spec:
+            model, _, effort = spec.partition(":")
+        else:
+            model, effort = self.cfg.agent_models.get(master_rescue.RESCUE_AGENT, ("", ""))
+        seconds = int(float(record["started"]) + float(record["budget"]) * 60 - time.time())
+        return (model, effort), max(0, seconds)
+
+    def finish_master_attempt(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str,
+                              workdir: Path, branch: str, text: str, why: str,
+                              found: tuple[str, str] | None, quota: bool) -> bool:
+        """Accept a normal developer completion or return an unsuccessful Claude rescue through the doctor."""
+        if quota:
+            self.quota_hit(key, agent, "master_rescue")
+        elif found and found[0] == "DONE" and repo.ahead(workdir, base) > 0:
+            if not self.begin_master_completion(key):
+                return True
+            if self.finish_development(key, view, repo, base, agent, workdir, branch, text):
+                return self.end_master_rescue(key, True)
+            why = "Claude's result could not complete the normal development handoff"
+        elif found and found[0] == "BLOCKED":
+            why = "Claude reported that the rescue remained blocked"
+        else:
+            why = "Claude ended without a DONE result and committed changes" if why == "ok" else f"Claude rescue ended ({why})"
+        return self.end_master_rescue(key, False, why)
+
+    def end_master_rescue(self, key: str, ok: bool, cause: str = "") -> bool:
+        from .rescue import Rescue
+        return Rescue(self).end(key, ok=ok, cause=cause)
+
+    def begin_master_completion(self, key: str) -> bool:
+        from .rescue import Rescue
+        return Rescue(self).begin_completion(key)
+
+    def finish_development(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str, workdir: Path, branch: str, text: str) -> bool:
         if self.cfg.project(key).database:
             try:
                 if repo.ticket_env_committed(workdir, base):
                     self.block(key, "The ticket worktree .env was committed; remove it from the branch before continuing.", kind="Config")
-                    return
+                    return False
             except GitError as error:
                 self.failed(key, "developer", agent, "worktree .env safety check", str(error))
-                return
+                return False
         bad = [s for s in repo.commit_subjects(workdir, base) if not github.valid_title(s)]
         if bad:
             self.failed(key, "developer", agent, "commit messages break Conventional Commits "
                         "(type(scope): Subject, uppercase first letter, no final period, 10-120 chars): " + "; ".join(bad[:4]), text)
-            return
+            return False
         answers = self.read_replies(key)
         if isinstance(answers, str):
             self.failed(key, "developer", agent, answers, text)
-            return
+            return False
         title = agents.pr_title(text) or ""
         if not github.valid_title(title):
             title = github.fallback_title(key, view.get("summary", key), str(view.get("type", "")), self.change_type(key))
@@ -1252,20 +1444,19 @@ class Supervisor:
             repo.push(workdir, branch, lease=True)
         except GitError as error:
             self.failed(key, "developer", agent, f"push failed: {error}", text)
-            return
+            return False
         self.redis.set(f"pushed:{key}", str(int(time.time())), 30 * DAY)
         self.require_human_for_deployment(key)
         for name in ("attempts:%s:developer", "qa:%s"):
             self.redis.delete(name % key)
         if answers and self.post_replies(key, repo, answers):
-            return
+            return False
         if self.state(key, "humanok"):  # a human already approved: no review, no QA again, only CI
             self.jira.comment(key, f"AI Flow: {agent} finished the rework on {self.cfg.machine}. Branch {branch} pushed; the human approved "
                                    f"this ticket before, so it goes back to Ready to merge (CI must pass).\n\n{tail(text, 1000)}")
-            self.jira.transition(key, "Ready to merge")
-            return
+            return self.jira.transition(key, "Ready to merge")
         self.jira.comment(key, f"AI Flow: {agent} finished on {self.cfg.machine}. Branch {branch} pushed to origin; sending to review.\n\n{tail(text, 1500)}")
-        self.jira.transition(key, "In Review")
+        return self.jira.transition(key, "In Review")
 
     def require_human_for_deployment(self, key: str) -> None:
         """A Deployment hand-over needs a human unless the project opts out."""

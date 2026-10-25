@@ -25,7 +25,27 @@ def ticket_snapshot(issue: dict[str, Any], blocked: dict[str, Any], rounds: int,
             "description": description, "stretch_minutes": stretch, "worked_minutes": worked_minutes,
             "rescued": rescue is not None, "last_comments": comments,
             "context_complete": context_complete,
-            "rework_rounds": rounds}
+            "rework_rounds": rounds, "attempts": attempt_history(redis, key)}
+
+
+def attempt_history(redis: Any, key: str) -> dict[str, int]:
+    """Return recorded failed runs by role; never substitute configured limits for ticket history."""
+    roles = ("developer", "reviewer", "qa", "pr")
+    try:
+        values = redis.get_many([f"attempts:{key}:{role}" for role in roles])
+    except (RedisError, OSError):
+        return {}
+    if not isinstance(values, (list, tuple)):
+        return {}
+    found = {}
+    for role, value in zip(roles, values):
+        try:
+            count = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            found[role] = count
+    return found
 
 
 def owner_context(issue: dict[str, Any], reason: str, summary: str, redis: Any, jira: Any) -> tuple[str, list[dict[str, Any]], bool]:

@@ -44,8 +44,8 @@ a cap below the work limit plus the rescue budget, a model that is not Claude) a
    so failed label writes and the handover audit comment are retried on later operator passes. The saved audit marker prevents
    duplicate comments when Jira accepted a comment but its response was lost. The label and record `rescue:<KEY>` make it one
    rescue per ticket; a later problem follows the normal operator path.
-4. **Audit comment** on the ticket: where it is stuck (status, time, and Blocked kind), what was tried (trigger, failed
-   attempts or rework rounds, and whether recent comments were reviewed), the work time and the remaining budget
+4. **Audit comment** on the ticket: where it is stuck (status, time, and Blocked kind), what was tried (recorded failed
+   developer/reviewer/QA/PR runs, rework rounds, and whether recent comments were reviewed), the work time and remaining budget
    (`min(master_minutes, total_cap_minutes - work time)`), and the model. Raw Blocked reasons and comment excerpts are omitted
    from audit text and logs so ticket content cannot copy credentials into stdout or OpenObserve.
 5. **Unsuccessful rescue**: if the budget expires while rescue is active, or Jira moves the ticket out of the rescue workflow
@@ -63,13 +63,14 @@ Handover succeeds but a later Jira label update fails, the rescue record keeps t
 it without delaying flow-doctor handling. A failed handover audit comment stays pending and is retried; reconciliation checks for
 its marker first so an accepted comment is not posted twice.
 
-### Handover pickup dependency
+### Handover pickup
 
-This code records the `Handover` status, `Taken by = Claude`, AI Model field, and rescue budget; it does not start a Claude worker.
-The legacy supervisor's worker stages do not include `Handover`. Rescue therefore depends on JAIF-102's Jira workflow/automation
-to pick up a Handover ticket for Claude, use the AI Model field, and enforce the `master_minutes` budget while Claude is working.
-The rescue timer is recorded immediately before the Handover request so an ambiguous response cannot extend the budget. If JAIF-102 only adds the status without that pickup behavior, rescue
-execution is not active until that dependency is supplied.
+The existing worker observes `Handover` tickets, but starts work only when both the `master-rescue` label and an active rescue
+record with a completed handover audit are present. It reserves a Claude session, resumes the normal developer worktree and
+prompt, uses the model saved at handover, and stops the runner at the saved rescue deadline. A successful developer result
+continues through the normal pull-request path. A run that times out, reports Blocked, or ends without committed work goes
+through the flow doctor, which records the cause and returns the ticket to To Do with a safe reference to its findings. No
+separate JAIF-102 worker automation is needed; JAIF-102 supplies the Handover status and `Taken by` Jira field.
 
-What AI Flow checks after the merge: the `Handover` status and the `Taken by` field exist in the Jira projects (JAIF-102), and
-the JAIF-102 pickup workflow routes a Claude handover using the model and budget recorded here.
+The rescue timer starts just before the Handover request, so an ambiguous Jira response cannot extend the budget. After merge,
+AI Flow verifies that the configured Jira projects expose the Handover status and `Taken by` field (JAIF-102).

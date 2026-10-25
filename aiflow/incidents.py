@@ -78,6 +78,7 @@ def _rescue_incident(ticket: dict[str, Any], state: dict[str, Any], facts: dict[
                      "summary": ticket.get("summary", ""), "mode": verdict.mode, "trigger": verdict.trigger,
                      "topic": verdict.topic, "stretch_minutes": int(ticket.get("stretch_minutes", 0)),
                      "worked_minutes": int(ticket.get("worked_minutes", 0)),
+                     "attempts": ticket.get("attempts", {}),
                      "remaining_minutes": verdict.remaining_minutes})
 
 

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from aiflow import master_rescue
+from aiflow import master_rescue, operator_state
 from aiflow.config import ConfigError, load
 from aiflow.incidents import find_incidents
 from aiflow.jira import JiraError
@@ -236,6 +236,36 @@ class RescueRunTests(unittest.TestCase):
         self.assertNotIn("tried twice", body)
         self.assertIn("Remaining budget: 50 min", body)
         self.assertIn("Taken by: Claude, model opus (effort max)", body)
+
+    def test_handover_audit_uses_recorded_failed_runs_instead_of_the_attempt_limit(self):
+        op, sup, redis = self.build()
+        now = time.time()
+        issue = {"key": "JAIF-1", "status": "Blocked", "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+                 "labels": [], "summary": "Routine task", "description": "Fix the routine task"}
+        sup.jira.found = [issue]
+        sup.jira.comments = lambda key, last=3: [{"author": "Claude", "body": "updated parser"},
+                                                 {"author": "Codex", "body": "added regression"}]
+        redis.set_persistent("blocked:JAIF-1", json.dumps({"kind": "Attempts", "reason": "three failures"}))
+        redis.set_persistent("statussince:JAIF-1", str(now - 40 * 60))
+        redis.set_persistent("worked:JAIF-1", "100")
+        redis.set_persistent("attempts:JAIF-1:developer", "2")
+        redis.set_persistent("attempts:JAIF-1:qa", "1")
+
+        tickets = operator_state.tickets(op, now)
+        incidents = find_incidents({"now": now, "thresholds": {"blocked_minutes": 30, "stuck_minutes": 120,
+                                    "ci_wait_minutes": 120, "rework_limit": 3}, "tickets": tickets,
+                                    "master": SETTINGS, "heartbeats": {}, "stale_seconds": 300, "role_pools": {}})
+        incident = next(item for item in incidents if item.kind == "rescue")
+        sup.jira.comments = []
+        self.assertTrue(op.handle(incident))
+        body = "\n".join(comment for key, comment in sup.jira.comments if key == "JAIF-1")
+
+        self.assertIn("Stuck: Blocked for 40 min (Attempts)", body)
+        self.assertIn("Tried: 2 failed developer run(s) recorded; 1 failed qa run(s) recorded", body)
+        self.assertNotIn("3 failed AI attempts", body)
+        self.assertIn("Remaining budget: 60 min", body)
+        self.assertNotIn("updated parser", body)
+        self.assertNotIn("added regression", body)
 
     def test_owner_context_fetch_failures_fail_closed_to_the_owner(self):
         now = time.time()
@@ -614,6 +644,17 @@ class RescueRunTests(unittest.TestCase):
         redis.set_persistent("rescue:JAIF-1", json.dumps(record))
         sup.jira.status = "Done"
         op.check_rescues()
+        self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "finished")
+        self.assertFalse(any(body.startswith("AI Flow doctor") for _, body in sup.jira.comments))
+
+    def test_successful_worker_handoff_wins_the_operator_reconciliation_race(self):
+        op, sup, redis = self.build()
+        op.handle(self.incident())
+        self.assertTrue(op.rescue.begin_completion("JAIF-1"))
+        sup.jira.status = "In Review"
+
+        op.check_rescues()
+
         self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "finished")
         self.assertFalse(any(body.startswith("AI Flow doctor") for _, body in sup.jira.comments))
 

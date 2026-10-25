@@ -199,6 +199,10 @@ class RescueRunTests(unittest.TestCase):
         op.handle(incident)
         self.assertIsNone(redis.get("rescue:JAIF-1"))
         self.assertIsNotNone(redis.get(f"operator:cool:{incident.id}"))
+        self.assertNotIn(("JAIF-1", "master-rescue"), sup.jira.added)
+        self.assertIsNone(sup.jira.fields[("JAIF-1", "Taken by")])
+        retry = find_incidents(state([ticket("JAIF-1", "Blocked", 40, blocked_kind="Config")], master=SETTINGS))
+        self.assertEqual([(item.id, item.kind) for item in retry], [(incident.id, "rescue")])
 
     def test_rescue_without_a_result_goes_through_the_flow_doctor_to_development(self):
         op, sup, redis = self.build()

@@ -24,6 +24,11 @@ The owner is not in the loop. When a ticket is Blocked, a pull request is stuck,
 
 Tickets with the label `aiflow-hold` or `needs-owner` are never incidents. Human review waits for the owner by design.
 
+Master rescue records a handover in the JAIF-102 `Handover` status with `Taken by = Claude`. This legacy supervisor does not
+schedule work from `Handover`; Claude pickup, use of the AI Model field, and enforcement of the rescue budget depend on the
+JAIF-102 Jira workflow/automation. A failed Handover transition leaves no rescue label or record, so the incident can retry after
+its temporary cooldown.
+
 ## What the operator may do alone
 Answer a Blocked ticket's question when the ticket, its parents or the documents answer it clearly; unblock; send a ticket back to To Do with a reason; retry CI; replace a dead AI; restart a worker; pause and resume the flow. As supervisor actions: `comment`, `transition` (To Do, Backlog or Blocked only), `label` (`needs-owner` or `rework` only), `retry_ci`, `replace_ai`, `restart_worker`, `pause`, `resume`; at most 5 per run.
 

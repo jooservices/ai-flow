@@ -3,7 +3,7 @@
     rescue incident -> Claude available?  yes: Handover status, Taken by = Claude, label master-rescue, audit comment   (one per ticket)
                                           no (quota / offline): the owner at once
                     -> owner-only work or no budget left: the owner at once
-    Claude's rescue ends without a result (budget used up, or `end_rescue`) -> the flow doctor records the cause and returns
+    Claude's rescue budget expires without a result -> the flow doctor records the cause and returns
     the ticket to development with its findings; it is not escalated to a person.
 
 The rescue record `rescue:<KEY>` (Redis, kept) holds the state, the start, Claude's budget and the model; it is also the
@@ -85,7 +85,6 @@ class Rescue:
         key, facts = incident.ticket, incident.facts
         model, effort = self.model()
         try:
-            self.jira.add_label(key, master_rescue.RESCUE_LABEL)
             self.jira.set_field(key, self.settings.taken_by_field, {"value": master_rescue.RESCUE_AGENT})
             if model:
                 self.jira.set_field(key, self.cfg.model_field, {"value": f"{master_rescue.RESCUE_AGENT}:{model}"})
@@ -94,17 +93,29 @@ class Rescue:
             self.op.sup_log(f"master rescue of {key} failed: {error}")
             moved = False
         if not moved:
-            self.redis.set(f"operator:cool:{incident.id}", "1", 600)  # try again later; the label stays so there is never a second rescue
+            self.clear_taken_by(key)
+            self.redis.set(f"operator:cool:{incident.id}", "1", 600)  # retry after the temporary cooldown
             return True
         self.redis.delete(f"lease:{key}")  # a worker still holding the ticket stops at its next heartbeat
         record = dict(state="active", started=int(time.time()), budget=facts.get("remaining_minutes", 0), model=f"{model}:{effort}".strip(":"),
                       stuck=facts.get("trigger", ""), findings=self.lines(incident))
         self.redis.set_persistent(f"rescue:{key}", json.dumps(record))
+        try:
+            self.jira.add_label(key, master_rescue.RESCUE_LABEL)
+        except JiraError as error:
+            self.op.sup_log(f"master rescue of {key} moved to Handover but could not add its label: {error}")
         extra = self.lines(incident) + [f"Taken by: {master_rescue.RESCUE_AGENT}, model {model or 'default'}" + (f" (effort {effort})" if effort else "")]
         self.op.audit(incident, "master", f"HANDOVER to {master_rescue.RESCUE_AGENT}: status {master_rescue.HANDOVER}, label {master_rescue.RESCUE_LABEL}",
                       ["handover", f"label {master_rescue.RESCUE_LABEL}"], [], extra)
         events.emit("operator.rescue", ticket=key, outcome="handover", budget=record["budget"], model=record["model"])
         return True
+
+    def clear_taken_by(self, key: str) -> None:
+        """Undo the temporary owner field when Jira refuses the Handover transition."""
+        try:
+            self.jira.set_field(key, self.settings.taken_by_field, None)
+        except JiraError as error:
+            self.op.sup_log(f"master rescue could not clear Taken by on {key}: {error}")
 
     # ---- the end of a rescue -----------------------------------------------------------------------------------------
     def check_rescues(self) -> None:
@@ -130,7 +141,7 @@ class Rescue:
         self.redis.set_persistent(f"rescue:{key}", json.dumps({**record, "state": state}))
 
     def end(self, key: str, ok: bool, cause: str = "", findings: str = "") -> None:
-        """Claude's rescue ended. With a result the record is closed; without one the flow doctor takes over."""
+        """Record a terminal rescue outcome; the budget-expiry path sends a missing result to the flow doctor."""
         try:
             record = json.loads(self.redis.get(f"rescue:{key}") or "{}")
         except (TypeError, ValueError):
@@ -145,10 +156,7 @@ class Rescue:
         notes = findings or "; ".join(record.get("findings", [])) or record.get("stuck", "")
         self.jira.comment(key, f"AI Flow doctor: Claude's rescue of {key} ended without a result.\nCause: {cause}\nFindings: {notes}\n"
                                f"The ticket returns to development ({DOCTOR_TARGET}); it is not escalated to a person.")
-        try:
-            self.jira.set_field(key, self.settings.taken_by_field, None)
-        except JiraError as error:
-            self.op.sup_log(f"flow doctor could not clear Taken by on {key}: {error}")
+        self.clear_taken_by(key)
         self.jira.transition(key, DOCTOR_TARGET)
         self.op.sup.clear_block(key)
         self.finish(key, record, "failed")

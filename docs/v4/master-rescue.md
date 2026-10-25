@@ -40,9 +40,21 @@ a cap below the work limit plus the rescue budget, a model that is not Claude) a
 4. **Audit comment** on the ticket: where it is stuck (status, time, Blocked kind and reason), what was tried (trigger, failed
    attempts or rework rounds, the last comments), the work time and the remaining budget
    (`min(master_minutes, total_cap_minutes - work time)`), and the model.
-5. **Rescue ends without a result** (the record's budget ran out while the ticket is still in Handover, or `Rescue.end(key, ok=False,
-   cause, findings)`): the flow doctor comments the cause and the findings, clears `Taken by` and returns the ticket to development
-   (`To Do`). It is not escalated to a person and gets no `needs-owner`.
+5. **Rescue budget expires without a result** while the ticket is still in Handover: the flow doctor comments the cause and the
+   findings, clears `Taken by` and returns the ticket to development (`To Do`). It is not escalated to a person and gets no
+   `needs-owner`.
 
-The Command Center shows the label and the status changes; the audit comments are the operator's usual ones.
-What AI Flow checks after the merge: the `Handover` status and the `Taken by` field exist in the Jira projects (JAIF-102).
+The Command Center shows the label and the status changes; the audit comments are the operator's usual ones. A failed transition
+does not add the rescue label or record, so the same incident becomes eligible again after its 10-minute operator cooldown.
+
+### Handover pickup dependency
+
+This code records the `Handover` status, `Taken by = Claude`, AI Model field, and rescue budget; it does not start a Claude worker.
+The legacy supervisor's worker stages do not include `Handover`. Rescue therefore depends on JAIF-102's Jira workflow/automation
+to pick up a Handover ticket for Claude, use the AI Model field, and enforce the `master_minutes` budget while Claude is working.
+The rescue timer here starts after Jira accepts Handover and invokes the flow doctor if the ticket is still in Handover when that
+budget expires. If JAIF-102 only adds the status without that pickup behavior, rescue execution is not active until that dependency
+is supplied.
+
+What AI Flow checks after the merge: the `Handover` status and the `Taken by` field exist in the Jira projects (JAIF-102), and
+the JAIF-102 pickup workflow routes a Claude handover using the model and budget recorded here.

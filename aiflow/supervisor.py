@@ -1871,11 +1871,9 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(desired_ids(config.registry, config.machine) if config.registry.from_files else [str(n) for n in range(1, config.workers + 1)]))
             return 0
         if "check" in args:  # the registry is loaded (and validated) above; show what was understood
-            from .projects import desired_ids
-            ids = desired_ids(config.registry, config.machine) if config.registry.from_files else [str(n) for n in range(1, config.workers + 1)]
-            cap = config.registry.max_workers.get(config.machine)
-            print(f"machine {config.machine}: {len(ids)} worker(s) ({', '.join(ids) or 'none'}), max_workers {cap or 'not set'}, "
-                  f"config {'from TOML files' if config.registry.from_files else 'legacy .env'}")
+            from .worker_scaling import configuration_summary
+            summary, ids = configuration_summary(config)
+            print(summary)
             limits = config.ai_limits
             print(f"  AI session limits: {', '.join(f'{n}={v}' for n, v in sorted(limits.items())) or 'none (all unlimited)'}; omitted AIs are unlimited")
             if not limits:
@@ -1932,7 +1930,8 @@ def main(argv: list[str] | None = None) -> int:
     (cfg.root / ".tmp").mkdir(exist_ok=True)
     if "--once" in args:
         return 0 if supervisor.tick() else 3
-    supervisor.run_forever()
+    from .worker_scaling import run_worker
+    run_worker(supervisor, redis, cfg)
     events.emit("worker.stop", retired=supervisor.retired)
     events.close()
     return 3 if supervisor.retired else 0  # 3: the unit does not restart it (RestartPreventExitStatus=2 3)

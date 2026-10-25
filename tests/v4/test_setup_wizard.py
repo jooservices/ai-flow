@@ -21,7 +21,7 @@ PASSWORD = "a-new-browser-password-for-ai-flow"
 OWNERSHIP_CAPABILITY = "first-run-ownership-capability-with-over-32-characters"
 
 
-def make_client(ctx, *, client_address=("127.0.0.1", 50000), base_url="http://testserver"):
+def make_client(ctx, *, client_address=("127.0.0.1", 50000), base_url="https://testserver"):
     ctx.settings.console_login = True
     ctx.settings.console_session_secret = SECRET
     ctx.settings.setup_ownership_capability = OWNERSHIP_CAPABILITY
@@ -44,7 +44,7 @@ def by_id(data, step):
     return next(item for item in data["steps"] if item["id"] == step)
 
 
-def bootstrap(client, url="http://console.example.test"):
+def bootstrap(client, url="https://console.example.test"):
     challenge = status(client)
     response = client.post("/v1/setup/bootstrap", json={"public_url": url, "email": EMAIL,
                                   "password": PASSWORD},
@@ -99,18 +99,18 @@ def test_first_start_serves_setup_and_bootstraps_public_address_and_administrato
     assert set(before) == {"admin_exists", "locked", "bootstrap_token"}
     assert "ownership_capability" not in before and "projects" not in before and "steps" not in before
     assert "TESTWP" not in str(before)
-    no_nonce = client.post("/v1/setup/bootstrap", json={"public_url": "http://console.example.test",
+    no_nonce = client.post("/v1/setup/bootstrap", json={"public_url": "https://console.example.test",
                             "email": EMAIL, "password": PASSWORD})
     assert no_nonce.status_code == 403
 
-    wrong_owner = client.post("/v1/setup/bootstrap", json={"public_url": "http://console.example.test",
+    wrong_owner = client.post("/v1/setup/bootstrap", json={"public_url": "https://console.example.test",
                                 "email": EMAIL, "password": PASSWORD},
                               headers={"X-AIFLOW4-Setup": before["bootstrap_token"],
                                        "X-AIFLOW4-Ownership": "not-the-installation-capability"})
     assert wrong_owner.status_code == 403 and setup_wizard.user_count(ctx) == 0
     assert ctx.db.one("SELECT ownership_claimed_at FROM setup_wizard_state WHERE id=true")["ownership_claimed_at"] is None
 
-    bad_password = client.post("/v1/setup/bootstrap", json={"public_url": "http://console.example.test",
+    bad_password = client.post("/v1/setup/bootstrap", json={"public_url": "https://console.example.test",
                                   "email": EMAIL, "password": "short"},
                                headers={"X-AIFLOW4-Setup": before["bootstrap_token"],
                                         "X-AIFLOW4-Ownership": OWNERSHIP_CAPABILITY})
@@ -123,9 +123,9 @@ def test_first_start_serves_setup_and_bootstraps_public_address_and_administrato
     user = ctx.db.one("SELECT email,role,roles,password_hash FROM console_users")
     assert user["email"] == "first.owner@example.test" and user["role"] == "administrator"
     assert user["roles"] == ["administrator"] and PASSWORD not in user["password_hash"]
-    assert ctx.db.one("SELECT public_url FROM setup_wizard_state WHERE id=true")["public_url"] == "http://console.example.test"
+    assert ctx.db.one("SELECT public_url FROM setup_wizard_state WHERE id=true")["public_url"] == "https://console.example.test"
     assert ctx.db.one("SELECT ownership_claimed_at FROM setup_wizard_state WHERE id=true")["ownership_claimed_at"] is not None
-    assert ctx.settings.public_url == "http://console.example.test"
+    assert ctx.settings.public_url == "https://console.example.test"
     assert ctx.settings.join_control_url == "https://control.example.test"
     audit = ctx.db.one("SELECT payload::text AS payload FROM write_audit WHERE target='setup' AND action='bootstrap'")
     assert PASSWORD not in audit["payload"]
@@ -137,7 +137,7 @@ def test_first_start_serves_setup_and_bootstraps_public_address_and_administrato
 
 
 def test_remote_bootstrap_requires_https_but_local_development_can_use_http(ctx):
-    remote_http = make_client(ctx, client_address=("198.51.100.25", 50000))
+    remote_http = make_client(ctx, client_address=("198.51.100.25", 50000), base_url="http://testserver")
     challenge = status(remote_http)
     response = remote_http.post("/v1/setup/bootstrap", json={"public_url": "https://console.example.test",
                                      "email": EMAIL, "password": PASSWORD},
@@ -163,6 +163,30 @@ def test_remote_bootstrap_requires_https_but_local_development_can_use_http(ctx)
     _, created = bootstrap(remote_https, url="https://console.example.test")
     assert created.status_code == 200, created.text
     assert "secure" in created.headers["set-cookie"].lower()
+
+
+def test_remote_http_address_is_refused_even_from_a_loopback_client(ctx):
+    client = make_client(ctx)
+    for url in ("http://console.example.test", "http://203.0.113.9:8080", "http://localhost.example.test"):
+        _, refused = bootstrap(client, url=url)
+        assert refused.status_code == 422 and "https://" in refused.json()["detail"]
+    assert setup_wizard.user_count(ctx) == 0
+    _, created = bootstrap(client, url="http://localhost:8080")
+    assert created.status_code == 200, created.text
+
+
+def test_machine_step_waits_for_the_first_project_and_points_to_projects(ctx, monkeypatch):
+    from aiflow.v4.control import setup_service
+
+    client = make_client(ctx)
+    _, created = bootstrap(client)
+    assert created.status_code == 200
+    ids = [step["id"] for step in status(client)["steps"]]
+    assert ids.index("project") < ids.index("machine") < ids.index("ai_accounts")
+    monkeypatch.setattr(setup_service, "_projects", lambda c: [], raising=False)
+    assert setup_service._action("machine", False)["url"] == "/projects"
+    assert setup_service._action("machine", True)["url"] == "/machines"
+    assert "Projects" in setup_service.MACHINE_NEEDS_PROJECT
 
 
 def test_each_external_step_reports_missing_action_and_skip_can_be_resumed(ctx):

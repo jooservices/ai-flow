@@ -47,6 +47,7 @@ from .console_auth import (COOKIE_NAME, PAGE_VIEWS, ROLE_LABELS, ROLE_PERMISSION
                            issue_session, landing_page, normalize_roles, permissions_for_view, resolve_session_user,
                            verify_session)
 from .db import J
+from .emails import EMAIL, normalize_email  # noqa: F401 - re-exported for callers of login.normalize_email
 from .ui import CONSOLE_PAGE_PATHS
 
 log = logging.getLogger(__name__)
@@ -59,7 +60,6 @@ RATE_PER_IP = 30          # sign-in attempts per client IP per window
 RATE_PER_IP_EMAIL = 10    # sign-in attempts per client IP and email per window
 AUDIT_FAILED_PER_MIN = 30
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
-EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}")
 REFUSED = "invalid email or password"
 
 PAGES = frozenset(CONSOLE_PAGE_PATHS) | frozenset(PAGE_VIEWS) | {"/setup"}
@@ -113,13 +113,6 @@ def _dummy_hash() -> str:
 
 
 # --- users -------------------------------------------------------------------------------------------------------
-def normalize_email(email: str) -> str:
-    email = (email or "").strip().lower()
-    if not EMAIL.fullmatch(email):
-        raise ValueError("enter a valid email address")
-    return email
-
-
 def write_password_file(path: str, password: str) -> None:
     """Write `password` to `path`, private from the first byte: the final component may not be a symlink, an existing
     file must be a regular file of this user with one link, and mode 0600 is set on the open descriptor."""

@@ -19,8 +19,7 @@ Command Center (`/cc`) is the first screen. It shows the state of the whole flow
 
 ## Common tasks
 
-- **Add node** (Owner and Super Administrator): choose the name, role and project, then show the one-time command (valid for five minutes) to run on the new machine. No provisioning key is typed; your signed-in session authorizes it.
-- **Finish setting up AI Flow**: after the first Administrator exists, a panel at the top of the Work tab lists the remaining first-run steps (Jira, GitHub, machine, AI accounts, project, sample ticket). Each step says in plain words what is missing, links to Integrations, Machines and AI, or Projects, and can be skipped and resumed. The panel disappears once every step is ready and stays hidden afterwards. See `docs/v4/first-run-setup.md`.
+- **Add node** (Owner and Super Administrator): creates a one-use token valid for five minutes with the command to run on the new machine.
 - Open an incident title to read its detail, then follow its runbook.
 
 ## If it looks wrong

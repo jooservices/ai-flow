@@ -10,11 +10,12 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field
 
 from . import licensing
-from .login import normalize_email
+from .emails import normalize_email
+from .github_registry import github_connected
 from .repositories import setup_wizard as repo
 
 NON_SKIPPABLE = {"public_address", "administrator"}
-STEP_IDS = ("public_address", "administrator", "jira", "github", "machine", "ai_accounts", "project",
+STEP_IDS = ("public_address", "administrator", "jira", "github", "project", "machine", "ai_accounts",
             "sample_ticket")
 STEP_LABELS = {
     "public_address": "Public address",
@@ -33,6 +34,8 @@ STEP_ACTIONS = {
     "ai_accounts": {"url": "/machines", "label": "Add AI accounts in Machines and AI"},
     "project": {"url": "/projects", "label": "Add a project in Projects"},
 }
+MACHINE_NEEDS_PROJECT = ("Add the first project in Projects before the machine: the one-time join command needs a "
+                         "project to choose.")
 ACCOUNT_READY = {"idle", "working", "probing"}
 
 
@@ -81,10 +84,8 @@ def _step(ready: bool, missing: str) -> dict:
 
 
 def _github_ready(ctx) -> bool:
-    from .api import github_connection_list
-
     try:
-        return bool(github_connection_list(ctx))
+        return github_connected(ctx)
     except Exception:  # noqa: BLE001 - the setup screen reports a missing connection, not internal details
         return False
 
@@ -104,7 +105,8 @@ def _steps(ctx, row: dict, admin_exists: bool, stored_url: str, projects: list[s
         "administrator": _step(admin_exists, "Create the first Administrator with an email and password."),
         "jira": _step(jira_connected(ctx), "Connect a Jira account in Integrations."),
         "github": _step(_github_ready(ctx), "Connect a GitHub App or an existing App in Integrations."),
-        "machine": _step(bool(worker_names), "Add a machine and use its one-time join command."),
+        "machine": _step(bool(worker_names), "Add a machine and use its one-time join command." if projects
+                         else MACHINE_NEEDS_PROJECT),
         "ai_accounts": _step(_accounts_ready(ctx, worker_names),
                              "Add an AI account to a machine and finish its sign-in."),
         "project": _step(bool(projects), "Add a Jira project and at least one repository in Projects."),
@@ -133,7 +135,14 @@ def status(ctx) -> dict:
             "completed": done, "locked": admin_exists, "sample_ticket": str(row.get("sample_ticket_key") or ""),
             "sample_status": "Intake" if sample_ready else "", "projects": projects,
             "steps": [{"id": step_id, "title": STEP_LABELS[step_id], **steps[step_id],
-                       "action": STEP_ACTIONS.get(step_id)} for step_id in STEP_IDS]}
+                       "action": _action(step_id, bool(projects))} for step_id in STEP_IDS]}
+
+
+def _action(step_id: str, has_project: bool) -> dict | None:
+    """The screen that resolves a step; the machine step is blocked until a project exists, so it points to Projects."""
+    if step_id == "machine" and not has_project:
+        return STEP_ACTIONS["project"]
+    return STEP_ACTIONS.get(step_id)
 
 
 def set_step_skipped(ctx, step_id: str, skipped: bool, actor: str) -> None:

@@ -16,14 +16,14 @@ After the Administrator is created, the wizard checks these steps:
 
 1. Connect Jira in Integrations using OAuth or an API token.
 2. Connect GitHub in Integrations by creating an App from GitHub's manifest flow or importing an existing App.
-3. Add a machine in Machines and AI. The screen creates a one-use command that expires after five minutes. Run that
+3. Add the first Jira project and its repositories in Projects.
+4. Add a machine in Machines and AI. The screen creates a one-use command that expires after five minutes. Run that
    command on the new machine; it is the only setup step that needs a terminal.
-4. Add an AI account to the machine in Machines and AI. Its provider sign-in URL and code appear on that screen.
-5. Add the first Jira project and its repositories in Projects.
+5. Add an AI account to the machine in Machines and AI. Its provider sign-in URL and code appear on that screen.
 6. Send a sample ticket to Intake.
 
-The first machine is assigned to a project, so the project can be configured before the machine is joined even though
-the wizard presents the machine step first. Every check reports what is ready or names the missing action in plain
+The join command needs a project to choose, so the project comes before the machine. While no project exists, the
+machine step says so and its action opens Projects. Every check reports what is ready or names the missing action in plain
 words. Jira, GitHub, machine, account and project actions remain available in Integrations, Machines and AI, and
 Projects after setup.
 
@@ -49,7 +49,8 @@ step has been ready, completion is permanent. A second send is refused with 409 
 - `POST /v1/setup/bootstrap` accepts the public address, Administrator email and password once. A short-lived
   same-site nonce protects against CSRF; the installation ownership capability authenticates the first owner and
   is atomically consumed in the transaction that creates the Administrator. Remotely, `/setup` and `/login` refuse
-  to serve the form over plain HTTP, and the public address must be `https://`; the session cookie is then `Secure`.
+  to serve the form over plain HTTP, and the public address must be `https://`; plain `http://` is accepted only when
+  the address itself is `localhost` or a loopback IP, whoever sends the request. Otherwise the session cookie is `Secure`.
   Remote setup submissions require HTTPS;
   direct loopback access is allowed for local development, and a TLS-terminating proxy must be listed in the trusted
   proxy settings.

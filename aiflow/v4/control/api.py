@@ -62,6 +62,7 @@ from .db import DB, J
 from .events import Events
 from .github import GitHubApp, GitHubError
 from .github_connect import GitHubSecretStore, app_metadata
+from .github_registry import github_connections as _github_registry
 from .github_connections import DEFAULT_ID, Connection, GitHubConnections, GitHubTokenApp, verify_token
 from .jira import Jira
 from .policy import Decision, decide, decide_master_action, decide_read_only, explain
@@ -476,13 +477,9 @@ github_connection_used: ContextVar[str] = ContextVar("github_connection_used", d
 
 
 def github_connections(ctx: Ctx) -> GitHubConnections:
-    """The registry of the connections after the default one, shared by every API replica through the secret store."""
-    registry = getattr(ctx, "github_registry", None)
-    if registry is None or registry.root != Path(ctx.settings.github_app_dir):
-        registry = GitHubConnections(ctx.settings.github_app_dir, lambda directory, org: GitHubApp(directory, org),
-                                     lambda token, account, kind: GitHubTokenApp(token, account, kind))
-        ctx.github_registry = registry
-    return registry
+    """The registry of the connections after the default one (see `github_registry`)."""
+    return _github_registry(ctx, lambda directory, org: GitHubApp(directory, org),
+                            lambda token, account, kind: GitHubTokenApp(token, account, kind))
 
 
 def github_connection_list(ctx: Ctx) -> list[Connection]:

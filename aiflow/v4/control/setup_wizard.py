@@ -12,6 +12,7 @@ import hashlib
 import ipaddress
 import secrets
 import time
+from urllib.parse import urlsplit
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -110,6 +111,17 @@ def _request_is_https(request: Request, ctx) -> bool:
     return False
 
 
+def _loopback_address(public_url: str) -> bool:
+    """Whether the configured address itself is this machine, the only case plain http:// is acceptable for."""
+    host = (urlsplit(public_url).hostname or "").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _loopback_client(request: Request) -> bool:
     try:
         return bool(request.client and ipaddress.ip_address(request.client.host).is_loopback)
@@ -174,8 +186,8 @@ def _register_bootstrap_route(app: FastAPI, ctx) -> None:
         body = await _bootstrap_payload(request)
         try:
             public_url, email = setup_service.normalize_bootstrap(body.public_url, body.email)
-            if not public_url.lower().startswith("https://") and not _loopback_client(request):
-                raise SetupError(422, "Enter an https:// public address; plain http:// is only allowed on this machine.")
+            if not public_url.lower().startswith("https://") and not _loopback_address(public_url):
+                raise SetupError(422, "Enter an https:// public address; plain http:// is only allowed for localhost.")
             setup_service.create_first_admin(ctx, public_url, email, hash_password(body.password))
         except SetupError as exc:
             raise _http_error(exc) from None

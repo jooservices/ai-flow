@@ -4647,13 +4647,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                         continue
                     available_elsewhere.update((ticket["key"], ticket["step"])
                                                for ticket in eligible(peer["id"], peer_node,
-                                                                      capacity_routing=False))
+                                                                      capacity_routing=False,
+                                                                      verify_retry_guard=verify_retry_guard))
             out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
         if capacity_routing and out:
-            out = route_capacity(account_id, node, out)
+            out = route_capacity(account_id, node, out, verify_retry_guard)
         return out
 
-    def route_capacity(account_id: str, node: str, offered: list[dict]) -> list[dict]:
+    def route_capacity(account_id: str, node: str, offered: list[dict],
+                       verify_retry_guard: bool = True) -> list[dict]:
         """Prefer an eligible account whose quota can cover the ticket's estimated upper bound.
 
         Candidate polling keeps its legacy behavior when no reliable quota forecast exists. If at least one eligible
@@ -4676,7 +4678,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 try:
                     peer_offers = offered if account.id == account_id and machine == node else eligible(
-                        account.id, machine, capacity_routing=False)
+                        account.id, machine, capacity_routing=False,
+                        verify_retry_guard=verify_retry_guard)
                 except HTTPException:
                     continue
                 for item in peer_offers:
@@ -7109,6 +7112,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             visible = set(user.project_keys)
             data["projects"] = [project for project in data["projects"] if project["key"] in visible]
             data["tickets"] = [ticket for ticket in all_tickets if ticket["project"] in visible]
+            data["slow_verifications"] = [item for item in data["slow_verifications"]
+                                           if item.get("project") in visible]
             ticket_keys = {ticket["key"] for ticket in data["tickets"]}
             data["active_runs"] = [run for run in data["active_runs"] if run.get("project") in visible]
             data["recent_runs"] = [run for run in data["recent_runs"] if run.get("ticket") in ticket_keys]
@@ -7150,6 +7155,14 @@ def create_app(ctx: Ctx) -> FastAPI:
             data["incidents_recent"] = []
             data["events"] = [{key: event.get(key) for key in ("ts", "type", "ticket", "outcome", "reason")}
                                for event in data["events"]]
+            slow_by_ticket = {item["key"]: item for item in data["slow_verifications"]}
+            for item in data["slow_verifications"]:
+                for index, account in enumerate(item.get("accounts", []), start=1):
+                    account["account"] = f"Verifier {index}"
+            for ticket in data["tickets"]:
+                slow = slow_by_ticket.get(ticket["key"])
+                if slow:
+                    ticket["slow_verify"] = verify_retry.describe(slow)
             for ticket in data["tickets"]:
                 if ticket.get("run"):
                     ticket["run"] = {key: ticket["run"].get(key) for key in

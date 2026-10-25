@@ -105,6 +105,18 @@ def test_no_verdict_run_goes_to_another_account_at_once(client, ctx):
     assert ("TESTWP-50", "verify") in offered(client, cc, "claude-01")
 
 
+def test_retry_probe_returns_alternate_with_ready_development_work(client, ctx):
+    cc = join(client, "cc")
+    join(client, "node1")
+    in_verify(ctx)
+    add_ticket(ctx.db, "TESTWP-51", "To Do", labels=("aiflow-ready",))
+    no_verdict(ctx, "TESTWP-50", "codex-01")
+
+    # The capacity router also checks the peer's development offers. Its verify probe must keep the retry guard
+    # disabled throughout those nested checks so the untried account can receive the ticket immediately.
+    assert ("TESTWP-50", "verify") in offered(client, cc, "claude-01")
+
+
 def test_no_verdict_counts_against_the_verify_role_only_from_the_second_in_a_row(ctx):
     in_verify(ctx)
     no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=6)
@@ -119,6 +131,35 @@ def test_no_verdict_counts_against_the_verify_role_only_from_the_second_in_a_row
     latest = max(RunsRepository(ctx.db).role_health_history(["verify"], "codex-01", 10),
                  key=lambda r: r["started_at"])
     assert role_health.classify(latest).failure is None
+
+
+def test_prior_no_verdict_from_before_new_development_round_is_ignored(ctx):
+    in_verify(ctx)
+    no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=55)
+    insert_run(ctx, "TESTWP-50", "dev", "opencode-01", "done", pr_url=PR, minutes_ago=30)
+    no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=20)
+
+    latest = max(RunsRepository(ctx.db).role_health_history(["verify"], "codex-01", 10),
+                 key=lambda row: row["started_at"])
+    assert latest["prev_no_verdict"] is False
+    assert role_health.classify(latest).failure is None
+
+
+def test_no_verdict_streak_does_not_open_generic_ticket_stuck_incident(client, ctx):
+    join(client, "cc"), join(client, "node1")
+    in_verify(ctx)
+    no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=8)
+    no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=6)
+    no_verdict(ctx, "TESTWP-50", "claude-01", minutes_ago=4)
+
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='ticket_stuck' AND subject='TESTWP-50'")["n"] == 0
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict' AND subject='TESTWP-50'")["n"] == 0
+
+    no_verdict(ctx, "TESTWP-50", "claude-01", minutes_ago=2)
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='ticket_stuck' AND subject='TESTWP-50'")["n"] == 0
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict' AND subject='TESTWP-50'")["n"] == 1
 
 
 def test_failure_on_all_eligible_accounts_raises_one_incident_and_the_dashboard_lists_it(client, ctx):

@@ -36,6 +36,7 @@ from ..core.toolchains import toolchain_gaps
 from .incidents import check_idle_flow, check_stack_pins, close_incident, open_incident
 from .api import Ctx, notify_human_review
 from .db import J
+from .repositories.runs import RunsRepository
 from .state import NODE_OFFLINE_S
 from .quota import assessments as quota_assessments
 from ..core.quota import as_utc
@@ -253,12 +254,11 @@ def watchdog(ctx: Ctx) -> None:
                 ctx.events.emit("ticket.requeued", ticket=t["key"], reason="In Progress without a run for 10 minutes")
             except Exception as e:  # noqa: BLE001
                 log.warning("could not requeue orphan %s: %s", t["key"], e)
-    # tickets whose dev runs keep failing (backoff in the API keeps them from spinning; a person should look)
-    from .api import BACKOFF_SQL
-    streak_sql = BACKOFF_SQL.split("SELECT ticket_key, fails FROM streak")[0] + "SELECT ticket_key, fails FROM streak"
+    # Tickets whose dev runs keep failing (backoff in the API keeps them from spinning; a person should look).
+    # A no-verdict verify result has its own retry and incident lifecycle, so it breaks this generic streak.
     stuck: dict[str, int] = {}
     for step in ("dev", "verify"):
-        for r in ctx.db.all(streak_sql, {"step": step}):
+        for r in RunsRepository(ctx.db).ticket_stuck_streaks(step):
             stuck[r["ticket_key"]] = max(stuck.get(r["ticket_key"], 0), r["fails"])
     for key, fails in stuck.items():
         if fails >= 3:

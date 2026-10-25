@@ -76,6 +76,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "loadConsoleThemePreference": None,
     "saveConsoleTheme": None,
     "renderCC": ("cc", "machines"),
+    "renderUsers": ("users",),
+    "captureUserAddForm": ("users",),
     "renderNodeJoin": ("cc",),
     "submitNodeJoin": ("cc",),
     "renderSA": ("sa",),

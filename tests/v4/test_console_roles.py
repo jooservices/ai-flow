@@ -184,6 +184,38 @@ def test_board_reader_roles_keep_already_done_reason_and_pull_request_in_state(c
         assert ticket["last_run"]["already_done"] is True, role
 
 
+def test_state_scopes_slow_verifications_and_redacts_account_ids_for_business_users(ctx):
+    from aiflow.v4.control.db import J
+
+    ctx.repo().projects["OTHER"] = Project("OTHER", "jooservices/other")
+    for key, project, account in (("TESTWP-910", "TESTWP", "claude-01"),
+                                  ("OTHER-910", "OTHER", "codex-01")):
+        add_ticket(ctx.db, key, "In Verify", labels=())
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+                   "started_at,ended_at,pr_url,details) VALUES (%s,%s,%s,'dev','opencode-01','opencode','cc',1,"
+                   "'finished','done',now()-interval '90 minutes',now()-interval '89 minutes',%s,%s)",
+                   (str(uuid.uuid4()), key, project, "https://github.com/jooservices/test-aiflow-wp/pull/9", J({})))
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+                   "started_at,ended_at,summary,details) VALUES (%s,%s,%s,'verify',%s,'x','cc',1,'finished','failed',"
+                   "now()-interval '60 minutes',now()-interval '59 minutes','no verdict',%s)",
+                   (str(uuid.uuid4()), key, project, account, J({"no_verdict": True})))
+
+    login.seed_user(ctx.db, "slow-limited@example.test", "business")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s",
+               (["TESTWP"], "slow-limited@example.test"))
+    response = role_client(ctx, "business", "slow-limited@example.test").get("/v1/state")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["key"] for item in data["slow_verifications"]] == ["TESTWP-910"]
+    assert {item["account"] for item in data["slow_verifications"][0]["accounts"]} == {"Verifier 1"}
+    ticket = next(item for item in data["tickets"] if item["key"] == "TESTWP-910")
+    assert "Verifier 1" in ticket["slow_verify"]
+    serialized = str(data)
+    assert "claude-01" not in serialized and "codex-01" not in serialized
+    assert "OTHER-910" not in serialized and "Summary of OTHER-910" not in serialized
+
+
 def test_usage_analytics_respects_project_scope_for_projects_tickets_and_accounts(ctx):
     ctx.repo().projects["OTHER"] = Project("OTHER", "jooservices/other")
     for ticket, project, account, node, cost in (

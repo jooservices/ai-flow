@@ -600,6 +600,11 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
     current_lines = [dashboard_role_line]
     assert docsite.changed_views("origin/develop") == {"cc"}
 
+    first_run_panel_line = next(i for i, line in enumerate(source_lines, 1)
+                                if 'data-block="first-run-setup"' in line)
+    current_lines = [first_run_panel_line]
+    assert docsite.changed_views("origin/develop") == {"cc"}
+
     current_lines = [hint_line]
     assert docsite.changed_views("origin/develop") == {"cc"}
 

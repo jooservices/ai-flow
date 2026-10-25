@@ -9,6 +9,10 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_inventory_covers_requested_owner_and_user_operations():
     inventory = (ROOT / "docs/v4/no-cli.md").read_text(encoding="utf-8")
 
+    assert "first Administrator" in inventory and "browser setup" in inventory
+    assert "--admin-email" not in inventory
+    assert "Initial install and the one-use node join command remain the only setup steps that need a terminal." in inventory
+
     for operation in (
         "Install the control plane",
         "Provision a VM and enroll a node",

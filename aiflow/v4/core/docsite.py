@@ -77,6 +77,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "saveConsoleTheme": None,
     "renderCC": ("cc", "machines"),
     "renderNodeJoin": ("cc",),
+    "submitNodeJoin": ("cc",),
     "renderSA": ("sa",),
     "renderDHead": ("work", "delivery"),
     "renderProjectPicker": ("work", "delivery"),
@@ -171,7 +172,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "viewAllowed": None,
     "syncMenuVisibility": None,
     "applyRoleNavigation": None,
-    "pollConsoleSession": None,
+    "pollConsoleSession": ("cc",),
     "loadPrefs": ("cc", "work"),
     "savePrefs": ("cc", "work"),
     "projTickets": ("work", "delivery"),
@@ -264,6 +265,7 @@ SCREEN_VIEW_PATTERNS = (
 # Styles for the V2 dashboard and its Work board destination are outside the static view sections.
 SCREEN_LINE_VIEWS += (
     (re.compile(r"conflictsError"), "delivery"),
+    (re.compile(r"JOIN_FIELDS"), "cc"),
     # The Projects environment editor can remain interactive when its save/scan toast is visible.
     (re.compile(r"^\s*\.toasts\{"), "projects"),
     (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|capacity: \{ data:"), "cc"),
@@ -1159,7 +1161,8 @@ def changed_views(base: str) -> set[str]:
                 old_index = old_first - 1 + (line_no - first)
                 if old_index < len(base_lines):
                     specific_views |= _changed_navigation_views(base_lines[old_index], changed_line, all_views)
-            layout_markup = ('id="layout-live"' in changed_line or 'data-block="' in changed_line
+            layout_markup = ('id="layout-live"' in changed_line
+                             or ('data-block="' in changed_line and 'data-block="first-run-setup"' not in changed_line)
                              or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
                              or "S.layouts." in changed_line or "layoutAction(act" in changed_line
                              or "applyLayout('delivery'" in changed_line

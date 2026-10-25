@@ -20,10 +20,9 @@ The install runs these steps in order (STEPS); docs/v4/control-install.md is the
 - infra: the release's deploy/v4/control/infra.yaml (PostgreSQL, Redis, Traefik, OpenObserve, Gatus, Mailpit) with
   `docker compose up -d`, which leaves unchanged containers running. Data lives under /srv/aiflow/control/data.
 - migrate: the pre-upgrade check (upgrades only), then `aiflow4 migrate` from the release image (forward only).
-- admin: `aiflow4 console-user seed` from the release image creates the first Super Administrator (--admin-email,
-  remembered in control.env) once; its generated password lands in /etc/aiflow/secrets/console (0600) and is never
-  printed. The secrets step turns console login on (AIFLOW4_CONSOLE_LOGIN=1), so after the install the owner only
-  uses the UI (docs/v4/console-login.md).
+- admin: a supplied legacy `--admin-email` seeds the first Super Administrator once; without it, the first browser
+  visit creates the Administrator in the setup wizard. The secrets step turns console login on
+  (AIFLOW4_CONSOLE_LOGIN=1), so after the install the owner only uses the UI (docs/v4/console-login.md).
 - deploy: `aiflow4-deploy vX.Y.Z` (control-api a and b one at a time, control-loops, CURRENT). When CURRENT is already
   vX.Y.Z and the containers run that image, only `docker compose up -d` runs, so a second run recreates nothing.
 - health: every component; the failed ones are named. After an upgrade a failed check redeploys the previous
@@ -300,9 +299,6 @@ class ControlInstaller:
                                    EXIT_USAGE)
             if o.admin_email and not ADMIN_EMAIL.match(o.admin_email.strip()):
                 raise InstallError("--admin-email must be an email address, for example owner@example.com", EXIT_USAGE)
-            if not self.admin_email():
-                raise InstallError("--admin-email is required on the first install: it becomes the first Super "
-                                   "Administrator of Command Center", EXIT_USAGE)
         self.si_settings()  # validates --stack and --si
         if o.vpn and o.vpn not in VPN_MODULES:
             raise InstallError("--vpn must be tailscale or wireguard", EXIT_USAGE)
@@ -510,11 +506,14 @@ class ControlInstaller:
         return checked
 
     def seed_admin(self, v: str, cur: str) -> None:
-        """Create the first Super Administrator once; a rerun finds the user and changes nothing."""
+        """Seed a legacy command-line administrator when requested; otherwise the first browser visit creates one."""
         if self.is_downgrade(v, cur):
             self.out(f"{v} is older than {cur}: the Super Administrator already exists")
             return
         lay, email = self.layout, self.admin_email()
+        if not email:
+            self.out(f"No Administrator was seeded. Open https://{self.opt.domain}/setup to finish setup in Command Center.")
+            return
         sec.ensure_dir(lay.console_secrets, 0o700)
         inside = "/run/aiflow4-console"
         r = self.host.run(["docker", "run", "--rm", "--network", "aiflow4-control",

@@ -4628,7 +4628,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 # never start two tickets expected to touch the same hot file (docs/v4/merge-conflicts.md)
                 if flying is None:
                     flying = hotfiles.in_flight_hot_files(ctx.db, footprint)
-                if hotfiles.blocking_ticket(footprint(t), {k: v for k, v in flying.items() if k != t["key"]}):
+                if hotfiles.blocking_ticket(footprint(t), {k: v for k, v in flying.items() if k != t["key"]},
+                                           slots=ctx.settings.hot_file_slots):
                     # A hot-file holder keeps its reservation through development and review; waiting never permits overlap.
                     hotfiles.mark_blocked(ctx.db, t["key"])
                     continue
@@ -4909,7 +4910,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.step == "dev":
             # The eligibility check above is a snapshot: reserve the hot files now, atomically with the claim, so
             # two simultaneous claims of different tickets cannot both start on the same hot file.
-            taken = hotfiles.reserve(ctx.db, t["key"], run_id, hotfiles.predict(ctx.db, t, ticket_epic(t))["hot"])
+            taken = hotfiles.reserve(ctx.db, t["key"], run_id, hotfiles.predict(ctx.db, t, ticket_epic(t))["hot"],
+                                    slots=ctx.settings.hot_file_slots)
             if taken:
                 ctx.leases.release(t["key"], run_id, c.fence)
                 if probation_id is not None:

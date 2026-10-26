@@ -93,153 +93,25 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             log.warning("PR comment failed: %s", e)
 
     try:
-        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
-                                                              "repo": project["repo"]})
-        token = credential["token"]
-        mirror = git.mirror(project["repo"], token, credential.get("transport_url", ""))
-        if not git.remote_branch_exists(mirror, pr["branch"]):
-            raise RuntimeError(f"branch {pr['branch']} is gone")
-        wt = Path(srv_root) / "work" / project["key"] / f"{pr['branch']}--verify"
-        head = git.detached(mirror, wt, f"origin/{pr['branch']}")
-        conflicts = git.merge_base_in(wt, project["base"], c.identity, commit=False)
-        auto_updated = False
-        if not conflicts and git.behind(wt, project["base"]):
-            # Behind the base without a conflict: AI Flow brings the branch up to date itself, no developer AI needed.
-            git.abort_merge(wt)
-            auto_updated = bring_up_to_date(api, c, git, mirror, wt, pr, project["base"], token,
-                                            credential.get("transport_url", ""))
-            if auto_updated:
-                head = pr["head_sha"]
-                result["head_sha"] = head
-            conflicts = git.merge_base_in(wt, project["base"], c.identity, commit=False)
-        hb.progress = {"phase": "verify", "head": head[:10]}
+        setup, conflicts = _prepare_verify_workspace(api, c, pr, git, srv_root, hb, jira)
         if conflicts:
-            git.abort_merge(wt)
-            findings = "- merge: the branch conflicts with the latest " + project["base"] + " in " + ", ".join(conflicts[:12]) + \
-                       ". Merge " + project["base"] + " into the branch and resolve the conflicts."
+            findings = (f"- merge: the branch conflicts with the latest {project['base']} in "
+                        f"{', '.join(conflicts[:12])}. Merge {project['base']} into the branch and resolve the conflicts.")
             result.setdefault("details", {})["reason"] = "conflict"
-            return _rework(c, api, jira, pr_comment, result, findings, "conflicts with " + project["base"], t0=t0)
-        jira("comment", body=note(c, "started", what=f"Verify PR #{pr['number']} at {head[:10]} merged with the latest {project['base']}",
-                                  why=f"Developed by {pr.get('dev_account', 'another account')}; work is never graded by its author",
-                                  next_="Check every acceptance criterion, run the checks, then merge or send findings back",
-                                  node=api_node(api)))
-        logs = Path(srv_root) / "logs" / "runs"
-        logs.mkdir(parents=True, exist_ok=True)
-        events = {"n": 0}
-
-        def on_progress(ev: dict) -> None:
-            events["n"] += 1
-            hb.progress = {"phase": "verify-ai", "events": events["n"], "elapsed_s": int(time.time() - t0)}
-
-        env = project_env(project["key"], project.get("environment"), "verify")
-        spec = RunSpec(prompt=build_prompt(c, pr, env), cwd=str(wt),
-                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model,
-                       effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
-                       control_url=control_url, run_token=c.run_token,
-                       log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=env)
-        adapter = get_adapter(c.provider)
-        base_argv = adapter.argv
-        adapter.argv = lambda s: run_as + base_argv(s)
-        wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
-        if project.get("containers") or wordpress:
-            from .containers import ContainerRuntime
-            runtime = ContainerRuntime(spec, run_as)
-        else:
-            runtime = nullcontext()
-        # The site is started through the container runtime, so its limits and crash cleanup own it.
-        with runtime as containers:
-            if wordpress:
-                hb.progress = {"phase": "wordpress-site"}
-                start_wordpress_site(containers, wt, project, c.run_id, spec)
-                jira("comment", body=note(
-                    c, "WordPress test site ready", what="A temporary WordPress test site is ready",
-                    result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
-                    next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
-                    node=api_node(api)))
-            res = adapter.run(spec, on_progress, stop=hb.lost)
+            return _rework(c, api, jira, pr_comment, result, findings,
+                           "conflicts with " + project["base"], t0=t0)
+        if setup["auto_updated"]:
+            result["head_sha"] = setup["head"]
+        res = _execute_review(api, c, pr, setup, srv_root, control_url, run_as, hb, jira, t0)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
-                      head_sha=head)
+                      head_sha=setup["head"])
         if hb.lost.is_set():
             raise LeaseLost()
-        text = res.final_text or ""
-        checks_m = CHECKS.search(text)
-        checks = checks_m.group(1).strip() if checks_m else "not reported"
-        verdict_m = VERDICT.search(text)
-        verdict = verdict_m.group(1) if verdict_m else ""
-        findings = findings_of(text)
-        post_merge = deferred_criteria(text)
-        result["details"] = {"verdict": verdict, "checks": checks, "findings": findings, "exit_code": res.exit_code,
-                             "duration_s": int(res.duration_s), "log": res.log_path,
-                             "qc_passed": False, "ci": [], "auto_updated": auto_updated,
-                             "post_merge_criteria": post_merge}
-        if res.error_kind in ("quota", "auth"):
-            result.update(outcome="quota", summary=f"verifier {c.account} cannot work now ({res.error_kind}): {res.error_message}"[:500])
-            return result
-        if verdict == "BLOCKED":
-            # the review itself could not run (sandbox, worktree): not the developer's fault, retry after backoff
-            result.update(outcome="failed", error_kind="infra",
-                          summary=f"review could not run: {(findings or text.strip())[-400:]}")
-            return result
-        if verdict == "FAIL":
-            return _rework(c, api, jira, pr_comment, result, findings or text.strip()[-1500:], "verify failed", checks, t0=t0)
-        if verdict != "PASS":
-            # control retries at once on another account and bars this one after two in a row (verify_retry.py)
-            result["details"]["no_verdict"] = True
-            result.update(outcome="failed", summary=f"no verdict ({res.error_kind or 'missing VERDICT line'}): "
-                                                    f"{(res.error_message or text.strip())[-400:]}")
-            return result
-        configured_checks = set(project.get("checks") or [])
-        unmapped = [criterion for criterion in post_merge
-                    if str(criterion.get("check") or "") not in configured_checks]
-        if unmapped:
-            ids = ", ".join(str(criterion.get("id") or "deferred criterion") for criterion in unmapped[:8])
-            findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
-                        "Map each deferred criterion to a configured check, or verify it before merge.")
-            return _rework(c, api, jira, pr_comment, result, findings,
-                           "deferred criterion has no configured check", checks, t0=t0)
-        # PASS from the reviewer; CI on the PR head must agree before anything is merged
-        ci = wait_for_ci(api, c, pr.get("head_sha") or head, hb)
-        failed = [x for x in ci if x["state"] == "failure"]
-        result["details"].update(ci=ci, qc_passed=bool(ci) and all(x["state"] in ("success", "neutral") for x in ci))
-        if failed:
-            findings = "\n".join(f"- CI {x['name']}: failed ({x['url']})" for x in failed[:10])
-            return _rework(c, api, jira, pr_comment, result, findings, "CI failed", checks, t0=t0)
-        if ci:
-            checks += " · CI: " + ", ".join(f"{x['name']} {x['state']}" for x in ci[:8])
-        result["summary"] = f"verify passed; checks: {checks}"[:1000]
-        needs_human = "require-human" in c.ticket.get("labels", []) or project.get("merge", {}).get("require_human")
-        if needs_human or not project.get("merge", {}).get("auto", True):
-            pr_comment(f"AI Flow verify: PASS by {c.account}.\n\nChecks: {checks}\n\nWaiting for a human review before merge.")
-            jira("comment", body=note(c, "passed, waiting for a person", what=f"PR {pr['url']} meets the acceptance criteria",
-                                      why="The ticket or project requires a human review before merge", result=f"Checks: {checks}",
-                                      next_="Approve and merge the PR, or comment what to change", t0=t0, node=api_node(api)))
-            jira("transition", to="Human review")
-            result["outcome"] = "human"
-            return result
-        title = pr_title(c.ticket)
-        m = merge_with_retries(api, c, pr, title, project.get("merge", {}).get("method", "squash"), hb)
-        if m.get("conflict"):  # an earlier merge in the queue changed the same lines: only now a real conflict
-            findings = (f"- merge: the branch conflicts with the latest {project['base']} (another pull request merged "
-                        f"first). Merge {project['base']} into the branch and resolve the conflicts.")
-            result["details"]["reason"] = "conflict"
-            return _rework(c, api, jira, pr_comment, result, findings, "conflicts with " + project["base"], checks, t0=t0)
-        if not m.get("merged"):
-            result.update(outcome="failed", summary=f"verify passed but the merge was refused: {m.get('message')}"[:500])
-            jira("comment", body=note(c, "merge refused", what="Verify passed but GitHub refused the merge",
-                                      why=str(m.get("message")), next_="The next verify run merges the latest base and tries again",
-                                      t0=t0, node=api_node(api)))
-            return result
-        jira("comment", body=note(c, "merged", what=f"PR #{pr['number']} merged into {project['base']} as {m.get('sha', '')[:10]}",
-                                  why="Every acceptance criterion is met and the checks pass", result=f"Checks: {checks}",
-                                  next_="Ticket Done; tickets blocked by it can start", t0=t0, node=api_node(api)))
-        jira("transition", to="Done")
-        try:
-            jira("fields", remove_labels=["rework"])
-        except Exception:  # noqa: BLE001
-            pass
-        result.update(outcome="merged", head_sha=m.get("sha", head))
-        return result
+        terminal = _handle_verdict(api, c, pr, res, result, t0, jira, pr_comment, setup)
+        if terminal is not None:
+            return terminal
+        return _complete_pass(api, c, pr, setup, result, hb, jira, pr_comment, t0)
     except LeaseLost:
         result.update(outcome="lost", summary="lease lost during verify; stopped without writing")
         return result
@@ -256,6 +128,181 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             git.scrub(Path(srv_root) / "work" / project["key"] / f"{pr['branch']}--verify")
         except Exception:  # noqa: BLE001
             pass
+
+
+def _prepare_verify_workspace(api: ControlClient, c: Claimed, pr: dict, git: Git, srv_root: str, hb: Heartbeat,
+                              jira) -> tuple[dict, list[str]]:
+    project = c.project
+    credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                          "repo": project["repo"]})
+    token = credential["token"]
+    mirror = git.mirror(project["repo"], token, credential.get("transport_url", ""))
+    if not git.remote_branch_exists(mirror, pr["branch"]):
+        raise RuntimeError(f"branch {pr['branch']} is gone")
+    worktree = Path(srv_root) / "work" / project["key"] / f"{pr['branch']}--verify"
+    head = git.detached(mirror, worktree, f"origin/{pr['branch']}")
+    conflicts = git.merge_base_in(worktree, project["base"], c.identity, commit=False)
+    auto_updated = False
+    if not conflicts and git.behind(worktree, project["base"]):
+        git.abort_merge(worktree)
+        auto_updated = bring_up_to_date(api, c, git, mirror, worktree, pr, project["base"], token,
+                                        credential.get("transport_url", ""))
+        if auto_updated:
+            head = pr["head_sha"]
+        conflicts = git.merge_base_in(worktree, project["base"], c.identity, commit=False)
+    hb.progress = {"phase": "verify", "head": head[:10]}
+    setup = {"worktree": worktree, "head": head, "auto_updated": auto_updated}
+    if not conflicts:
+        jira("comment", body=note(
+            c, "started", what=f"Verify PR #{pr['number']} at {head[:10]} merged with the latest {project['base']}",
+            why=f"Developed by {pr.get('dev_account', 'another account')}; work is never graded by its author",
+            next_="Check every acceptance criterion, run the checks, then merge or send findings back",
+            node=api_node(api)))
+    else:
+        git.abort_merge(worktree)
+    return setup, conflicts
+
+
+def _execute_review(api: ControlClient, c: Claimed, pr: dict, setup: dict, srv_root: str, control_url: str,
+                    run_as: list[str], hb: Heartbeat, jira, t0: float):
+    project = c.project
+    worktree = setup["worktree"]
+    logs = Path(srv_root) / "logs" / "runs"
+    logs.mkdir(parents=True, exist_ok=True)
+    events = {"n": 0}
+
+    def on_progress(_event: dict) -> None:
+        events["n"] += 1
+        hb.progress = {"phase": "verify-ai", "events": events["n"], "elapsed_s": int(time.time() - t0)}
+
+    env = project_env(project["key"], project.get("environment"), "verify")
+    spec = RunSpec(prompt=build_prompt(c, pr, env), cwd=str(worktree),
+                   account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model,
+                   effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
+                   control_url=control_url, run_token=c.run_token,
+                   log_path=str(logs / f"{c.ticket['key']}-{c.run_id}.jsonl"), extra_env=env)
+    adapter = get_adapter(c.provider)
+    base_argv = adapter.argv
+    adapter.argv = lambda spec_: run_as + base_argv(spec_)
+    wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
+    if project.get("containers") or wordpress:
+        from .containers import ContainerRuntime
+        runtime = ContainerRuntime(spec, run_as)
+    else:
+        runtime = nullcontext()
+    # The site is started through the container runtime, so its limits and crash cleanup own it.
+    with runtime as containers:
+        if wordpress:
+            hb.progress = {"phase": "wordpress-site"}
+            start_wordpress_site(containers, worktree, project, c.run_id, spec)
+            jira("comment", body=note(
+                c, "WordPress test site ready", what="A temporary WordPress test site is ready",
+                result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
+                next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
+                node=api_node(api)))
+        return adapter.run(spec, on_progress, stop=hb.lost)
+
+
+def _handle_verdict(api: ControlClient, c: Claimed, pr: dict, res, result: dict, t0: float, jira, pr_comment,
+                    setup: dict) -> dict | None:
+    text = res.final_text or ""
+    checks_match = CHECKS.search(text)
+    checks = checks_match.group(1).strip() if checks_match else "not reported"
+    verdict_match = VERDICT.search(text)
+    verdict = verdict_match.group(1) if verdict_match else ""
+    findings = findings_of(text)
+    result["details"] = {"verdict": verdict, "checks": checks, "findings": findings, "exit_code": res.exit_code,
+                         "duration_s": int(res.duration_s), "log": res.log_path,
+                         "qc_passed": False, "ci": [], "auto_updated": setup["auto_updated"],
+                         "post_merge_criteria": deferred_criteria(text)}
+    if res.error_kind in ("quota", "auth"):
+        result.update(outcome="quota", summary=(f"verifier {c.account} cannot work now ({res.error_kind}): "
+                                                 f"{res.error_message}")[:500])
+        return result
+    if verdict == "BLOCKED":
+        result.update(outcome="failed", error_kind="infra",
+                      summary=f"review could not run: {(findings or text.strip())[-400:]}")
+        return result
+    if verdict == "FAIL":
+        return _rework(c, api, jira, pr_comment, result, findings or text.strip()[-1500:], "verify failed", checks, t0=t0)
+    if verdict != "PASS":
+        # Control retries at once on another account and bars this one after two in a row.
+        result["details"]["no_verdict"] = True
+        result.update(outcome="failed", summary=f"no verdict ({res.error_kind or 'missing VERDICT line'}): "
+                                                    f"{(res.error_message or text.strip())[-400:]}")
+        return result
+    return None
+
+
+def _complete_pass(api: ControlClient, c: Claimed, pr: dict, setup: dict, result: dict, hb: Heartbeat,
+                   jira, pr_comment, t0: float) -> dict:
+    project = c.project
+    checks = result["details"]["checks"]
+    post_merge = result["details"]["post_merge_criteria"]
+    configured_checks = set(project.get("checks") or [])
+    unmapped = [criterion for criterion in post_merge
+                if str(criterion.get("check") or "") not in configured_checks]
+    if unmapped:
+        ids = ", ".join(str(criterion.get("id") or "deferred criterion") for criterion in unmapped[:8])
+        findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
+                    "Map each deferred criterion to a configured check, or verify it before merge.")
+        return _rework(c, api, jira, pr_comment, result, findings,
+                       "deferred criterion has no configured check", checks, t0=t0)
+    ci = wait_for_ci(api, c, pr.get("head_sha") or setup["head"], hb)
+    failed = [item for item in ci if item["state"] == "failure"]
+    result["details"].update(ci=ci, qc_passed=bool(ci) and all(item["state"] in ("success", "neutral") for item in ci))
+    if failed:
+        findings = "\n".join(f"- CI {item['name']}: failed ({item['url']})" for item in failed[:10])
+        return _rework(c, api, jira, pr_comment, result, findings, "CI failed", checks, t0=t0)
+    if ci:
+        checks += " · CI: " + ", ".join(f"{item['name']} {item['state']}" for item in ci[:8])
+    result["summary"] = f"verify passed; checks: {checks}"[:1000]
+    needs_human = "require-human" in c.ticket.get("labels", []) or project.get("merge", {}).get("require_human")
+    if needs_human or not project.get("merge", {}).get("auto", True):
+        return _handoff_for_human(api, c, pr, result, checks, jira, pr_comment, t0)
+    return _complete_merge(api, c, pr, setup, result, checks, hb, jira, pr_comment, t0)
+
+
+def _handoff_for_human(api: ControlClient, c: Claimed, pr: dict, result: dict, checks: str, jira, pr_comment,
+                       t0: float) -> dict:
+    pr_comment(f"AI Flow verify: PASS by {c.account}.\n\nChecks: {checks}\n\nWaiting for a human review before merge.")
+    jira("comment", body=note(c, "passed, waiting for a person", what=f"PR {pr['url']} meets the acceptance criteria",
+                              why="The ticket or project requires a human review before merge", result=f"Checks: {checks}",
+                              next_="Approve and merge the PR, or comment what to change", t0=t0, node=api_node(api)))
+    jira("transition", to="Human review")
+    result["outcome"] = "human"
+    return result
+
+
+def _complete_merge(api: ControlClient, c: Claimed, pr: dict, setup: dict, result: dict, checks: str,
+                    hb: Heartbeat, jira, pr_comment, t0: float) -> dict:
+    project = c.project
+    title = pr_title(c.ticket)
+    merged = merge_with_retries(api, c, pr, title, project.get("merge", {}).get("method", "squash"), hb)
+    if merged.get("conflict"):
+        findings = (f"- merge: the branch conflicts with the latest {project['base']} (another pull request merged "
+                    f"first). Merge {project['base']} into the branch and resolve the conflicts.")
+        result["details"]["reason"] = "conflict"
+        return _rework(c, api, jira, pr_comment, result, findings,
+                       "conflicts with " + project["base"], checks, t0=t0)
+    if not merged.get("merged"):
+        result.update(outcome="failed", summary=f"verify passed but the merge was refused: {merged.get('message')}"[:500])
+        jira("comment", body=note(c, "merge refused", what="Verify passed but GitHub refused the merge",
+                                  why=str(merged.get("message")),
+                                  next_="The next verify run merges the latest base and tries again",
+                                  t0=t0, node=api_node(api)))
+        return result
+    jira("comment", body=note(c, "merged", what=f"PR #{pr['number']} merged into {project['base']} as "
+                              f"{merged.get('sha', '')[:10]}",
+                              why="Every acceptance criterion is met and the checks pass", result=f"Checks: {checks}",
+                              next_="Ticket Done; tickets blocked by it can start", t0=t0, node=api_node(api)))
+    jira("transition", to="Done")
+    try:
+        jira("fields", remove_labels=["rework"])
+    except Exception:  # noqa: BLE001
+        pass
+    result.update(outcome="merged", head_sha=merged.get("sha", setup["head"]))
+    return result
 
 
 def bring_up_to_date(api: ControlClient, c: Claimed, git: Git, mirror, wt: Path, pr: dict, base: str, token: str,

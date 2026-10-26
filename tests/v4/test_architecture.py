@@ -290,6 +290,21 @@ def test_watchdog_is_split_into_functions_within_the_architecture_size_budget():
     assert not oversized, f"watchdog responsibilities exceed the 80-line limit: {oversized}"
 
 
+def test_verify_worker_separates_setup_verdict_and_merge_within_architecture_budget():
+    verify_path = ROOT / "aiflow/v4/worker/verify.py"
+    tree = ast.parse(verify_path.read_text(encoding="utf-8"), filename=str(verify_path))
+    expected = {"run_verify", "_prepare_verify_workspace", "_execute_review", "_handle_verdict",
+                "_complete_pass", "_complete_merge"}
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    missing = expected - functions.keys()
+    oversized = {name: functions[name].end_lineno - functions[name].lineno + 1
+                 for name in expected & functions.keys()
+                 if functions[name].end_lineno - functions[name].lineno + 1 > 80}
+
+    assert not missing, f"verify stages are not extracted into focused helpers: {sorted(missing)}"
+    assert not oversized, f"verify responsibilities exceed the 80-line limit: {oversized}"
+
+
 def test_developer_and_verify_prompts_use_architecture_document():
     developer = (ROOT / "prompts/v4/dev.md").read_text(encoding="utf-8")
     verify = (ROOT / "prompts/v4/verify.md").read_text(encoding="utf-8")

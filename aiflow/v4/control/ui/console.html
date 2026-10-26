@@ -2118,6 +2118,21 @@ function openDashboardCard(card) {
   if (card === 'waiting' && consoleCan('view.human_review')) { S.reviewProject = ''; setView('review'); return; }
   openDashboardWorkFilter(card === 'done' ? 'done' : card === 'in-flight' ? 'in-flight' : 'waiting');
 }
+function slowVerificationsPanel(items) {
+  var h = '<section class="panel" data-block="slow-verifications" aria-labelledby="dashboard-slow-verifications-title">';
+  h += '<div class="panel-h"><h2 id="dashboard-slow-verifications-title">Slow verifications</h2><span class="hint">Waiting more than 30 minutes</span></div>';
+  if (!items.length) return h + '<div class="empty">No slow verifications.</div></section>';
+  h += '<div class="att">';
+  items.forEach(function (item) {
+    var accounts = (item.accounts || []).map(function (account) {
+      var label = account.account || 'Unknown verifier';
+      if (account.no_verdict) label += ' (no verdict x' + account.no_verdict + (account.barred ? ', not offered again' : '') + ')';
+      return label;
+    });
+    h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(item.key) + '"><span class="pill" data-tone="warn">' + esc(item.waiting_minutes) + ' min</span><span class="t"><span class="mono muted">' + esc(item.key) + '</span> ' + esc(item.summary) + '<span class="d">' + esc(item.project) + ' · tried: ' + esc(accounts.join(', ') || 'no account has tried yet') + '</span></span><span class="muted">Open</span></button>';
+  });
+  return h + '</div></section>';
+}
 function renderDashboard() {
   var canSeeMachines = !S.consoleUser || consoleCan('view.machines_ai');
   var root = $('#view-cc'); if (!root) return;
@@ -2176,6 +2191,7 @@ function renderDashboard() {
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="waiting"><span class="label">Waiting for you</span><span class="kpi-main"><span class="value">' + (S.dashboardWaiting.keys === null && S.dashboardWaiting.loading ? '—' : waitingCount) + '</span>' + dashboardSpark(waitingTrend, 'var(--warn)') + '</span><span class="kpi-delta">' + (waitingCount ? 'Needs a person' : 'All clear') + '</span><span class="detail">Questions, decisions and reviews</span></button>';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="ai-usage"><span class="label">AI usage today</span><span class="kpi-main"><span class="value">' + tok(usage.tokensToday) + ' <small>tokens</small></span>' + dashboardSpark(days.map(function (day) { return usage.tokenDays[day] || 0; }), 'var(--provider-claude)') + '</span><span class="kpi-delta">' + (usage.costToday ? 'Approx. $' + usage.costToday.toFixed(4) : 'Approx. $0.0000') + '</span><span class="detail">Approximate cost today</span></button></div>';
   h += '<section class="panel" data-block="conflict-loss">' + conflictLossBlock() + '</section>';
+  h += slowVerificationsPanel(d.slow_verifications || []);
   h += '<section class="panel" data-block="flow" aria-labelledby="dashboard-flow-title"><div class="panel-h"><h2 id="dashboard-flow-title">Flow at a glance</h2><span class="hint">Tickets across every project</span></div><div class="dash-flow">' + flow + '</div></section>';
   h += '<section class="panel" data-block="projects"><div class="panel-h"><h2>Projects</h2><span class="hint">' + projectRows.length + ' shown · choose a project to open its board</span></div>';
   h += '<div class="dash-tools"><label for="dash-project-search">Search projects</label><input class="in" id="dash-project-search" type="search" placeholder="Name or key" value="' + esc(S.dashboardQuery) + '"></div>';

@@ -368,11 +368,12 @@ async function exerciseConflictLossDashboard(page) {
 }
 
 async function exerciseSlowVerificationDashboard(page) {
-  await page.getByRole('tab', { name: 'Delivery', exact: true }).click();
-  const section = page.locator('#view-delivery [data-block="attention"]');
+  await page.getByRole('tab', { name: 'Dashboard', exact: true }).click();
+  await page.getByRole('tab', { name: 'Work', exact: true }).click();
+  const section = page.locator('#view-cc [data-block="slow-verifications"]');
   const expected = Array.from({ length: 25 }, (_, index) => `TESTWP-${900 + index}`);
   await page.waitForFunction((keys) => {
-    const visible = new Set(Array.from(document.querySelectorAll('#view-delivery [data-block="attention"] .att-item'),
+    const visible = new Set(Array.from(document.querySelectorAll('#view-cc [data-block="slow-verifications"] .att-item'),
       (item) => item.dataset.key));
     return keys.every((key) => visible.has(key));
   }, expected, { timeout: 15000 });
@@ -380,7 +381,7 @@ async function exerciseSlowVerificationDashboard(page) {
     items.map((item) => ({ key: item.dataset.key, text: item.innerText })));
   for (const key of expected) {
     const entry = entries.find((item) => item.key === key);
-    assert.ok(entry, `Needs attention omitted slow verification ${key}`);
+    assert.ok(entry, `Dashboard omitted slow verification ${key}`);
     assert.match(entry.text, /tried: claude-01/, `${key} does not show the account that tried`);
   }
 }

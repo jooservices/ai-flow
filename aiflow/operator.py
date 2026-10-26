@@ -347,6 +347,7 @@ class Operator:
         target = incident.ticket or self.cfg.health_ticket
         if incident.ticket:
             self.jira.add_label(incident.ticket, "needs-owner")
+            self.redis.delete(f"lease:{incident.ticket}")
         if target:
             self.jira.comment(target, text)
         events.emit("operator.escalate", incident=incident.id, ticket=target, question=question[:500], options=options[:300], recommend=recommend[:200])

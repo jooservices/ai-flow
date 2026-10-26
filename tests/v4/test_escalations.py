@@ -138,6 +138,11 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
             answered = esc.triage_decision(ctx, run, {"decision": "ANSWER", "answer": "Use fmt_date in aiflow/v4/core/text.py.",
                                                        "why": "AGENTS.md", "class": ""}, item["text"])
             assert answered["action"] == "answered" and answered["class"] == esc.AMBIGUITY
+    # Replay the captured event dates instead of the test runner's wall clock.
+    rows = ctx.db.all("SELECT id FROM escalations ORDER BY id")
+    for row, item in zip(rows, FIXTURE["escalations"]):
+        ctx.db.run("UPDATE escalations SET created_at=%s WHERE id=%s",
+                   (datetime.fromisoformat(item["at"].replace("Z", "+00:00")), row["id"]))
     rows = ctx.db.all("SELECT * FROM escalations ORDER BY id")
     assert len(rows) == len(FIXTURE["escalations"])
     assert {r["class"] for r in rows} == set(esc.CLASSES)  # every one is classified

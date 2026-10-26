@@ -57,7 +57,7 @@ class MasterSettings:
     total_work_minutes: int = 120    # total work time, CI excluded
     master_minutes: int = 60         # Claude's own rescue budget
     total_cap_minutes: int = 180     # work limit + rescue budget; a ticket never gets more
-    model: str = ""                  # Claude[:model[:effort]] of the rescue; empty = the model configured for Claude in agent_models
+    model: str = ""                  # Claude:model[:effort] of the rescue; empty = the model configured for Claude in agent_models
     taken_by_field: str = "Taken by"
 
 
@@ -106,7 +106,8 @@ def _parse_setting(name: str, value: Any, values: dict[str, Any], known: list[st
 def _validate_settings(settings: MasterSettings, where: str) -> None:
     if settings.model:
         parts = settings.model.split(":")
-        if len(parts) < 2 or parts[0] != RESCUE_AGENT or not parts[1].strip():
+        if (len(parts) not in (2, 3) or parts[0].strip() != RESCUE_AGENT
+                or any(not part.strip() for part in parts[1:])):
             raise ConfigError(f"{where}: `model` must name Claude and a model, as Claude:model[:effort].")
     if settings.total_cap_minutes < settings.total_work_minutes + settings.master_minutes:
         raise ConfigError(f"{where}: `total_cap_minutes` ({settings.total_cap_minutes}) must cover `total_work_minutes` "

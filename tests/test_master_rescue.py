@@ -1,12 +1,13 @@
 import io
 import json
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from aiflow import master_rescue, operator_state
+from aiflow import master_rescue, operator_state, runner
 from aiflow.config import ConfigError, load
 from aiflow.incidents import Incident, find_incidents
 from aiflow.jira import JiraError
@@ -42,11 +43,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual((found.waits["Config"], found.waits["Attempts"], found.waits["Unclear"]), (5, 1, 30))
         self.assertEqual((found.in_progress_minutes, found.total_work_minutes, found.master_minutes, found.total_cap_minutes), (45, 100, 30, 200))
         self.assertEqual(found.model, "Claude:opus:max")
+        self.assertEqual(parse({"model": "Claude:opus"}, "x").model, "Claude:opus")
 
     def test_invalid_settings_are_rejected(self):
         for table in ({"config_wait_minutes": -1}, {"config_wait_minutes": "10"}, {"rework_wait_minutes": True}, {"quota_wait_minutes": 5},
                       {"offline_wait_minutes": 5}, {"in_progress_minutes": 0}, {"master_minutes": 1.5}, {"unknown": 1},
-                      {"model": "Codex:gpt"}, {"model": "Claude:"}, {"model": 3}, {"taken_by_field": " "},
+                      {"model": "Codex:gpt"}, {"model": "Claude:"}, {"model": "Claude::max"},
+                      {"model": "Claude:opus:"}, {"model": "Claude:opus:max:typo"}, {"model": 3}, {"taken_by_field": " "},
                       {"total_cap_minutes": 100}, ["not a table"]):
             with self.subTest(table=table), self.assertRaises(ConfigError):
                 parse(table, "aiflow.toml [master]")
@@ -68,6 +71,9 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("master rescue: waits", output.getvalue())
         self.assertIn("Config 3 min", output.getvalue())
         (folder / "aiflow.toml").write_text("[master]\nquota_wait_minutes = 3\n")
+        with self.assertRaises(ConfigError):
+            load(env={"AIFLOW_MACHINE": "wsl"}, config_dir=folder)
+        (folder / "aiflow.toml").write_text('[master]\nmodel = "Claude:opus:max:typo"\n')
         with self.assertRaises(ConfigError):
             load(env={"AIFLOW_MACHINE": "wsl"}, config_dir=folder)
         (folder / "aiflow.toml").write_text("[master]\nmaster_minutes = 0\n")
@@ -417,6 +423,35 @@ class RescueRunTests(unittest.TestCase):
                 self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
                 self.assertTrue(any(f"Claude is unavailable ({reason})" in b for _, b in sup.jira.comments))
                 self.assertIsNone(redis.get("rescue:JAIF-1"))
+
+    def test_workers_reject_needs_owner_tickets(self):
+        _, sup, _ = self.build()
+        issue = ticket("JAIF-1", "In Progress", 1, labels=["needs-owner"])
+
+        self.assertFalse(sup.eligible(issue))
+
+    def test_owner_routing_fences_an_active_worker_lease(self):
+        op, sup, redis = self.build()
+        redis.set("lease:JAIF-1", "worker-1", 60)
+        self.assertTrue(redis.renew("lease:JAIF-1", "worker-1", 60))
+        sup.online_pool = lambda: ["Codex"]
+
+        op.handle(self.incident())
+
+        self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
+        self.assertIsNone(redis.get("lease:JAIF-1"))
+        process = mock.Mock(pid=123, stdin=None)
+        process.wait.side_effect = subprocess.TimeoutExpired("claude", 5)
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("aiflow.runner.subprocess.Popen", return_value=process), \
+                mock.patch("aiflow.runner.head", return_value=""), \
+                mock.patch("aiflow.runner._stop", return_value=-15) as stop:
+            result = runner.run(["claude"], None, Path(directory), Path(directory) / "run.log", {},
+                                idle_seconds=60, max_seconds=60, heartbeat_seconds=0,
+                                heartbeat=lambda: redis.renew("lease:JAIF-1", "worker-1", 60))
+
+        self.assertEqual(result, (-15, "lost-lease"))
+        stop.assert_called_once_with(process)
 
     def test_reservation_rechecks_global_unavailability_and_routes_unstarted_rescues_to_owner(self):
         for reason in ("offline", "quota"):

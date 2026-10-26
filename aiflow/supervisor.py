@@ -256,7 +256,9 @@ class Supervisor:
         key, status = issue["key"], issue["status"]
         if status not in STAGES:  # the JQL index can lag behind a transition we just made
             return False
-        if "aiflow-hold" in issue.get("labels", []) or self.redis.get(f"lease:{key}"):
+        labels = issue.get("labels", [])
+        if ("aiflow-hold" in labels or "needs-owner" in labels
+                or self.redis.get(f"lease:{key}")):
             return False
         if status == master_rescue.HANDOVER:
             return self.master_worker.active_record(issue) is not None

@@ -59,6 +59,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "dashboardUsageTotals": ("cc",),
     "dashboardUsageShare": ("cc",),
     "dashboardWaitingTickets": ("cc",),
+    "slowVerificationsPanel": ("cc",),
     "capacityPanel": ("cc",),
     "drawerTicket": ("cc",),
     "loadCapacity": ("cc",),
@@ -253,7 +254,7 @@ SCREEN_VIEW_UI_PATTERNS = (
 )
 
 # Small pieces of shared console code live outside named renderers. Keep their screen impact explicit so the UI
-# documentation check can map escalation state and delegated click actions to the panel's screens.
+# documentation check can map escalation state, delegated clicks, and screen-specific layout blocks.
 SCREEN_VIEW_PATTERNS = (
     (re.compile(r"\besc:\s*\{\s*data:"), ("cc", "machines")),
     (re.compile(r"\bact\s*===\s*[\"']esc-(?:answer|retire|add)[\"']"), ("cc", "machines")),
@@ -290,6 +291,7 @@ SCREEN_LINE_VIEWS += (
 # Lines that belong to one screen even inside a shared renderer: they narrow that renderer to this screen.
 SCREEN_LOCAL_LINE_VIEWS = (
     (re.compile(r"logs-nav"), "cc"),
+    (re.compile(r'data-block="slow-verifications"'), "cc"),
 )
 
 # A change to one of these needs a documentation change in the same pull request.
@@ -1191,8 +1193,8 @@ def changed_views(base: str) -> set[str]:
                     or ("S.view === 'users'" in changed_line and "loadUsers(" in changed_line)):
                 line_views = {"users"}
             if is_layout_ui:
-                # Even when a shared renderer contains the hook, this particular change belongs to layout mode.
-                line_views = set(LAYOUT_SCREEN_VIEWS)
+                # Layout controls affect each supported screen unless the changed line names a screen-specific block.
+                line_views = specific_views or set(LAYOUT_SCREEN_VIEWS)
             # Keep a hint-text edit local to that screen. The declarations and shared Help plumbing affect every
             # screen, including edits to the top-bar link, first-use container and dismiss behavior.
             if hints_start is not None and hints_end is not None and hints_start <= line_no - 1 <= hints_end:

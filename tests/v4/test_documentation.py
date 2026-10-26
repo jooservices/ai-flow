@@ -331,6 +331,8 @@ def test_every_console_renderer_has_a_documentation_mapping():
     functions = docsite._function_spans((ROOT / "aiflow/v4/control/ui/console.html").read_text().splitlines())
     renderers = {name for name in functions if name.startswith("render")}
     assert renderers <= set(docsite.SCREEN_RENDERER_VIEWS)
+    assert "slowVerificationsPanel" in functions
+    assert docsite.SCREEN_RENDERER_VIEWS["slowVerificationsPanel"] == ("cc",)
     views = set(docsite.console_views())
     assert all(mapped is None or set(mapped) <= views for mapped in docsite.SCREEN_RENDERER_VIEWS.values())
 

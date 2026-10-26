@@ -369,8 +369,8 @@ async function exerciseConflictLossDashboard(page) {
 
 async function exerciseSlowVerificationDashboard(page) {
   await page.getByRole('tab', { name: 'Dashboard', exact: true }).click();
-  await page.getByRole('tab', { name: 'Work', exact: true }).click();
   const section = page.locator('#view-cc [data-block="slow-verifications"]');
+  await section.waitFor({ state: 'visible' });
   const expected = Array.from({ length: 25 }, (_, index) => `TESTWP-${900 + index}`);
   await page.waitForFunction((keys) => {
     const visible = new Set(Array.from(document.querySelectorAll('#view-cc [data-block="slow-verifications"] .att-item'),

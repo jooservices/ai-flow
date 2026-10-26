@@ -473,6 +473,8 @@ def _open_quota_prediction(ctx: Ctx, account_id: str, providers: dict, awareness
 
 def _check_verify_incidents(ctx: Ctx, releases) -> None:
     try:
+        from .candidate_runtime import initialize as initialize_candidate_runtime
+        initialize_candidate_runtime(ctx, releases)
         verify_retry.check_incidents(ctx, releases)
     except Exception as exc:  # noqa: BLE001 - verification exhaustion must not stop other watchdog work
         log.warning("verify no-verdict check failed: %s", exc)

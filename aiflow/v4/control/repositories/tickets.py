@@ -58,6 +58,11 @@ class TicketsRepository:
         return self.db.all("SELECT key, project, status, type, parent_key, labels FROM tickets"
                            " WHERE project=%s ORDER BY key", (project,))
 
+    def dashboard_tickets(self) -> list[dict]:
+        """Ticket rows used by the Command Center board and epic summaries."""
+        return self.db.all("SELECT key, project, status, type, priority, labels, summary, parent_key, blocked_by,"
+                           " done_at, jira_updated FROM tickets ORDER BY project, key")
+
     def verification_candidates(self, projects: list[str]) -> list[dict]:
         """Tickets in verification that are not on hold or epics."""
         return self.db.all(_VERIFY_CANDIDATES_SQL, (projects,))

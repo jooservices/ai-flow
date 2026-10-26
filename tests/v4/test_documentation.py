@@ -173,6 +173,11 @@ def test_generated_api_reference_shows_request_and_response_schema_fields():
         "recent_runs[].tokens_in",
         "events[].type",
         "release_progress[].release.steps[].state",
+        "slow_verifications[].key",
+        "slow_verifications[].waiting_minutes",
+        "slow_verifications[].accounts[].account",
+        "slow_verifications[].accounts[].barred",
+        "tickets[].slow_verify",
     ):
         assert f"`{field}`" in state, f"/v1/state reference omits {field}"
     api_module = "aiflow/v4/control/api.py"

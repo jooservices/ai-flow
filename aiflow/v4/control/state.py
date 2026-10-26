@@ -14,6 +14,13 @@ from . import tooling
 from .sa import dashboard_data, thresholds
 from .shared_accounts import machines_view
 from .quota import assessments as quota_assessments
+from .repositories.accounts import AccountsRepository
+from .repositories.events import EventsRepository
+from .repositories.incidents import IncidentsRepository
+from .repositories.nodes import NodesRepository
+from .repositories.projects import ProjectsRepository
+from .repositories.runs import RunsRepository
+from .repositories.tickets import TicketsRepository
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
@@ -26,10 +33,10 @@ def _iso(ts: datetime | None) -> str | None:
     return None if ts is None else ts.isoformat()
 
 
-def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
-    from . import api as control_api, release_progress, release_readiness, rollout
+def snapshot(ctx, releases: Path | None = None, *, include_signin: bool = False) -> dict[str, Any]:
+    from . import release_progress, release_readiness, rollout
     repo = ctx.repo()
-    nodes = _nodes(ctx, repo, control_api.RELEASES)
+    nodes = _nodes(ctx, repo, releases)
     node_status = {node["name"]: node["status"] for node in nodes}
     runs_per_account, running, active, recent = _runs(ctx)
     accounts = _accounts(ctx, repo, node_status, runs_per_account, running, include_signin)
@@ -91,14 +98,7 @@ def _scope_project_rollups(ctx, data: dict, visible: set[str]) -> None:
 
 
 def _visible_totals(ctx, visible: set[str]) -> dict:
-    totals = ctx.db.one(
-        "SELECT count(*) FILTER (WHERE started_at > now()-interval '24 hours') AS runs_24h,"
-        " coalesce(sum(cost_usd) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS cost_24h,"
-        " coalesce(sum(tokens_in) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_in_24h,"
-        " coalesce(sum(tokens_out) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_out_24h,"
-        " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome='done') AS done_24h,"
-        " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome = ANY(%s)) AS failed_24h"
-        " FROM runs WHERE project=ANY(%s)", (["failed", "blocked", "timeout", "lost"], list(visible)))
+    totals = RunsRepository(ctx.db).dashboard_totals(sorted(visible))
     integer_fields = {"runs_24h", "tokens_in_24h", "tokens_out_24h", "done_24h", "failed_24h"}
     return {key: int(value) if key in integer_fields else float(value) for key, value in totals.items()}
 
@@ -150,11 +150,10 @@ def _redact_ticket_runs(ticket: dict) -> None:
                                                            "ended_age_s"))
 
 
-def _nodes(ctx, repo, releases: Path) -> list[dict]:
+def _nodes(ctx, repo, releases: Path | None) -> list[dict]:
     assigned = _assigned_accounts(repo)
-    active_by_node = {row["node"]: int(row["busy"]) for row in ctx.db.all(
-        "SELECT node,count(*) AS busy FROM runs WHERE status='running' GROUP BY node")}
-    rows = ctx.db.all("SELECT * FROM nodes WHERE removed_at IS NULL ORDER BY role DESC, name")
+    active_by_node = RunsRepository(ctx.db).dashboard_busy_by_node()
+    rows = NodesRepository(ctx.db).dashboard_nodes()
     return [_node_entry(ctx, repo, row, assigned, active_by_node, releases) for row in rows]
 
 
@@ -167,7 +166,7 @@ def _assigned_accounts(repo) -> dict[str, int]:
 
 
 def _node_entry(ctx, repo, row: dict, assigned: dict[str, int], active_by_node: dict[str, int],
-                releases: Path) -> dict:
+                releases: Path | None) -> dict:
     age = _age(row["last_heartbeat"])
     status = row["status"]
     if status == "online" and (age is None or age > NODE_OFFLINE_S):
@@ -233,24 +232,20 @@ def _desired_service_rows(services: list[dict]) -> list[dict]:
              "healthcheck_configured": bool(service.get("healthcheck"))} for service in services]
 
 
-def rollout_policy(ctx, node: dict, releases: Path) -> dict:
+def rollout_policy(ctx, node: dict, releases: Path | None) -> dict:
     from . import rollout
     return rollout.node_policy(ctx, node["name"], node["release_version"], releases)
 
 
 def _runs(ctx) -> tuple[dict[str, int], dict[str, dict], list[dict], list[dict]]:
-    db = ctx.db
+    repository = RunsRepository(ctx.db)
     runs_per_account: dict[str, int] = {}
-    for row in db.all("SELECT account_id FROM runs WHERE status='running'"):
+    running_rows = repository.dashboard_running_rows()
+    for row in running_rows:
         runs_per_account[row["account_id"]] = runs_per_account.get(row["account_id"], 0) + 1
-    running = {row["account_id"]: row for row in db.all(
-        "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
-    active = [_active_run(ctx, row) for row in db.all(
-        "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
-        " WHERE r.status='running' ORDER BY r.started_at")]
-    recent = [_recent_run(row) for row in db.all(
-        "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
-        " WHERE r.status<>'running' ORDER BY r.started_at DESC LIMIT 30")]
+    running = {row["account_id"]: row for row in running_rows}
+    active = [_active_run(ctx, row) for row in running_rows]
+    recent = [_recent_run(row) for row in repository.dashboard_recent_rows()]
     return runs_per_account, running, active, recent
 
 
@@ -276,15 +271,12 @@ def _accounts(ctx, repo, node_status: dict[str, str], runs_per_account: dict[str
               running: dict[str, dict], include_signin: bool) -> list[dict]:
     db = ctx.db
     thresholds_value = thresholds(repo)
-    rows = db.all("SELECT * FROM accounts ORDER BY node, provider, id")
+    accounts_repo = AccountsRepository(db)
+    rows = accounts_repo.dashboard_accounts()
     quota_by_account = quota_assessments(db, rows)
-    today = {row["account_id"]: row for row in db.all(
-        "SELECT account_id,coalesce(sum(tokens_in),0) AS tokens_in,coalesce(sum(tokens_out),0) AS tokens_out,"
-        "coalesce(sum(cost_usd),0) AS cost_usd FROM runs WHERE started_at >= date_trunc('day',now()) "
-        "GROUP BY account_id")}
-    sign_in = {row["id"]: row["sign_in_status"] for row in db.all(
-        "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
-    managed = {row["id"] for row in db.all("SELECT id FROM shared_accounts WHERE managed")}
+    today = RunsRepository(db).dashboard_daily_usage()
+    sign_in = accounts_repo.dashboard_sign_in_statuses()
+    managed = accounts_repo.dashboard_managed_ids()
     out = []
     for row in rows:
         account = _account_entry(ctx, repo, row, node_status, runs_per_account, running,
@@ -392,8 +384,7 @@ def _account_run(run: dict | None) -> dict | None:
 
 def _tickets(ctx, repo, active: list[dict], recent: list[dict]) -> tuple[list[dict], list[dict]]:
     db = ctx.db
-    tickets = db.all("SELECT key, project, status, type, priority, labels, summary, parent_key, blocked_by, done_at, jira_updated"
-                     " FROM tickets ORDER BY project, key")
+    tickets = TicketsRepository(db).dashboard_tickets()
     by_key = {ticket["key"]: ticket for ticket in tickets}
     for ticket in tickets:
         ticket["epic"] = epic_for_ticket(ticket, by_key)
@@ -421,8 +412,7 @@ def _latest_runs_by_ticket(recent: list[dict]) -> dict[str, dict]:
 
 def _already_done_tickets(db) -> dict[str, dict]:
     out = {}
-    for row in db.all("SELECT DISTINCT ON (ticket_key) id, ticket_key, pr_url, details FROM runs"
-                      " WHERE step='dev' AND outcome='done' ORDER BY ticket_key, started_at DESC"):
+    for row in RunsRepository(db).dashboard_already_done_tickets():
         if (row["details"] or {}).get("already_done"):
             out[row["ticket_key"]] = {"pr_url": row["pr_url"] or "", "run_id": str(row["id"])}
     return out
@@ -430,23 +420,14 @@ def _already_done_tickets(db) -> dict[str, dict]:
 
 def _dashboard_summary(ctx, repo, nodes: list[dict], accounts: list[dict], tickets: list[dict]) -> dict:
     counts = _ticket_counts(tickets)
-    lifecycle = {row["project"]: row for row in ctx.db.all(
-        "SELECT project, status, closed_at, closed_by, version FROM project_lifecycle")}
+    lifecycle = {row["project"]: row for row in ProjectsRepository(ctx.db).lifecycle_rows()}
     projects = [_project_summary(project, counts.get(project.key, {}), lifecycle.get(project.key, {}))
                 for project in repo.projects.values()]
-    today = ctx.db.one(
-        "SELECT count(*) AS runs, coalesce(sum(cost_usd),0) AS cost, coalesce(sum(tokens_in),0) AS tin,"
-        " coalesce(sum(tokens_out),0) AS tout, count(*) FILTER (WHERE outcome='done') AS done,"
-        " count(*) FILTER (WHERE outcome IN ('failed','blocked','timeout','lost')) AS failed"
-        " FROM runs WHERE started_at > now() - interval '24 hours'")
-    return {"projects": projects, "incidents": ctx.db.all(
-                "SELECT id, opened_at, severity, kind, subject, title, detail FROM incidents"
-                " WHERE closed_at IS NULL ORDER BY opened_at DESC"),
-            "incidents_recent": ctx.db.all(
-                "SELECT id, opened_at, closed_at, severity, kind, subject, title, detail FROM incidents"
-                " WHERE closed_at > now() - interval '24 hours' ORDER BY closed_at DESC LIMIT 20"),
-            "events": ctx.db.all("SELECT ts, type, ticket, account, node, outcome, reason FROM events"
-                                 " WHERE type <> 'node.heartbeat' ORDER BY id DESC LIMIT 60"),
+    today = RunsRepository(ctx.db).dashboard_totals()
+    incidents = IncidentsRepository(ctx.db)
+    return {"projects": projects, "incidents": incidents.dashboard_open(),
+            "incidents_recent": incidents.dashboard_recently_closed(),
+            "events": EventsRepository(ctx.db).dashboard_recent(),
             "totals": {"runs_24h": today["runs"], "cost_24h": float(today["cost"]),
                        "tokens_in_24h": int(today["tin"]), "tokens_out_24h": int(today["tout"]),
                        "done_24h": today["done"], "failed_24h": today["failed"]}}

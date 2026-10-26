@@ -117,3 +117,47 @@ class RunsRepository:
     def capacity_history(self, project_keys: list[str] | tuple[str, ...] | None = None) -> list[dict]:
         """Completed ticket-level work samples used by quota-aware capacity estimates."""
         return self.db.all(_CAPACITY_HISTORY_SQL, (project_keys is None, list(project_keys or ())))
+
+    def dashboard_busy_by_node(self) -> dict[str, int]:
+        """Running session counts used by each node's registry summary."""
+        return {row["node"]: int(row["busy"]) for row in self.db.all(
+            "SELECT node,count(*) AS busy FROM runs WHERE status='running' GROUP BY node")}
+
+    def dashboard_running_rows(self) -> list[dict]:
+        """All running rows with ticket summaries for account and live-run summaries."""
+        return self.db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
+                           " WHERE r.status='running' ORDER BY r.started_at")
+
+    def dashboard_recent_rows(self) -> list[dict]:
+        """Latest finished rows with ticket summaries for the Dashboard run list."""
+        return self.db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
+                           " WHERE r.status<>'running' ORDER BY r.started_at DESC LIMIT 30")
+
+    def dashboard_daily_usage(self) -> dict[str, dict]:
+        """Token and cost totals since database midnight, grouped by account."""
+        return {row["account_id"]: row for row in self.db.all(
+            "SELECT account_id,coalesce(sum(tokens_in),0) AS tokens_in,coalesce(sum(tokens_out),0) AS tokens_out,"
+            "coalesce(sum(cost_usd),0) AS cost_usd FROM runs WHERE started_at >= date_trunc('day',now()) "
+            "GROUP BY account_id")}
+
+    def dashboard_already_done_tickets(self) -> list[dict]:
+        """Latest successful development rows used to explain already-delivered work."""
+        return self.db.all("SELECT DISTINCT ON (ticket_key) id,ticket_key,pr_url,details FROM runs"
+                           " WHERE step='dev' AND outcome='done' ORDER BY ticket_key,started_at DESC")
+
+    def dashboard_totals(self, projects: list[str] | None = None) -> dict:
+        """Last-day usage totals, optionally limited to visible projects."""
+        columns = ("count(*) AS runs, coalesce(sum(cost_usd),0) AS cost, "
+                   "coalesce(sum(tokens_in),0) AS tin, coalesce(sum(tokens_out),0) AS tout, "
+                   "count(*) FILTER (WHERE outcome='done') AS done, "
+                   "count(*) FILTER (WHERE outcome IN ('failed','blocked','timeout','lost')) AS failed")
+        if projects is None:
+            return self.db.one(f"SELECT {columns} FROM runs WHERE started_at > now() - interval '24 hours'")
+        return self.db.one(
+            "SELECT count(*) FILTER (WHERE started_at > now()-interval '24 hours') AS runs_24h,"
+            " coalesce(sum(cost_usd) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS cost_24h,"
+            " coalesce(sum(tokens_in) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_in_24h,"
+            " coalesce(sum(tokens_out) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_out_24h,"
+            " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome='done') AS done_24h,"
+            " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome = ANY(%s)) AS failed_24h"
+            " FROM runs WHERE project=ANY(%s)", (["failed", "blocked", "timeout", "lost"], projects))

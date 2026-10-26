@@ -40,7 +40,9 @@ When every eligible account is barred from a ticket in verification, the watchdo
 incident (subject: the ticket) that names the ticket and the reason and lists the accounts. Repeated checks do not open a
 second one. It stays open if temporary capacity loss leaves no eligible account online. It closes when the ticket leaves
 verification or an unbarred eligible account can receive it; a new development round resets the account history and can
-make a retry available. Incidents are shown in the control UI like all others.
+make a retry available. The control-loops process installs the same candidate eligibility probe used by the API before
+checking exhaustion, so this works when the loops process has not initialized a FastAPI app. Incidents are shown in the
+control UI like all others.
 
 ## Dashboard
 
@@ -48,7 +50,8 @@ The Dashboard and Delivery section "Needs attention" lists every ticket that has
 verification (since the dev run finished), with the accounts that tried, their no-verdict counts and which are not
 offered the ticket again. The list is complete rather than truncated at 20 entries. Owner-token and open-console
 callers see account IDs; restricted authenticated users see verifier labels and only projects they can view. The data
-is `slow_verifications` in `/v1/state`.
+is `slow_verifications` in `/v1/state`; each ticket also has a nullable `slow_verify` description. The API schema
+describes both shapes for generated API reference users.
 
 ## API contracts touched
 

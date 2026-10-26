@@ -218,6 +218,31 @@ def test_failure_on_all_eligible_accounts_raises_one_incident_and_the_dashboard_
                       " AND closed_at IS NULL")["n"] == 0
 
 
+def test_loops_watchdog_initializes_candidate_probe_without_create_app(ctx, tmp_path):
+    from aiflow.v4.control import loops
+
+    assert ctx.candidate_offers is None
+    in_verify(ctx)
+    for account in ("codex-01", "claude-01"):
+        for minutes in (8, 2):
+            no_verdict(ctx, "TESTWP-50", account, minutes_ago=minutes)
+    for node in ("cc", "node1"):
+        ctx.db.run("INSERT INTO nodes (name,role,status,slots_total,last_heartbeat,projects,dynamic,accepting_work)"
+                   " VALUES (%s,'worker','online',2,now(),%s,false,true) ON CONFLICT (name) DO UPDATE SET"
+                   " status='online',last_heartbeat=now(),projects=EXCLUDED.projects,dynamic=false,accepting_work=true",
+                   (node, ["TESTWP"]))
+    for account, provider, node in (("claude-01", "claude", "cc"), ("codex-01", "codex", "node1")):
+        ctx.db.run("INSERT INTO accounts (id,provider,node,tier,roles,status) VALUES (%s,%s,%s,'middle',%s,'idle')"
+                   " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider,node=EXCLUDED.node,"
+                   "roles=EXCLUDED.roles,status='idle'", (account, provider, node, ["dev", "verify", "master"]))
+
+    loops._check_verify_incidents(ctx, tmp_path)
+
+    assert ctx.candidate_offers is not None
+    assert ctx.db.one("SELECT subject FROM incidents WHERE kind='verify_no_verdict' AND closed_at IS NULL") == {
+        "subject": "TESTWP-50"}
+
+
 def test_watchdog_uses_the_capped_candidate_path_for_exhaustion(client, ctx, monkeypatch):
     join(client, "cc"), join(client, "node1")
     in_verify(ctx)

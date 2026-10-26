@@ -27,3 +27,25 @@ class AccountsRepository:
             " JOIN accounts peer ON peer.provider=source.provider AND peer.id<>source.id"
             " WHERE source.id=%s AND peer.status NOT IN ('cooldown','signed_out','error') ORDER BY peer.id",
             (account_id,))
+
+    def dashboard_accounts(self) -> list[dict]:
+        """Account rows for Command Center account summaries."""
+        return self.db.all("SELECT * FROM accounts ORDER BY node, provider, id")
+
+    def dashboard_sign_in_statuses(self) -> dict[str, str]:
+        """Non-idle sign-in statuses shown beside each managed account."""
+        return {row["id"]: row["sign_in_status"] for row in self.db.all(
+            "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
+
+    def dashboard_managed_ids(self) -> set[str]:
+        """Accounts whose machine assignments are managed from Command Center."""
+        return {row["id"] for row in self.db.all("SELECT id FROM shared_accounts WHERE managed")}
+
+    def removed_managed_ids(self) -> set[str]:
+        """Managed accounts removed from the live registry view."""
+        return {row["id"] for row in self.db.all(
+            "SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL")}
+
+    def managed_machine_accounts(self) -> list[dict]:
+        """Active accounts created by the machine account management screen."""
+        return self.db.all("SELECT * FROM managed_ai_accounts WHERE removed_at IS NULL ORDER BY created_at,id")

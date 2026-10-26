@@ -39,7 +39,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
 from pydantic import BaseModel, Field
 
 from .. import VERSION
-from ..core.controlrepo import Account, ControlRepo, epic_for_ticket
+from ..core.controlrepo import ControlRepo, epic_for_ticket
 from ..core import backups as control_backups, handover, log_sources as log_sources_core
 from ..core.fencing import Leases
 from ..core.settings import Settings
@@ -51,17 +51,16 @@ from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts,
                role_health, rollout, runtime_settings, setup_wizard, shared_accounts, support_bundle, tooling,
                version_release, work_eligibility)
 from . import environment as environment_reports
+from . import candidate_runtime as work_candidate_runtime
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
-from . import capacity, conflict_loss, hotfiles, merge_queue, review_metrics, verify_retry, work_candidates
+from . import capacity, conflict_loss, hotfiles, merge_queue, review_metrics, verify_retry
 from . import merge_flow
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
-from .repositories.accounts import AccountsRepository
-from .repositories.nodes import NodesRepository
 from .repositories.runs import RunsRepository
 from .repositories.tickets import TicketsRepository
 from .events import Events
@@ -195,6 +194,14 @@ _STATE_INCIDENT = _state_object({
     "severity": _STATE_STRING, "kind": _STATE_STRING, "subject": _STATE_STRING, "title": _STATE_STRING,
     "detail": _STATE_STRING,
 }, ("id", "opened_at", "severity", "kind", "subject", "title", "detail"))
+_STATE_SLOW_VERIFICATION = _state_object({
+    "key": _STATE_STRING, "project": _STATE_STRING, "summary": _STATE_STRING,
+    "waiting_minutes": _STATE_INTEGER,
+    "accounts": _state_array(_state_object({
+        "account": _STATE_STRING, "runs": _STATE_INTEGER, "no_verdict": _STATE_INTEGER,
+        "barred": _STATE_BOOLEAN,
+    }, ("account", "runs", "no_verdict", "barred"))),
+}, ("key", "project", "summary", "waiting_minutes", "accounts"))
 _STATE_READINESS_REASON = _state_object({"cause": _STATE_STRING, "ticket": _state_nullable(_STATE_STRING),
     "summary": _STATE_STRING, "status": _STATE_STRING, "bug": _STATE_STRING, "detail": _STATE_STRING},
     ("cause", "ticket", "summary"))
@@ -259,9 +266,11 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "done_at": _state_nullable(_STATE_DATETIME),
         "epic": _STATE_STRING, "repository": _STATE_STRING, "run": _state_nullable(_STATE_RUN),
         "last_run": _state_nullable(_STATE_RECENT_RUN), "updated_age_s": _state_nullable(_STATE_INTEGER),
+        "slow_verify": _state_nullable(_STATE_STRING),
         "already_done": _state_nullable(_state_object({"pr_url": _STATE_STRING, "run_id": _STATE_STRING}, ("pr_url", "run_id"))),
     }, ("key", "project", "status", "type", "priority", "labels", "summary", "parent_key", "blocked_by", "done_at", "epic",
-        "repository", "run", "last_run", "updated_age_s", "already_done"))),
+        "repository", "run", "last_run", "updated_age_s", "slow_verify", "already_done"))),
+    "slow_verifications": _state_array(_STATE_SLOW_VERIFICATION),
     "release_readiness": _state_array(_state_object({
         "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "ready": _STATE_BOOLEAN,
         "ticket_count": _STATE_INTEGER, "done_count": _STATE_INTEGER, "tickets": _STATE_STRING_ARRAY,
@@ -349,7 +358,7 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "done_24h": _STATE_INTEGER, "failed_24h": _STATE_INTEGER},
         ("runs_24h", "cost_24h", "tokens_in_24h", "tokens_out_24h", "done_24h", "failed_24h")),
 }, ("generated_at", "env", "control_repo", "versions", "version", "links", "tool_waits", "nodes", "accounts",
-    "active_runs", "recent_runs", "projects", "tickets", "release_readiness", "release_progress", "incidents",
+    "active_runs", "recent_runs", "projects", "tickets", "slow_verifications", "release_readiness", "release_progress", "incidents",
     "incidents_recent", "events", "sa", "role_health", "rollout", "version_policy", "totals"))
 
 
@@ -1211,34 +1220,7 @@ class ManagedAccountSignInStatusBody(BaseModel):
 def create_app(ctx: Ctx) -> FastAPI:
     from contextlib import asynccontextmanager
 
-    configured_repo = getattr(ctx, "_configured_repo", ctx.repo)
-    ctx._configured_repo = configured_repo
-
-    def runtime_repo() -> ControlRepo:
-        """Merge console-managed accounts over the control-repo snapshot for live worker scheduling."""
-        base = configured_repo()
-        removed_nodes = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NOT NULL")}
-        removed_ids = {row["id"] for row in ctx.db.all(
-            "SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL")}
-        managed = [row for row in ctx.db.all(
-            "SELECT * FROM managed_ai_accounts WHERE removed_at IS NULL ORDER BY created_at,id")
-                   if row["node"] not in removed_nodes]
-        if not managed and not removed_nodes and not removed_ids:
-            return base
-        managed_ids = {row["id"] for row in managed}
-        accounts = {account.id: account for account in base.accounts
-                    if account.id not in managed_ids and account.id not in removed_ids
-                    and account.node not in removed_nodes}
-        for row in managed:
-            accounts[row["id"]] = Account(
-                id=row["id"], provider=row["provider"], node=row["node"], tier=row["tier"],
-                roles=list(row["roles"] or []), parallel=int(row["parallel"]),
-                explicit_only=bool(row["explicit_only"]), paused=bool(row["paused"]))
-        return replace(base, accounts=list(accounts.values()))
-
-    # The registry is the live source for screen-managed accounts. Configured accounts stay supported,
-    # while the console can add and edit account assignments without a control-repo file change.
-    ctx.repo = runtime_repo
+    candidate_path = work_candidate_runtime.initialize(ctx, RELEASES)
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -1254,10 +1236,6 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     app = FastAPI(title="AI Flow v4 control API", version=VERSION, lifespan=lifespan)
     app.state.ctx = ctx
-    if not getattr(ctx, "_shared_accounts", False):  # accounts managed in Command Center join the control repo view
-        base_repo = ctx.repo
-        ctx.repo = lambda: shared_accounts.overlay(base_repo(), ctx.db)
-        ctx._shared_accounts = True
     support_bundle.control_log_buffer(
         *(v if isinstance(v, str) else "" for v in (ctx.settings.support_log_dir, ctx.settings.o2_source))
     )
@@ -1281,7 +1259,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def sync_accounts() -> list[str]:
         """Sync configured accounts and machines that fit the current licence limits."""
-        repo = configured_repo()
+        repo = ctx._configured_repo()
         warnings: list[str] = []
         removed = {row["id"] for row in ctx.db.all(
             "SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL")}
@@ -1775,52 +1753,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.run("UPDATE accounts SET status=%s,last_error=%s,updated_at=now(),"
                    "idle_since=CASE WHEN %s='idle' THEN coalesce(idle_since,now()) ELSE NULL END WHERE id=%s",
                    (status, summary[:300], status, account_id))
-
-    def quota_forecast_at_risk(account_id: str) -> bool:
-        """Read the latest watchdog forecast without rebuilding weeks of run and probe history per poll."""
-        return AccountsRepository(ctx.db).quota_at_risk(account_id)
-
-    def quota_peer_accounts(account_id: str, roles: set[str] | None = None) -> list[dict]:
-        """Ready same-provider accounts that can serve at least one of this account's workflow roles."""
-        peers = AccountsRepository(ctx.db).quota_peer_candidates(account_id)
-        online = shared_accounts.online_nodes(ctx.db)
-        available: list[dict] = []
-        for peer in peers:
-            account = ctx.repo().account(peer["id"])
-            peer["nodes"] = ([machine for machine in account.machines if machine in online
-                               and shared_accounts.may_take(ctx.db, account, machine, as_peer=True)[0]]
-                              if account else [])
-            if not peer["nodes"]:
-                continue
-            peer_roles = set(peer.get("roles") or ["dev", "verify"])
-            if roles and not roles.intersection(peer_roles):
-                continue
-            if roles == {"master"} and peer["status"] not in ("idle", "working", "probing"):
-                continue
-            if peer["quota_at_risk"] or ctx.leases.cooling(peer["id"]) or account_master_paused(peer["id"]):
-                continue
-            available.append(peer)
-        return available
-
-    def account_quota_at_risk(account_id: str, roles: set[str] | None = None) -> bool:
-        """Defer a risky account only while another ready account of the same provider can take its role."""
-        if not quota_forecast_at_risk(account_id):
-            return False
-        return bool(quota_peer_accounts(account_id, roles))
-
-    def quota_peer_release_candidates(account_id: str) -> set[tuple[str, str, str]]:
-        """Release work a ready peer can actually claim for this quota-risky account."""
-        if not quota_forecast_at_risk(account_id):
-            return set()
-        available: set[tuple[str, str, str]] = set()
-        for peer in quota_peer_accounts(account_id, {"master", "release"}):
-            for node in peer["nodes"]:
-                if not rollout.node_compatible(ctx, node, RELEASES)["compatible"]:
-                    continue
-                for candidate in version_release.candidates(ctx, peer["id"], node):
-                    available.add((candidate["project"], str(candidate["version_id"]),
-                                   str(candidate.get("repository") or "")))
-        return available
 
     def master_snapshot() -> dict:
         now = utcnow()
@@ -4407,49 +4339,8 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     # --- work -----------------------------------------------------------------------------------------------
     def last_dev(key: str, done: bool = False) -> dict | None:
-        """The latest finished dev run; done=True: the latest one that delivered work (a failed or blocked run
-        in between does not answer the reviewer's findings)."""
+        """The latest finished dev run, optionally limited to one that delivered work."""
         return RunsRepository(ctx.db).latest_development(key, delivered_only=done)
-
-    def eligible(account_id: str, node: str, *, capacity_routing: bool = True,
-                 verify_retry_guard: bool = True) -> list[dict]:
-        """Resolve account and node gates, then delegate role offers to the candidate service."""
-        repo, acc = work_candidates.resolve_account(ctx, account_id, node)
-        if not work_eligibility.can_take_work(ctx.db, ctx.leases, acc, node):
-            return []
-        node_row = NodesRepository(ctx.db).candidate_node(node)
-        if not node_row.get("accepting_work", True):
-            return []
-        projects = work_candidates.available_projects(ctx, repo, node, node_row)
-        if not projects:
-            return []
-        roles = set(acc.roles or ["dev", "verify"])
-        modes = role_health.modes(ctx.db, acc.id, sorted(roles))
-        node_tools = node_row.get("tools") or {}
-        runs_repo = RunsRepository(ctx.db)
-        tickets_repo = TicketsRepository(ctx.db)
-        state = work_candidates.CandidateContext(
-            ctx=ctx, repo=repo, account=acc, node=node, node_row=node_row, projects=projects,
-            missing_container_runtime=False, roles=roles, modes=modes,
-            held=set(ctx.leases.held_keys()),
-            priorities={key: int(getattr(project, "priority", 5) or 5)
-                        for key, project in repo.projects.items()},
-            quota_at_risk=quota_forecast_at_risk(account_id), capacity_routing=capacity_routing,
-            verify_retry_guard=verify_retry_guard, runs_repo=runs_repo, tickets_repo=tickets_repo,
-            quota_peers=quota_peer_accounts,
-            peer_compatible=rollout.node_compatible,
-            peer_offers=lambda peer, machine, guard: eligible(
-                peer, machine, capacity_routing=False, verify_retry_guard=guard),
-            capacity_route=route_capacity, entitled_candidates=entitled_candidates,
-            releases=RELEASES, license_error=licensing.LicenseError)
-        state.missing_container_runtime = bool(
-            toolchain_gaps(node_tools, [CONTAINER_RUNTIME_TOOL], repo.versions))
-        return work_candidates.collect(state)
-
-    def route_capacity(account_id: str, node: str, offered: list[dict],
-                       verify_retry_guard: bool = True) -> list[dict]:
-        return capacity.route_candidates(ctx, account_id, node, offered, eligible,
-                                         shared_accounts.online_nodes, verify_retry_guard)
 
     def master_ready(account_id: str, node: str) -> bool:
         if ctx.leases.cooling(account_id) or account_master_paused(account_id):
@@ -4465,7 +4356,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if account.paused or "master" not in (account.roles or []) or not master_ready(account_id, node):
             return None
-        if account_quota_at_risk(account_id, {"master"}) or (account_id, "master") in role_health.disabled_roles(ctx.db):
+        if candidate_path.account_quota_at_risk(account_id, {"master"}) \
+                or (account_id, "master") in role_health.disabled_roles(ctx.db):
             return None
         if not shared_accounts.may_take(ctx.db, account, node)[0]:
             return None
@@ -4502,37 +4394,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "description": "Review incidents and follow up on blocked or slow work.",
                 "jira_created": None, "step": "master"}
 
-    def entitled_candidates(account: str, node: str, *, verify_retry_guard: bool = True) -> tuple[list[dict], str]:
-        """Filter offers by account, machine, and project plan limits without affecting active runs."""
-        state = licensing.enforce_work_entitlement(ctx, account, node,
-                                                    public_key=ctx.settings.license_public_key)
-        candidates = eligible(account, node, verify_retry_guard=verify_retry_guard)
-        allowed: list[dict] = []
-        refused: list[str] = []
-        for ticket in candidates:
-            try:
-                licensing.enforce_project_entitlement(ctx, ticket["project"],
-                                                      public_key=ctx.settings.license_public_key, state=state)
-            except licensing.LicenseError as exc:
-                refused.append(str(exc))
-            else:
-                allowed.append(ticket)
-        reason = refused[0] if candidates and not allowed and refused else ""
-        return allowed, reason
-
-    def final_candidate_offers(account: str, node: str) -> list[dict]:
-        """Use the complete candidate endpoint path for watchdog eligibility probes."""
-        if node not in shared_accounts.online_nodes(ctx.db):
-            return []
-        return verify_retry.final_offers(ctx, account, node, entitled_candidates,
-                                        rollout.node_compatible, RELEASES, licensing.LicenseError)
-
-    ctx.candidate_offers = final_candidate_offers
-
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
         try:
-            tickets, reason = entitled_candidates(account, node)
+            tickets, reason = candidate_path.entitled_candidates(account, node)
         except licensing.LicenseError as exc:
             return {"tickets": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)
@@ -4597,7 +4462,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.step == "master":
             candidates = [master_candidate(body.account, node)]
         else:
-            candidates = eligible(body.account, node)
+            candidates = candidate_path.eligible(body.account, node)
             offered = next((candidate for candidate in candidates
                             if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
             if offered:
@@ -4839,7 +4704,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                     if not (item.get("project") in repo.projects
                             and repo.projects[item["project"]].settings_for_repo(item.get("repository", "")).get("containers")
                             and toolchain_gaps(node_row.get("tools") or {}, [CONTAINER_RUNTIME_TOOL], repo.versions))]
-        peer_candidates = quota_peer_release_candidates(account)
+        peer_candidates = candidate_path.quota_peer_release_candidates(account)
         available = [candidate for candidate in versions
                      if (candidate["project"], str(candidate["version_id"]),
                          str(candidate.get("repository") or "")) not in peer_candidates]
@@ -4909,7 +4774,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                                    [CONTAINER_RUNTIME_TOOL], repo.versions)):
             raise HTTPException(409, "safe container runtime is missing on this node")
         candidate_key = (project.key, str(version["id"]), project.repo)
-        if candidate_key in quota_peer_release_candidates(body.account):
+        if candidate_key in candidate_path.quota_peer_release_candidates(body.account):
             raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
         state = ctx.db.one("SELECT status FROM version_releases WHERE project=%s AND version_id=%s AND repository=%s",
                            (project.key, version["id"], project.repo))
@@ -6852,7 +6717,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         # resolving the cookie here keeps scoped session data filtered while allowing the owner token alone.
         user = optional_console_user(request)
         include_signin = bool(user and has_permission(user.effective_roles, "nodes.manage"))
-        data = snapshot(ctx, include_signin=include_signin)
+        data = snapshot(ctx, RELEASES, include_signin=include_signin)
         can_view_machines = bool(user and has_permission(user.effective_roles, "view.machines_ai"))
         redact_machine_data = bool(user and not can_view_machines)
         return scope_snapshot(ctx, data, user.project_keys if user else None,
@@ -6862,7 +6727,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     def deploy_state(_deploy: str = Depends(deploy_auth)) -> dict:
         """The registry state for aiflow4-autodeploy; works with console sign-in on because it checks the token."""
         from .state import snapshot
-        return snapshot(ctx)
+        return snapshot(ctx, RELEASES)
 
     @app.get("/v1/deploy/ci-state")
     def deploy_ci_state(repo: str = Query(pattern=r"^[\w.-]+/[\w.-]+$"), sha: str = Query(pattern=r"^[0-9a-fA-F]{7,64}$"),

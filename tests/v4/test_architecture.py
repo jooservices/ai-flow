@@ -182,18 +182,21 @@ def test_candidate_setup_uses_aggregate_repositories_for_its_query_shapes():
     inline_queries = {name: queries for name, queries in inline_queries.items() if queries}
     api = api_path.read_text(encoding="utf-8")
     candidates = (ROOT / "aiflow/v4/control/work_candidates.py").read_text(encoding="utf-8")
+    runtime = (ROOT / "aiflow/v4/control/candidate_runtime.py").read_text(encoding="utf-8")
     accounts = (ROOT / "aiflow/v4/control/repositories/accounts.py").read_text(encoding="utf-8")
     runs = (ROOT / "aiflow/v4/control/repositories/runs.py").read_text(encoding="utf-8")
     incidents = (ROOT / "aiflow/v4/control/incidents.py").read_text(encoding="utf-8")
 
     assert not inline_queries
-    assert "NodesRepository(ctx.db).candidate_node(node)" in api
-    assert "AccountsRepository(ctx.db).quota_at_risk(account_id)" in api
-    assert "AccountsRepository(ctx.db).quota_peer_candidates(account_id)" in api
+    assert "NodesRepository(ctx.db).candidate_node(node)" in runtime
+    assert "AccountsRepository(self.ctx.db).quota_at_risk(account_id)" in runtime
+    assert "AccountsRepository(ctx.db).quota_peer_candidates(account_id)" in runtime
     assert "BACKOFF_SQL" not in api
     assert "RunsRepository(ctx.db).cooling_tickets(\"dev\")" in incidents
     assert "VerifyRunsRepository(ctx.db).cooling_tickets()" in incidents
-    assert "runs_repo=runs_repo, tickets_repo=tickets_repo" in api
+    assert "runs_repo=RunsRepository(ctx.db)" in runtime
+    assert "tickets_repo=TicketsRepository(ctx.db)" in runtime
+    assert "initialize(ctx, RELEASES)" in api
     assert "state.runs_repo.latest_development" in candidates
     assert "state.runs_repo.cooling_tickets" in candidates
     assert "state.runs_repo.intake_waiting_tickets" in candidates
@@ -201,6 +204,25 @@ def test_candidate_setup_uses_aggregate_repositories_for_its_query_shapes():
         assert f"def {method}" in runs
     for method in ("quota_at_risk", "quota_peer_candidates"):
         assert f"def {method}" in accounts
+
+
+def test_state_snapshot_passes_release_configuration_and_uses_aggregate_repositories():
+    state_path = ROOT / "aiflow/v4/control/state.py"
+    state_tree = ast.parse(state_path.read_text(encoding="utf-8"), filename=str(state_path))
+    inline_queries = [node.args[0].value for node in ast.walk(state_tree)
+                      if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                      and node.func.attr in {"all", "one", "run"} and node.args
+                      and isinstance(node.args[0], ast.Constant)
+                      and isinstance(node.args[0].value, str)
+                      and node.args[0].value.lstrip().upper().startswith(("SELECT", "INSERT", "UPDATE", "DELETE"))]
+    reverse_api_imports = [node for node in ast.walk(state_tree) if isinstance(node, ast.ImportFrom)
+                           and node.module == "api"]
+    api = (ROOT / "aiflow/v4/control/api.py").read_text(encoding="utf-8")
+
+    assert not inline_queries
+    assert not reverse_api_imports
+    assert "snapshot(ctx, RELEASES, include_signin=include_signin)" in api
+    assert "return snapshot(ctx, RELEASES)" in api
 
 
 def test_watchdog_is_split_into_functions_within_the_architecture_size_budget():

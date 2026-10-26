@@ -236,26 +236,45 @@ def _handle_verdict(api: ControlClient, c: Claimed, pr: dict, res, result: dict,
 
 def _complete_pass(api: ControlClient, c: Claimed, pr: dict, setup: dict, result: dict, hb: Heartbeat,
                    jira, pr_comment, t0: float) -> dict:
-    project = c.project
     checks = result["details"]["checks"]
-    post_merge = result["details"]["post_merge_criteria"]
-    configured_checks = set(project.get("checks") or [])
-    unmapped = [criterion for criterion in post_merge
-                if str(criterion.get("check") or "") not in configured_checks]
-    if unmapped:
-        ids = ", ".join(str(criterion.get("id") or "deferred criterion") for criterion in unmapped[:8])
-        findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
-                    "Map each deferred criterion to a configured check, or verify it before merge.")
+    findings = _deferred_check_findings(result["details"]["post_merge_criteria"],
+                                        set(c.project.get("checks") or []))
+    if findings:
         return _rework(c, api, jira, pr_comment, result, findings,
                        "deferred criterion has no configured check", checks, t0=t0)
+    checks, ci_findings = _complete_ci_checks(api, c, pr, setup, result, hb, checks)
+    if ci_findings:
+        return _rework(c, api, jira, pr_comment, result, ci_findings, "CI failed", checks, t0=t0)
+    return _route_pass_completion(api, c, pr, setup, result, checks, hb, jira, pr_comment, t0)
+
+
+def _deferred_check_findings(criteria: list[dict], configured_checks: set[str]) -> str:
+    unmapped = [criterion for criterion in criteria
+                if str(criterion.get("check") or "") not in configured_checks]
+    if not unmapped:
+        return ""
+    ids = ", ".join(str(criterion.get("id") or "deferred criterion") for criterion in unmapped[:8])
+    return (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
+            "Map each deferred criterion to a configured check, or verify it before merge.")
+
+
+def _complete_ci_checks(api: ControlClient, c: Claimed, pr: dict, setup: dict, result: dict, hb: Heartbeat,
+                        checks: str) -> tuple[str, str]:
     ci = wait_for_ci(api, c, pr.get("head_sha") or setup["head"], hb)
     failed = [item for item in ci if item["state"] == "failure"]
-    result["details"].update(ci=ci, qc_passed=bool(ci) and all(item["state"] in ("success", "neutral") for item in ci))
+    qc_passed = bool(ci) and all(item["state"] in ("success", "neutral") for item in ci)
+    result["details"].update(ci=ci, qc_passed=qc_passed)
     if failed:
         findings = "\n".join(f"- CI {item['name']}: failed ({item['url']})" for item in failed[:10])
-        return _rework(c, api, jira, pr_comment, result, findings, "CI failed", checks, t0=t0)
+        return checks, findings
     if ci:
         checks += " · CI: " + ", ".join(f"{item['name']} {item['state']}" for item in ci[:8])
+    return checks, ""
+
+
+def _route_pass_completion(api: ControlClient, c: Claimed, pr: dict, setup: dict, result: dict, checks: str,
+                           hb: Heartbeat, jira, pr_comment, t0: float) -> dict:
+    project = c.project
     result["summary"] = f"verify passed; checks: {checks}"[:1000]
     needs_human = "require-human" in c.ticket.get("labels", []) or project.get("merge", {}).get("require_human")
     if needs_human or not project.get("merge", {}).get("auto", True):

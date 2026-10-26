@@ -397,29 +397,41 @@ def _watch_account_state(ctx: Ctx) -> None:
 
 
 def _watch_role_coverage(ctx: Ctx, repo) -> None:
-    online = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE status='online'")}
-    by_id = {account.id: account for account in repo.accounts}
-    ready = {row["id"] for row in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working','probing')")
-             if row["id"] in by_id and online.intersection(by_id[row["id"]].machines)}
+    ready = _ready_role_accounts(ctx, repo)
     try:
         role_health.evaluate(ctx)
     except Exception as e:  # noqa: BLE001
         log.warning("role health evaluation failed: %s", e)
     switched_off = role_health.disabled_roles(ctx.db)
     for role in ("master", "intake_refiner", "verify", "dev"):
-        holders = [account for account in repo.accounts if role in (account.roles or [])]
-        if not holders:
-            continue
-        available = [account.id for account in holders if account.id in ready and (account.id, role) not in switched_off]
-        if len(available) < 2:
-            severity = "critical" if not available else "warning"
-            open_incident(ctx, "role_coverage", role, severity,
-                          f"role {role} has {len(available)} ready account{'s' if len(available) != 1 else ''}",
-                          f"Accounts with the role: {', '.join(account.id for account in holders)}; "
-                          f"ready: {', '.join(available) or 'none'}. Every role needs two ready accounts of different "
-                          "providers so one quota or outage cannot stop the flow.")
-        else:
-            close_incident(ctx, "role_coverage", role, f"{len(available)} accounts ready")
+        _watch_role_coverage_for_role(ctx, role, repo.accounts, ready, switched_off)
+
+
+def _ready_role_accounts(ctx: Ctx, repo) -> set[str]:
+    online = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE status='online'")}
+    by_id = {account.id: account for account in repo.accounts}
+    return {row["id"] for row in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working','probing')")
+            if row["id"] in by_id and online.intersection(by_id[row["id"]].machines)}
+
+
+def _watch_role_coverage_for_role(ctx: Ctx, role: str, accounts: list, ready: set[str], switched_off: set) -> None:
+    holders = [account for account in accounts if role in (account.roles or [])]
+    if not holders:
+        return
+    available = [account.id for account in holders if account.id in ready and (account.id, role) not in switched_off]
+    if len(available) < 2:
+        _open_role_coverage_incident(ctx, role, holders, available)
+        return
+    close_incident(ctx, "role_coverage", role, f"{len(available)} accounts ready")
+
+
+def _open_role_coverage_incident(ctx: Ctx, role: str, holders: list, available: list[str]) -> None:
+    severity = "critical" if not available else "warning"
+    open_incident(ctx, "role_coverage", role, severity,
+                  f"role {role} has {len(available)} ready account{'s' if len(available) != 1 else ''}",
+                  f"Accounts with the role: {', '.join(account.id for account in holders)}; "
+                  f"ready: {', '.join(available) or 'none'}. Every role needs two ready accounts of different "
+                  "providers so one quota or outage cannot stop the flow.")
 
 
 def _watch_quota_limits(ctx: Ctx) -> None:

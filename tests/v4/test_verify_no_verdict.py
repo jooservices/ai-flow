@@ -377,6 +377,18 @@ def test_dashboard_describes_tried_account_without_no_verdict_details(ctx):
     assert "no account has tried yet" not in described
 
 
+def test_owner_dashboard_shows_account_ids_for_slow_verifications(client, ctx):
+    in_verify(ctx, "TESTWP-83")
+    no_verdict(ctx, "TESTWP-83", "claude-01", minutes_ago=5)
+
+    data = client.get("/v1/state").json()
+
+    assert data["slow_verifications"][0]["key"] == "TESTWP-83"
+    assert data["slow_verifications"][0]["accounts"][0]["account"] == "claude-01"
+    ticket = next(row for row in data["tickets"] if row["key"] == "TESTWP-83")
+    assert "claude-01" in ticket["slow_verify"]
+
+
 def test_untried_account_that_cannot_receive_the_ticket_does_not_hold_the_retry_back(client, ctx):
     cc = join(client, "cc")
     join(client, "node1")

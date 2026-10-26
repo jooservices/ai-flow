@@ -216,17 +216,30 @@ def _stack_ready(repo, node_tools: dict, key: str) -> bool:
 def collect(state: CandidateContext) -> list[dict]:
     if not state.projects:
         return []
-    strategies = [strategy for strategy in _ROLE_STRATEGIES.values() if strategy.role in state.roles]
-    ordinary = [ticket for strategy in strategies if strategy.phase == 0 for ticket in strategy.collect(state)]
+    ordinary = _collect_phase(state, 0)
     ordinary.sort(key=lambda ticket: (state.priorities.get(ticket["project"], 5), ticket["jira_created"] or _now()))
-    development = [ticket for strategy in strategies if strategy.phase == 1 for ticket in strategy.collect(state)]
-    out = ordinary + development
-    out.sort(key=lambda ticket: "flow-bug" not in (ticket.get("labels") or []))
+    development = _collect_phase(state, 1)
+    return _route_candidates(state, _sort_candidates(ordinary, development))
+
+
+def _collect_phase(state: CandidateContext, phase: int) -> list[dict]:
+    return [ticket for strategy in _ROLE_STRATEGIES.values()
+            if strategy.role in state.roles and strategy.phase == phase
+            for ticket in strategy.collect(state)]
+
+
+def _sort_candidates(ordinary: list[dict], development: list[dict]) -> list[dict]:
+    offered = ordinary + development
+    offered.sort(key=lambda ticket: "flow-bug" not in (ticket.get("labels") or []))
+    return offered
+
+
+def _route_candidates(state: CandidateContext, offered: list[dict]) -> list[dict]:
     if state.quota_at_risk:
-        out = _apply_peer_route(state, out)
-    if state.capacity_routing and out:
-        out = _apply_capacity_route(state, out)
-    return out
+        offered = _apply_peer_route(state, offered)
+    if state.capacity_routing and offered:
+        offered = _apply_capacity_route(state, offered)
+    return offered
 
 
 def _verify(state: CandidateContext) -> list[dict]:

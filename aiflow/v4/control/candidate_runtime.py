@@ -157,20 +157,11 @@ def _install_runtime_repo(ctx) -> None:
             removed_nodes = NodesRepository(ctx.db).removed_names()
             accounts_repository = AccountsRepository(ctx.db)
             removed_ids = accounts_repository.removed_managed_ids()
-            managed = [row for row in accounts_repository.managed_machine_accounts()
-                       if row["node"] not in removed_nodes]
+            managed = _active_managed_accounts(accounts_repository, removed_nodes)
             if not managed and not removed_nodes and not removed_ids:
                 return base
-            managed_ids = {row["id"] for row in managed}
-            accounts = {account.id: account for account in base.accounts
-                        if account.id not in managed_ids and account.id not in removed_ids
-                        and account.node not in removed_nodes}
-            for row in managed:
-                accounts[row["id"]] = Account(
-                    id=row["id"], provider=row["provider"], node=row["node"], tier=row["tier"],
-                    roles=list(row["roles"] or []), parallel=int(row["parallel"]),
-                    explicit_only=bool(row["explicit_only"]), paused=bool(row["paused"]))
-            return replace(base, accounts=list(accounts.values()))
+            accounts = _filter_runtime_accounts(base.accounts, managed, removed_ids, removed_nodes)
+            return replace(base, accounts=accounts)
 
         ctx.repo = runtime_repo
         ctx._runtime_repo_configured = True
@@ -178,3 +169,24 @@ def _install_runtime_repo(ctx) -> None:
         base_repo = ctx.repo
         ctx.repo = lambda: shared_accounts.overlay(base_repo(), ctx.db)
         ctx._shared_accounts = True
+
+
+def _active_managed_accounts(repository: AccountsRepository, removed_nodes: set[str]) -> list[dict]:
+    return [row for row in repository.managed_machine_accounts() if row["node"] not in removed_nodes]
+
+
+def _filter_runtime_accounts(accounts: list[Account], managed: list[dict], removed_ids: set[str],
+                             removed_nodes: set[str]) -> list[Account]:
+    managed_ids = {row["id"] for row in managed}
+    configured = {account.id: account for account in accounts
+                  if account.id not in managed_ids and account.id not in removed_ids
+                  and account.node not in removed_nodes}
+    for row in managed:
+        configured[row["id"]] = _managed_account(row)
+    return list(configured.values())
+
+
+def _managed_account(row: dict) -> Account:
+    return Account(id=row["id"], provider=row["provider"], node=row["node"], tier=row["tier"],
+                   roles=list(row["roles"] or []), parallel=int(row["parallel"]),
+                   explicit_only=bool(row["explicit_only"]), paused=bool(row["paused"]))

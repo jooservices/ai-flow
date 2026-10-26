@@ -7,6 +7,7 @@ import uuid
 from conftest import add_ticket, join_node
 from aiflow.v4.control import capacity, quota as quota_reporting
 from aiflow.v4.control.db import J
+from aiflow.v4.control.repositories.tickets import TicketsRepository
 from aiflow.v4.control.ui import mount_ui
 
 
@@ -173,6 +174,21 @@ def test_weekly_plan_counts_finishable_tickets_and_names_the_limiting_ai(client,
     assert plan["limiting_ai"]["account"] == "claude-01"
     accounts = {item["account"]: item for item in plan["accounts"]}
     assert accounts["claude-01"]["tickets"] < accounts["codex-01"]["tickets"]
+
+
+def test_capacity_ready_ticket_repository_excludes_epics_and_respects_project_scope(ctx):
+    add_ticket(ctx.db, "TESTWP-CAPACITY-READY-1")
+    add_ticket(ctx.db, "TESTWP-CAPACITY-EPIC", labels=("aiflow-ready",))
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-CAPACITY-EPIC'")
+    add_ticket(ctx.db, "OTHER-CAPACITY-READY-1")
+
+    repository = TicketsRepository(ctx.db)
+
+    assert [row["key"] for row in repository.capacity_ready_tickets(["TESTWP"])] == ["TESTWP-CAPACITY-READY-1"]
+    assert [row["key"] for row in repository.capacity_ready_tickets(["OTHER"])] == ["OTHER-CAPACITY-READY-1"]
+    assert {row["key"] for row in repository.capacity_ready_tickets()} == {
+        "TESTWP-CAPACITY-READY-1", "OTHER-CAPACITY-READY-1",
+    }
 
 
 def test_estimates_update_with_new_runs_and_completed_ticket_error_is_reported(client, ctx):

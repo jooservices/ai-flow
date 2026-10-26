@@ -82,6 +82,29 @@ _CAPACITY_HISTORY_SQL = (
     "HAVING count(*) FILTER (WHERE r.tokens_in>0 OR r.tokens_out>0 OR r.ended_at>r.started_at)>0"
 )
 
+_CAPACITY_DECISIONS_SQL = """
+SELECT DISTINCT ON (r.ticket_key) r.ticket_key,t.project,t.summary,r.account_id,r.provider,r.started_at,
+  r.details->'capacity'->'estimate' AS estimate,r.details->'capacity'->'assignment_reason' AS reason
+FROM runs r JOIN tickets t ON t.key=r.ticket_key
+WHERE r.step='dev' AND r.details->'capacity' ? 'estimate' AND (%s OR t.project=ANY(%s))
+ORDER BY r.ticket_key,r.started_at DESC LIMIT 100
+"""
+
+_CAPACITY_ESTIMATE_ROWS_SQL = """
+SELECT DISTINCT ON (r.ticket_key) r.ticket_key,t.project,t.summary,r.started_at,
+  r.details->'capacity'->'estimate' AS estimate
+FROM runs r JOIN tickets t ON t.key=r.ticket_key
+WHERE r.step='dev' AND r.details->'capacity' ? 'estimate' AND t.status IN ('Done','Closed')
+  AND (%s OR t.project=ANY(%s)) ORDER BY r.ticket_key,r.started_at LIMIT 100
+"""
+
+_CAPACITY_ACTUAL_SQL = """
+SELECT coalesce(sum(greatest(0,tokens_in)+greatest(0,tokens_out)),0)::bigint AS tokens,
+  coalesce(sum(greatest(0,extract(epoch FROM ended_at-started_at))),0)::float8 AS duration_s,
+  bool_or(outcome='rework') AS reworked FROM runs
+WHERE ticket_key=%s AND step IN ('dev','verify') AND status='finished' AND ended_at IS NOT NULL AND started_at >= %s
+"""
+
 
 class RunsRepository:
     def __init__(self, db) -> None:
@@ -117,6 +140,18 @@ class RunsRepository:
     def capacity_history(self, project_keys: list[str] | tuple[str, ...] | None = None) -> list[dict]:
         """Completed ticket-level work samples used by quota-aware capacity estimates."""
         return self.db.all(_CAPACITY_HISTORY_SQL, (project_keys is None, list(project_keys or ())))
+
+    def capacity_decisions(self, project_keys: list[str] | tuple[str, ...] | None = None) -> list[dict]:
+        """Latest recorded development assignment explanations for capacity planning."""
+        return self.db.all(_CAPACITY_DECISIONS_SQL, (project_keys is None, list(project_keys or ())))
+
+    def capacity_estimate_rows(self, project_keys: list[str] | tuple[str, ...] | None = None) -> list[dict]:
+        """Completed ticket estimates used to compare estimates with actual work."""
+        return self.db.all(_CAPACITY_ESTIMATE_ROWS_SQL, (project_keys is None, list(project_keys or ())))
+
+    def capacity_actual(self, ticket_key: str, started_at) -> dict | None:
+        """Aggregate completed development and verification work after an estimate was recorded."""
+        return self.db.one(_CAPACITY_ACTUAL_SQL, (ticket_key, started_at))
 
     def dashboard_busy_by_node(self) -> dict[str, int]:
         """Running session counts used by each node's registry summary."""

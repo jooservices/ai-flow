@@ -16,6 +16,19 @@ WHERE t.status='In Verify' AND lower(coalesce(t.type,'')) <> 'epic'
 ORDER BY since
 """
 
+_IDLE_FLOW_CANDIDATES_SQL = """
+SELECT key,project,status,blocked_by FROM tickets WHERE NOT ('aiflow-hold'=ANY(labels))
+  AND lower(coalesce(type,'')) <> 'epic'
+  AND ((status='To Do' AND 'aiflow-ready'=ANY(labels)) OR status='In Verify')
+  AND coalesce(jira_updated,synced_at) <= now() - %s * interval '1 minute'
+"""
+
+_CAPACITY_READY_SQL = """
+SELECT key,project,type,priority,labels,summary,description,fields FROM tickets
+WHERE status='To Do' AND 'aiflow-ready'=ANY(labels) AND NOT ('aiflow-hold'=ANY(labels))
+  AND lower(coalesce(type,'')) <> 'epic' AND (%s OR project=ANY(%s)) ORDER BY priority,key
+"""
+
 _VERIFY_CANDIDATES_SQL = """
 SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'
   AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'
@@ -62,6 +75,14 @@ class TicketsRepository:
         """Ticket rows used by the Command Center board and epic summaries."""
         return self.db.all("SELECT key, project, status, type, priority, labels, summary, parent_key, blocked_by,"
                            " done_at, jira_updated FROM tickets ORDER BY project, key")
+
+    def idle_flow_candidates(self, older_than_min: float = 0.0) -> list[dict]:
+        """Ready or verifying non-epic tickets considered by the idle-flow checks."""
+        return self.db.all(_IDLE_FLOW_CANDIDATES_SQL, (older_than_min,))
+
+    def capacity_ready_tickets(self, project_keys: list[str] | tuple[str, ...] | None = None) -> list[dict]:
+        """Ready, unheld, non-epic ticket facts used by the capacity plan."""
+        return self.db.all(_CAPACITY_READY_SQL, (project_keys is None, list(project_keys or ())))
 
     def verification_candidates(self, projects: list[str]) -> list[dict]:
         """Tickets in verification that are not on hold or epics."""

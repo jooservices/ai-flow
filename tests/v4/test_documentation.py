@@ -801,6 +801,11 @@ def test_jaif_271_verification_behavior_has_its_own_linked_topic():
     topics = (ROOT / "deploy/v4/README.md").read_text(encoding="utf-8").split("## Topics", 1)[1]
     assert "Owner-token and open-console callers see account IDs" in content
     assert "restricted authenticated users see verifier labels" in content
+    assert "reports `ready_tickets`" in content and "does not return an idle-ticket count" in content
+    assert "project status counts include epics" in content
+    assert "work candidate and claim paths" in content
+    assert "leaves epics out of the idle and capacity counts" not in content
+    assert "leaves epics out of the work counts" not in content
     assert "[Epics and verification without a verdict](../../docs/v4/verify-no-verdict.md)" in topics
 
 

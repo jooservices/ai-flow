@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Event
 
 from conftest import add_open_escalation, add_ticket, join_node
-from aiflow.v4.control import role_health, state, verify_retry, work_candidates, work_eligibility
+from aiflow.v4.control import incidents, role_health, state, verify_retry, work_candidates, work_eligibility
 from aiflow.v4.control.db import J
 from aiflow.v4.core.controlrepo import Account
 from aiflow.v4.control.loops import _reconcile_epics, watchdog
@@ -68,6 +68,20 @@ def test_epic_with_ready_label_is_never_offered(client, ctx):
     assert not {key for key, _ in seen} & {"TESTWP-61", "TESTWP-62", "TESTWP-63", "TESTWP-64", "TESTWP-65"}
     assert client.post("/v1/work/claim", json={"ticket": "TESTWP-61", "account": "claude-01"},
                        headers=cc).status_code == 409
+
+
+def test_idle_flow_checks_get_ticket_rows_from_repository_and_skip_epics(ctx):
+    add_ticket(ctx.db, "TESTWP-IDLE-ORDINARY")
+    add_ticket(ctx.db, "TESTWP-IDLE-EPIC")
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-IDLE-EPIC'")
+    add_ticket(ctx.db, "TESTWP-IDLE-VERIFY", "In Verify")
+    add_ticket(ctx.db, "TESTWP-IDLE-VERIFY-EPIC", "In Verify")
+    ctx.db.run("UPDATE tickets SET type='epic' WHERE key='TESTWP-IDLE-VERIFY-EPIC'")
+
+    expected = {"TESTWP-IDLE-ORDINARY", "TESTWP-IDLE-VERIFY"}
+
+    assert {row["key"] for row in incidents.idle_tickets(ctx)} == expected
+    assert {row["key"] for row in incidents.workable_tickets(ctx)} == expected
 
 
 def test_registered_candidate_rule_names_why_an_epic_is_ineligible():

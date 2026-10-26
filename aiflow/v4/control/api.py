@@ -61,6 +61,7 @@ from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
+from .repositories.accounts import AccountsRepository
 from .repositories.runs import RunsRepository
 from .repositories.tickets import TicketsRepository
 from .events import Events
@@ -6752,7 +6753,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 else optional_console_user(request))
         if user and not has_permission(user.effective_roles, "view.machines_ai"):
             raise HTTPException(403, "not available for your role")
-        accounts = ctx.db.all("SELECT id,provider,tier,roles,quota FROM accounts ORDER BY id")
+        accounts = AccountsRepository(ctx.db).capacity_dashboard_accounts()
         forecasts = quota_reporting.assessments(ctx.db, accounts)
         project_keys = user.project_keys if user and user.project_keys is not None else None
         return capacity.dashboard(ctx.db, accounts, forecasts, project_keys)

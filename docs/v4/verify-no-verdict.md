@@ -57,9 +57,13 @@ describes both shapes for generated API reference users.
 
 - `POST /v1/work/claim` refuses an epic, and a verification this account may not take (barred, or an untried account
   goes first).
-- `GET /v1/capacity` leaves epics out of the idle and capacity counts.
+- `GET /v1/capacity` reports `ready_tickets` for ready, unheld, non-epic tickets and provides quota and estimate
+  data; it does not return an idle-ticket count.
 - `GET /v1/state` carries `slow_verifications` for the Dashboard.
-- `GET /v1/deploy/state` leaves epics out of the work counts.
+- `GET /v1/deploy/state` returns the shared registry snapshot, whose project status counts include epics. Epics
+  remain excluded from the work candidate and claim paths.
+- `GET /v1/work/candidates` excludes epics from development, verification, triage, impact, intake and post-merge
+  work, regardless of labels.
 - `GET /v1/master/candidate` polls the master-cycle candidate for an account and node.
 - `GET /v1/version-releases/candidates` lists configured Jira versions eligible for a release worker; `POST /v1/version-releases/claim` validates and claims a version for that worker.
 - `POST /v1/runs/{run_id}/result` records the fenced worker result; a verification with no verdict is marked in the stored run details.

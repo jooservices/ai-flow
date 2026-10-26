@@ -15,6 +15,10 @@ class AccountsRepository:
         """Account quota and role facts used to compare eligible development candidates."""
         return self.db.all("SELECT id,provider,tier,roles,quota_forecast FROM accounts ORDER BY id")
 
+    def capacity_dashboard_accounts(self) -> list[dict]:
+        """Account quota and role fields displayed by the capacity dashboard."""
+        return self.db.all("SELECT id,provider,tier,roles,quota FROM accounts ORDER BY id")
+
     def quota_at_risk(self, account_id: str) -> bool:
         """Whether the latest watchdog forecast marks an account as likely to exhaust its quota."""
         row = self.db.one("SELECT quota_at_risk FROM accounts WHERE id=%s", (account_id,))

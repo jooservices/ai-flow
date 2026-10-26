@@ -163,6 +163,58 @@ def test_capacity_routing_reads_account_and_run_history_through_repositories():
     assert "RunsRepository(db).capacity_history(project_keys)" in capacity
 
 
+def test_capacity_dashboard_and_route_queries_live_in_aggregate_repositories():
+    capacity_path = ROOT / "aiflow/v4/control/capacity.py"
+    capacity_tree = ast.parse(capacity_path.read_text(encoding="utf-8"), filename=str(capacity_path))
+    dashboard = next(node for node in capacity_tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name == "dashboard")
+    inline_queries = [node.args[0].value for node in ast.walk(dashboard)
+                      if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                      and node.func.attr in {"all", "one"} and node.args
+                      and isinstance(node.args[0], ast.Constant)
+                      and isinstance(node.args[0].value, str)
+                      and node.args[0].value.lstrip().upper().startswith("SELECT")]
+    api_path = ROOT / "aiflow/v4/control/api.py"
+    api_tree = ast.parse(api_path.read_text(encoding="utf-8"), filename=str(api_path))
+    capacity_route = next(node for node in ast.walk(api_tree) if isinstance(node, ast.FunctionDef)
+                          and node.name == "capacity_plan")
+    route_queries = [node.args[0].value for node in ast.walk(capacity_route)
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                     and node.func.attr in {"all", "one"} and node.args
+                     and isinstance(node.args[0], ast.Constant)
+                     and isinstance(node.args[0].value, str)
+                     and node.args[0].value.lstrip().upper().startswith("SELECT")]
+    assert not inline_queries and not route_queries
+    tickets = (ROOT / "aiflow/v4/control/repositories/tickets.py").read_text(encoding="utf-8")
+    runs = (ROOT / "aiflow/v4/control/repositories/runs.py").read_text(encoding="utf-8")
+    accounts = (ROOT / "aiflow/v4/control/repositories/accounts.py").read_text(encoding="utf-8")
+    assert "TicketsRepository(db).capacity_ready_tickets(project_keys)" in capacity_path.read_text()
+    assert "def capacity_ready_tickets" in tickets
+    assert "def capacity_decisions" in runs and "def capacity_estimate_rows" in runs
+    assert "def capacity_actual" in runs
+    assert "AccountsRepository(ctx.db).capacity_dashboard_accounts()" in api_path.read_text()
+    assert "def capacity_dashboard_accounts" in accounts
+
+
+def test_idle_flow_ticket_queries_live_in_tickets_repository():
+    incidents_path = ROOT / "aiflow/v4/control/incidents.py"
+    incidents_tree = ast.parse(incidents_path.read_text(encoding="utf-8"), filename=str(incidents_path))
+    services = [node for node in incidents_tree.body if isinstance(node, ast.FunctionDef)
+                and node.name in {"workable_tickets", "idle_tickets"}]
+    inline_queries = [query for service in services for node in ast.walk(service)
+                      if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                      and node.func.attr in {"all", "one"} and node.args
+                      and isinstance(node.args[0], ast.Constant)
+                      and isinstance(node.args[0].value, str)
+                      and node.args[0].value.lstrip().upper().startswith("SELECT")
+                      for query in [node.args[0].value]]
+    tickets = (ROOT / "aiflow/v4/control/repositories/tickets.py").read_text(encoding="utf-8")
+    assert not inline_queries
+    assert "tickets = TicketsRepository(ctx.db)" in incidents_path.read_text()
+    assert "tickets.idle_flow_candidates(" in incidents_path.read_text()
+    assert "def idle_flow_candidates" in tickets
+
+
 def test_candidate_setup_uses_aggregate_repositories_for_its_query_shapes():
     api_path = ROOT / "aiflow/v4/control/api.py"
     api_tree = ast.parse(api_path.read_text(encoding="utf-8"), filename=str(api_path))

@@ -14,6 +14,7 @@ from ..core.toolchains import STACK_TOOLS, locked_version, normalize_stacks, too
 from . import knowledge
 from . import notify
 from .repositories.runs import RunsRepository
+from .repositories.tickets import TicketsRepository
 from .repositories.verify_runs import VerifyRunsRepository
 
 
@@ -215,12 +216,10 @@ def workable_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
     cooling = {"dev": RunsRepository(ctx.db).cooling_tickets("dev"),
                "verify": VerifyRunsRepository(ctx.db).cooling_tickets()}
     held = set(ctx.leases.held_keys())
-    done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status='Done'")}
+    tickets = TicketsRepository(ctx.db)
+    done = tickets.done_keys()
     out = []
-    for t in ctx.db.all(
-            "SELECT key, project, status, blocked_by FROM tickets WHERE NOT ('aiflow-hold' = ANY(labels))"
-            " AND ((status='To Do' AND 'aiflow-ready' = ANY(labels)) OR status='In Verify')"
-            " AND coalesce(jira_updated, synced_at) <= now() - %s * interval '1 minute'", (older_than_min,)):
+    for t in tickets.idle_flow_candidates(older_than_min):
         if t["key"] in held:
             continue
         if t["status"] == "To Do" and (t["key"] in cooling["dev"] or any(b not in done for b in t["blocked_by"])):
@@ -234,13 +233,10 @@ def workable_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
 def idle_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
     """Old queue items that still need work, including items gated by a wait, backoff or project pause."""
     held = set(ctx.leases.held_keys())
-    done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status='Done'")}
+    tickets = TicketsRepository(ctx.db)
+    done = tickets.done_keys()
     out = []
-    for ticket in ctx.db.all(
-            "SELECT key,project,status,blocked_by FROM tickets WHERE NOT ('aiflow-hold'=ANY(labels))"
-            " AND lower(coalesce(type,'')) <> 'epic'"
-            " AND ((status='To Do' AND 'aiflow-ready'=ANY(labels)) OR status='In Verify')"
-            " AND coalesce(jira_updated,synced_at) <= now() - %s * interval '1 minute'", (older_than_min,)):
+    for ticket in tickets.idle_flow_candidates(older_than_min):
         if ticket["key"] in held:
             continue
         if ticket["status"] == "To Do" and any(blocker not in done for blocker in ticket["blocked_by"]):

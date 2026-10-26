@@ -32,19 +32,23 @@ _REQUIREMENT_ACTION = (r"add|added|adds|adding|create|created|creates|creating|c
 _REQUIREMENT_TARGET = r"requirements?|product direction|acceptance criteria"
 _REQUIREMENT_CHANGE = (rf"\b(?:{_REQUIREMENT_ACTION})\b.{{0,40}}\b(?:{_REQUIREMENT_TARGET})\b|"
                        rf"\b(?:{_REQUIREMENT_TARGET})\b.{{0,40}}\b(?:{_REQUIREMENT_ACTION})\b")
-_INSTALLED_ACTION = (r"install(?:ing|ed)?|uninstall(?:ing|ed)?|upgrad(?:e|ed|ing)|updat(?:e|ed|ing)|"
-                     r"modif(?:y|ied|ying)|chang(?:e|ed|ing)|remov(?:e|ed|ing)|patch(?:ed|ing)?")
+_INSTALLED_ACTION = (r"install(?:s|ed|ing)?|uninstall(?:s|ed|ing)?|reinstall(?:s|ed|ing)?|"
+                     r"upgrad(?:e|es|ed|ing)|downgrad(?:e|es|ed|ing)|updat(?:e|es|ed|ing)|"
+                     r"modif(?:y|ies|ied|ying)|chang(?:e|es|ed|ing)|remov(?:e|es|ed|ing)|"
+                     r"patch(?:es|ed|ing)?|pin(?:s|ned|ning)?|roll[ -]?back(?:s|ing)?")
 _INSTALLED_TARGET = r"(?:installed\s+)?(?:software|packages?|tools?|binar(y|ies)|cli|dependencies|runtimes?)"
 OWNER_ONLY = (
-    ("spending money", r"\b(pay|payment|billing|invoice|purchase|spend(ing)?|subscription|money|paid plan)\b"),
-    ("credentials, tokens or secrets", r"\b(credentials?|secrets?|tokens?|passwords?|api[ _-]?keys?|private key)\b"),
-    ("deleting data", r"\b(delet(e|ed|ing)|remov(e|ed|ing)|drop(ped|ping)?|purge(d|s|ing)?|wipe(d|s|ing)?|truncate(d|s|ing)?)\b"
-                       r".{0,40}\b((production\s+)?data|databases?|tables?|repositor(y|ies)|branch(es)?|records?)\b|force-push"),
-    ("a release", r"\breleas(e|es|ing)\b|\bproduction deploy"),
+    ("spending money", r"\b(pay|payment|refund|billing|invoice|purchase|spend(ing)?|subscription|money|costs?|prices?|paid plan|fees?)\b|"
+                       r"\bcharg(?:e|es|ed|ing)\b.{0,30}\b(card|account|customer|invoice|payment|fee|subscription|money)\b|"
+                       r"\b(card|account|customer|invoice|payment|fee|subscription|money)\b.{0,30}\bcharg(?:e|es|ed|ing)\b"),
+    ("credentials, tokens or secrets", r"\b(credentials?|secrets?|tokens?|passwords?|api[ _-]?keys?|ssh[ _-]?keys?|private key)\b"),
+    ("deleting data", r"\b(delet(e|es|ed|ing)|remov(e|es|ed|ing)|destroy(s|ed|ing)?|drop(ped|ping|s)?|purge(d|s|ing)?|wipe(d|s|ing)?)\b"
+                       r".{0,40}\b((production|prod)\s+)?(data|dbs?|databases?|tables?|repositor(y|ies)|branch(es)?|records?)\b|force-push"),
+    ("a release", r"\breleas(e|es|ed|ing)\b|\bproduction deploy|\bpublish(?:es|ed|ing)? (?:the )?(?:release|version)\b"),
     ("changing the requirements", _REQUIREMENT_CHANGE),
     ("merging by hand", r"\bmerg(e|ing)\b.{0,15}\b(by hand|manually)\b|\bmanual(ly)? merge"),
-    ("runtime setup", r"\b(set[ -]?up|configure|configuration|provision(?:ing)?)\b.{0,40}\b(runtime|server|host|network|systemd|environment)\b|"
-                      r"\b(runtime|server|host|network|systemd|environment)\b.{0,40}\b(set[ -]?up|configure|configuration|provision(?:ing)?)\b|\bprovision"),
+    ("runtime setup", r"\b(set[ -]?up|setup|configur(?:e|es|ed|ing|ation)|provision(?:s|ed|ing)?|bootstrap(?:s|ped|ping)?|initiali[sz](?:e|es|ed|ing|ation))\b.{0,40}\b(runtime|server|host|network|systemd|environment)\b|"
+                      r"\b(runtime|server|host|network|systemd|environment)\b.{0,40}\b(set[ -]?up|setup|configur(?:e|es|ed|ing|ation)|provision(?:s|ed|ing)?|bootstrap(?:s|ped|ping)?|initiali[sz](?:e|es|ed|ing|ation))\b|\bprovision"),
     ("changing installed software", rf"\b(?:{_INSTALLED_ACTION})\b.{{0,40}}\b{_INSTALLED_TARGET}\b|missing tool|not installed"),
 )
 OWNER_PATTERNS = tuple((topic, re.compile(pattern, re.I)) for topic, pattern in OWNER_ONLY)

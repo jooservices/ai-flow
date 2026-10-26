@@ -1111,6 +1111,16 @@ class Supervisor:
     def execution_model(self, role: str, agent: str, key: str, override: tuple[str, str] | None) -> tuple[str, str]:
         return override if override is not None else self.model_for(role, agent, key)
 
+    def renew_ticket_ownership(self, key: str, agent: str, session_owner: str | None = None) -> bool | None:
+        """Renew ticket and worker leases; None means Redis could not confirm ownership."""
+        try:
+            if not self.redis.renew(f"lease:{key}", self.cfg.owner, self.cfg.lease_seconds):
+                return False
+            return (not session_owner or self.redis.renew_session(
+                self.cfg.machine, agent, session_owner, self.cfg.lease_seconds))
+        except RedisError:
+            return None
+
     def quota_hit(self, key: str, agent: str, role: str) -> None:
         self.redis.set(f"cooldown:{agent}", "1", self.cfg.quota_cooldown_minutes * 60)
         events.emit("ai.quota", ticket=key, role=role, agent=agent, cooldown_minutes=self.cfg.quota_cooldown_minutes)
@@ -1118,11 +1128,14 @@ class Supervisor:
                                f"Cooling it down for {self.cfg.quota_cooldown_minutes} min; the ticket will be reassigned to another AI "
                                f"and continues from the branch and the hand-over comments.")
 
-    def failed(self, key: str, role: str, agent: str, why: str, text: str) -> None:
+    def failed(self, key: str, role: str, agent: str, why: str, text: str, output_allowed: bool = True) -> None:
         count = self.redis.incr(f"attempts:{key}:{role}", 7 * DAY)
-        events.emit("ai.failed", ticket=key, role=role, agent=agent, why=why, attempt=count, of=self.cfg.max_attempts)
-        self.jira.comment(key, f"AI Flow: {agent} on {self.cfg.machine} ended the {role} run without a usable result ({why}); "
-                               f"attempt {count}/{self.cfg.max_attempts}. Last output: {text[-600:]!r}")
+        safe_why = why if output_allowed else "details omitted for rescue privacy"
+        events.emit("ai.failed", ticket=key, role=role, agent=agent, why=safe_why,
+                    attempt=count, of=self.cfg.max_attempts)
+        output = f" Last output: {text[-600:]!r}" if text and output_allowed else ""
+        self.jira.comment(key, f"AI Flow: {agent} on {self.cfg.machine} ended the {role} run without a usable result ({safe_why}); "
+                               f"attempt {count}/{self.cfg.max_attempts}.{output}")
         if count >= self.cfg.max_attempts:
             self.block(key, f"{self.cfg.max_attempts} failed {role} attempts; needs the owner.", kind="Attempts")
 
@@ -1134,8 +1147,10 @@ class Supervisor:
 
     def finish_master_attempt(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str,
                               workdir: Path, branch: str, text: str, why: str,
-                              found: tuple[str, str] | None, quota: bool) -> bool:
-        return self.master_worker.finish_attempt(key, view, repo, base, agent, workdir, branch, text, why, found, quota)
+                              found: tuple[str, str] | None, quota: bool,
+                              session_owner: str | None = None) -> bool:
+        return self.master_worker.finish_attempt(key, view, repo, base, agent, workdir, branch, text, why, found, quota,
+                                                 session_owner)
 
     def end_master_rescue(self, key: str, ok: bool, cause: str = "", findings: str = "") -> bool:
         return self.master_worker.end(key, ok, cause, findings)
@@ -1143,44 +1158,74 @@ class Supervisor:
     def begin_master_completion(self, key: str) -> bool:
         return self.master_worker.begin_completion(key)
 
-    def finish_development(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str, workdir: Path, branch: str, text: str) -> bool:
-        if self.cfg.project(key).database:
-            try:
-                if repo.ticket_env_committed(workdir, base):
-                    self.block(key, "The ticket worktree .env was committed; remove it from the branch before continuing.", kind="Config")
-                    return False
-            except GitError as error:
-                self.failed(key, "developer", agent, "worktree .env safety check", str(error))
-                return False
-        bad = [s for s in repo.commit_subjects(workdir, base) if not github.valid_title(s)]
-        if bad:
-            self.failed(key, "developer", agent, "commit messages break Conventional Commits "
-                        "(type(scope): Subject, uppercase first letter, no final period, 10-120 chars): " + "; ".join(bad[:4]), text)
+    def finish_development(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str, workdir: Path,
+                           branch: str, text: str, rescue_run: bool = False,
+                           session_owner: str | None = None) -> bool | None:
+        if self.renew_ticket_ownership(key, agent, session_owner) is not True:
+            return None
+        answers = self.prepare_development_handoff(key, view, repo, base, agent, workdir, text, rescue_run)
+        if answers is None:
             return False
-        answers = self.read_replies(key)
-        if isinstance(answers, str):
-            self.failed(key, "developer", agent, answers, text)
-            return False
-        title = agents.pr_title(text) or ""
-        if not github.valid_title(title):
-            title = github.fallback_title(key, view.get("summary", key), str(view.get("type", "")), self.change_type(key))
-        self.redis.set(f"prtitle:{key}", github.with_key(title, key), 30 * DAY)
+        if self.renew_ticket_ownership(key, agent, session_owner) is not True:
+            return None
         try:
             repo.push(workdir, branch, lease=True)
         except GitError as error:
-            self.failed(key, "developer", agent, f"push failed: {error}", text)
+            self.failed(key, "developer", agent, f"push failed: {error}", text, not rescue_run)
             return False
+        if self.renew_ticket_ownership(key, agent, session_owner) is not True:
+            return None
         self.redis.set(f"pushed:{key}", str(int(time.time())), 30 * DAY)
         self.require_human_for_deployment(key)
         for name in ("attempts:%s:developer", "qa:%s"):
             self.redis.delete(name % key)
-        if answers and self.post_replies(key, repo, answers):
-            return False
+        if answers:
+            if self.renew_ticket_ownership(key, agent, session_owner) is not True:
+                return None
+            if self.post_replies(key, repo, answers):
+                return False
+        if self.renew_ticket_ownership(key, agent, session_owner) is not True:
+            return None
+        return self.comment_development_handoff(key, agent, branch, text, rescue_run, session_owner)
+
+    def prepare_development_handoff(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str,
+                                   workdir: Path, text: str, rescue_run: bool) -> list[tuple[dict[str, Any], dict[str, Any]]] | None:
+        if self.cfg.project(key).database:
+            try:
+                if repo.ticket_env_committed(workdir, base):
+                    self.block(key, "The ticket worktree .env was committed; remove it from the branch before continuing.", kind="Config")
+                    return None
+            except GitError as error:
+                self.failed(key, "developer", agent, "worktree .env safety check", str(error), not rescue_run)
+                return None
+        bad = [s for s in repo.commit_subjects(workdir, base) if not github.valid_title(s)]
+        if bad:
+            self.failed(key, "developer", agent, "commit messages break Conventional Commits "
+                        "(type(scope): Subject, uppercase first letter, no final period, 10-120 chars): " + "; ".join(bad[:4]),
+                        text, not rescue_run)
+            return None
+        answers = self.read_replies(key)
+        if isinstance(answers, str):
+            self.failed(key, "developer", agent, answers, text, not rescue_run)
+            return None
+        title = "" if rescue_run else agents.pr_title(text) or ""
+        if not github.valid_title(title):
+            title = github.fallback_title(key, view.get("summary", key), str(view.get("type", "")), self.change_type(key))
+        self.redis.set(f"prtitle:{key}", github.with_key(title, key), 30 * DAY)
+        return answers
+
+    def comment_development_handoff(self, key: str, agent: str, branch: str, text: str,
+                                   rescue_run: bool, session_owner: str | None = None) -> bool | None:
+        output = "" if rescue_run else f"\n\n{tail(text, 1000 if self.state(key, 'humanok') else 1500)}"
         if self.state(key, "humanok"):  # a human already approved: no review, no QA again, only CI
             self.jira.comment(key, f"AI Flow: {agent} finished the rework on {self.cfg.machine}. Branch {branch} pushed; the human approved "
-                                   f"this ticket before, so it goes back to Ready to merge (CI must pass).\n\n{tail(text, 1000)}")
+                                   f"this ticket before, so it goes back to Ready to merge (CI must pass).{output}")
+            if self.renew_ticket_ownership(key, agent, session_owner) is not True:
+                return None
             return self.jira.transition(key, "Ready to merge")
-        self.jira.comment(key, f"AI Flow: {agent} finished on {self.cfg.machine}. Branch {branch} pushed to origin; sending to review.\n\n{tail(text, 1500)}")
+        self.jira.comment(key, f"AI Flow: {agent} finished on {self.cfg.machine}. Branch {branch} pushed to origin; sending to review.{output}")
+        if self.renew_ticket_ownership(key, agent, session_owner) is not True:
+            return None
         return self.jira.transition(key, "In Review")
 
     def require_human_for_deployment(self, key: str) -> None:

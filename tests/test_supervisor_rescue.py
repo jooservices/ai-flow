@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from aiflow import agents
+from aiflow import agents, supervisor_execution
 from aiflow.jira import JiraError
 from aiflow.rescue import Rescue
 from aiflow.supervisor import STAGES
@@ -81,6 +81,7 @@ class MasterRescuePickupTests(unittest.TestCase):
 
     def test_executor_recalculates_budget_after_delayed_setup(self):
         sup = make()
+        sup.redis.set("lease:JAIF-9", sup.cfg.owner, 60)
         repo = mock.Mock()
         repo.name = "ai-flow"
         clock = {"now": 1000.0}
@@ -109,6 +110,139 @@ class MasterRescuePickupTests(unittest.TestCase):
         self.assertEqual(build.call_args.args[5:7], ("opus", "max"))
         self.assertEqual(run.call_args.kwargs["max_seconds"], 35)
         self.assertEqual(result[2], ("BLOCKED", "missing fixture"))
+
+    def test_fast_finish_after_owner_routing_cannot_start_a_rescue_handoff(self):
+        redis = FakeRedis()
+        sup = make(redis=redis)
+        redis.set("lease:JAIF-9", sup.cfg.owner, 60)
+        sup.label_workspace = mock.Mock()
+        sup.prepare_ticket_database = mock.Mock(return_value=True)
+        sup.finish_master_attempt = mock.Mock(return_value=True)
+        repo = mock.Mock()
+        repo.ensure_worktree.return_value = (Path(tempfile.gettempdir()), "JAIF-9-rescue")
+
+        def finish_after_owner_route(*_args, **_kwargs):
+            redis.delete("lease:JAIF-9")
+            return "ok", "private run output", ("DONE", "finished"), False
+
+        sup.execute = mock.Mock(side_effect=finish_after_owner_route)
+        with tempfile.TemporaryDirectory() as directory:
+            sup.replies_file = lambda key: Path(directory) / "replies.json"
+            issue = self.issue()
+            view = {"summary": "Routine task", "agent_field": "Claude", "agent": "Claude"}
+            self.assertTrue(sup.develop("JAIF-9", issue, view, repo, "develop", "Claude",
+                                        session_owner="session", rescue_record=self.record()))
+
+        sup.finish_master_attempt.assert_not_called()
+        self.assertIsNone(redis.get("lease:JAIF-9"))
+
+    def test_executor_ignores_a_fast_result_when_owner_routing_deleted_its_lease(self):
+        sup = make()
+        sup.redis.set("lease:JAIF-9", sup.cfg.owner, 60)
+        repo = mock.Mock()
+        repo.name = "ai-flow"
+        logs, events = [], []
+
+        def finish_after_owner_route(*_args, **_kwargs):
+            sup.redis.delete("lease:JAIF-9")
+            return 0, "ok"
+
+        with tempfile.TemporaryDirectory() as directory:
+            sup.replies_file = lambda key: Path(directory) / "replies.json"
+            sup.jira.comments = lambda key, last=6: []
+            for name, value in (("recall", ""), ("memory_env", {}), ("rework_text", ""), ("pr_text", ""),
+                                ("change_type", "")):
+                setattr(sup, name, mock.Mock(return_value=value))
+            with mock.patch("aiflow.supervisor.agents.build_command", return_value=(["claude"], None)), \
+                    mock.patch("aiflow.supervisor.agents.run_env", return_value={}), \
+                    mock.patch("aiflow.supervisor.runner.run", side_effect=finish_after_owner_route), \
+                    mock.patch("aiflow.supervisor.usage.report") as report, \
+                    mock.patch("aiflow.supervisor.agents.final_text") as final_text, \
+                    mock.patch("aiflow.supervisor_execution.events.emit", side_effect=lambda *a, **kw: events.append((a, kw))):
+                result = sup.execute("developer", "Claude", "JAIF-9", {"summary": "Routine fix"},
+                                     Path(directory), "JAIF-9-fix", "develop", repo)
+
+        self.assertEqual(result, ("lost-lease", "", None, False))
+        report.assert_not_called()
+        final_text.assert_not_called()
+        self.assertEqual(events, [])
+
+    def test_heartbeat_does_not_push_a_branch_after_lease_loss(self):
+        sup = make()
+        repo = mock.Mock()
+        repo.name = "ai-flow"
+        beat = supervisor_execution.heartbeat(sup, "developer", "JAIF-9", "Claude", Path("."), "branch", repo,
+                                              None, None, 600, lambda message: None)
+
+        self.assertFalse(beat())
+        repo.push.assert_not_called()
+
+    def test_rescue_output_is_omitted_from_logs_events_and_jira_comments(self):
+        secret = "token=CANARY_SECRET_92_RESCUE_OUTPUT"
+        sup = make(redis=FakeRedis())
+        sup.redis.set("lease:JAIF-9", sup.cfg.owner, 60)
+        repo = mock.Mock()
+        repo.name = "ai-flow"
+        logs, events, comments = [], [], []
+        sup.log_usage = mock.Mock()
+        sup.remember_lessons = mock.Mock()
+
+        def log_journal(message):
+            logs.append(message)
+            supervisor_execution.events.emit("log", message=message)
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("aiflow.supervisor_execution.usage.report", return_value={}), \
+                mock.patch("aiflow.supervisor_execution.agents.final_text", return_value=secret), \
+                mock.patch("aiflow.supervisor_execution.agents.verdict", return_value=("DONE", secret)), \
+                mock.patch("aiflow.supervisor_execution.agents.looks_like_quota", return_value=False), \
+                mock.patch("aiflow.supervisor_execution.events.emit", side_effect=lambda *a, **kw: events.append((a, kw))):
+            result = supervisor_execution.finish(sup, "developer", "Claude", "JAIF-9", repo, Path(directory),
+                                                 Path(directory) / "run.log", Path(directory) / "run.result",
+                                                 "opus", "max", time.monotonic(), 0, "ok", log_journal,
+                                                 rescue_run=True)
+
+        self.assertEqual(result[2], ("DONE", secret))
+        self.assertNotIn(secret, "\n".join(logs))
+        self.assertNotIn(secret, repr(events))
+        run_event = next(fields for args, fields in events if args[0] == "ai.run")
+        self.assertEqual(run_event["detail"], "")
+        sup.remember_lessons.assert_not_called()
+
+        sup.redis.set("lease:JAIF-9", sup.cfg.owner, 60)
+        sup.jira.comments = lambda key, last=3: []
+        sup.jira.comment = lambda key, body: comments.append(body)
+        sup.read_replies = mock.Mock(return_value=[])
+        sup.change_type = mock.Mock(return_value="")
+        sup.require_human_for_deployment = mock.Mock()
+        repo.ticket_env_committed.return_value = False
+        repo.commit_subjects.return_value = []
+        sup.finish_development("JAIF-9", {"summary": "Routine task"}, repo, "develop", "Claude",
+                               Path(directory), "branch", secret, rescue_run=True)
+        failed_events = []
+        with mock.patch("aiflow.supervisor.events.emit",
+                        side_effect=lambda *args, **fields: failed_events.append((args, fields))):
+            sup.failed("JAIF-9", "developer", "Claude", secret, secret, output_allowed=False)
+        self.assertNotIn(secret, "\n".join(comments))
+        self.assertNotIn(secret, repr(failed_events))
+        self.assertTrue(any("sending to review" in body for body in comments))
+        self.assertTrue(any("without a usable result" in body for body in comments))
+
+    def test_finish_development_rechecks_ownership_immediately_before_pushing(self):
+        sup = make(redis=FakeRedis())
+        sup.renew_ticket_ownership = mock.Mock(side_effect=(True, False))
+        sup.read_replies = mock.Mock(return_value=[])
+        sup.change_type = mock.Mock(return_value="")
+        sup.require_human_for_deployment = mock.Mock()
+        repo = mock.Mock()
+        repo.ticket_env_committed.return_value = False
+        repo.commit_subjects.return_value = []
+
+        result = sup.finish_development("JAIF-9", {"summary": "Routine task"}, repo, "develop", "Claude",
+                                        Path("."), "branch", "private output")
+
+        self.assertIsNone(result)
+        repo.push.assert_not_called()
 
     def test_executor_does_not_launch_after_setup_uses_the_remaining_budget(self):
         sup = make()
@@ -141,6 +275,7 @@ class MasterRescuePickupTests(unittest.TestCase):
         redis = FakeRedis()
         sup = make(redis=redis)
         sup.jira.status = "Handover"
+        redis.set("lease:JAIF-9", sup.cfg.owner, 60)
         redis.set_persistent("rescue:JAIF-9", json.dumps(self.record(stuck="pre-rescue audit", findings=["pre-rescue audit"])))
         repo = mock.Mock()
         repo.ahead.return_value = 0
@@ -161,6 +296,7 @@ class MasterRescuePickupTests(unittest.TestCase):
         redis = FakeRedis()
         sup = make(redis=redis)
         sup.jira.status = "Handover"
+        redis.set("lease:JAIF-9", sup.cfg.owner, 60)
         redis.set_persistent("rescue:JAIF-9", json.dumps(self.record()))
         repo = mock.Mock()
         repo.ahead.return_value = 0
@@ -177,6 +313,7 @@ class MasterRescuePickupTests(unittest.TestCase):
         redis = FakeRedis()
         sup = make(redis=redis)
         sup.jira.status = "Handover"
+        redis.set("lease:JAIF-9", sup.cfg.owner, 60)
         redis.set_persistent("rescue:JAIF-9", json.dumps(self.record()))
         repo = mock.Mock()
         repo.ahead.return_value = 1
@@ -232,11 +369,12 @@ class MasterRescuePickupTests(unittest.TestCase):
                 redis = FakeRedis()
                 sup = make(redis=redis)
                 sup.jira.status = "Handover"
+                redis.set("lease:JAIF-9", sup.cfg.owner, 60)
                 redis.set_persistent("rescue:JAIF-9", json.dumps(self.record()))
                 repo = mock.Mock()
                 repo.ahead.return_value = 1
 
-                def accepted_but_unacknowledged(*_args):
+                def accepted_but_unacknowledged(*_args, **_kwargs):
                     sup.jira.status = status
                     return False
 
@@ -253,6 +391,7 @@ class MasterRescuePickupTests(unittest.TestCase):
         redis = FakeRedis()
         sup = make(redis=redis)
         sup.jira.status = "Handover"
+        redis.set("lease:JAIF-9", sup.cfg.owner, 60)
         redis.set_persistent("rescue:JAIF-9", json.dumps(self.record()))
         repo = mock.Mock()
         repo.ahead.return_value = 1

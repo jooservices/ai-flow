@@ -141,17 +141,23 @@ class RulesTests(unittest.TestCase):
 
     def test_owner_only_work_goes_to_the_owner_without_waiting(self):
         topics = {"Pay the invoice for the licence": "spending money", "Rotate the API key": "credentials, tokens or secrets",
-                  "Delete the database": "deleting data", "Cut a release": "a release", "The requirements changed": "changing the requirements",
+                  "Rotate SSH key": "credentials, tokens or secrets", "Delete the database": "deleting data",
+                  "Delete production DB": "deleting data", "Refund the subscription": "spending money",
+                  "Cut a release": "a release", "Publish the release": "a release",
+                  "The requirements changed": "changing the requirements",
                   "Merge it by hand": "merging by hand", "Runtime setup of the host": "runtime setup",
                   "Install the missing tool": "changing installed software",
                   "Update the installed package": "changing installed software",
-                  "Modify installed software": "changing installed software"}
+                  "Modify installed software": "changing installed software",
+                  "Upgrade the installed tool": "changing installed software",
+                  "Rollback the runtime package": "changing installed software"}
         for text, topic in topics.items():
             with self.subTest(text=text):
                 found = verdict("Blocked", 0, blocked_kind="Config", reason=text)  # even before the 10 minute wait
                 self.assertEqual((found.mode, found.topic), ("owner", topic))
         self.assertEqual(owner_only_topic("a failing unit test"), "")
         self.assertEqual(owner_only_topic("Update the ticket documentation"), "")
+        self.assertEqual(owner_only_topic("Fix charge timeout handling"), "")
         self.assertEqual(verdict("In Progress", 70, stretch_minutes=70, summary="Rotate the credentials").mode, "owner")
 
     def test_ordinary_owner_only_actions_are_detected_in_descriptions_and_comments(self):
@@ -490,8 +496,38 @@ class RescueRunTests(unittest.TestCase):
 
                 self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "owner")
                 self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
+                self.assertIsNone(sup.jira.fields.get(("JAIF-1", "Taken by")))
+                self.assertIsNone(sup.jira.fields.get(("JAIF-1", "AI Model")))
                 self.assertTrue(any(f"Claude is unavailable ({reason})" in body
                                     for _, body in sup.jira.comments))
+
+    def test_unavailable_after_handover_retries_cleanup_of_owner_fields(self):
+        op, sup, redis = self.build()
+        self.assertTrue(op.handle(self.incident()))
+        self.assertEqual(sup.jira.fields[("JAIF-1", "Taken by")], {"value": "Claude"})
+        self.assertEqual(sup.jira.fields[("JAIF-1", "AI Model")], {"value": "Claude:opus"})
+        sup.online_pool = lambda: ["Codex"]
+        self.assertEqual(sup.master_worker.reserve("JAIF-1"), (None, None))
+
+        set_field = sup.jira.set_field
+        failed = set()
+
+        def fail_first_clear(key, field, value):
+            if value is None and field in ("Taken by", "AI Model") and field not in failed:
+                failed.add(field)
+                raise JiraError("temporary owner-field cleanup failure")
+            set_field(key, field, value)
+
+        sup.jira.set_field = fail_first_clear
+        op.check_rescues()
+        self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "owner")
+        self.assertIsNotNone(redis.get("operator:rescue-cleanup:JAIF-1"))
+
+        op.check_rescues()
+
+        self.assertIsNone(redis.get("operator:rescue-cleanup:JAIF-1"))
+        self.assertIsNone(sup.jira.fields[("JAIF-1", "Taken by")])
+        self.assertIsNone(sup.jira.fields[("JAIF-1", "AI Model")])
 
     def test_capacity_reservation_failure_remains_retryable(self):
         op, sup, redis = self.build()
@@ -760,6 +796,7 @@ class RescueRunTests(unittest.TestCase):
         self.assertEqual(sup.jira.moves[-1], ("JAIF-1", "To Do"))
         self.assertNotIn(("JAIF-1", "needs-owner"), sup.jira.added)
         self.assertIsNone(sup.jira.fields[("JAIF-1", "Taken by")])
+        self.assertIsNone(sup.jira.fields[("JAIF-1", "AI Model")])
         body = [b for k, b in sup.jira.comments if b.startswith("AI Flow doctor")][0]
         self.assertIn("rescue budget of 50 min ran out without a result", body)
         self.assertIn("Stuck: Blocked for 40 min", body)

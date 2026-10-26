@@ -90,23 +90,34 @@ class MasterRescueWorker:
 
     def finish_attempt(self, key: str, view: dict[str, Any], repo: Any, base: str, agent: str,
                        workdir: Any, branch: str, text: str, why: str,
-                       found: tuple[str, str] | None, quota: bool) -> bool:
+                       found: tuple[str, str] | None, quota: bool,
+                       session_owner: str | None = None) -> bool:
+        if self.sup.renew_ticket_ownership(key, agent, session_owner) is not True:
+            return True
         if quota:
             self.sup.quota_hit(key, agent, "master_rescue")
             cause = f"Claude rescue ended ({why})"
         elif found and found[0] == "DONE" and repo.ahead(workdir, base) > 0:
-            if not self.begin_completion(key):
-                return True
-            if self.sup.finish_development(key, view, repo, base, agent, workdir, branch, text):
-                return self.end(key, True)
-            if Rescue(self.sup).reconcile_failed_completion(key):
-                return True
-            cause = "Claude's result could not complete the normal development handoff"
+            return self.finish_successful_result(key, view, repo, base, agent, workdir, branch, text, found, session_owner)
         elif found and found[0] == "BLOCKED":
             cause = "Claude reported that the rescue remained blocked"
         else:
             cause = ("Claude ended without a DONE result and committed changes" if why == "ok"
                      else f"Claude rescue ended ({why})")
+        return self.end(key, False, cause, safe_run_findings(text, found))
+
+    def finish_successful_result(self, key: str, view: dict[str, Any], repo: Any, base: str, agent: str,
+                                 workdir: Any, branch: str, text: str, found: tuple[str, str] | None,
+                                 session_owner: str | None) -> bool:
+        if not self.begin_completion(key):
+            return True
+        handed_off = self.sup.finish_development(key, view, repo, base, agent, workdir, branch, text,
+                                                 rescue_run=True, session_owner=session_owner)
+        if handed_off is True:
+            return self.end(key, True)
+        if handed_off is None or Rescue(self.sup).reconcile_failed_completion(key):
+            return True
+        cause = "Claude's result could not complete the normal development handoff"
         return self.end(key, False, cause, safe_run_findings(text, found))
 
     def end(self, key: str, ok: bool, cause: str = "", findings: str = "") -> bool:

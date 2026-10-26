@@ -29,9 +29,13 @@ def develop(supervisor: Any, key: str, issue: dict[str, Any], view: dict[str, An
     why, text, found, quota = result
     if why == "lost-lease":
         return True
+    if supervisor.renew_ticket_ownership(key, agent, session_owner) is not True:
+        return True
     if rescue_record is not None:
-        return supervisor.finish_master_attempt(key, view, repo, base, agent, workdir, branch, text, why, found, quota)
-    return finish_developer_attempt(supervisor, key, view, repo, base, agent, workdir, branch, text, why, found, quota)
+        return supervisor.finish_master_attempt(key, view, repo, base, agent, workdir, branch, text, why, found, quota,
+                                               session_owner)
+    return finish_developer_attempt(supervisor, key, view, repo, base, agent, workdir, branch, text, why, found, quota,
+                                    session_owner)
 
 
 def development_limit(supervisor: Any, key: str, repo: Any, rescue_record: dict[str, Any] | None) -> bool:
@@ -95,11 +99,14 @@ def start_run(supervisor: Any, key: str, issue: dict[str, Any], view: dict[str, 
 
 def finish_developer_attempt(supervisor: Any, key: str, view: dict[str, Any], repo: Any, base: str, agent: str,
                              workdir: Path, branch: str, text: str, why: str,
-                             found: tuple[str, str] | None, quota: bool) -> bool:
+                             found: tuple[str, str] | None, quota: bool,
+                             session_owner: str | None = None) -> bool:
+    if supervisor.renew_ticket_ownership(key, agent, session_owner) is not True:
+        return True
     if quota:
         supervisor.quota_hit(key, agent, "developer")
     elif found and found[0] == "DONE" and repo.ahead(workdir, base) > 0:
-        supervisor.finish_development(key, view, repo, base, agent, workdir, branch, text)
+        supervisor.finish_development(key, view, repo, base, agent, workdir, branch, text, session_owner=session_owner)
     elif found and found[0] == "BLOCKED":
         supervisor.block(key, f"{agent} reported: {found[1]}", kind="Unclear")
     else:

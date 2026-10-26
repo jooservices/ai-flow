@@ -216,9 +216,12 @@ class Rescue:
 
     def rollback_handover(self, key: str, incident_id: str, model: bool) -> None:
         if not self.clear_handover_fields(key, model):
-            self.redis.set_persistent(f"operator:rescue-cleanup:{key}", json.dumps({"model": model}))
+            self.queue_handover_cleanup(key, model)
         self.redis.delete(f"rescue:{key}")
         self.redis.set(f"operator:cool:{incident_id}", "1", 600)
+
+    def queue_handover_cleanup(self, key: str, model: bool) -> None:
+        self.redis.set_persistent(f"operator:rescue-cleanup:{key}", json.dumps({"model": model}))
 
     def current_status(self, key: str) -> str | None:
         """Read Jira's status; None means the transition outcome is still uncertain."""
@@ -393,6 +396,9 @@ class Rescue:
     def route_pending_owner(self, key: str, record: dict[str, Any]) -> bool:
         if record.get("state") != "owner_pending":
             return False
+        model = bool(record.get("model"))
+        if not self.clear_handover_fields(key, model):
+            self.queue_handover_cleanup(key, model)
         facts = record.get("incident_facts")
         incident = Incident(f"rescue:{key}", "rescue", key, str(record.get("summary", "")),
                             facts if isinstance(facts, dict) else {})
@@ -534,7 +540,8 @@ class Rescue:
                 return False
             record["doctor_commented"] = True
             self.finish(key, record, "doctor_pending")
-        if not self.clear_taken_by(key):
+        if not self.clear_handover_fields(key, bool(record.get("model"))):
+            self.queue_handover_cleanup(key, bool(record.get("model")))
             return False
         try:
             status = str(self.jira.view(key).get("status", "") or "")

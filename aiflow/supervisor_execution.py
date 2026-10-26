@@ -32,7 +32,7 @@ def execute(supervisor: Any, role: str, agent: str, key: str, view: dict[str, An
                            idle_seconds=supervisor.cfg.idle_minutes * 60, max_seconds=max_seconds,
                            heartbeat_seconds=supervisor.cfg.heartbeat_seconds, heartbeat=beat)
     return finish(supervisor, role, agent, key, repo, workdir, log_file, result_file, model, effort,
-                  began, code, why, log_message)
+                  began, code, why, log_message, session_owner, rescue_deadline is not None)
 
 
 def prepare(supervisor: Any, role: str, agent: str, key: str, view: dict[str, Any], workdir: Path,
@@ -74,43 +74,53 @@ def heartbeat(supervisor: Any, role: str, key: str, agent: str, workdir: Path, b
     pushed_at, last_ok = [time.monotonic()], [time.monotonic()]
 
     def beat() -> bool:
-        if role == "developer" and time.monotonic() - pushed_at[0] > 120:
-            pushed_at[0] = time.monotonic()
-            try:  # keep the branch on origin so another machine can continue after a crash
-                repo.push(workdir, branch)
-            except GitError:
-                pass
         try:
             supervisor.redis.set(f"hb:{supervisor.cfg.machine}:{supervisor.cfg.worker_label}", str(int(time.time())), 300)
             if slot_owner:
                 supervisor.redis.renew(f"qaslot:{repo.name}", slot_owner, slot_seconds)
-            session_alive = (not session_owner or supervisor.redis.renew_session(
-                supervisor.cfg.machine, agent, session_owner, supervisor.cfg.lease_seconds))
-            alive = supervisor.redis.renew(f"lease:{key}", supervisor.cfg.owner,
-                                           supervisor.cfg.lease_seconds) and session_alive
+            alive = supervisor.renew_ticket_ownership(key, agent, session_owner)
         except RedisError as error:
             silent = time.monotonic() - last_ok[0]
             log_message(f"{key}: redis unreachable for {int(silent)}s during {role}: {error}")
             return silent < supervisor.cfg.lease_seconds * 0.75
+        if alive is None:
+            silent = time.monotonic() - last_ok[0]
+            log_message(f"{key}: redis unreachable for {int(silent)}s during {role}")
+            return silent < supervisor.cfg.lease_seconds * 0.75
+        if not alive:
+            return False
         last_ok[0] = time.monotonic()
-        return alive
+        if role == "developer" and time.monotonic() - pushed_at[0] > 120:
+            pushed_at[0] = time.monotonic()
+            try:  # a running branch is pushed only while this worker still owns its ticket lease
+                repo.push(workdir, branch)
+            except GitError:
+                pass
+        return True
 
     return beat
 
 
 def finish(supervisor: Any, role: str, agent: str, key: str, repo: Any, workdir: Path,
            log_file: Path, result_file: Path, model: str, effort: str, began: float,
-           code: int | None, why: str, log_message: Any) -> tuple[str, str, tuple[str, str] | None, bool]:
+           code: int | None, why: str, log_message: Any, session_owner: str | None = None,
+           rescue_run: bool = False) -> tuple[str, str, tuple[str, str] | None, bool]:
+    if supervisor.renew_ticket_ownership(key, agent, session_owner) is not True:
+        return "lost-lease", "", None, False
     used = usage.report(agent, log_file, ticket=key, role=role, model=model, effort=effort, why=why,
                         code=code, minutes=round((time.monotonic() - began) / 60, 2))
     supervisor.log_usage(key, role, agent, (time.monotonic() - began) / 60, why, code, used)
     text = agents.final_text(agent, log_file, result_file)
     found = agents.verdict(text)
-    supervisor.remember_lessons(key, repo, agent, text)
+    if not rescue_run:
+        supervisor.remember_lessons(key, repo, agent, text)
     quota = (code != 0 or found is None) and agents.looks_like_quota(log_file, text, code)
-    log_message(f"{key} {role} {agent}: exit={code} why={why} verdict={found} quota={quota}")
+    verdict = found[0] if found else ""
+    detail = "" if rescue_run or not found else found[1][:300]
+    log_message(f"{key} {role} {agent}: exit={code} why={why} verdict={verdict} quota={quota}"
+                f"{' (detail omitted)' if rescue_run and found else ''}")
     events.emit("ai.run", ticket=key, role=role, agent=agent, model=model, effort=effort,
                 minutes=round((time.monotonic() - began) / 60, 2), why=why, code=code,
-                verdict=found[0] if found else "", detail=(found[1] if found else "")[:300],
+                verdict=verdict, detail=detail,
                 quota=quota, log_file=str(log_file))
     return why, text, found, quota

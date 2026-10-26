@@ -13,6 +13,7 @@ from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, locked_version, normalize_stacks, toolchain_gaps
 from . import knowledge
 from . import notify
+from .repositories.incidents import IncidentsRepository
 from .repositories.runs import RunsRepository
 from .repositories.tickets import TicketsRepository
 from .repositories.verify_runs import VerifyRunsRepository
@@ -233,11 +234,14 @@ def workable_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
 def idle_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
     """Old queue items that still need work, including items gated by a wait, backoff or project pause."""
     held = set(ctx.leases.held_keys())
+    verify_incidents = set(IncidentsRepository(ctx.db).open_subjects("verify_no_verdict"))
     tickets = TicketsRepository(ctx.db)
     done = tickets.done_keys()
     out = []
     for ticket in tickets.idle_flow_candidates(older_than_min):
         if ticket["key"] in held:
+            continue
+        if ticket["status"] == "In Verify" and ticket["key"] in verify_incidents:
             continue
         if ticket["status"] == "To Do" and any(blocker not in done for blocker in ticket["blocked_by"]):
             continue

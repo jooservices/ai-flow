@@ -40,9 +40,10 @@ When every eligible account is barred from a ticket in verification, the watchdo
 incident (subject: the ticket) that names the ticket and the reason and lists the accounts. Repeated checks do not open a
 second one. It stays open if temporary capacity loss leaves no eligible account online. It closes when the ticket leaves
 verification or an unbarred eligible account can receive it; a new development round resets the account history and can
-make a retry available. The control-loops process installs the same candidate eligibility probe used by the API before
-checking exhaustion, so this works when the loops process has not initialized a FastAPI app. Incidents are shown in the
-control UI like all others.
+make a retry available. The watchdog checks exhaustion before generic idle flow and excludes tickets covered by an open
+`verify_no_verdict` incident from idle detection, so one stalled verification does not raise a second `flow_idle` incident.
+The control-loops process installs the same candidate eligibility probe used by the API before checking exhaustion, so
+this works when the loops process has not initialized a FastAPI app. Incidents are shown in the control UI like all others.
 
 ## Dashboard
 

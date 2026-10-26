@@ -155,12 +155,12 @@ def watchdog(ctx: Ctx) -> None:
     _watch_nodes_without_accounts(ctx, repo)
     _watch_orphan_tickets(ctx)
     _watch_stuck_tickets(ctx)
+    _check_verify_incidents(ctx, control_api.RELEASES)
     try:
         check_stack_pins(ctx)
         check_idle_flow(ctx)
     except Exception as e:  # noqa: BLE001 - a failing check must not stop the rest of the watchdog
         log.warning("idle and pin checks failed: %s", e)
-    _check_verify_incidents(ctx, control_api.RELEASES)
     _watch_lost_runs(ctx)
     _watch_run_clocks(ctx, now, repo)
     _close_finished_run_incidents(ctx)

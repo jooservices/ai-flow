@@ -232,6 +232,23 @@ def test_failure_on_all_eligible_accounts_raises_one_incident_and_the_dashboard_
                       " AND closed_at IS NULL")["n"] == 0
 
 
+def test_stale_exhausted_ticket_opens_only_verify_incident_not_flow_idle(client, ctx):
+    join(client, "cc"), join(client, "node1")
+    in_verify(ctx)
+    ctx.db.run("UPDATE tickets SET jira_updated=now()-interval '2 hours' WHERE key='TESTWP-50'")
+    for account in ("codex-01", "claude-01"):
+        for minutes in (40, 35):
+            no_verdict(ctx, "TESTWP-50", account, minutes_ago=minutes)
+
+    for _ in range(2):
+        watchdog(ctx)
+        incidents_by_kind = ctx.db.all(
+            "SELECT kind, count(*) AS count FROM incidents WHERE subject='TESTWP-50' AND closed_at IS NULL"
+            " GROUP BY kind")
+        assert incidents_by_kind == [{"kind": "verify_no_verdict", "count": 1}]
+    assert "TESTWP-50" not in {row["key"] for row in incidents.idle_tickets(ctx)}
+
+
 def test_loops_watchdog_initializes_candidate_probe_without_create_app(ctx, tmp_path):
     from aiflow.v4.control import loops
 

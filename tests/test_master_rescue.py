@@ -20,6 +20,11 @@ NOW = 1_000_000.0
 SETTINGS = MasterSettings()
 
 
+class CommentLog(list):
+    def __call__(self, key, last=3):
+        return []
+
+
 def verdict(status, minutes, **extra):
     item = ticket("JAIF-1", status, minutes, **extra)
     return evaluate(item, SETTINGS, minutes)
@@ -272,6 +277,29 @@ class RescueRunTests(unittest.TestCase):
         self.assertNotIn("updated parser", body)
         self.assertNotIn("added regression", body)
 
+    def test_real_attempts_block_preserves_counts_for_the_handover_audit(self):
+        op, sup, redis = self.build()
+        now = time.time()
+        sup.jira.status = "In Progress"
+        sup.jira.comments = CommentLog()
+        sup.jira.found = [{"key": "JAIF-1", "status": "Blocked",
+                           "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 40 * 60)),
+                           "labels": [], "summary": "Routine task", "description": "Fix the routine task"}]
+        redis.set_persistent("attempts:JAIF-1:developer", "2")
+        redis.set_persistent("attempts:JAIF-1:qa", "1")
+
+        sup.block("JAIF-1", "three failed runs", kind="Attempts")
+        self.assertIsNone(redis.get("attempts:JAIF-1:developer"))
+        blocked = json.loads(redis.get("blocked:JAIF-1"))
+        self.assertEqual(blocked["attempts"], {"developer": 2, "qa": 1})
+        incident = next(item for item in find_incidents(op.state()) if item.kind == "rescue")
+        self.assertEqual(incident.facts["attempts"], {"developer": 2, "qa": 1})
+
+        self.assertTrue(op.handle(incident))
+        body = next(body for key, body in sup.jira.comments
+                    if key == "JAIF-1" and "Master rescue handover audit" in body)
+        self.assertIn("Tried: 2 failed developer run(s) recorded; 1 failed qa run(s) recorded", body)
+
     def test_owner_context_fetch_failures_fail_closed_to_the_owner(self):
         now = time.time()
         cases = (
@@ -390,6 +418,58 @@ class RescueRunTests(unittest.TestCase):
                 self.assertTrue(any(f"Claude is unavailable ({reason})" in b for _, b in sup.jira.comments))
                 self.assertIsNone(redis.get("rescue:JAIF-1"))
 
+    def test_reservation_rechecks_global_unavailability_and_routes_unstarted_rescues_to_owner(self):
+        for reason in ("offline", "quota"):
+            with self.subTest(reason=reason):
+                op, sup, redis = self.build()
+                op.handle(self.incident())
+                if reason == "offline":
+                    sup.online_pool = lambda: ["Codex"]
+                else:
+                    redis.set("cooldown:Claude", "1", 60)
+
+                self.assertEqual(sup.master_worker.reserve("JAIF-1"), (None, None))
+                self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "owner_pending")
+
+                op.check_rescues()
+
+                self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "owner")
+                self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
+                self.assertTrue(any(f"Claude is unavailable ({reason})" in body
+                                    for _, body in sup.jira.comments))
+
+    def test_capacity_reservation_failure_remains_retryable(self):
+        op, sup, redis = self.build()
+        op.handle(self.incident())
+        sup.master_worker.online_here = lambda: True
+        acquire = redis.acquire_session
+        redis.acquire_session = lambda *args, **kwargs: False
+
+        self.assertEqual(sup.master_worker.reserve("JAIF-1"), (None, None))
+        self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "active")
+        self.assertNotIn(("JAIF-1", "needs-owner"), sup.jira.added)
+
+        redis.acquire_session = acquire
+        agent, owner = sup.master_worker.reserve("JAIF-1")
+        self.assertEqual(agent, "Claude")
+        self.assertTrue(owner)
+        self.assertTrue(json.loads(redis.get("rescue:JAIF-1"))["worker_started"])
+
+    def test_expired_unstarted_rescue_goes_to_owner_when_claude_is_offline(self):
+        op, sup, redis = self.build()
+        op.handle(self.incident())
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        record["started"] = int(time.time()) - 51 * 60
+        redis.set_persistent("rescue:JAIF-1", json.dumps(record))
+        sup.online_pool = lambda: ["Codex"]
+
+        op.check_rescues()
+
+        self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "owner")
+        self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
+        self.assertFalse(any(move == ("JAIF-1", "To Do") for move in sup.jira.moves))
+        self.assertTrue(any("Claude is unavailable (offline)" in body for _, body in sup.jira.comments))
+
     def test_owner_only_work_is_never_handed_over(self):
         op, sup, redis = self.build()
         item = ticket("JAIF-1", "Blocked", 1, blocked_kind="Config", reason="needs a new API token")
@@ -478,6 +558,29 @@ class RescueRunTests(unittest.TestCase):
         record = json.loads(redis.get("rescue:JAIF-1"))
         self.assertEqual(record["state"], "active")
         self.assertIn(("JAIF-1", "master-rescue"), sup.jira.added)
+
+    def test_handover_record_precedes_transition_and_recovers_after_process_interruption(self):
+        op, sup, redis = self.build()
+
+        def accepted_then_process_stops(key, status):
+            record = json.loads(redis.get("rescue:JAIF-1"))
+            self.assertEqual(record["state"], "handover_pending")
+            sup.jira.status = status
+            raise SystemExit("simulated process stop after Jira accepted Handover")
+
+        sup.jira.transition = accepted_then_process_stops
+        with self.assertRaises(SystemExit):
+            op.handle(self.incident())
+        self.assertEqual(json.loads(redis.get("rescue:JAIF-1"))["state"], "handover_pending")
+        self.assertNotIn(("JAIF-1", "master-rescue"), sup.jira.added)
+
+        op.check_rescues()
+
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertEqual(record["state"], "active")
+        self.assertIn(("JAIF-1", "master-rescue"), sup.jira.added)
+        self.assertTrue(any("Master rescue handover audit: rescue:JAIF-1" in body
+                            for _, body in sup.jira.comments))
 
     def test_failed_handover_retries_cleanup_of_temporary_fields(self):
         op, sup, redis = self.build()

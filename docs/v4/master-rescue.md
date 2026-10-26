@@ -40,10 +40,11 @@ a cap below the work limit plus the rescue budget, a model that is not Claude) a
    cap or Claude unavailable (no machine has Claude: offline; Claude cooling down after a usage limit: quota) also goes to the
    owner. The ticket gets `needs-owner` and the usual question comment.
 3. **Handover** otherwise: status `Handover` (JAIF-102), `Taken by = Claude`, the AI Model field set to the rescue model, the label
-   `master-rescue`, and the lease of a running worker is released. The rescue record is stored as soon as Jira accepts Handover,
-   so failed label writes and the handover audit comment are retried on later operator passes. The saved audit marker prevents
-   duplicate comments when Jira accepted a comment but its response was lost. The label and record `rescue:<KEY>` make it one
-   rescue per ticket; a later problem follows the normal operator path.
+   `master-rescue`, and the lease of a running worker is released. A pending rescue record, including the saved audit payload, is
+   persisted before the Jira transition. Later operator passes reconcile it against Jira after an interruption, then retry failed
+   label writes and the handover audit comment. The saved audit marker prevents duplicate comments when Jira accepted a comment
+   but its response was lost. The label and record `rescue:<KEY>` make it one rescue per ticket; a later problem follows the normal
+   operator path.
 4. **Audit comment** on the ticket: where it is stuck (status, time, and Blocked kind), what was tried (recorded failed
    developer/reviewer/QA/PR runs, rework rounds, and whether recent comments were reviewed), the work time and remaining budget
    (`min(master_minutes, total_cap_minutes - work time)`), and the model. Raw Blocked reasons and comment excerpts are omitted
@@ -71,7 +72,10 @@ record with a completed handover audit are present. It reserves a Claude session
 prompt, uses the model saved at handover, and stops the runner at the saved rescue deadline. A successful developer result
 continues through the normal pull-request path. A run that times out, reports Blocked, or ends without committed work goes
 through the flow doctor, which records the cause and returns the ticket to To Do with a safe reference to its findings. No
-separate JAIF-102 worker automation is needed; JAIF-102 supplies the Handover status and `Taken by` Jira field.
+separate JAIF-102 worker automation is needed; JAIF-102 supplies the Handover status and `Taken by` Jira field. The worker
+and operator recovery recheck global Claude offline and quota state before the rescue starts, including before the budget-expiry
+path. An unstarted rescue moves to the owner through the operator's saved incident/audit path. A local session-capacity miss leaves
+the rescue active for a later pickup. After Claude has started, a later outage does not reclassify the active rescue as unstarted.
 
 The rescue timer starts just before the Handover request, so an ambiguous Jira response cannot extend the budget. Prompt, Jira
 context, and environment preparation also consume the budget; the worker recalculates the remaining seconds immediately before
@@ -84,10 +88,10 @@ AI Flow verifies that the configured Jira projects expose the Handover status an
 |---|---|---|
 | AC1 | `aiflow/master_rescue.py`: `WAIT_DEFAULTS`, `_parse_wait`, `trigger_of` | `tests/test_master_rescue.py`: `test_blocked_kinds_wait_their_own_time`, `test_quota_offline_and_other_kinds_are_never_handed_to_claude` |
 | AC2 | `aiflow/master_rescue.py`: `trigger_of`; `aiflow/operator_rescue.py`: work-time snapshot | `tests/test_master_rescue.py`: `test_in_progress_stretch_and_total_work_limits`, `test_accumulated_work_still_qualifies_after_moving_into_qa` |
-| AC3 | `aiflow/rescue.py`: `hand_over`; `aiflow/supervisor_flow.py`: Handover pickup | `tests/test_master_rescue.py`: `test_handover_sets_status_taken_by_label_model_and_audit`, `test_only_one_rescue_per_ticket`; `tests/test_supervisor_rescue.py`: `test_handover_stage_dispatches_only_an_active_record_to_a_reserved_claude_worker` |
-| AC4 | `aiflow/rescue.py`: `lines`; `aiflow/master_rescue_worker.py`: saved model | `tests/test_master_rescue.py`: `test_handover_audit_uses_recorded_failed_runs_instead_of_the_attempt_limit`, `test_handover_sets_status_taken_by_label_model_and_audit` |
+| AC3 | `aiflow/rescue.py`: `hand_over`, `handover_record`, `reconcile_handover`; `aiflow/supervisor_flow.py`: Handover pickup | `tests/test_master_rescue.py`: `test_handover_sets_status_taken_by_label_model_and_audit`, `test_handover_record_precedes_transition_and_recovers_after_process_interruption`, `test_only_one_rescue_per_ticket`; `tests/test_supervisor_rescue.py`: `test_handover_stage_dispatches_only_an_active_record_to_a_reserved_claude_worker` |
+| AC4 | `aiflow/supervisor.py`: persist attempt history before counter cleanup; `aiflow/operator_rescue.py`: snapshot fallback; `aiflow/rescue.py`: `lines` | `tests/test_master_rescue.py`: `test_real_attempts_block_preserves_counts_for_the_handover_audit`, `test_handover_audit_uses_recorded_failed_runs_instead_of_the_attempt_limit`, `test_handover_sets_status_taken_by_label_model_and_audit` |
 | AC5 | `aiflow/master_rescue.py`: budget defaults/cap; `aiflow/master_rescue_worker.py` and `aiflow/supervisor.py`: absolute deadline | `tests/test_master_rescue.py`: `test_budget_is_master_minutes_under_the_total_cap`; `tests/test_supervisor_rescue.py`: `test_executor_recalculates_budget_after_delayed_setup`, `test_executor_does_not_launch_after_setup_uses_the_remaining_budget` |
-| AC6 | `aiflow/rescue.py`: `claude_unavailable`, `handle`, `to_owner` | `tests/test_master_rescue.py`: `test_unavailable_claude_goes_to_the_owner_at_once` |
+| AC6 | `aiflow/rescue.py`: `defer_unstarted_to_owner`, `route_pending_owner`, `route_unavailable_unstarted`; `aiflow/master_rescue_worker.py`: `reserve`; `aiflow/operator.py`: rescue recovery | `tests/test_master_rescue.py`: `test_unavailable_claude_goes_to_the_owner_at_once`, `test_reservation_rechecks_global_unavailability_and_routes_unstarted_rescues_to_owner`, `test_expired_unstarted_rescue_goes_to_owner_when_claude_is_offline`, `test_capacity_reservation_failure_remains_retryable` |
 | AC7 | `aiflow/master_rescue.py`: `owner_only_topic`, `evaluate` | `tests/test_master_rescue.py`: `test_owner_only_work_goes_to_the_owner_without_waiting`, `test_ordinary_owner_only_actions_are_detected_in_descriptions_and_comments` |
 | AC8 | `aiflow/master_rescue_worker.py`: `finish_attempt`; `aiflow/rescue.py`: `safe_run_findings`, `flow_doctor`; `aiflow/operator.py`: cycle ordering and pending guard | `tests/test_supervisor_rescue.py`: `test_worker_run_findings_reach_the_flow_doctor`; `tests/test_master_rescue.py`: `test_cycle_recovers_rescues_before_syncing_or_running_ordinary_incidents`, `test_run_next_skips_a_stale_ordinary_incident_during_doctor_recovery` |
 | AC9 | `aiflow/config.py`: master registry loading/check line | `tests/test_master_rescue.py`: `test_the_file_is_validated_by_the_configuration_load_and_the_check`, `test_invalid_settings_are_rejected` |

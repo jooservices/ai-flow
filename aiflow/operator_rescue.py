@@ -27,25 +27,36 @@ def ticket_snapshot(issue: dict[str, Any], blocked: dict[str, Any], rounds: int,
             "rescued": rescue is not None, "rescue_pending": rescue_state in master_rescue.PENDING_RESCUE_STATES,
             "last_comments": comments,
             "context_complete": context_complete,
-            "rework_rounds": rounds, "attempts": attempt_history(redis, key)}
+            "rework_rounds": rounds, "attempts": attempt_history(redis, key, blocked.get("attempts"))}
 
 
-def attempt_history(redis: Any, key: str) -> dict[str, int]:
+def attempt_history(redis: Any, key: str, preserved: Any = None) -> dict[str, int]:
     """Return recorded failed runs by role; never substitute configured limits for ticket history."""
     roles = ("developer", "reviewer", "qa", "pr")
+    found = _preserved_attempts(preserved, roles)
     try:
         values = redis.get_many([f"attempts:{key}:{role}" for role in roles])
     except (RedisError, OSError):
-        return {}
+        return found
     if not isinstance(values, (list, tuple)):
-        return {}
-    found = {}
+        return found
     for role, value in zip(roles, values):
         try:
             count = int(value or 0)
         except (TypeError, ValueError):
             continue
         if count > 0:
+            found[role] = count
+    return found
+
+
+def _preserved_attempts(value: Any, roles: tuple[str, ...]) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    found = {}
+    for role in roles:
+        count = value.get(role)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
             found[role] = count
     return found
 

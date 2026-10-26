@@ -32,6 +32,10 @@ and remaining budget, but omit raw Blocked reasons and comment excerpts. It reco
 with `Taken by = Claude`. The worker picks up only a labeled Handover with a confirmed rescue record, reserves Claude, uses the
 saved rescue model, and enforces the remaining rescue budget while using the standard developer worktree and result path. Prompt,
 Jira context, and environment setup consume that budget; the worker recalculates the deadline immediately before launching Claude.
+A pending rescue record and its audit payload are stored before Jira is asked to transition to Handover, so an operator pass can
+reconcile an interruption after Jira accepted the transition. Worker reservation and operator recovery recheck global offline and
+quota state before Claude starts, including before budget expiry, and send an unstarted rescue to the owner through the usual
+incident audit path when either condition applies; a local session-capacity miss leaves it ready for retry.
 A successful result continues to review; an unsuccessful result goes through the flow doctor with a bounded, redacted summary of
 Claude's actual run findings. Rescue recovery runs before ordinary incident queue sync, and pending doctor recovery suppresses
 stale blocked/stuck incidents so they cannot be escalated to a person by the same cycle. Work time accumulated in In Progress and In Review still qualifies after the ticket moves to QA

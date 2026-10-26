@@ -51,11 +51,19 @@ class MasterRescueWorker:
 
     def reserve(self, key: str) -> tuple[str | None, str | None]:
         agent = master_rescue.RESCUE_AGENT
-        if not self.online_here() or self.sup.cooling(agent):
+        rescue = Rescue(self.sup)
+        unavailable = rescue.claude_unavailable()
+        if unavailable:
+            rescue.defer_unstarted_to_owner(key, unavailable)
+            return None, None
+        if not self.online_here():
             return None, None
         owner = f"{self.sup.cfg.owner}:{key}:master_rescue:{uuid.uuid4().hex}"
         limit = self.sup.cfg.ai_limits.get(agent.casefold())
         if not self.sup.redis.acquire_session(self.sup.cfg.machine, agent, owner, self.sup.cfg.lease_seconds, limit):
+            return None, None
+        if not rescue.mark_worker_started(key):
+            self.sup.redis.release_session(self.sup.cfg.machine, agent, owner)
             return None, None
         events.emit("ai.assign", ticket=key, role="master_rescue", agent=agent, limit=limit, from_field=True)
         return agent, owner

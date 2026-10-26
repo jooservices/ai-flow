@@ -64,9 +64,9 @@ class Rescue:
 
     def claude_unavailable(self) -> str:
         """'offline' when no machine has Claude, 'quota' when it cools down after a usage limit, '' when it can work."""
-        if master_rescue.RESCUE_AGENT not in self.op.sup.online_pool():
+        if master_rescue.RESCUE_AGENT not in self.sup.online_pool():
             return "offline"
-        return "quota" if self.op.sup.cooling(master_rescue.RESCUE_AGENT) else ""
+        return "quota" if self.sup.cooling(master_rescue.RESCUE_AGENT) else ""
 
     def model(self) -> tuple[str, str]:
         """The strongest configured model for Claude: `[master] model`, else the model configured for Claude in agent_models."""
@@ -101,9 +101,23 @@ class Rescue:
     def lines(self, incident: Incident) -> list[str]:
         """Where the ticket is stuck, what was tried, what is left of the budget (the audit comment of the handover)."""
         facts = incident.facts
-        stuck = f"{facts.get('status')} for {facts['times']['minutes_in_status']} min"
+        return [f"Stuck: {self.stuck_summary(facts)}",
+                f"Tried: {self.tried_summary(facts)}",
+                f"Work time: {facts.get('worked_minutes', 0)} min in total, {facts.get('stretch_minutes', 0)} min in the current stretch",
+                f"Remaining budget: {facts.get('remaining_minutes', 0)} min (master_minutes {self.settings.master_minutes}, "
+                f"total_cap_minutes {self.settings.total_cap_minutes})"]
+
+    @staticmethod
+    def stuck_summary(facts: dict[str, Any]) -> str:
+        times = facts.get("times")
+        minutes = times.get("minutes_in_status", 0) if isinstance(times, dict) else 0
+        stuck = f"{facts.get('status', 'unknown')} for {minutes} min"
         if facts.get("blocked_kind"):
             stuck += f" ({facts['blocked_kind']})"
+        return stuck
+
+    @staticmethod
+    def tried_summary(facts: dict[str, Any]) -> str:
         tried = []
         attempts = facts.get("attempts")
         if isinstance(attempts, dict):
@@ -118,11 +132,7 @@ class Rescue:
         comments = facts.get("last_comments", [])
         if isinstance(comments, list) and comments:
             tried.append(f"{len(comments)} recent comment(s) reviewed; raw excerpts omitted")
-        return [f"Stuck: {stuck}",
-                "Tried: " + "; ".join(tried),
-                f"Work time: {facts.get('worked_minutes', 0)} min in total, {facts.get('stretch_minutes', 0)} min in the current stretch",
-                f"Remaining budget: {facts.get('remaining_minutes', 0)} min (master_minutes {self.settings.master_minutes}, "
-                f"total_cap_minutes {self.settings.total_cap_minutes})"]
+        return "; ".join(tried)
 
     def hand_over(self, incident: Incident) -> bool:
         key = incident.ticket
@@ -136,6 +146,14 @@ class Rescue:
             self.rollback_handover(key, incident.id, bool(model))
             return True
         started = int(time.time())
+        record = self.handover_record(incident, model, effort, started)
+        try:
+            self.finish(key, record, "handover_pending")
+        except RedisError as error:
+            self.log(f"master rescue of {key} could not persist its pending handover: {error}")
+            self.rollback_handover(key, incident.id, bool(model))
+            return True
+        self.redis.delete(f"lease:{key}")  # the pending record fences any worker after a restart
         try:
             moved = self.jira.transition(key, master_rescue.HANDOVER)
         except JiraError as error:
@@ -144,34 +162,56 @@ class Rescue:
         if not moved:
             status = self.current_status(key)
             if status is None:
-                self.redis.delete(f"lease:{key}")
-                self.finish(key, self.handover_record(incident, model, effort, started), "handover_pending")
                 return True
             if status.casefold() != master_rescue.HANDOVER.casefold():
                 self.rollback_handover(key, incident.id, bool(model))
                 return True
-        self.activate_handover(key, incident, model, effort, started)
+        self.activate_handover(key, record)
         return True
 
     def handover_record(self, incident: Incident, model: str, effort: str, started: int) -> dict[str, Any]:
         key, facts = incident.ticket, incident.facts
         findings = self.lines(incident)
+        source_times = facts.get("times")
+        minutes = source_times.get("minutes_in_status", 0) if isinstance(source_times, dict) else 0
+        incident_facts = dict(status=facts.get("status", "unknown"), times={"minutes_in_status": minutes},
+                              trigger=facts.get("trigger", ""), blocked_kind=facts.get("blocked_kind", ""),
+                              worked_minutes=facts.get("worked_minutes", 0), stretch_minutes=facts.get("stretch_minutes", 0),
+                              remaining_minutes=facts.get("remaining_minutes", 0), attempts=facts.get("attempts", {}))
         extra = [f"Master rescue handover audit: rescue:{key}", *findings,
                  f"Taken by: {master_rescue.RESCUE_AGENT}, model {model or 'default'}" +
                  (f" (effort {effort})" if effort else "")]
-        return dict(state="active", started=started, budget=facts.get("remaining_minutes", 0),
+        return dict(state="handover_pending", started=started, budget=facts.get("remaining_minutes", 0),
                     model=f"{model}:{effort}".strip(":"), stuck=facts.get("trigger", ""), findings=findings,
+                    summary=incident.summary, incident_facts=incident_facts,
                     label_pending=True, handover_audit_pending=True, handover_audit_attempts=0,
                     handover_audit=dict(summary=incident.summary, extra=extra,
                                         done=["handover", f"label {master_rescue.RESCUE_LABEL}"]))
 
-    def activate_handover(self, key: str, incident: Incident, model: str, effort: str, started: int) -> None:
-        record = self.handover_record(incident, model, effort, started)
-        self.redis.delete(f"lease:{key}")  # a worker still holding the ticket stops at its next heartbeat
+    def activate_handover(self, key: str, record: dict[str, Any]) -> None:
+        record["state"] = "active"
         self.finish(key, record, "active")
         self.ensure_label(key, record)
         self.ensure_handover_audit(key, record)
         events.emit("operator.rescue", ticket=key, outcome="handover", budget=record["budget"], model=record["model"])
+
+    def defer_unstarted_to_owner(self, key: str, reason: str) -> bool:
+        """Keep global Claude unavailability durable for the operator; a local capacity miss is not a handoff."""
+        record = self.load_record(f"rescue:{key}")
+        if record is None or record.get("state") != "active" or record.get("worker_started"):
+            return False
+        record["owner_reason"] = f"Claude is unavailable ({reason})"
+        self.finish(key, record, "owner_pending")
+        return True
+
+    def mark_worker_started(self, key: str) -> bool:
+        """Record the first successful Claude reservation so later outages do not reclassify active work."""
+        record = self.load_record(f"rescue:{key}")
+        if record is None or record.get("state") != "active":
+            return False
+        record["worker_started"] = True
+        self.finish(key, record, "active")
+        return True
 
     def rollback_handover(self, key: str, incident_id: str, model: bool) -> None:
         if not self.clear_handover_fields(key, model):
@@ -324,19 +364,56 @@ class Rescue:
         return record if isinstance(record, dict) else None
 
     def check_rescue(self, key: str, record: dict[str, Any]) -> None:
-        if record.get("state") == "completing" and self.check_completion(key, record):
+        if self.reconcile_rescue_state(key, record):
             return
-        if record.get("state") == "handover_pending" and not self.reconcile_handover(key, record):
+        self.reconcile_handover_artifacts(key, record)
+        if self.route_pending_owner(key, record):
             return
-        if record.get("handover_audit_pending"):
-            self.ensure_handover_audit(key, record)
-        if record.get("label_pending", True):
-            self.ensure_label(key, record)
         if record.get("state") == "doctor_pending":
             self.flow_doctor(key, record, record.get("doctor_cause", "the rescue ended without a result"),
                              record.get("doctor_findings", ""))
             return
         if record.get("state") != "active":
+            return
+        self.check_active_rescue(key, record)
+
+    def reconcile_rescue_state(self, key: str, record: dict[str, Any]) -> bool:
+        """Resolve states that must be checked before ordinary active-rescue handling."""
+        if record.get("state") == "completing" and self.check_completion(key, record):
+            return True
+        return record.get("state") == "handover_pending" and not self.reconcile_handover(key, record)
+
+    def reconcile_handover_artifacts(self, key: str, record: dict[str, Any]) -> None:
+        if record.get("handover_audit_pending"):
+            self.ensure_handover_audit(key, record)
+        if record.get("label_pending", True):
+            self.ensure_label(key, record)
+
+    def route_pending_owner(self, key: str, record: dict[str, Any]) -> bool:
+        if record.get("state") != "owner_pending":
+            return False
+        facts = record.get("incident_facts")
+        incident = Incident(f"rescue:{key}", "rescue", key, str(record.get("summary", "")),
+                            facts if isinstance(facts, dict) else {})
+        try:
+            self.to_owner(incident, str(record.get("owner_reason", "Claude is unavailable")))
+        except JiraError as error:
+            self.log(f"master rescue of {key} could not route the unavailable Claude case to the owner: {error}")
+            return True
+        self.finish(key, record, "owner")
+        return True
+
+    def route_unavailable_unstarted(self, key: str, record: dict[str, Any]) -> bool:
+        if record.get("worker_started"):
+            return False
+        unavailable = self.claude_unavailable()
+        if not unavailable or not self.defer_unstarted_to_owner(key, unavailable):
+            return False
+        pending = self.load_record(f"rescue:{key}")
+        return self.route_pending_owner(key, pending) if pending else True
+
+    def check_active_rescue(self, key: str, record: dict[str, Any]) -> None:
+        if self.route_unavailable_unstarted(key, record):
             return
         status = self.rescue_status(key)
         if not status:

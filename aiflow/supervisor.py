@@ -785,16 +785,24 @@ class Supervisor:
         """Move the ticket to Blocked, say why on the ticket and in the field Blocked reason, and remember where it came from."""
         self.release_slot(key)
         rework_rounds = int(self.redis.get(f"cycles:{key}") or 0) if kind == "Rework" else 0
-        for name in ("attempts:%s:developer", "attempts:%s:reviewer", "attempts:%s:qa", "cycles:%s"):
-            self.redis.delete(name % key)  # the owner who unblocks the ticket gets a fresh start, not an instant second block
+        attempts = {role: count for role in ("developer", "reviewer", "qa", "pr")
+                    if (count := self.attempts(key, role)) > 0}
         try:
             status = str(self.jira.view(key).get("status", ""))
             blocked = {"status": status, "kind": kind, "reason": reason[:500]}
             if rework_rounds:
                 blocked["rework_rounds"] = rework_rounds
+            if attempts:
+                blocked["attempts"] = attempts
             self.redis.set(f"blocked:{key}", json.dumps(blocked), 30 * DAY)
-            self.jira.set_field(key, self.cfg.blocked_reason_field, f"{kind}: {reason}"[:250])
         except (JiraError, RedisError) as error:
+            log(f"{key}: could not preserve the block snapshot: {error}")
+        else:
+            for name in ("attempts:%s:developer", "attempts:%s:reviewer", "attempts:%s:qa", "cycles:%s"):
+                self.redis.delete(name % key)  # the owner who unblocks the ticket gets a fresh start, not an instant second block
+        try:
+            self.jira.set_field(key, self.cfg.blocked_reason_field, f"{kind}: {reason}"[:250])
+        except JiraError as error:
             log(f"{key}: could not record the block reason: {error}")
         events.emit("ticket.blocked", ticket=key, kind=kind, reason=reason[:500])
         self.jira.comment(key, f"AI Flow: blocked on {self.cfg.machine} ({kind}). {reason}")

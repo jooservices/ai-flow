@@ -13,6 +13,7 @@ log = logging.getLogger("aiflow4.epic_lifecycle")
 
 EPIC_FINISHED = ("Done", "Declined")
 EPIC_NOT_STARTED = ("Backlog", "Intake", "To Do")
+EPIC_FIRST_CHILD_SOURCES = (*EPIC_NOT_STARTED, "Needs owner")
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ GUARDS = {"all_children_finished": _all_children_finished,
 TRANSITIONS = (
     Transition("Done", None, "all_children_finished",
                "all {count} child tickets are Done or Declined"),
-    Transition("In Progress", EPIC_NOT_STARTED, "first_child_started", "the first child ticket started"),
+    Transition("In Progress", EPIC_FIRST_CHILD_SOURCES, "first_child_started", "the first child ticket started"),
     Transition("To Do", ("Done",), "new_active_child", "{count} child tickets are not all Done"),
 )
 

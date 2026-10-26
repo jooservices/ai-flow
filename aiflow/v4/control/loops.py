@@ -38,6 +38,7 @@ from .incidents import check_idle_flow, check_stack_pins, close_incident, open_i
 from .api import Ctx, notify_human_review
 from .db import J
 from .repositories.runs import RunsRepository
+from .repositories.tickets import TicketsRepository
 from .state import NODE_OFFLINE_S
 from .quota import assessments as quota_assessments
 from ..core.quota import as_utc
@@ -52,94 +53,78 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
     epic_lifecycle.reconcile(ctx, projects, changed_ticket_keys, first_seen_ticket_keys, preexisting_ticket_keys)
 
 
-def jira_sync(ctx: Ctx, full: bool = False) -> int:
+def _active_jira_projects(ctx: Ctx) -> list[str]:
     configured = ctx.repo().projects
     # The control repo is authoritative: paused or removed projects must stop being queried on the next pass.
-    keys = sorted(key for key, project in configured.items() if not project.paused)
-    # Without a usable credential (disconnected, refresh rejected), the jira_auth incident says why.
-    if not keys or not jira_connect.sync_gate(ctx):
-        return 0
-    projects = ",".join(keys)
-    jql = f"project in ({projects})" + ("" if full else " AND updated >= -5m")
-    n = 0
-    changed_ticket_keys: set[str] = set()
-    first_seen_ticket_keys: set[str] = set()
-    for project in keys:
-        for version in ctx.jira.project_versions(project):
-            ctx.db.run(
-                "INSERT INTO versions (id, project, name, released, release_date)"
-                " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (id) DO UPDATE SET project=EXCLUDED.project,"
-                " name=EXCLUDED.name, released=EXCLUDED.released, release_date=EXCLUDED.release_date",
-                (version["id"], project, version["name"], version["released"], version["release_date"]))
-    preexisting_ticket_keys = {
-        row["key"]
-        for project in keys
-        for row in ctx.db.all("SELECT key FROM tickets WHERE project=%s", (project,))
-    }
-    # The sync reads each issue with its change history (Fix version attach dates, first In Progress).
-    search = getattr(ctx.jira, "search_history", ctx.jira.search)
-    for issue in search(jql + " ORDER BY updated DESC"):
-        t = ctx.jira.normalize(issue)
-        old = ctx.db.one("SELECT status, labels, parent_key FROM tickets WHERE key=%s", (t["key"],))
-        if not old:
-            first_seen_ticket_keys.add(t["key"])
-        if (not old or old["parent_key"] != t["parent_key"] or
-                (old["status"] == "Done" and t["status"] != "Done")):
-            changed_ticket_keys.add(t["key"])
-        done_at = t.get("done_at")
-        if t["status"] == "Done" and done_at is None:
-            done_at = t["jira_updated"]
-        ctx.db.run(
-            "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by,"
-            " jira_created, jira_updated, done_at, fields, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
-            " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s,%(fields)s, now())"
-            " ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority,"
-            " labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description,"
-            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, fields=EXCLUDED.fields,"
-            " done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
-            " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
-            " ELSE tickets.done_at END, synced_at=now()",
-            {**t, "done_at": done_at, "fields": J({"assignee": t.get("assignee")})})
-        # Replace the complete relationship for each ticket received from Jira, so removals are mirrored too.
-        ctx.db.run(
-            "WITH removed AS (DELETE FROM ticket_versions WHERE ticket_key=%s RETURNING ticket_key)"
-            " INSERT INTO ticket_versions (ticket_key, version_id)"
-            " SELECT %s, fix.version_id FROM unnest(%s::text[]) AS fix(version_id)"
-            " CROSS JOIN (SELECT count(*) FROM removed) AS deletion_done"
-            " ON CONFLICT (ticket_key, version_id) DO NOTHING",
-            (t["key"], t["key"], t["fix_versions"]))
-        # Jira change history: when each Fix version was attached, and the first move to In Progress.
-        for version_id, added_at in (t.get("fix_version_added") or {}).items():
-            ctx.db.run("INSERT INTO ticket_version_added (ticket_key, version_id, added_at) VALUES (%s,%s,%s)"
-                       " ON CONFLICT (ticket_key, version_id) DO UPDATE SET added_at=EXCLUDED.added_at",
-                       (t["key"], version_id, added_at))
-        if t.get("first_in_progress"):
-            ctx.db.run("UPDATE tickets SET first_in_progress_at=LEAST(first_in_progress_at, %s) WHERE key=%s",
-                       (t["first_in_progress"], t["key"]))
-        if not old:
-            project_lifecycle.reopen_for_new_ticket(ctx, t["project"], t["key"])
-        if t["type"] == "Epic" and t["status"] == "Done" and (not old or old["status"] != "Done"):
-            try:
-                project_lifecycle.report_done_epic(ctx, t["project"], t["key"])
-            except Exception as e:  # noqa: BLE001
-                log.warning("could not generate completion report for epic %s: %s", t["key"], e)
-        if old and old["status"] != "Human review" and t["status"] == "Human review":
-            notify_human_review(ctx, t["key"], t)
-        if old and old["status"] != t["status"]:  # the flow writes its own moves to the mirror first: this one is a person's
-            merge_flow.record_move(ctx, t["key"], old["status"], t["status"], merge_flow.PERSON, "moved in Jira")
-        ready = "aiflow-ready" in t["labels"]
-        if not old or old["status"] != t["status"] or ("aiflow-ready" in old["labels"]) != ready:
-            # a move or a ready label made outside the control API (people, Jira automation): the ticket timeline
-            ctx.events.emit("ticket.status", ticket=t["key"], project=t["project"], outcome=t["status"],
-                            reason=f"from {old['status']}" if old else "first seen", from_status=old["status"] if old else "",
-                            ready=ready, source="jira_sync")
-        n += 1
-    _reconcile_epics(ctx, keys, changed_ticket_keys, first_seen_ticket_keys, preexisting_ticket_keys)
+    return sorted(key for key, project in configured.items() if not project.paused)
+
+
+def _record_epic_sync_changes(ticket: dict, old: dict | None, changed: set[str], first_seen: set[str]) -> None:
+    if not old:
+        first_seen.add(ticket["key"])
+    if (not old or old["parent_key"] != ticket["parent_key"] or
+            (old["status"] == "Done" and ticket["status"] != "Done")):
+        changed.add(ticket["key"])
+
+
+def _record_completed_epic(ctx: Ctx, ticket: dict, old: dict | None) -> None:
+    if ticket["type"] != "Epic" or ticket["status"] != "Done" or (old and old["status"] == "Done"):
+        return
+    try:
+        project_lifecycle.report_done_epic(ctx, ticket["project"], ticket["key"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not generate completion report for epic %s: %s", ticket["key"], exc)
+
+
+def _record_ticket_sync_effects(ctx: Ctx, ticket: dict, old: dict | None) -> None:
+    if not old:
+        project_lifecycle.reopen_for_new_ticket(ctx, ticket["project"], ticket["key"])
+    _record_completed_epic(ctx, ticket, old)
+    if old and old["status"] != "Human review" and ticket["status"] == "Human review":
+        notify_human_review(ctx, ticket["key"], ticket)
+    if old and old["status"] != ticket["status"]:
+        merge_flow.record_move(ctx, ticket["key"], old["status"], ticket["status"], merge_flow.PERSON,
+                               "moved in Jira")
+    ready = "aiflow-ready" in ticket["labels"]
+    old_ready = "aiflow-ready" in (old.get("labels") or []) if old else False
+    if not old or old["status"] != ticket["status"] or old_ready != ready:
+        ctx.events.emit("ticket.status", ticket=ticket["key"], project=ticket["project"],
+                        outcome=ticket["status"], reason=f"from {old['status']}" if old else "first seen",
+                        from_status=old["status"] if old else "", ready=ready, source="jira_sync")
+
+
+def _capture_closed_tickets(ctx: Ctx) -> None:
     try:
         knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
     except Exception as exc:  # noqa: BLE001 - knowledge capture must not stop Jira mirroring
         log.warning("closed ticket knowledge capture failed: %s", type(exc).__name__)
-    return n
+
+
+def jira_sync(ctx: Ctx, full: bool = False) -> int:
+    projects = _active_jira_projects(ctx)
+    # Without a usable credential (disconnected, refresh rejected), the jira_auth incident says why.
+    if not projects or not jira_connect.sync_gate(ctx):
+        return 0
+    repository = TicketsRepository(ctx.db)
+    for project in projects:
+        repository.sync_project_versions(project, list(ctx.jira.project_versions(project)))
+    preexisting_ticket_keys = repository.keys_for_projects(projects)
+    jql = f"project in ({','.join(projects)})" + ("" if full else " AND updated >= -5m")
+    changed_ticket_keys: set[str] = set()
+    first_seen_ticket_keys: set[str] = set()
+    # The sync reads each issue with its change history (Fix version attach dates, first In Progress).
+    search = getattr(ctx.jira, "search_history", ctx.jira.search)
+    count = 0
+    for issue in search(jql + " ORDER BY updated DESC"):
+        ticket = ctx.jira.normalize(issue)
+        old = repository.by_key(ticket["key"])
+        _record_epic_sync_changes(ticket, old, changed_ticket_keys, first_seen_ticket_keys)
+        repository.sync_from_jira(ticket)
+        _record_ticket_sync_effects(ctx, ticket, old)
+        count += 1
+    _reconcile_epics(ctx, projects, changed_ticket_keys, first_seen_ticket_keys, preexisting_ticket_keys)
+    _capture_closed_tickets(ctx)
+    return count
 
 
 def watchdog(ctx: Ctx) -> None:

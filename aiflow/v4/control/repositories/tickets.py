@@ -66,6 +66,58 @@ class TicketsRepository:
     def __init__(self, db) -> None:
         self.db = db
 
+    def keys_for_projects(self, projects: list[str]) -> set[str]:
+        """Ticket keys already mirrored for the Jira projects in this sync pass."""
+        return {row["key"] for row in self.db.all("SELECT key FROM tickets WHERE project=ANY(%s)", (projects,))}
+
+    def sync_project_versions(self, project: str, versions: list[dict]) -> None:
+        """Mirror Jira's version definitions for one project."""
+        for version in versions:
+            self.db.run(
+                "INSERT INTO versions (id, project, name, released, release_date)"
+                " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (id) DO UPDATE SET project=EXCLUDED.project,"
+                " name=EXCLUDED.name, released=EXCLUDED.released, release_date=EXCLUDED.release_date",
+                (version["id"], project, version["name"], version["released"], version["release_date"]))
+
+    def sync_from_jira(self, ticket: dict) -> None:
+        """Persist Jira ticket fields, version links and available change-history facts."""
+        done_at = ticket.get("done_at")
+        if ticket["status"] == "Done" and done_at is None:
+            done_at = ticket["jira_updated"]
+        self.db.run(
+            "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by,"
+            " jira_created, jira_updated, done_at, fields, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
+            " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s,%(fields)s, now())"
+            " ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority,"
+            " labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description,"
+            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, fields=EXCLUDED.fields,"
+            " done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
+            " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
+            " ELSE tickets.done_at END, synced_at=now()",
+            {**ticket, "done_at": done_at, "fields": J({"assignee": ticket.get("assignee")})})
+        self._sync_ticket_versions(ticket)
+        self._sync_ticket_history(ticket)
+
+    def _sync_ticket_versions(self, ticket: dict) -> None:
+        """Replace Jira's complete Fix version relationship for a ticket."""
+        self.db.run(
+            "WITH removed AS (DELETE FROM ticket_versions WHERE ticket_key=%s RETURNING ticket_key)"
+            " INSERT INTO ticket_versions (ticket_key, version_id)"
+            " SELECT %s, fix.version_id FROM unnest(%s::text[]) AS fix(version_id)"
+            " CROSS JOIN (SELECT count(*) FROM removed) AS deletion_done"
+            " ON CONFLICT (ticket_key, version_id) DO NOTHING",
+            (ticket["key"], ticket["key"], ticket["fix_versions"]))
+
+    def _sync_ticket_history(self, ticket: dict) -> None:
+        """Persist version attach times and the first In Progress time from Jira history."""
+        for version_id, added_at in (ticket.get("fix_version_added") or {}).items():
+            self.db.run("INSERT INTO ticket_version_added (ticket_key, version_id, added_at) VALUES (%s,%s,%s)"
+                        " ON CONFLICT (ticket_key, version_id) DO UPDATE SET added_at=EXCLUDED.added_at",
+                        (ticket["key"], version_id, added_at))
+        if ticket.get("first_in_progress"):
+            self.db.run("UPDATE tickets SET first_in_progress_at=LEAST(first_in_progress_at, %s) WHERE key=%s",
+                        (ticket["first_in_progress"], ticket["key"]))
+
     def project_epic_rows(self, project: str) -> list[dict]:
         """Ticket rows needed to reconcile parent epic lifecycle state."""
         return self.db.all("SELECT key, project, status, type, parent_key, labels FROM tickets"

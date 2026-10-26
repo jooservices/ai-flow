@@ -69,6 +69,20 @@ def test_jira_sync_starts_epic_when_child_finished_between_syncs(ctx):
     assert audit["payload"]["transition_guard"] == "first_child_started"
 
 
+def test_jira_sync_starts_needs_owner_epic_when_its_first_child_starts(ctx):
+    epic_key = "TESTWP-109"
+    ctx.jira.status_of[epic_key] = "Needs owner"
+    sync_issues(ctx, [issue(epic_key, "Needs owner", "Epic"),
+                      issue("TESTWP-110", "In Progress", parent=epic_key)])
+
+    assert jira_sync(ctx, full=True) == 2
+
+    assert ctx.jira.status(epic_key) == "In Progress"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (epic_key,))["status"] == "In Progress"
+    audit = ctx.db.one("SELECT payload FROM write_audit WHERE ticket=%s AND action='transition'", (epic_key,))
+    assert audit["payload"]["transition_guard"] == "first_child_started"
+
+
 def test_jira_sync_reopens_done_epic_when_a_new_child_is_not_done(ctx):
     epic_key = "TESTWP-110"
     add_ticket(ctx.db, epic_key, status="Done", labels=())

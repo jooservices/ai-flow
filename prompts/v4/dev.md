@@ -8,6 +8,7 @@ Read AGENTS.md and docs/SPEC.md first when they exist; they define the layout, r
 Before changing code on every developer run, read `docs/v4/architecture.md` and use it to place the feature and
 check layer dependencies, registration points, function size and complexity. Include the architecture document in
 the run notes, together with any architecture checks that found a mismatch.
+{timeout_retry}
 {rework}
 How to work, in this order. A change that goes back from review costs a full development run and a full review,
 so the aim is a change a careful reviewer finds nothing in the first time.
@@ -58,6 +59,14 @@ Ticket description:
 ---
 {description}
 ---
+Test order and time budget:
+- Run the configured checks that cover the changed code first, before the full suite.
+- Run the full configured suite exactly once at the end of implementation.
+- Reserve the final {test_time_slice}-minute test time slice for that one full-suite attempt, within the run's hard limit.
+- If the full suite does not finish in that slice or the hard limit arrives first, stop it and report it as unfinished.
+  The worker will open or update the pull request so the pipeline checks can finish the suite.
+- Do not claim a full-suite pass unless the suite completed successfully. In the final response include exactly one line:
+  `FULL SUITE: FINISHED` or `FULL SUITE: UNFINISHED - <why>`.
 {related}
 
 Finish your reply with these lines, exactly:

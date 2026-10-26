@@ -35,6 +35,7 @@ PAGES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
         ("projects", "Projects", "large"),
         ("waiting", "Waiting for you", "small"),
         ("building", "What is being built", "large"),
+        ("timeouts", "Developer run timeouts", "full"),
         ("usage", "AI usage", "large"),
         ("tokens", "Tokens and cost", "small"),
         ("conflict-loss", "Lost to merge conflicts", "full"),

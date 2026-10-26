@@ -160,6 +160,8 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
     # the policy message of JOOWP-308 explains the allowed alternative
     assert "Edit" in results[("JOOWP-308", 3)]["answer"]
     # the weekly numbers count every row
+    # Keep the historical replay inside its fixed reporting week, independent of the machine's current date.
+    ctx.db.run("UPDATE escalations SET created_at=%s", (datetime(2026, 10, 22, 12, tzinfo=timezone.utc),))
     metrics = esc.weekly_metrics(ctx.db, now=datetime(2026, 10, 24, tzinfo=timezone.utc))
     assert metrics["this_week"]["total"] == len(rows) == len(FIXTURE["escalations"])
 

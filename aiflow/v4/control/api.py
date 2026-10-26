@@ -46,9 +46,12 @@ from ..core.settings import Settings
 from ..core.services import normalize_services, service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
+from ..core.work_limits import retry_hard_minutes
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
-from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               role_health, rollout, runtime_settings, setup_wizard, shared_accounts, support_bundle, tooling, version_release)
+from . import (ba_chat, business, dashboard_timeout_routes, escalations, jira_connect, knowledge, layouts, licensing,
+               log_viewer, memory,
+               role_health, rollout, runtime_settings, setup_wizard, shared_accounts, support_bundle, tooling,
+               ticket_splitting_routes, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -4935,7 +4938,20 @@ def create_app(ctx: Ctx) -> FastAPI:
             selected_repo = dict(prior_settings) if isinstance(prior_settings, dict) else p.settings_for_repo(prior_repository)
         run_details = ({"repository": selected_repo.get("repo", ""),
                         "repository_settings": selected_repo} if selected_repo else {})
+        intake_estimate: dict[str, Any] | None = None
+        timeout_retries = 0
+        if body.step == "intake":
+            intake_estimate = capacity.estimate(t, capacity.history(ctx.db))
+            run_details["intake_estimate"] = intake_estimate
         if body.step == "dev":
+            timeout_row = ctx.db.one("SELECT count(*) AS count FROM runs WHERE ticket_key=%s AND step='dev'"
+                                     " AND ended_at IS NOT NULL AND (outcome='timeout' OR error_kind='timeout')",
+                                     (t["key"],))
+            timeout_retries = int((timeout_row or {}).get("count") or 0)
+            if timeout_retries:
+                run_details["timeout_retry"] = {"previous_timeouts": timeout_retries,
+                                                 "hard_minutes": retry_hard_minutes(
+                                                     p.work_minutes()["hard"] if p else 60, timeout_retries)}
             capacity_samples = capacity.history(ctx.db)
             ticket_estimate = capacity.estimate(t, capacity_samples)
             quota_accounts = ctx.db.all("SELECT id,quota_forecast FROM accounts ORDER BY id")
@@ -5052,19 +5068,26 @@ def create_app(ctx: Ctx) -> FastAPI:
         except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
             log.warning("knowledge context pack for %s failed: %s", t["key"], type(exc).__name__)
             extra["context_pack"] = {"project": t.get("project", ""), "ticket": t["key"], "items": []}
+        limits = p.work_minutes() if p else {"target": 30, "warn": 45, "hard": 60}
+        if body.step == "dev" and timeout_retries:
+            limits["hard"] = retry_hard_minutes(limits["hard"], timeout_retries)
         project_data = ({"key": "", "repo": "", "base": "", "hotfix_base": "", "checks": [], "stack": "",
                          "node": node,
                          "work_minutes": {"target": 30, "warn": 45, "hard": 60},
                          "merge": {"method": "squash", "auto": False, "require_human": True}}
                         if body.step == "master" else
                         {"key": p.key, **selected_repo, "hotfix_base": p.hotfix_base,
-                         "work_minutes": p.work_minutes(),
+                         "work_minutes": limits,
                          "environment": ([item.public() for item in p.environment_items]
                                          if body.step in ("intake", "dev", "verify", "post_merge") else []),
                          "merge": {"method": (p.merge or {}).get("method", "squash"),
                                    "auto": bool((p.merge or {}).get("auto", True)),
                                    "require_human": bool((p.merge or {}).get("require_human", False))}}
                         if p else {})
+        if body.step == "intake" and intake_estimate:
+            ticket_data["work_estimate"] = {**intake_estimate, "target_minutes": 30}
+        if body.step == "dev":
+            project_data["timeout_retries"] = timeout_retries
         return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
                 "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,
                 "account": acc.id, "identity": bot_identity(),
@@ -7597,6 +7620,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         audit("backup", "run_now", "", "", None, user.subject, True, "backup queued")
         return {"queued": True}
 
+    ticket_splitting_routes.install(app, ctx, node_auth, fenced, audit)
+    dashboard_timeout_routes.install(app, ctx, console_user, optional_console_user)
     jira_connect.mount(app, ctx); setup_wizard.install(app, ctx)
     runtime_settings.install(app, ctx, console_user, audit)
     from .login import install_login

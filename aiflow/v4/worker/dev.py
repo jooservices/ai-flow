@@ -21,6 +21,7 @@ from pathlib import Path
 from ..adapters import RunSpec, get_adapter
 from ..core import handover
 from ..core.environment import items_of, parse_missing_environment, redact
+from ..core.work_limits import FULL_SUITE_TIME_SLICE_MINUTES
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
                                parse_missing_requirements)
@@ -35,6 +36,7 @@ SUMMARY = re.compile(r"^SUMMARY:\s*(.+)$", re.M)
 # a real conflict marker starts a line ("<<<<<<< HEAD"); the same characters inside code or docs are not one
 CONFLICT_MARKER = re.compile(r"^(<{7}|>{7})( |$)|^={7}$", re.M)
 TESTS = re.compile(r"^TESTS:\s*(.+)$", re.M)
+FULL_SUITE = re.compile(r"^FULL SUITE:\s*(FINISHED|UNFINISHED)(?:\s*[-:]\s*(.*))?$", re.M | re.I)
 PROVIDER_NAME = {"claude": "Claude", "codex": "Codex", "grok": "Grok", "opencode": "OpenCode"}
 
 
@@ -97,6 +99,10 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci
     checks = "\n".join(f"  - {x}" for x in c.project.get("checks") or []) or "  - the project's test suite"
     if c.project.get("containers"):
         checks += "\n  - Docker commands go through the run's rootless, worktree-confined runtime"
+    timeout_retries = int(c.project.get("timeout_retries") or 0)
+    retry_context = (f"This ticket has timed out {timeout_retries} time(s); the flow increased this run's hard limit "
+                     f"to {int((c.project.get('work_minutes') or {}).get('hard', 60))} minutes. Reassess and split the work "
+                     "if needed; do not repeat the same run plan." if timeout_retries else "")
     t = c.ticket
     rework = ""
     if c.findings:
@@ -121,7 +127,8 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci
                       rework=rework, related=related_block(c.related), machine=machine_block(c.machine_tools),
                       environment=environment_notes(
                           c.project.get("environment"), "dev",
-                          project_env(t["project"], c.project.get("environment"), "dev") if env is None else env))
+                          project_env(t["project"], c.project.get("environment"), "dev") if env is None else env),
+                      test_time_slice=FULL_SUITE_TIME_SLICE_MINUTES, timeout_retry=retry_context)
     return with_knowledge_context(prompt, c.context_pack)
 
 
@@ -220,6 +227,54 @@ def commit_message(c: Claimed, summary: str) -> str:
             f"{'/' + c.model if c.model else ''})\n")
 
 
+def _suite_status(text: str, timed_out: bool) -> dict[str, str]:
+    match = FULL_SUITE.search(text or "")
+    if timed_out:
+        return {"status": "unfinished", "reason": (match.group(2).strip() if match and match.group(2)
+                                                        else "developer run reached its hard time limit")}
+    if match:
+        return {"status": match.group(1).lower(), "reason": (match.group(2) or "").strip()}
+    return {"status": "unreported", "reason": "the developer response did not report full-suite completion"}
+
+
+def _handover_timed_out(api: ControlClient, c: Claimed, git: Git, worktree: Path, branch: str,
+                        repo: str, summary: str, handed: dict, result: dict, started: float) -> bool:
+    """Commit available work and hand an interrupted full suite to PR checks."""
+    changed = git.changed(worktree)
+    if not changed:
+        return False
+    final_summary = (summary or "Developer run reached its hard time limit")[:500]
+    sha = git.commit_all(worktree, commit_message(c, final_summary), c.identity)
+    credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                          "repo": repo, "branch": branch})
+    git.push(worktree, branch, credential["token"])
+    note_text = (f"The full suite did not finish before this run's hard limit. CI checks must finish the suite; "
+                 f"the available changes were handed over as {c.ticket['key']} on {branch}.")
+    body = (f"Jira: {c.ticket['key']}\n\n## Summary\n{note_text}\n\n## Tests\n"
+            "The full suite was not finished before the developer run limit. The pull request pipeline must complete "
+            "the configured checks before merge.\n\n" + handover.pr_sections(handed)
+            + f"## Run\n- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
+            f"- run: {c.run_id}, fence {c.fence}\n- files changed: {len(changed)}\n")
+    pr = api.call("POST", "/v1/github/pr", {"run_id": c.run_id, "fence": c.fence, "repo": repo,
+                                             "head": branch, "base": c.project["base"],
+                                             "title": pr_title(c.ticket), "body": body, "draft": True})
+    jira = lambda path, **payload: api.call("POST", f"/v1/jira/{c.ticket['key']}/{path}",
+                                             {"run_id": c.run_id, "fence": c.fence, **payload})
+    jira("comment", body=note(c, "full suite handed to pipeline",
+                              what="The full suite did not finish before the developer run limit",
+                              why="The run preserved its available change and opened a draft pull request",
+                              result=f"{note_text} {pr['url']}",
+                              next_="The pull request pipeline completes the configured checks before merge",
+                              t0=started, node=api_node(api)))
+    jira("transition", to="In Verify")
+    result.update(outcome="done", error_kind="timeout", pr_url=pr["url"], head_sha=sha,
+                  summary=note_text[:1000])
+    result.setdefault("details", {}).update(full_suite={"status": "unfinished",
+                                                         "reason": "developer run reached its hard time limit"},
+                                             handed_to_pipeline=True)
+    return True
+
+
 def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,
             run_as: list[str]) -> dict:
     key, project = c.ticket["key"], c.project
@@ -316,7 +371,11 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         tests = tests_m.group(1).strip() if tests_m else ""
         result["summary"] = summary
         handed = handover.parse(res.final_text or "", c.ticket.get("description") or "")
-        result.setdefault("details", {}).update(handed)
+        suite_status = _suite_status(res.final_text or "", res.error_kind == "timeout")
+        result.setdefault("details", {}).update(handed, full_suite=suite_status)
+        if suite_status["status"] == "unfinished":
+            tests = (tests + "; " if tests else "") + "full suite unfinished: " + suite_status["reason"]
+            result["details"]["handed_to_pipeline"] = True
 
         if res.error_kind in ("quota", "auth"):
             result["outcome"] = "quota"
@@ -437,6 +496,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="Needs owner")
             return result
         changed = git.changed(wt)
+        if res.error_kind == "timeout" and _handover_timed_out(
+                api, c, git, wt, branch, repo, summary, handed, result, t0):
+            return result
         result.setdefault("details", {})["changed_files"] = changed[:100]
         if conflicts and any(CONFLICT_MARKER.search((wt / f).read_text(errors="ignore")) for f in conflicts if (wt / f).is_file()):
             res.error_kind = res.error_kind or "unresolved conflicts"
@@ -519,7 +581,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                                                               "repo": repo, "branch": branch})
         token = credential["token"]
         git.push(wt, branch, token)
-        body = (f"Jira: {key}\n\n## Summary\n{summary}\n\n## Tests\n{tests or 'see the run log'}\n\n"
+        pipeline_note = ("\n\nThe full suite did not finish in the developer run; the pull request pipeline must complete "
+                         "the configured checks before merge." if suite_status["status"] == "unfinished" else "")
+        body = (f"Jira: {key}\n\n## Summary\n{summary}\n\n## Tests\n{tests or 'see the run log'}{pipeline_note}\n\n"
                 f"{handover.pr_sections(handed)}"
                 f"## Run\n- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
                 f"- run: {c.run_id}, fence {c.fence}\n- files changed: {len(changed)}\n\n"
@@ -529,7 +593,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                                                 "body": body, "draft": True})
         jira("comment", body=note(c, "draft PR opened", what=summary[:700],
                                   result=f"{len(changed)} files committed as {sha[:10]} on {branch}; draft PR {pr['url']}. Tests: {tests or 'not reported'}",
-                                  next_="Another account verifies the PR against the acceptance criteria and merges it",
+                                  next_=("The pull request pipeline completes the configured checks before merge"
+                                         if suite_status["status"] == "unfinished" else
+                                         "Another account verifies the PR against the acceptance criteria and merges it"),
                                   t0=t0, node=api_node(api)))
         jira("transition", to="In Verify")
         result.update(outcome="done", pr_url=pr["url"], head_sha=sha)

@@ -38,6 +38,33 @@ GROUP BY 1, 2
 ORDER BY 1 DESC, 2
 """
 
+TIMEOUT_DAILY_SQL = """
+SELECT (started_at AT TIME ZONE 'UTC')::date AS day,
+       count(*) AS developer_runs,
+       count(*) FILTER (WHERE outcome='timeout' OR error_kind='timeout') AS timeouts
+FROM runs
+WHERE step='dev'
+  AND ended_at IS NOT NULL
+  AND started_at >= ((now() AT TIME ZONE 'UTC')::date - %s::int)::timestamp AT TIME ZONE 'UTC'
+  AND (%s OR project = ANY(%s))
+GROUP BY 1 ORDER BY 1 DESC
+"""
+
+TIMEOUT_TICKET_SQL = """
+SELECT ticket_key AS ticket, project,
+       count(*) AS developer_runs,
+       count(*) FILTER (WHERE outcome='timeout' OR error_kind='timeout') AS timeouts,
+       max(started_at) FILTER (WHERE outcome='timeout' OR error_kind='timeout') AS latest_timeout
+FROM runs
+WHERE step='dev'
+  AND ended_at IS NOT NULL
+  AND started_at >= ((now() AT TIME ZONE 'UTC')::date - %s::int)::timestamp AT TIME ZONE 'UTC'
+  AND (%s OR project = ANY(%s))
+GROUP BY ticket_key,project
+HAVING count(*) FILTER (WHERE outcome='timeout' OR error_kind='timeout') > 0
+ORDER BY timeouts DESC, latest_timeout DESC, ticket
+"""
+
 
 def daily(db, days: int = 14, project: str = "") -> list[dict[str, Any]]:
     """One row per (day, project, account) that had runs in the last `days` UTC days, today included."""
@@ -53,6 +80,28 @@ def daily_usage(db, days: int = 14, project_keys: list[str] | tuple[str, ...] | 
              "tokens_in": int(row["tokens_in"]), "tokens_out": int(row["tokens_out"]),
              "tokens": int(row["tokens_in"] + row["tokens_out"]),
              "cost_usd": round(float(row["cost_usd"]), 6)} for row in rows]
+
+
+def timeouts(db, days: int = 30, project_keys: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+    """Timeout counts by UTC day and ticket, plus the developer-run timeout share."""
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 90:
+        raise ValueError("days must be between 1 and 90")
+    params = (days - 1, project_keys is None, list(project_keys or ()))
+    daily_rows = db.all(TIMEOUT_DAILY_SQL, params)
+    ticket_rows = db.all(TIMEOUT_TICKET_SQL, params)
+    runs = sum(int(row["developer_runs"]) for row in daily_rows)
+    timeout_count = sum(int(row["timeouts"]) for row in daily_rows)
+    return {"days": days, "developer_runs": runs, "timeouts": timeout_count,
+            "timeout_share_pct": round(100 * timeout_count / runs, 2) if runs else 0.0,
+            "target_share_pct": 10.0,
+            "daily": [{"day": row["day"].isoformat(), "developer_runs": int(row["developer_runs"]),
+                       "timeouts": int(row["timeouts"]),
+                       "timeout_share_pct": round(100 * int(row["timeouts"]) / int(row["developer_runs"]), 2)
+                       if row["developer_runs"] else 0.0} for row in daily_rows],
+            "tickets": [{"ticket": row["ticket"], "project": row["project"],
+                         "developer_runs": int(row["developer_runs"]), "timeouts": int(row["timeouts"]),
+                         "latest_timeout": row["latest_timeout"].isoformat() if row["latest_timeout"] else None}
+                        for row in ticket_rows]}
 
 
 USAGE_DIMENSIONS = {"account": "account_id", "ai": "provider", "machine": "node", "project": "project",

@@ -135,6 +135,7 @@ class FakeJira:
         self.released_versions: list[str] = []
         self.version_release_dates: dict[str, str] = {}
         self.issue_links: list[tuple[str, str, str]] = []
+        self.write_events: list[tuple] = []
 
     def projects(self) -> list[dict[str, str]]:
         return list(self.projects_data)
@@ -148,8 +149,24 @@ class FakeJira:
         self.version_reads.append(key)
         return list(self.versions_data.get(key, []))
 
-    def search(self, jql: str):
+    def search(self, jql: str, fields=None, page=100, expand=""):
         self.search_queries.append(jql)
+        import re
+
+        marker = re.search(r'labels = "([^"]+)"', jql)
+        if marker:
+            return iter([{"key": row["key"], "fields": {"labels": row["labels"]}}
+                         for row in getattr(self, "created", []) if marker.group(1) in row.get("labels", [])])
+        key_match = re.search(r'key = "([^"]+)"', jql)
+        if key_match:
+            key = key_match.group(1)
+            links = []
+            for blocker, blocked, kind in self.issue_links:
+                if key not in (blocker, blocked):
+                    continue
+                links.append({"type": {"name": kind},
+                              "outwardIssue": {"key": blocker}, "inwardIssue": {"key": blocked}})
+            return iter([{"key": key, "fields": {"issuelinks": links}}])
         return iter(self.search_data)
 
     def search_history(self, jql: str):
@@ -176,6 +193,7 @@ class FakeJira:
 
     def transition_to(self, key: str, target: str) -> str:
         self.transitions.append((key, target))
+        self.write_events.append(("transition", key, target))
         self.status_of[key] = target
         return target
 
@@ -200,6 +218,7 @@ class FakeJira:
 
     def add_label(self, key: str, label: str) -> None:
         self.labels.append(("add", key, label))
+        self.write_events.append(("add_label", key, label))
 
     def remove_label(self, key: str, label: str) -> None:
         self.labels.append(("remove", key, label))
@@ -220,11 +239,13 @@ class FakeJira:
         if version_field:
             created["version_field"] = version_field
         self.created.append(created)
+        self.write_events.append(("create", key, list(labels or [])))
         self.status_of[key] = self.initial_status
         return key
 
     def link_issues(self, blocker, blocked, link_type="Blocks"):
         self.issue_links.append((blocker, blocked, link_type))
+        self.write_events.append(("link", blocker, blocked, link_type))
 
     def add_attachment(self, key, filename, content, content_type):
         self.attachments.append((key, filename, content, content_type))

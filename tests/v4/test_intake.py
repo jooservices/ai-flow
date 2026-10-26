@@ -1,6 +1,7 @@
 """Intake step: Intake tickets go to intake_refiner accounts, the worker rewrites them into the template through
 the fenced description endpoint, or sends questions to the owner."""
 from pathlib import Path
+import json
 
 import pytest
 
@@ -253,6 +254,111 @@ def test_rewrite_keeps_the_original_and_queues_the_ticket(iclient, ctx, tmp_path
     actions = [a["action"] for a in ctx.db.all("SELECT action FROM write_audit WHERE ticket='TESTWP-27' ORDER BY id")]
     assert actions == ["token", "comment", "description", "fields", "transition"]  # original saved before the rewrite
     assert ctx.db.one("SELECT outcome FROM runs WHERE ticket_key='TESTWP-27'")["outcome"] == "refined"
+
+
+def test_oversized_intake_is_split_into_ordered_children_before_any_child_is_offered(
+        iclient, ctx, tmp_path, monkeypatch):
+    add_ticket(ctx.db, "TESTWP-36", status="Intake", labels=("size-s",))
+    ctx.db.run("UPDATE tickets SET summary='Implement a complete profile editor', description='large request' WHERE key=%s",
+               ("TESTWP-36",))
+    plan = [
+        {"summary": "Add profile data model", "description": "Business requirement: Store profile data.\n"
+         "Acceptance criteria:\n- AC1: Profile data is stored.\nTechnical notes: Model changes.\n"
+         "Definition of done: Tests cover AC1."},
+        {"summary": "Add profile editor screen", "description": "Business requirement: Edit a profile.\n"
+         "Acceptance criteria:\n- AC1: A profile can be edited.\nTechnical notes: Screen changes.\n"
+         "Definition of done: Tests cover AC1."},
+    ]
+    answer = "SPLIT PLAN:\n<<<\n" + json.dumps(plan) + "\n>>>\nINTAKE: SPLIT\n"
+    result, adapter = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-36", answer)
+
+    children = result["details"]["split_children"]
+    assert result["outcome"] == "split" and len(children) == 2
+    assert "90" in adapter.prompts[0] and "over 30 minutes" in adapter.prompts[0]
+    assert ctx.db.one("SELECT status,labels FROM tickets WHERE key='TESTWP-36'") == {
+        "status": "Backlog", "labels": ["size-s", "aiflow-split-parent"]}
+    assert [ctx.db.one("SELECT status,blocked_by FROM tickets WHERE key=%s", (key,))
+            for key in children] == [{"status": "To Do", "blocked_by": []},
+                                     {"status": "To Do", "blocked_by": [children[0]]}]
+    assert ("TESTWP-36", children[0], "Relates") in ctx.jira.issue_links
+    assert ("TESTWP-36", children[1], "Relates") in ctx.jira.issue_links
+    assert (children[0], children[1], "Blocks") in ctx.jira.issue_links
+    created = [row for row in ctx.jira.created if row["key"] in children]
+    assert all("aiflow-ready" not in row["labels"] for row in created)
+    first_offer = next(index for index, event in enumerate(ctx.jira.write_events)
+                       if event[0] == "add_label" and event[1] in children and event[2] == "aiflow-ready")
+    links_before_offer = {(event[1], event[2], event[3]) for event in ctx.jira.write_events[:first_offer]
+                          if event[0] == "link"}
+    assert links_before_offer == {("TESTWP-36", children[0], "Relates"),
+                                  ("TESTWP-36", children[1], "Relates"),
+                                  (children[0], children[1], "Blocks")}
+    assert (children[0], "dev") in candidates(iclient, "claude-01")
+    assert (children[1], "dev") not in candidates(iclient, "claude-01")
+    assert ("TESTWP-36", "dev") not in candidates(iclient, "claude-01")
+    dev_run = claim(iclient, children[0], account="claude-01", step="dev")
+    again = iclient.post("/v1/jira/TESTWP-36/split", json={"run_id": dev_run["run_id"],
+                                                           "fence": dev_run["fence"], "tickets": plan})
+    assert again.status_code == 403  # a developer run cannot split intake work
+
+
+def test_repeating_an_intake_split_resumes_the_same_ordered_children(iclient, ctx):
+    add_ticket(ctx.db, "TESTWP-38", status="Intake", labels=("size-s",))
+    run = claim(iclient, "TESTWP-38")
+    plan = [{"summary": "First child", "description": "AC1: first result"},
+            {"summary": "Second child", "description": "AC1: second result"}]
+    body = {"run_id": run["run_id"], "fence": run["fence"], "tickets": plan}
+
+    first = iclient.post("/v1/jira/TESTWP-38/split", json=body)
+    repeated = iclient.post("/v1/jira/TESTWP-38/split", json=body)
+
+    assert first.status_code == 200 and repeated.status_code == 200
+    assert repeated.json()["already_split"] is True
+    assert repeated.json()["children"] == first.json()["children"]
+    assert len(ctx.jira.created) == 2
+
+
+@pytest.mark.parametrize("plan", [[], [{}], [{"summary": 5, "description": "AC1: yes"},
+                                               {"summary": "second", "description": "AC1: yes"}],
+                                   [{"summary": "first", "description": "missing AC"},
+                                    {"summary": "second", "description": "AC1: yes"}]])
+def test_split_plan_rejects_empty_wrong_type_and_missing_acceptance_criteria(plan):
+    from aiflow.v4.core.ticket_splitting import InvalidSplitPlan, validate_plan
+
+    with pytest.raises(InvalidSplitPlan):
+        validate_plan(plan)
+
+
+def test_split_plan_enforces_count_and_summary_boundaries():
+    from aiflow.v4.core.ticket_splitting import InvalidSplitPlan, MAX_CHILDREN, validate_plan
+
+    child = {"summary": "Child task", "description": "AC1: testable result"}
+    assert len(validate_plan([child, child])) == 2
+    assert len(validate_plan([child] * MAX_CHILDREN)) == MAX_CHILDREN
+    assert len(validate_plan([{"summary": "12345", "description": "AC1: " + "x" * 9_995}, child])) == 2
+    assert len(validate_plan([{"summary": "x" * 240, "description": "AC1: max summary"}, child])) == 2
+    with pytest.raises(InvalidSplitPlan, match="between 2"):
+        validate_plan([child] * (MAX_CHILDREN + 1))
+    with pytest.raises(InvalidSplitPlan, match="summary"):
+        validate_plan([{"summary": "", "description": "AC1: x"}, child])
+    with pytest.raises(InvalidSplitPlan, match="summary"):
+        validate_plan([{"summary": "x" * 241, "description": "AC1: too long"}, child])
+    with pytest.raises(InvalidSplitPlan, match="description"):
+        validate_plan([{"summary": "valid child", "description": "AC1: " + "x" * 9_996}, child])
+    with pytest.raises(InvalidSplitPlan, match="description"):
+        validate_plan([{"summary": "valid child", "description": ""}, child])
+    with pytest.raises(InvalidSplitPlan, match="between 2"):
+        validate_plan("not a ticket list")
+
+
+def test_split_endpoint_requires_intake_run_and_an_over_target_estimate(iclient, ctx):
+    add_ticket(ctx.db, "TESTWP-37", status="Intake", labels=("size-xs",))
+    run = claim(iclient, "TESTWP-37")
+    plan = [{"summary": "First part", "description": "AC1: first result"},
+            {"summary": "Second part", "description": "AC1: second result"}]
+    response = iclient.post("/v1/jira/TESTWP-37/split", json={"run_id": run["run_id"],
+                              "fence": run["fence"], "tickets": plan})
+    assert response.status_code == 422 and "within the 30-minute target" in response.text
+    assert not getattr(ctx.jira, "created", [])
 
 
 def test_typed_intake_uses_bug_template_and_preserves_known_and_unknown_labels(iclient, ctx, tmp_path, monkeypatch):

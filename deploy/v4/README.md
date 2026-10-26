@@ -10,6 +10,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [v4 control plane architecture](../../docs/v4/architecture.md): layers, dependency direction, registration points, patterns and architectural checks
 - [Control API router registry](../../docs/v4/router-registry.md): feature routers discovered and mounted by priority without a central registration list
 - [Shared worker fairness](../../docs/v4/shared-worker-fairness.md): round-robin ready tickets across projects while preserving rework preference and each project's priority and age order
+- [Developer run limits](../../docs/v4/developer-run-limits.md): estimate and split oversized intake tickets, reserve time for final checks, increase limits after timeouts, and show timeout metrics on the Dashboard
 
 Feature documents live in `docs/v4/`. Normally, add one line per feature in `deploy/v4/topics/<topic>.md` (see
 [Fewer merge conflicts](../../docs/v4/merge-conflicts.md)); tickets that explicitly require a README link may add

@@ -15,12 +15,12 @@ def day(back: int) -> datetime:
 
 
 def add_run(db, *, back: int, account="claude-01", project="TESTWP", step="dev", outcome="done", seconds=600,
-            tokens_in=1000, tokens_out=200, cost=0.5, status="finished"):
+            tokens_in=1000, tokens_out=200, cost=0.5, status="finished", ticket_key=""):
     started = day(back)
     ended = started + timedelta(seconds=seconds) if seconds is not None else None
     db.run("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, node, fence, status, outcome,"
            " started_at, ended_at, tokens_in, tokens_out, cost_usd) VALUES (%s,%s,%s,%s,%s,'claude','cc',1,%s,%s,%s,%s,%s,%s,%s)",
-           (str(uuid.uuid4()), f"{project}-1", project, step, account, status, outcome, started, ended,
+           (str(uuid.uuid4()), ticket_key or f"{project}-1", project, step, account, status, outcome, started, ended,
             tokens_in, tokens_out, cost))
 
 
@@ -112,6 +112,64 @@ def test_days_window_project_filter_and_validation(client, ctx):
 
 def test_no_runs_gives_no_rows(client):
     assert client.get("/v1/analytics/daily", params={"days": 14}).json()["rows"] == []
+
+
+def test_dashboard_timeouts_include_daily_ticket_and_developer_share_metrics(client, ctx):
+    add_run(ctx.db, back=0, ticket_key="TESTWP-700", outcome="timeout")
+    run_id = str(uuid.uuid4())
+    now = day(0)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,error_kind,"
+               "started_at,ended_at) VALUES (%s,'TESTWP-700','TESTWP','dev','claude-01','claude','cc',1,'finished',"
+               "'failed','timeout',%s,%s)", (run_id, now, now + timedelta(minutes=60)))
+    add_run(ctx.db, back=0, ticket_key="TESTWP-701", outcome="done")
+    add_run(ctx.db, back=0, ticket_key="TESTWP-702", outcome="", seconds=None, status="running")
+    add_run(ctx.db, back=0, ticket_key="TESTWP-700", step="verify", outcome="timeout")
+    add_run(ctx.db, back=0, project="OTHER", ticket_key="OTHER-700", outcome="timeout")
+
+    response = client.get("/v1/dashboard/timeouts", params={"days": 1})
+    assert response.status_code == 200
+    data = response.json()
+    assert (data["developer_runs"], data["timeouts"], data["timeout_share_pct"], data["target_share_pct"]) == (
+        4, 3, 75.0, 10.0)
+    assert data["daily"][0]["day"] == day(0).date().isoformat()
+    assert (data["daily"][0]["developer_runs"], data["daily"][0]["timeouts"]) == (4, 3)
+    tickets = {row["ticket"]: row for row in data["tickets"]}
+    assert set(tickets) == {"TESTWP-700", "OTHER-700"}
+    assert (tickets["TESTWP-700"]["developer_runs"], tickets["TESTWP-700"]["timeouts"]) == (2, 2)
+    assert client.get("/v1/dashboard/timeouts", params={"days": 0}).status_code == 422
+    assert client.get("/v1/dashboard/timeouts", params={"days": 91}).status_code == 422
+
+
+def test_dashboard_timeout_analytics_respect_project_permissions(client, ctx):
+    add_run(ctx.db, back=0, project="TESTWP", ticket_key="TESTWP-710", outcome="timeout")
+    add_run(ctx.db, back=0, project="OTHER", ticket_key="OTHER-710", outcome="timeout")
+    assert client.get("/v1/dashboard/timeouts").status_code == 200
+
+    from aiflow.v4.control import login
+    from aiflow.v4.control.console_auth import issue_session
+
+    ctx.settings.console_login = True
+    ctx.settings.console_session_secret = "test-dashboard-timeouts-secret-with-at-least-32-bytes"
+    assert client.get("/v1/dashboard/timeouts").status_code == 401
+    login.seed_user(ctx.db, "timeouts-limited@example.test", "business")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s",
+               (["TESTWP"], "timeouts-limited@example.test"))
+    client.cookies.set("aiflow4_session", issue_session("timeouts-limited@example.test", "business", 2_000_000_000,
+                                                         ctx.settings.console_session_secret))
+    data = client.get("/v1/dashboard/timeouts").json()
+    assert {row["project"] for row in data["tickets"]} == {"TESTWP"}
+    assert data["timeouts"] == 1 and data["developer_runs"] == 1
+
+
+def test_dashboard_timeout_panel_is_visible_and_renders_day_ticket_and_share_rows():
+    from aiflow.v4.control.layouts import PAGES
+
+    page = PAGE.read_text()
+    panel = re.search(r"function dashboardTimeoutsPanel\(\)(.*?)\n}\n", page, re.S).group(1)
+    assert "data-block=\"timeouts\"" in panel
+    assert "Timeout share" in panel and "By day" in panel and "By ticket" in panel
+    assert "loadDashboardTimeouts(false)" in re.search(r"function renderDashboard\(\)(.*?)\n}\n", page, re.S).group(1)
+    assert any(block[0] == "timeouts" for block in PAGES["dashboard"][1])
 
 
 def test_daily_usage_groups_real_tokens_and_cost_by_provider_and_utc_day(client, ctx):

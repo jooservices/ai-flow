@@ -11,6 +11,7 @@ Outcomes:
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -18,14 +19,16 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from ..core.environment import find_server_wording, is_server_question, kinds_of, redact, rejection_message
+from ..core.ticket_splitting import TARGET_MINUTES, validate_plan
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, with_knowledge_context
 from .gitops import Git
 from .notes import note
 
 log = logging.getLogger("aiflow4.intake")
-KIND = re.compile(r"^INTAKE:\s*(REWRITE|QUESTIONS)\b", re.M)
+KIND = re.compile(r"^INTAKE:\s*(REWRITE|QUESTIONS|SPLIT)\b", re.M)
 DESCRIPTION = re.compile(r"^DESCRIPTION:\s*\n<<<\s*\n(.*?)\n>>>\s*$", re.M | re.S)
+SPLIT_PLAN = re.compile(r"^SPLIT PLAN:\s*\n<<<\s*\n(.*?)\n>>>\s*$", re.M | re.S)
 QUESTIONS = re.compile(r"^QUESTIONS:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
 REMOVED = re.compile(r"^REMOVED:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
 ENVIRONMENT_NEEDS = re.compile(r"^ENVIRONMENT NEEDS:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
@@ -109,6 +112,15 @@ def parse(text: str, issue_type: str | None = "Story") -> tuple[str, str]:
         return "rewrite", d.group(1).strip()
     if kind == "QUESTIONS" and q:
         return "questions", q.group(1).strip()
+    if kind == "SPLIT":
+        match = SPLIT_PLAN.search(text)
+        if not match:
+            return "invalid", "the split plan is missing its JSON ticket list"
+        try:
+            plan = validate_plan(json.loads(match.group(1)))
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return "invalid", f"the split plan is invalid: {exc}"
+        return "split", json.dumps(plan, ensure_ascii=False)
     return "", ""
 
 
@@ -161,10 +173,15 @@ def build_prompt(c: Claimed, spec: str) -> str:
                                     for item in environment_items)
                            or "- none configured")
     outline = "\n".join(_outline_section(section) for section in required_sections(issue_type))
+    estimate = t.get("work_estimate") or {}
+    minutes = estimate.get("time_minutes") or {}
+    estimate_context = (f"size {estimate.get('size', 'unknown')}, estimated {minutes.get('low', '?')}–"
+                        f"{minutes.get('high', '?')} minutes (target {estimate.get('target_minutes', TARGET_MINUTES)} minutes)"
+                        if estimate else f"not available (use the {TARGET_MINUTES}-minute target conservatively)")
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"], spec=spec,
                       issue_type=issue_type, original_issue_type=t.get("type") or "Task",
                       template_outline=outline, label_context=label_context,
-                      environment=environment_context,
+                      environment=environment_context, estimate=estimate_context,
                       description=t["description"] or "(no description)",
                       comments="\n".join(comments) or "(no comments)")
     return with_knowledge_context(prompt, c.context_pack)
@@ -236,7 +253,23 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             result.update(outcome="quota", summary=f"{c.account} cannot work now ({res.error_kind}): {res.error_message}"[:500])
             return result
         kind, text = parse(res.final_text or "", c.ticket.get("type"))
+        estimate = c.ticket.get("work_estimate") or {}
+        estimated_high = float((estimate.get("time_minutes") or {}).get("high") or 0)
+        if kind == "split":
+            if estimated_high <= TARGET_MINUTES:
+                result["summary"] = "the ticket estimate is within the 30-minute target; an intake split is not needed"
+                return result
+            return split(c, result, json.loads(text), api, estimate)
         if kind == "rewrite":
+            if estimated_high > TARGET_MINUTES:
+                result["summary"] = (f"the estimated upper work time is {estimated_high:g} minutes, above the 30-minute target; "
+                                     "intake must split this ticket before offering it")[:1000]
+                jira("comment", body=note(c, "large ticket rewrite rejected",
+                                          what="The ticket exceeds the single-run work target",
+                                          why=result["summary"],
+                                          next_="Intake retries with an ordered split plan; the ticket stays in Intake",
+                                          t0=t0, node=api_node(api)))
+                return result
             removed, needs = parse_removals(res.final_text or "")
             return refined(c, jira, result, text, t0, api_node(api), api=api, removed=removed, needs=needs)
         if kind == "questions":
@@ -265,6 +298,18 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         return result
     finally:
         hb.stop.set()
+
+
+def split(c: Claimed, result: dict, plan: list[dict[str, str]], api: ControlClient, estimate: dict) -> dict:
+    """Hand a validated plan to control, which creates and links the children before queuing them."""
+    reply = api.call("POST", f"/v1/jira/{c.ticket['key']}/split",
+                     {"run_id": c.run_id, "fence": c.fence, "tickets": plan})
+    children = reply.get("children") or []
+    result.update(outcome="split", summary=(f"ticket split into {len(children)} ordered child tickets: "
+                                            + ", ".join(children))[:1000])
+    result.setdefault("details", {}).update(split_parent=c.ticket["key"], split_children=children,
+                                             estimate=estimate, split_target_minutes=TARGET_MINUTES)
+    return result
 
 
 def refined(c: Claimed, jira, result: dict, description: str, t0: float | None, node: str, api=None,

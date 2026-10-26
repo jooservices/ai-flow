@@ -10,6 +10,12 @@ Required template (plain text, one section per heading and in this order; every 
 required, otherwise the rewrite is rejected):
 {template_outline}
 
+AI Flow's estimate for this ticket is {estimate}. The control plane calculates this estimate from Jira size facts,
+completed-ticket history and a conservative size baseline when history is missing. If the upper estimate is over
+30 minutes, split the work before it is offered: preserve the author's full intent across 2–8 ordered Story tickets,
+make each child independently testable, and put later work after the prerequisite it depends on. Keep each child's
+description concise, with an observable AC1. Do not rewrite and ready the oversized parent.
+
 Labels on the ticket: {label_context}
 AI Flow recognizes these labels: `aiflow-ready`, `aiflow-hold`, `rework`, `require-human`, `tier-senior`,
 `ai-<provider>`, `area-<core|theme|plugin|platform|flow>`, `regression`, `uat-bug`, `blocked-external`,
@@ -62,7 +68,14 @@ as part of the author's intent and do not ask again what a comment already answe
 {comments}
 ---
 
-Answer in exactly one of these two forms and nothing after it.
+Answer in exactly one of these forms and nothing after it.
+
+When the estimate is over 30 minutes and you split the ticket:
+SPLIT PLAN:
+<<<
+[{{"summary":"...","description":"..."}},{{"summary":"...","description":"..."}}]
+>>>
+INTAKE: SPLIT
 
 When you rewrote the ticket:
 DESCRIPTION:

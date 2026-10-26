@@ -130,6 +130,7 @@ def scope_dashboard(data: dict, visible_projects: list[str] | None, reveal_accou
         slow[:] = [item for item in slow if item.get("project") in visible]
     if reveal_accounts:
         return
+    _redact_incident_account_ids(data)
     by_ticket = {item["key"]: item for item in slow}
     for item in slow:
         for index, account in enumerate(item.get("accounts", []), start=1):
@@ -138,6 +139,17 @@ def scope_dashboard(data: dict, visible_projects: list[str] | None, reveal_accou
         item = by_ticket.get(ticket["key"])
         if item:
             ticket["slow_verify"] = describe(item)
+
+
+def _redact_incident_account_ids(data: dict) -> None:
+    """Keep verify exhaustion reasons visible without exposing verifier identities to restricted users."""
+    for field in ("incidents", "incidents_recent"):
+        for incident in data.get(field, []):
+            if incident.get("kind") == KIND:
+                incident["detail"] = (
+                    "Reason: every eligible account ended verification without a VERDICT line twice in a row. "
+                    "The ticket can be verified again when an eligible account becomes available."
+                )
 
 
 def history(db, ticket_key: str) -> dict[str, list[bool]]:
@@ -241,8 +253,8 @@ def check_incidents(ctx, releases: Path | None = None) -> None:
         open_now.add(ticket["key"])
         open_incident(ctx, KIND, ticket["key"], "warning",
                       f"{ticket['key']} cannot be verified: every eligible account ended without a verdict",
-                      f"Reason: the verification of {ticket['key']} ended without a VERDICT line twice in a row on each"
-                      f" eligible account ({', '.join(failed)}). None of them is offered the ticket again. Fix the"
+                      f"Reason: every eligible account ended verification of {ticket['key']} without a VERDICT line"
+                      " twice in a row. None of them is offered the ticket again. Fix the"
                       " cause or verify the ticket by hand.")
     for subject in already_open:
         if subject not in open_now:

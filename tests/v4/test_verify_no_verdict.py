@@ -221,6 +221,7 @@ def test_failure_on_all_eligible_accounts_raises_one_incident_and_the_dashboard_
                       " AND closed_at IS NULL")
     assert len(rows) == 1 and rows[0]["subject"] == "TESTWP-50"
     assert "TESTWP-50" in rows[0]["title"] and "without a VERDICT line" in rows[0]["detail"]
+    assert "claude-01" not in rows[0]["detail"] and "codex-01" not in rows[0]["detail"]
     # the Dashboard lists the ticket with the accounts that tried
     slow = state.snapshot(ctx)["slow_verifications"]
     assert [v["key"] for v in slow] == ["TESTWP-50"]

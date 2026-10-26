@@ -199,6 +199,10 @@ def test_state_scopes_slow_verifications_and_redacts_account_ids_for_business_us
                    "started_at,ended_at,summary,details) VALUES (%s,%s,%s,'verify',%s,'x','cc',1,'finished','failed',"
                    "now()-interval '60 minutes',now()-interval '59 minutes','no verdict',%s)",
                    (str(uuid.uuid4()), key, project, account, J({"no_verdict": True})))
+    ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail) VALUES (%s,%s,'warning',%s,%s)",
+               ("verify_no_verdict", "TESTWP-910",
+                "TESTWP-910 cannot be verified: every eligible account ended without a verdict",
+                "Reason: TESTWP-910 had no verdict twice on claude-01 and codex-01."))
 
     login.seed_user(ctx.db, "slow-limited@example.test", "business")
     ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s",
@@ -209,6 +213,9 @@ def test_state_scopes_slow_verifications_and_redacts_account_ids_for_business_us
     data = response.json()
     assert [item["key"] for item in data["slow_verifications"]] == ["TESTWP-910"]
     assert {item["account"] for item in data["slow_verifications"][0]["accounts"]} == {"Verifier 1"}
+    incident = next(item for item in data["incidents"] if item["kind"] == "verify_no_verdict")
+    assert incident["subject"] == "TESTWP-910" and "TESTWP-910" in incident["title"]
+    assert "without a VERDICT line twice in a row" in incident["detail"]
     ticket = next(item for item in data["tickets"] if item["key"] == "TESTWP-910")
     assert "Verifier 1" in ticket["slow_verify"]
     serialized = str(data)

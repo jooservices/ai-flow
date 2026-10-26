@@ -105,18 +105,20 @@ def _visible_totals(ctx, visible: set[str]) -> dict:
 
 def _scope_project_resources(data: dict, visible: set[str]) -> None:
     visible_nodes = {node["name"] for node in data["nodes"] if visible.intersection(node.get("projects") or [])}
+    visible_tickets = {ticket["key"] for ticket in data["tickets"]}
     data["nodes"] = [node for node in data["nodes"] if node["name"] in visible_nodes]
     data["accounts"] = [account for account in data["accounts"] if _account_has_visible_node(account, visible_nodes)]
-    data["incidents"] = _visible_incidents(data["incidents"], visible, visible_nodes)
-    data["incidents_recent"] = _visible_incidents(data["incidents_recent"], visible, visible_nodes)
+    data["incidents"] = _visible_incidents(data["incidents"], visible, visible_nodes, visible_tickets)
+    data["incidents_recent"] = _visible_incidents(data["incidents_recent"], visible, visible_nodes, visible_tickets)
 
 
 def _account_has_visible_node(account: dict, visible_nodes: set[str]) -> bool:
     return any(machine.get("node") in visible_nodes for machine in account.get("machines") or [])
 
 
-def _visible_incidents(incidents: list[dict], visible: set[str], visible_nodes: set[str]) -> list[dict]:
-    return [item for item in incidents if item.get("subject") in visible | visible_nodes]
+def _visible_incidents(incidents: list[dict], visible: set[str], visible_nodes: set[str],
+                       visible_tickets: set[str]) -> list[dict]:
+    return [item for item in incidents if item.get("subject") in visible | visible_nodes | visible_tickets]
 
 
 def _redact_machine_data(data: dict) -> None:
@@ -125,8 +127,9 @@ def _redact_machine_data(data: dict) -> None:
     data["sa"] = {}
     data["role_health"] = {"roles": [], "settings": {}}
     data["version_policy"] = {}
-    data["incidents"] = []
-    data["incidents_recent"] = []
+    data["incidents"] = [item for item in data["incidents"] if item.get("kind") == verify_retry.KIND]
+    data["incidents_recent"] = [item for item in data["incidents_recent"]
+                                if item.get("kind") == verify_retry.KIND]
     data["events"] = [_pick(event, ("ts", "type", "ticket", "outcome", "reason")) for event in data["events"]]
     data["active_runs"] = [_pick(run, ("id", "ticket", "project", "summary", "step", "elapsed_s",
                                         "heartbeat_age_s", "lease_ms", "progress")) for run in data["active_runs"]]

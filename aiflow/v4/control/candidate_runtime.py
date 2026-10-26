@@ -32,23 +32,28 @@ class CandidateRuntime:
         online = shared_accounts.online_nodes(ctx.db)
         available = []
         for peer in peers:
-            account = ctx.repo().account(peer["id"])
-            peer["nodes"] = ([machine for machine in account.machines if machine in online
-                              and shared_accounts.may_take(ctx.db, account, machine, as_peer=True)[0]]
-                             if account else [])
-            if not peer["nodes"]:
-                continue
-            peer_roles = set(peer.get("roles") or ["dev", "verify"])
-            if roles and not roles.intersection(peer_roles):
-                continue
-            if roles == {"master"} and peer["status"] not in ("idle", "working", "probing"):
-                continue
-            if peer["quota_at_risk"] or ctx.leases.cooling(peer["id"]):
-                continue
-            if work_eligibility.master_paused(ctx.db, peer["id"]):
-                continue
-            available.append(peer)
+            peer["nodes"] = self._online_peer_nodes(peer["id"], online)
+            if peer["nodes"] and self._quota_peer_is_available(peer, roles):
+                available.append(peer)
         return available
+
+    def _online_peer_nodes(self, account_id: str, online: set[str]) -> list[str]:
+        account = self.ctx.repo().account(account_id)
+        if not account:
+            return []
+        return [machine for machine in account.machines if machine in online
+                and shared_accounts.may_take(self.ctx.db, account, machine, as_peer=True)[0]]
+
+    def _quota_peer_is_available(self, peer: dict, roles: set[str] | None) -> bool:
+        ctx = self.ctx
+        peer_roles = set(peer.get("roles") or ["dev", "verify"])
+        if roles and not roles.intersection(peer_roles):
+            return False
+        if roles == {"master"} and peer["status"] not in ("idle", "working", "probing"):
+            return False
+        if peer["quota_at_risk"] or ctx.leases.cooling(peer["id"]):
+            return False
+        return not work_eligibility.master_paused(ctx.db, peer["id"])
 
     def account_quota_at_risk(self, account_id: str, roles: set[str] | None = None) -> bool:
         return self.quota_forecast_at_risk(account_id) and bool(self.quota_peer_accounts(account_id, roles))

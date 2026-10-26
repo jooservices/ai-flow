@@ -362,42 +362,39 @@ def error_report(estimate_value: dict[str, Any], actual_tokens: int, actual_minu
                        "within_range": float(risk["low"]) <= (100.0 if actual_rework else 0.0) <= float(risk["high"])} }
 
 
-def dashboard(db, account_rows: list[dict[str, Any]], forecasts: dict[str, dict[str, Any]],
-              project_keys: list[str] | tuple[str, ...] | None = None,
-              now: datetime | None = None) -> dict[str, Any]:
-    """Build the console's next-week quota plan, assignment explanations and completed estimate errors."""
-    now = now or datetime.now(timezone.utc)
-    samples = history(db, project_keys)
-    ready = TicketsRepository(db).capacity_ready_tickets(project_keys)
-    ready_estimates = [estimate(ticket, samples) for ticket in ready]
-    if ready_estimates:
-        average_tokens = sum(item["tokens"]["high"] for item in ready_estimates) / len(ready_estimates)
-    else:
-        average_tokens = estimate({"type": "Task", "project": "", "summary": "", "labels": ["size-m"]},
-                                  samples)["tokens"]["high"]
-    account_plan = []
+def _average_ready_ticket_tokens(ready: list[dict[str, Any]], samples: list[dict[str, Any]]) -> float:
+    if not ready:
+        fallback = {"type": "Task", "project": "", "summary": "", "labels": ["size-m"]}
+        return estimate(fallback, samples)["tokens"]["high"]
+    estimates = [estimate(ticket, samples) for ticket in ready]
+    return sum(item["tokens"]["high"] for item in estimates) / len(estimates)
+
+
+def _account_capacity_plan(account_rows: list[dict[str, Any]], forecasts: dict[str, dict[str, Any]],
+                           now: datetime, average_tokens: float) -> list[dict[str, Any]]:
+    plan = []
     for row in account_rows:
         account_id = str(row["id"])
         forecast = forecasts.get(account_id) or {}
         capacity = weekly_tokens(forecast, row.get("quota") or {}, now)
         tickets = int(capacity["tokens"] // max(1.0, average_tokens)) if capacity["known"] else 0
-        account_plan.append({"account": account_id, "provider": str(row.get("provider") or ""),
-                             "tokens_available": capacity["tokens"], "tickets": tickets,
-                             "limiting_window": capacity["window"], "quota_source": forecast.get("source", "unknown"),
-                             "confidence": forecast.get("confidence", "low"),
-                             "known": capacity["known"]})
-    known_accounts = [row for row in account_plan if row["known"]]
-    limiting = min(known_accounts, key=lambda row: (row["tickets"], row["account"])) if known_accounts else None
-    total_capacity = sum(row["tickets"] for row in known_accounts)
-    runs = RunsRepository(db)
-    decisions_rows = runs.capacity_decisions(project_keys)
-    decisions = [{"ticket": row["ticket_key"], "project": row["project"], "summary": row["summary"],
-                  "account": row["account_id"], "provider": row["provider"],
-                  "assigned_at": row["started_at"].isoformat(), "estimate": row.get("estimate") or {},
-                  "reason": row.get("reason") or ""} for row in decisions_rows]
-    estimate_rows = runs.capacity_estimate_rows(project_keys)
+        plan.append({"account": account_id, "provider": str(row.get("provider") or ""),
+                     "tokens_available": capacity["tokens"], "tickets": tickets,
+                     "limiting_window": capacity["window"], "quota_source": forecast.get("source", "unknown"),
+                     "confidence": forecast.get("confidence", "low"), "known": capacity["known"]})
+    return plan
+
+
+def _assignment_decisions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"ticket": row["ticket_key"], "project": row["project"], "summary": row["summary"],
+             "account": row["account_id"], "provider": row["provider"],
+             "assigned_at": row["started_at"].isoformat(), "estimate": row.get("estimate") or {},
+             "reason": row.get("reason") or ""} for row in rows]
+
+
+def _estimate_errors(runs: RunsRepository, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     errors = []
-    for row in estimate_rows:
+    for row in rows:
         estimate_value = row.get("estimate") or {}
         if not estimate_value:
             continue
@@ -408,6 +405,24 @@ def dashboard(db, account_rows: list[dict[str, Any]], forecasts: dict[str, dict[
                        "estimated_at": row["started_at"].isoformat(), "estimate": estimate_value,
                        "actual": error_report(estimate_value, actual_tokens, actual_minutes,
                                               bool(actual.get("reworked")))})
+    return errors
+
+
+def dashboard(db, account_rows: list[dict[str, Any]], forecasts: dict[str, dict[str, Any]],
+              project_keys: list[str] | tuple[str, ...] | None = None,
+              now: datetime | None = None) -> dict[str, Any]:
+    """Build the console's next-week quota plan, assignment explanations and completed estimate errors."""
+    now = now or datetime.now(timezone.utc)
+    samples = history(db, project_keys)
+    ready = TicketsRepository(db).capacity_ready_tickets(project_keys)
+    average_tokens = _average_ready_ticket_tokens(ready, samples)
+    account_plan = _account_capacity_plan(account_rows, forecasts, now, average_tokens)
+    known_accounts = [row for row in account_plan if row["known"]]
+    limiting = min(known_accounts, key=lambda row: (row["tickets"], row["account"])) if known_accounts else None
+    total_capacity = sum(row["tickets"] for row in known_accounts)
+    runs = RunsRepository(db)
+    decisions = _assignment_decisions(runs.capacity_decisions(project_keys))
+    errors = _estimate_errors(runs, runs.capacity_estimate_rows(project_keys))
     return {"week_start": now.date().isoformat(), "ready_tickets": len(ready),
             "estimated_tokens_per_ticket": round(average_tokens), "tickets_finishable": min(len(ready), total_capacity),
             "quota_capacity_tickets": total_capacity,

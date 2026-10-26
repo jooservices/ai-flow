@@ -35,7 +35,16 @@ def mount_ui(app: FastAPI, ctx) -> None:
     page = HERE / "console.html"
     logs_page = HERE / "logs.html"
     assets.register_assets(app)
+    _register_console_routes(app, page)
+    _register_logs_route(app, ctx, logs_page)
+    _register_help_routes(app)
+    _register_notifications_route(app, ctx, page)
+    _register_settings_route(app, ctx, page)
+    _register_ticket_route(app, ctx)
+    _register_services_route(app)
 
+
+def _register_console_routes(app: FastAPI, page: Path) -> None:
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
         return RedirectResponse("/dashboard")
@@ -47,6 +56,8 @@ def mount_ui(app: FastAPI, ctx) -> None:
         if path not in {"/", "/help", "/notifications", "/settings", "/logs"}:
             app.add_api_route(path, console, methods=["GET"], include_in_schema=False)
 
+
+def _register_logs_route(app: FastAPI, ctx, logs_page: Path) -> None:
     @app.get("/logs", include_in_schema=False)
     def logs(request: Request) -> FileResponse:
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
@@ -58,6 +69,8 @@ def mount_ui(app: FastAPI, ctx) -> None:
         return FileResponse(logs_page, media_type="text/html",
                             headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"})
 
+
+def _register_help_routes(app: FastAPI) -> None:
     @app.get("/help", include_in_schema=False)
     def help_root() -> RedirectResponse:
         return RedirectResponse("/help/")
@@ -78,6 +91,8 @@ def mount_ui(app: FastAPI, ctx) -> None:
             raise HTTPException(404, "no such documentation page")
         return FileResponse(target, headers={"Cache-Control": "no-cache"})
 
+
+def _register_notifications_route(app: FastAPI, ctx, page: Path) -> None:
     @app.get("/notifications", include_in_schema=False)
     def notifications(request: Request) -> FileResponse:
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
@@ -88,6 +103,8 @@ def mount_ui(app: FastAPI, ctx) -> None:
             raise HTTPException(403, "not available for your role")
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
+
+def _register_settings_route(app: FastAPI, ctx, page: Path) -> None:
     @app.get("/settings", include_in_schema=False)
     def settings_page(request: Request) -> FileResponse:
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
@@ -98,6 +115,8 @@ def mount_ui(app: FastAPI, ctx) -> None:
             raise HTTPException(403, "not available for your role")
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
+
+def _register_ticket_route(app: FastAPI, ctx) -> None:
     @app.get("/v1/tickets/{key}")
     def ticket(key: str) -> dict:
         t = ctx.db.one("SELECT * FROM tickets WHERE key=%s", (key,))
@@ -141,6 +160,8 @@ def mount_ui(app: FastAPI, ctx) -> None:
                 "merge": merge_flow.facts(t), "moves": merge_flow.moves(ctx.db, key),
                 "jira_url": f"{ctx.settings.jira_site}/browse/{key}"}
 
+
+def _register_services_route(app: FastAPI) -> None:
     @app.get("/v1/services")
     def services() -> dict:
         """Active checks from Gatus (name, group, up, response time)."""

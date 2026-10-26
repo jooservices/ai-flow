@@ -45,6 +45,9 @@ record. The handover audit comment also stays pending after a Jira failure and i
 Jira accepted the comment but its response was lost. An unsuccessful rescue that ends early or uses its budget returns through
 the flow doctor; Jira failures leave that recovery pending for another operator pass. If a refused Handover leaves temporary
 `Taken by` or model fields that Jira will not clear immediately, those cleanup writes are retried too.
+Committed or unignored worktree `.env` safety guards remain Blocked and are not cleared by rescue's flow doctor. If a development
+handoff returns a failed Jira response, the completing rescue reads Jira before deciding: a confirmed In Review or Ready to merge
+status finishes the rescue, and an unreadable status remains pending for reconciliation.
 
 ## What the operator may do alone
 Answer a Blocked ticket's question when the ticket, its parents or the documents answer it clearly; unblock; send a ticket back to To Do with a reason; retry CI; replace a dead AI; restart a worker; pause and resume the flow. As supervisor actions: `comment`, `transition` (To Do, Backlog or Blocked only), `label` (`needs-owner` or `rework` only), `retry_ci`, `replace_ai`, `restart_worker`, `pause`, `resume`; at most 5 per run.

@@ -99,6 +99,8 @@ class MasterRescueWorker:
                 return True
             if self.sup.finish_development(key, view, repo, base, agent, workdir, branch, text):
                 return self.end(key, True)
+            if Rescue(self.sup).reconcile_failed_completion(key):
+                return True
             cause = "Claude's result could not complete the normal development handoff"
         elif found and found[0] == "BLOCKED":
             cause = "Claude reported that the rescue remained blocked"

@@ -789,19 +789,9 @@ class Supervisor:
         rework_rounds = int(self.redis.get(f"cycles:{key}") or 0) if kind == "Rework" else 0
         attempts = {role: count for role in ("developer", "reviewer", "qa", "pr")
                     if (count := self.attempts(key, role)) > 0}
-        try:
-            status = str(self.jira.view(key).get("status", ""))
-            blocked = {"status": status, "kind": kind, "reason": reason[:500]}
-            if rework_rounds:
-                blocked["rework_rounds"] = rework_rounds
-            if attempts:
-                blocked["attempts"] = attempts
-            self.redis.set(f"blocked:{key}", json.dumps(blocked), 30 * DAY)
-        except (JiraError, RedisError) as error:
-            log(f"{key}: could not preserve the block snapshot: {error}")
-        else:
-            for name in ("attempts:%s:developer", "attempts:%s:reviewer", "attempts:%s:qa", "cycles:%s"):
-                self.redis.delete(name % key)  # the owner who unblocks the ticket gets a fresh start, not an instant second block
+        status = self.blocked_from_status(key)
+        if self.save_block_snapshot(key, status, kind, reason, rework_rounds, attempts):
+            self.clear_block_counters(key)
         try:
             self.jira.set_field(key, self.cfg.blocked_reason_field, f"{kind}: {reason}"[:250])
         except JiraError as error:
@@ -809,6 +799,43 @@ class Supervisor:
         events.emit("ticket.blocked", ticket=key, kind=kind, reason=reason[:500])
         self.jira.comment(key, f"AI Flow: blocked on {self.cfg.machine} ({kind}). {reason}")
         self.jira.transition(key, "Blocked")
+
+    def blocked_from_status(self, key: str) -> str:
+        """Read the previous Jira status, falling back to the supervisor's last observed status."""
+        try:
+            issue = self.jira.view(key)
+            status = issue.get("status", "") if isinstance(issue, dict) else ""
+            if isinstance(status, str) and status:
+                return status
+        except (JiraError, ValueError, TypeError, OSError, subprocess.TimeoutExpired) as error:
+            log(f"{key}: could not read Jira status while preserving the block snapshot ({type(error).__name__})")
+        try:
+            return str(self.redis.get(f"status:{key}") or "unknown")
+        except RedisError as error:
+            log(f"{key}: could not read the cached status for the block snapshot ({type(error).__name__})")
+            return "unknown"
+
+    def save_block_snapshot(self, key: str, status: str, kind: str, reason: str,
+                            rework_rounds: int, attempts: dict[str, int]) -> bool:
+        blocked = {"status": status, "kind": kind, "reason": reason[:500]}
+        if rework_rounds:
+            blocked["rework_rounds"] = rework_rounds
+        if attempts:
+            blocked["attempts"] = attempts
+        try:
+            self.redis.set(f"blocked:{key}", json.dumps(blocked), 30 * DAY)
+        except RedisError as error:
+            log(f"{key}: could not preserve the block snapshot ({type(error).__name__})")
+            return False
+        return True
+
+    def clear_block_counters(self, key: str) -> None:
+        """Clear each saved attempt counter independently after the block snapshot is durable."""
+        for name in ("attempts:%s:developer", "attempts:%s:reviewer", "attempts:%s:qa", "cycles:%s"):
+            try:
+                self.redis.delete(name % key)
+            except RedisError as error:
+                log(f"{key}: could not clear block counter {name.split(':')[-1]} ({type(error).__name__})")
 
     def prepare_ticket_database(self, key: str, worktree: Path) -> bool:
         """Provision the configured project database before an AI uses its ticket worktree."""

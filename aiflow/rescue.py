@@ -26,6 +26,7 @@ from .project_database import redact as redact_line
 DAY = 86400
 DOCTOR_TARGET = "To Do"  # development
 SUCCESS_STATUSES = {"done", "closed", "resolved"}
+COMPLETION_STATUSES = SUCCESS_STATUSES | {"in review", "review passed", "in qa", "human review", "ready to merge"}
 ACTIVE_RESCUE_STATUSES = {master_rescue.HANDOVER.casefold(), "in progress"}
 
 
@@ -441,8 +442,7 @@ class Rescue:
         status = self.rescue_status(key)
         if not status:
             return True
-        completed = SUCCESS_STATUSES | {"in review", "review passed", "in qa", "human review", "ready to merge"}
-        if status.casefold() in completed:
+        if status.casefold() in COMPLETION_STATUSES:
             self.finish(key, record, "finished")
         elif status.casefold() == master_rescue.HANDOVER.casefold() and self.redis.get(f"lease:{key}"):
             return True
@@ -453,6 +453,19 @@ class Rescue:
         else:
             self.end(key, ok=False, cause=f"Claude's completion handoff ended in {status} without a confirmed result",
                      findings=self.recent_findings(key, record))
+        return True
+
+    def reconcile_failed_completion(self, key: str) -> bool:
+        """Return True when a failed worker response is confirmed complete or Jira is still unreadable."""
+        record = self.load_record(f"rescue:{key}")
+        if record is None or record.get("state") != "completing":
+            return False
+        status = self.rescue_status(key)
+        if not status:
+            return True  # leave `completing` for a later operator pass to reconcile
+        if status.casefold() not in COMPLETION_STATUSES:
+            return False
+        self.finish(key, record, "finished")
         return True
 
     def rescue_status(self, key: str) -> str:
@@ -484,7 +497,26 @@ class Rescue:
         if ok:
             self.finish(key, record, "finished")
             return True
+        if self.preserve_env_safety_block(key, record):
+            return True
         return self.flow_doctor(key, record, cause or "the rescue ended without a result", findings)
+
+    def preserve_env_safety_block(self, key: str, record: dict[str, Any]) -> bool:
+        """Keep the explicit worktree `.env` credential guards out of flow-doctor recovery."""
+        if record.get("state") not in master_rescue.PENDING_RESCUE_STATES:
+            return False
+        try:
+            blocked = json.loads(self.redis.get(f"blocked:{key}") or "{}")
+        except (TypeError, ValueError, RedisError):
+            return False
+        if not isinstance(blocked, dict) or blocked.get("kind") != "Config":
+            return False
+        reason = str(blocked.get("reason", "")).casefold()
+        markers = ("worktree .env is not ignored by git", "worktree .env was committed")
+        if not any(marker in reason for marker in markers):
+            return False
+        self.finish(key, record, "safety_blocked")
+        return True
 
     def flow_doctor(self, key: str, record: dict[str, Any], cause: str, findings: str) -> bool:
         """Record the cause and return the ticket to development with its findings; no escalation to a person."""

@@ -4,9 +4,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from aiflow import agents
+from aiflow.jira import JiraError
+from aiflow.rescue import Rescue
 from aiflow.supervisor import STAGES
 from tests.test_supervisor import FakeRedis, make, stamp
 
@@ -169,3 +172,97 @@ class MasterRescuePickupTests(unittest.TestCase):
         record = json.loads(redis.get("rescue:JAIF-9"))
         self.assertNotIn(secret, doctor)
         self.assertNotIn(secret, record["doctor_findings"])
+
+    def test_committed_env_safety_block_is_not_cleared_by_the_flow_doctor(self):
+        redis = FakeRedis()
+        sup = make(redis=redis)
+        sup.jira.status = "Handover"
+        redis.set_persistent("rescue:JAIF-9", json.dumps(self.record()))
+        repo = mock.Mock()
+        repo.ahead.return_value = 1
+        repo.ticket_env_committed.return_value = True
+        jira_view = sup.jira.view
+
+        def block_transition(key, status):
+            sup.jira.moves.append((key, status))
+            sup.jira.status = status
+            return True
+
+        sup.jira.transition = mock.Mock(side_effect=block_transition)
+        sup.jira.view = mock.Mock(side_effect=(JiraError("unavailable"), JiraError("unavailable")))
+
+        with mock.patch("aiflow.config.Settings.project", return_value=SimpleNamespace(database="ticket-db")):
+            handled = sup.finish_master_attempt("JAIF-9", {}, repo, "develop", "Claude", Path("."), "branch",
+                                                "committed .env", "ok", ("DONE", "done"), False)
+
+        blocked = json.loads(redis.get("blocked:JAIF-9"))
+        rescue = json.loads(redis.get("rescue:JAIF-9"))
+        self.assertTrue(handled)
+        self.assertIn(".env was committed", blocked["reason"])
+        self.assertEqual(rescue["state"], "completing")
+        sup.jira.view = jira_view
+        Rescue(sup).check_rescues()  # a later pass sees Blocked while the record still says completing
+        rescue = json.loads(redis.get("rescue:JAIF-9"))
+        self.assertEqual(rescue["state"], "safety_blocked")
+        self.assertEqual(sup.jira.moves[-1], ("JAIF-9", "Blocked"))
+        self.assertFalse(any(body.startswith("AI Flow doctor") for _, body in sup.jira.comments))
+
+    def test_unignored_env_safety_block_is_not_cleared_during_rescue_preparation(self):
+        redis = FakeRedis()
+        sup = make(redis=redis)
+        sup.jira.status = "Handover"
+        redis.set_persistent("rescue:JAIF-9", json.dumps(self.record()))
+        sup.project_database = mock.Mock()
+        sup.project_database.env_is_ignored.return_value = False
+
+        with mock.patch("aiflow.config.Settings.project", return_value=SimpleNamespace(database="ticket-db")):
+            self.assertFalse(sup.prepare_ticket_database("JAIF-9", Path(".")))
+        self.assertTrue(sup.end_master_rescue("JAIF-9", False, "database preparation failed"))
+
+        blocked = json.loads(redis.get("blocked:JAIF-9"))
+        rescue = json.loads(redis.get("rescue:JAIF-9"))
+        self.assertIn(".env is not ignored", blocked["reason"])
+        self.assertEqual(rescue["state"], "safety_blocked")
+        self.assertEqual(sup.jira.moves[-1], ("JAIF-9", "Blocked"))
+        self.assertFalse(any(body.startswith("AI Flow doctor") for _, body in sup.jira.comments))
+
+    def test_accepted_development_handoff_with_lost_response_finishes_the_rescue(self):
+        for status in ("In Review", "Ready to merge"):
+            with self.subTest(status=status):
+                redis = FakeRedis()
+                sup = make(redis=redis)
+                sup.jira.status = "Handover"
+                redis.set_persistent("rescue:JAIF-9", json.dumps(self.record()))
+                repo = mock.Mock()
+                repo.ahead.return_value = 1
+
+                def accepted_but_unacknowledged(*_args):
+                    sup.jira.status = status
+                    return False
+
+                with mock.patch.object(sup, "finish_development", side_effect=accepted_but_unacknowledged):
+                    handled = sup.finish_master_attempt("JAIF-9", {}, repo, "develop", "Claude", Path("."), "branch",
+                                                        "finished", "ok", ("DONE", "done"), False)
+
+                record = json.loads(redis.get("rescue:JAIF-9"))
+                self.assertTrue(handled)
+                self.assertEqual(record["state"], "finished")
+                self.assertFalse(any(body.startswith("AI Flow doctor") for _, body in sup.jira.comments))
+
+    def test_unreadable_completion_status_stays_pending_for_reconciliation(self):
+        redis = FakeRedis()
+        sup = make(redis=redis)
+        sup.jira.status = "Handover"
+        redis.set_persistent("rescue:JAIF-9", json.dumps(self.record()))
+        repo = mock.Mock()
+        repo.ahead.return_value = 1
+        sup.jira.view = mock.Mock(side_effect=JiraError("unavailable"))
+
+        with mock.patch.object(sup, "finish_development", return_value=False):
+            handled = sup.finish_master_attempt("JAIF-9", {}, repo, "develop", "Claude", Path("."), "branch",
+                                                "finished", "ok", ("DONE", "done"), False)
+
+        record = json.loads(redis.get("rescue:JAIF-9"))
+        self.assertTrue(handled)
+        self.assertEqual(record["state"], "completing")
+        self.assertFalse(any(body.startswith("AI Flow doctor") for _, body in sup.jira.comments))

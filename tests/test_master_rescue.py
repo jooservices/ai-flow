@@ -306,6 +306,26 @@ class RescueRunTests(unittest.TestCase):
                     if key == "JAIF-1" and "Master rescue handover audit" in body)
         self.assertIn("Tried: 2 failed developer run(s) recorded; 1 failed qa run(s) recorded", body)
 
+    def test_block_status_read_failure_preserves_attempts_then_owner_unblock_starts_fresh(self):
+        _, sup, redis = self.build()
+        redis.set_persistent("status:JAIF-1", "In Progress")
+        redis.set_persistent("attempts:JAIF-1:developer", "3")
+        redis.set_persistent("attempts:JAIF-1:qa", "2")
+        sup.jira.view = mock.Mock(side_effect=JiraError("Jira is temporarily unavailable"))
+
+        sup.block("JAIF-1", "three failed runs", kind="Attempts")
+
+        blocked = json.loads(redis.get("blocked:JAIF-1"))
+        self.assertEqual(blocked["status"], "In Progress")
+        self.assertEqual(blocked["attempts"], {"developer": 3, "qa": 2})
+        self.assertIsNone(redis.get("attempts:JAIF-1:developer"))
+        self.assertIsNone(redis.get("attempts:JAIF-1:qa"))
+
+        sup.jira.status = "To Do"  # the owner returns the ticket to development
+        sup.clear_block("JAIF-1")
+        self.assertIsNone(redis.get("blocked:JAIF-1"))
+        self.assertEqual((sup.attempts("JAIF-1", "developer"), sup.attempts("JAIF-1", "qa")), (0, 0))
+
     def test_owner_context_fetch_failures_fail_closed_to_the_owner(self):
         now = time.time()
         cases = (

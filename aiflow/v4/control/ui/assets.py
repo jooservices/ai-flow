@@ -8,8 +8,7 @@ from fastapi.responses import FileResponse
 
 HERE = Path(__file__).parent
 ASSETS = (("licensing-notice.js", "licensing_notice.js"),
-          ("dashboard-attention.js", "dashboard_attention.js"),
-          ("user-admin-form.js", "user_admin_form.js"))
+          ("dashboard-attention.js", "dashboard_attention.js"))
 
 
 def _asset_endpoint(filename: str):

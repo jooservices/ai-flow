@@ -62,8 +62,7 @@ def test_prediction_reads_paths_areas_epic_and_history(db):
 def test_keyword_area_points_to_the_console_page(db):
     footprint = hotfiles.predict(db, {"key": "TESTWP-9", "summary": "New dashboard card", "description": ""})
     assert footprint["hot"] == [CONSOLE, "aiflow/v4/control/ui/dashboard_attention.js",
-                                 "aiflow/v4/control/ui/licensing_notice.js",
-                                 "aiflow/v4/control/ui/user_admin_form.js"]
+                                 "aiflow/v4/control/ui/licensing_notice.js"]
 
 
 def test_hot_scheduling_covers_develop_giants_node_agent_and_shared_tests():

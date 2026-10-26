@@ -330,7 +330,6 @@ async function exerciseMachineAndUserAdministration(page, mode) {
   assert.equal(await emailField.inputValue(), email, 'Add person email field did not retain its value');
   await page.getByLabel('Name', { exact: true }).fill(`Browser Person ${mode}`);
   await reviewerRole.check();
-  await page.waitForFunction((expected) => document.querySelector('[data-user-email]')?.value === expected, email);
   assert.equal(await reviewerRole.isChecked(), true, 'Reviewer role was not selected for the new person');
   assert.equal(await emailField.inputValue(), email, 'Add person form lost its email while selecting a role');
   const userResponse = page.waitForResponse((item) => item.request().method() === 'POST' &&

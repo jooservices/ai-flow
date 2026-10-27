@@ -50,9 +50,5 @@ class VerifyRunsRepository:
         return self.db.one("SELECT account_id, pr_url, details FROM runs WHERE ticket_key=%s AND step='dev'"
                            " AND outcome='done' ORDER BY started_at DESC LIMIT 1", (ticket_key,))
 
-    def running_project_count(self, project: str) -> int:
-        row = self.db.one("SELECT count(*) AS count FROM runs WHERE status='running' AND project=%s", (project,))
-        return int((row or {}).get("count", 0))
-
     def now(self):
         return self.db.one("SELECT now() AS t")["t"]

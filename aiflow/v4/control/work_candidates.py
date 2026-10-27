@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from fastapi import HTTPException
-
 from ..core.services import service_gaps
 from ..core.toolchains import CONTAINER_RUNTIME_TOOL, toolchain_gaps
 from . import environment as environment_reports, hotfiles, role_health, tooling, verify_retry, work_eligibility
@@ -183,7 +181,7 @@ def resolve_account(ctx, account_id: str, node: str):
     repo = ctx.repo()
     account = repo.account(account_id)
     if not account or not account.runs_on(node):
-        raise HTTPException(403, f"account {account_id} does not run on {node}")
+        raise work_eligibility.CandidateAccountUnavailable(f"account {account_id} does not run on {node}")
     return repo, account
 
 

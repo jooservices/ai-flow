@@ -10,15 +10,13 @@ what happens next, by rule and without AI (queries live in `repositories/verify_
 * When every eligible account is barred the watchdog raises one `verify_no_verdict` incident for the ticket.
 * The Dashboard lists tickets waiting for verification longer than 30 minutes with the accounts that tried.
 
-All of it is scoped to the current development round: a newer finished dev run starts the count again.
+All retry, streak, and account history is scoped to the ticket and account across development rounds.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-
-from fastapi import HTTPException
 
 from . import role_health
 from .incidents import close_incident, open_incident
@@ -153,9 +151,9 @@ def _redact_incident_account_ids(data: dict) -> None:
 
 
 def history(db, ticket_key: str) -> dict[str, list[bool]]:
-    """Per account, newest first: did each verify run of this development round end without a verdict."""
+    """Per account, newest first: did each verify run for this ticket end without a verdict."""
     out: dict[str, list[bool]] = {}
-    for row in VerifyRunsRepository(db).round_runs(ticket_key):
+    for row in VerifyRunsRepository(db).ticket_history(ticket_key):
         out.setdefault(row["account_id"], []).append(bool(row["no_verdict"]))
     return out
 
@@ -217,7 +215,7 @@ def may_take(ctx, ticket: dict, account_id: str, dev_account: str, offers) -> bo
 def _offered(offers, account_id: str, node: str, key: str) -> bool:
     try:
         return any(t["key"] == key and t.get("step") == "verify" for t in offers(account_id, node))
-    except HTTPException:
+    except work_eligibility.CandidateAccountUnavailable:
         return False
 
 
@@ -229,7 +227,7 @@ def exhausted(ctx, ticket: dict, offers=None, releases: Path | None = None) -> l
 
 def exhaustion_state(ctx, ticket: dict, offers=None, releases: Path | None = None
                      ) -> tuple[list[str], list[str], dict[str, list[bool]]]:
-    """Return eligible accounts, barred eligible accounts, and current-round history for incident recovery."""
+    """Return eligible accounts, barred eligible accounts, and ticket-wide history for incident recovery."""
     runs = history(ctx.db, ticket["key"])
     dev_account = VerifyRunsRepository(ctx.db).last_dev_account(ticket["key"])
     accounts = pool(ctx, ticket, dev_account, offers, releases)

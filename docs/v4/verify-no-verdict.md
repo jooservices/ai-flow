@@ -21,7 +21,8 @@ The control loop moves an epic with its children (`jira_sync`, `_reconcile_epics
 
 The verify worker marks such a run with `details.no_verdict = true` (outcome `failed`, summary `no verdict ...`).
 Quota and sign-in problems are not no-verdict results. `control/verify_retry.py` decides the rest. All counts are per
-development round: a newer finished dev run starts them again.
+ticket and account across development rounds. A newer development run does not reset the retry, role-health, or
+Dashboard account history.
 
 - **Retried at once.** A no-verdict run does not start the usual retry backoff. The ticket is offered immediately to an
   account that has not ended it without a verdict. The account that failed is not asked again while another eligible
@@ -31,8 +32,7 @@ development round: a newer finished dev run starts them again.
   When every eligible account has tried once, they may try again.
 - **Role health.** The first no-verdict result of an account on a ticket is not scored. The second one in a row on the
   same ticket counts as a failed verify run. A real verdict in between breaks the streak.
-- **Barred.** An account with two consecutive no-verdict results on a ticket is not offered that ticket again in this
-  round.
+- **Barred.** An account with two consecutive no-verdict results on a ticket is not offered that ticket again.
 
 ## Incident
 
@@ -41,7 +41,7 @@ incident (subject: the ticket) that names the ticket and the reason. The shared 
 IDs; restricted users see incidents only for visible tickets and receive a generic reason. Owners can see the tried
 accounts in the slow-verification Dashboard list. Repeated checks do not open a second incident. It stays open if
 temporary capacity loss leaves no eligible account online. It closes when the ticket leaves verification or an unbarred
-eligible account can receive it; a new development round resets the account history and can make a retry available. The
+eligible account can receive it; a new development run does not reset account history. The
 watchdog checks exhaustion before generic idle flow and excludes tickets covered by an open `verify_no_verdict` incident
 from idle detection, so one stalled verification does not raise a second `flow_idle` incident. The control-loops process
 installs the same candidate eligibility probe used by the API before checking exhaustion, so this works when the loops

@@ -4401,6 +4401,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             tickets, reason = candidate_path.entitled_candidates(account, node)
         except licensing.LicenseError as exc:
             return {"tickets": [], "reason": str(exc)}
+        except work_eligibility.CandidateAccountUnavailable as exc:
+            raise HTTPException(403, str(exc)) from None
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"tickets": [], "reason": f"version skew: {policy['reason']}"}
@@ -4463,7 +4465,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.step == "master":
             candidates = [master_candidate(body.account, node)]
         else:
-            candidates = candidate_path.eligible(body.account, node)
+            try:
+                candidates = candidate_path.eligible(body.account, node)
+            except work_eligibility.CandidateAccountUnavailable as exc:
+                raise HTTPException(403, str(exc)) from None
             offered = next((candidate for candidate in candidates
                             if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
             if offered:

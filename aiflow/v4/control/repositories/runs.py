@@ -17,9 +17,6 @@ SELECT r.*, CASE WHEN r.step = 'dev' AND r.outcome = 'done' THEN
   CASE WHEN r.step = 'verify' THEN coalesce(
   (SELECT p.details->>'no_verdict' = 'true' FROM runs p WHERE p.ticket_key = r.ticket_key
      AND p.account_id = r.account_id AND p.step = 'verify' AND p.status <> 'running' AND p.started_at < r.started_at
-     AND p.started_at > coalesce((SELECT max(d.started_at) FROM runs d WHERE d.ticket_key = r.ticket_key
-                                  AND d.step = 'dev' AND d.outcome = 'done' AND d.started_at < r.started_at),
-                                 '-infinity'::timestamptz)
    ORDER BY p.started_at DESC LIMIT 1), false) END AS prev_no_verdict
 FROM recent r WHERE r.n <= %(limit)s ORDER BY r.started_at DESC
 """
@@ -111,7 +108,7 @@ class RunsRepository:
         self.db = db
 
     def role_health_history(self, steps: list[str], account: str = "", limit: int = 500) -> list[dict]:
-        """Finished runs with the prior verdict marker needed by role-health policy."""
+        """Finished runs with the prior ticket-and-account verdict marker needed by role-health policy."""
         return self.db.all(ROLE_HEALTH_RUNS_SQL, {"steps": steps, "account": account, "limit": limit})
 
     def ticket_stuck_streaks(self, step: str) -> list[dict]:

@@ -8,6 +8,10 @@ from . import shared_accounts
 from .repositories.accounts import AccountsRepository
 
 
+class CandidateAccountUnavailable(Exception):
+    """The requested account cannot receive work on the requested node."""
+
+
 @dataclass(frozen=True)
 class CandidateDecision:
     eligible: bool

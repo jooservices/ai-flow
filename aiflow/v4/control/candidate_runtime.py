@@ -4,8 +4,6 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from fastapi import HTTPException
-
 from . import capacity, licensing, role_health, rollout, shared_accounts, verify_retry, work_candidates
 from . import work_eligibility
 from .repositories.accounts import AccountsRepository

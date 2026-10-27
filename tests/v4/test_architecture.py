@@ -141,6 +141,16 @@ def test_work_candidate_sql_queries_live_in_ticket_and_run_repositories():
     assert ".running_counts_by_project()" in source
 
 
+def test_candidate_services_do_not_depend_on_http_error_types():
+    modules = ("work_candidates.py", "candidate_runtime.py", "verify_retry.py")
+    paths = [ROOT / "aiflow/v4/control" / module for module in modules]
+    imports = {path.name: _imported_modules(path) for path in paths}
+    assert all("fastapi" not in imported and "starlette" not in imported
+               for imported in imports.values()), imports
+    source = (ROOT / "aiflow/v4/control/work_eligibility.py").read_text(encoding="utf-8")
+    assert "class CandidateAccountUnavailable" in source
+
+
 def test_capacity_routing_reads_account_and_run_history_through_repositories():
     capacity_path = ROOT / "aiflow/v4/control/capacity.py"
     capacity = capacity_path.read_text(encoding="utf-8")

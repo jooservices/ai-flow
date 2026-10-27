@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from threading import Event
 
+import pytest
+
 from conftest import add_open_escalation, add_ticket, join_node
 from aiflow.v4.control import incidents, role_health, state, verify_retry, work_candidates, work_eligibility
 from aiflow.v4.control.db import J
@@ -175,16 +177,31 @@ def test_no_verdict_counts_against_the_verify_role_only_from_the_second_in_a_row
     assert role_health.classify(latest).failure is None
 
 
-def test_prior_no_verdict_from_before_new_development_round_is_ignored(ctx):
+def test_prior_no_verdict_from_before_new_development_round_counts_ticket_wide(ctx):
     in_verify(ctx)
     no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=55)
-    insert_run(ctx, "TESTWP-50", "dev", "opencode-01", "done", pr_url=PR, minutes_ago=30)
-    no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=20)
+    insert_run(ctx, "TESTWP-50", "dev", "opencode-01", "done", pr_url=PR, minutes_ago=40)
+    no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=25)
 
     latest = max(RunsRepository(ctx.db).role_health_history(["verify"], "codex-01", 10),
                  key=lambda row: row["started_at"])
-    assert latest["prev_no_verdict"] is False
-    assert role_health.classify(latest).failure is None
+    assert latest["prev_no_verdict"] is True
+    assert role_health.classify(latest).failure == 1.0
+    assert verify_retry.barred(verify_retry.history(ctx.db, "TESTWP-50")["codex-01"])
+    assert verify_retry.slow_verifications(ctx.db)[0]["accounts"] == [
+        {"account": "codex-01", "runs": 2, "no_verdict": 2, "barred": True}]
+
+
+def test_candidate_service_uses_domain_rejection_and_api_maps_it_to_forbidden(client, ctx):
+    cc = join(client, "cc")
+
+    with pytest.raises(work_eligibility.CandidateAccountUnavailable, match="does not run on cc"):
+        work_candidates.resolve_account(ctx, "codex-01", "cc")
+
+    candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=cc)
+    claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-50", "account": "codex-01"}, headers=cc)
+    assert candidates.status_code == 403
+    assert claim.status_code == 403
 
 
 def test_no_verdict_streak_does_not_open_generic_ticket_stuck_incident(client, ctx):
@@ -226,11 +243,11 @@ def test_failure_on_all_eligible_accounts_raises_one_incident_and_the_dashboard_
     slow = state.snapshot(ctx)["slow_verifications"]
     assert [v["key"] for v in slow] == ["TESTWP-50"]
     assert {a["account"]: a["barred"] for a in slow[0]["accounts"]} == {"claude-01": True, "codex-01": True}
-    # a new development round starts the count again and closes the incident
+    # a newer development run does not reset ticket-wide account history or close the incident
     insert_run(ctx, "TESTWP-50", "dev", "opencode-01", "done", pr_url=PR, minutes_ago=0)
     watchdog(ctx)
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict'"
-                      " AND closed_at IS NULL")["n"] == 0
+                      " AND closed_at IS NULL")["n"] == 1
 
 
 def test_stale_exhausted_ticket_opens_only_verify_incident_not_flow_idle(client, ctx):

@@ -21,11 +21,9 @@ SELECT ticket_key, fails FROM streak
 WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
 """
 
-_ROUND_SQL = """
+_TICKET_HISTORY_SQL = """
 SELECT account_id, outcome, started_at, ended_at, coalesce(details->>'no_verdict' = 'true', false) AS no_verdict
 FROM runs WHERE ticket_key = %s AND step = 'verify' AND status <> 'running'
-  AND started_at > coalesce((SELECT max(started_at) FROM runs WHERE ticket_key = %s AND step = 'dev'
-                             AND outcome = 'done'), '-infinity'::timestamptz)
 ORDER BY started_at DESC
 """
 
@@ -37,9 +35,9 @@ class VerifyRunsRepository:
         """Tickets whose failed `step` runs still wait out the shared backoff (no-verdict runs excluded)."""
         return {r["ticket_key"] for r in self.db.all(VERIFY_BACKOFF_SQL, {"step": step})}
 
-    def round_runs(self, ticket_key: str) -> list[dict]:
-        """Finished verify runs of the current development round, newest first."""
-        return self.db.all(_ROUND_SQL, (ticket_key, ticket_key))
+    def ticket_history(self, ticket_key: str) -> list[dict]:
+        """Finished verify runs for the ticket, across all development rounds, newest first."""
+        return self.db.all(_TICKET_HISTORY_SQL, (ticket_key,))
 
     def last_dev_account(self, ticket_key: str) -> str:
         row = self.db.one("SELECT account_id FROM runs WHERE ticket_key=%s AND step='dev' AND outcome='done'"

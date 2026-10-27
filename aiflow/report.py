@@ -38,7 +38,7 @@ def normalize(reason: str) -> str:
 
     def replace_number(match: re.Match[str]) -> str:
         prefix = text[:match.start()]
-        if len(match.group(0)) == 3 and re.search(r"\bHTTP\s+$", prefix, re.IGNORECASE):
+        if len(match.group(0)) == 3 and re.search(r"\bHTTP(?:/\d+(?:\.\d+)?)?(?:\s+(?:Error|status(?:\s+code)?))?:?\s+$", prefix, re.IGNORECASE):
             return match.group(0)
         return "<N>"
 

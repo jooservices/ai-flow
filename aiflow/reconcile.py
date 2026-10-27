@@ -154,7 +154,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keys", help="comma separated Jira project keys")
     parser.add_argument("--base", default="origin/develop", help="GitHub base branch to audit")
     args = parser.parse_args(argv)
-    root = common.workspaces_root()
     default_repo = Path(__file__).resolve().parent.parent
     repo = (args.repo or default_repo).expanduser().resolve()
     if args.keys is None:
@@ -175,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         print(f"cannot complete the merge audit: {error}", file=sys.stderr)
         return 2
+    root = common.workspaces_root()
     issues = search_merged_issues(Jira(root), merged, keys)
     rows = mismatches(merged, issues)
     for row in rows:

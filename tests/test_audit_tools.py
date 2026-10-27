@@ -25,6 +25,18 @@ class ReportTests(unittest.TestCase):
         self.assertNotEqual(report.signature("OpenObserve", "request failed with HTTP 403"),
                             report.signature("OpenObserve", "request failed with HTTP 404"))
 
+    def test_http_error_status_codes_remain_distinct(self):
+        samples = (
+            ("HTTP Error", "HTTP Error 401: Unauthorized", "HTTP Error 503: Service Unavailable"),
+            ("HTTP status", "HTTP status: 401 Unauthorized", "HTTP status: 503 Unavailable"),
+            ("HTTP status code", "HTTP status code: 401 Unauthorized", "HTTP status code: 503 Unavailable"),
+            ("HTTP/1.1", "HTTP/1.1 401 Unauthorized", "HTTP/1.1 503 Unavailable"),
+        )
+        for label, first, second in samples:
+            with self.subTest(label=label):
+                self.assertIn("401", report.normalize(first))
+                self.assertNotEqual(report.signature("OpenObserve", first), report.signature("OpenObserve", second))
+
     def test_long_normalized_reasons_remain_distinct(self):
         prefix = "same cause " * 12
         self.assertNotEqual(report.signature("Config", prefix + "first"),

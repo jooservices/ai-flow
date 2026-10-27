@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from ..core.controlrepo import epic_for_ticket
 from . import merge_flow
+from .identity_redaction import redact_account_ids_in_text
 from .repositories.audits import AuditsRepository
 from .repositories.events import EventsRepository
 from .repositories.runs import RunsRepository
@@ -39,6 +40,7 @@ def ticket_detail(ctx, key: str) -> dict:
 
 def redact_ticket_identities(data: dict) -> dict:
     """Replace account, machine and audit actor identities throughout a ticket response."""
+    redact_account_ids_in_text(data)
     _redact_account_fields(data)
     decision = data.get("capacity_decision")
     if decision:

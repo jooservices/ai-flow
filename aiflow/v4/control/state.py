@@ -13,6 +13,7 @@ from . import role_health, verify_retry
 from . import tooling
 from .sa import dashboard_data, thresholds
 from .shared_accounts import machines_view
+from .identity_redaction import redact_account_ids_in_text
 from .quota import assessments as quota_assessments
 from .repositories.accounts import AccountsRepository
 from .repositories.events import EventsRepository
@@ -64,6 +65,8 @@ def snapshot(ctx, releases: Path | None = None, *, include_signin: bool = False)
 def scope_snapshot(ctx, data: dict, visible_projects: list[str] | None, reveal_accounts: bool,
                    redact_machine_data: bool) -> dict:
     """Apply the Dashboard's project and machine-identity permissions to a fresh snapshot."""
+    if not reveal_accounts:
+        redact_account_ids_in_text(data)
     verify_retry.scope_dashboard(data, visible_projects, reveal_accounts)
     if visible_projects is not None:
         _scope_projects(ctx, data, set(visible_projects))

@@ -271,6 +271,63 @@ def test_ticket_details_and_timeline_redact_account_ids_by_role(ctx):
     assert timeline["segments"][0]["account"] == account
 
 
+def test_restricted_roles_redact_account_ids_in_run_summaries_for_state_and_ticket_details(ctx, monkeypatch):
+    from aiflow.v4.control.repositories.runs import RunsRepository
+
+    key, account = "TESTWP-921", "codex-01"
+    summary = f"verifier {account} cannot work now (quota): quota window exhausted"
+    add_ticket(ctx.db, key, "In Verify", labels=())
+    ctx.db.run(
+        "INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary,"
+        "started_at,ended_at) VALUES (%s,%s,'TESTWP','verify',%s,'codex','node1',1,'finished','quota',%s,"
+        "now()-interval '2 minutes',now()-interval '1 minute')",
+        (str(uuid.uuid4()), key, account, summary))
+    recent_rows = RunsRepository.dashboard_recent_rows
+
+    def recent_rows_with_run_summaries(repository):
+        rows = recent_rows(repository)
+        for row in rows:
+            if row["ticket_key"] == key:
+                row["summary"] = summary
+        return rows
+
+    monkeypatch.setattr(RunsRepository, "dashboard_recent_rows", recent_rows_with_run_summaries)
+
+    for role in ("business", "delivery"):
+        client = role_client(ctx, role, f"{role}-summary@example.test")
+        state = client.get("/v1/state").json()
+        ticket = next(row for row in state["tickets"] if row["key"] == key)
+        detail = client.get(f"/v1/tickets/{key}").json()
+
+        assert account not in str(state)
+        assert account not in str(detail)
+        assert "verifier Verifier cannot work now (quota)" in ticket["last_run"]["summary"]
+        assert "verifier Verifier cannot work now (quota)" in detail["runs"][0]["summary"]
+
+    privileged = role_client(ctx, "administrator", "admin-summary@example.test")
+    privileged_state = privileged.get("/v1/state").json()
+    privileged_ticket = next(row for row in privileged_state["tickets"] if row["key"] == key)
+    privileged_detail = privileged.get(f"/v1/tickets/{key}").json()
+    assert privileged_ticket["last_run"]["summary"] == summary
+    assert privileged_detail["runs"][0]["summary"] == summary
+
+
+def test_account_id_text_redaction_handles_empty_duplicate_and_nested_values():
+    from aiflow.v4.control.identity_redaction import redact_account_ids_in_text
+
+    data = {"account": "codex-01", "runs": [{"account_id": "codex-01", "summary": "codex-01"}],
+            "messages": ["account codex-01"], "summary": "verifier codex-01; similar codex-01-extra",
+            "optional": None, "count": 1}
+    redact_account_ids_in_text(data)
+    assert data["summary"] == "verifier Verifier; similar codex-01-extra"
+    assert data["runs"][0]["summary"] == "Verifier"
+    assert data["messages"] == ["account Verifier"]
+
+    empty = {"account_id": "", "summary": "unchanged"}
+    redact_account_ids_in_text(empty)
+    assert empty == {"account_id": "", "summary": "unchanged"}
+
+
 def test_usage_analytics_respects_project_scope_for_projects_tickets_and_accounts(ctx):
     ctx.repo().projects["OTHER"] = Project("OTHER", "jooservices/other")
     for ticket, project, account, node, cost in (

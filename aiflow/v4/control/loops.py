@@ -29,6 +29,7 @@ from . import environment as environment_reports
 from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
 from . import projects as project_lifecycle
 from . import rollout
+from . import run_limits
 from . import version_release
 from ..core.services import service_gaps
 from ..core.toolchains import toolchain_gaps
@@ -219,6 +220,20 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     return n
 
 
+def _check_run_clock(ctx: Ctx, run: dict, now: datetime) -> None:
+    project = ctx.repo().projects.get(run["project"])
+    limits = run_limits.effective_work_minutes(project, run.get("details"))
+    minutes = (now - run["started_at"]).total_seconds() / 60
+    if minutes >= limits["hard"]:
+        open_incident(ctx, "run_hard_limit", run["ticket_key"], "critical",
+                      f"{run['ticket_key']} passed {limits['hard']} minutes",
+                      f"Run {run['id']} on {run['node']} ({run['account_id']}) has worked {int(minutes)} minutes.")
+    elif minutes >= limits["warn"]:
+        open_incident(ctx, "run_slow", run["ticket_key"], "warning",
+                      f"{run['ticket_key']} passed {limits['warn']} minutes",
+                      f"Run {run['id']} on {run['node']} ({run['account_id']}) has worked {int(minutes)} minutes.")
+
+
 def watchdog(ctx: Ctx) -> None:
     now = datetime.now(timezone.utc)
     # nodes
@@ -383,15 +398,7 @@ def watchdog(ctx: Ctx) -> None:
                     log.warning("could not requeue %s: %s", r["ticket_key"], e)
             continue
         # clocks: 30 target, 45 warn, 60 hard (per project)
-        p = ctx.repo().projects.get(r["project"])
-        wm = p.work_minutes() if p else {"target": 30, "warn": 45, "hard": 60}
-        minutes = (now - r["started_at"]).total_seconds() / 60
-        if minutes >= wm["hard"]:
-            open_incident(ctx, "run_hard_limit", r["ticket_key"], "critical", f"{r['ticket_key']} passed {wm['hard']} minutes",
-                          f"Run {r['id']} on {r['node']} ({r['account_id']}) has worked {int(minutes)} minutes.")
-        elif minutes >= wm["warn"]:
-            open_incident(ctx, "run_slow", r["ticket_key"], "warning", f"{r['ticket_key']} passed {wm['warn']} minutes",
-                          f"Run {r['id']} on {r['node']} ({r['account_id']}) has worked {int(minutes)} minutes.")
+        _check_run_clock(ctx, r, now)
     for kind in ("run_slow", "run_hard_limit"):
         for i in ctx.db.all("SELECT subject FROM incidents WHERE kind=%s AND closed_at IS NULL", (kind,)):
             if not ctx.db.one("SELECT 1 FROM runs WHERE ticket_key=%s AND status='running'", (i["subject"],)):

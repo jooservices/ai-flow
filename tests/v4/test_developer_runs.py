@@ -196,3 +196,26 @@ def test_timeout_limit_growth_boundaries(base, count):
 def test_timeout_limit_growth_rejects_invalid_values(base, count):
     with pytest.raises(ValueError):
         retry_hard_minutes(base, count)
+
+
+@pytest.mark.parametrize("hard", [0, True, 90.0, "90", None])
+def test_effective_run_limits_ignore_invalid_hard_overrides(hard):
+    from aiflow.v4.control.run_limits import effective_work_minutes
+
+    class Project:
+        def work_minutes(self):
+            return {"target": 30, "warn": 45, "hard": 60}
+
+    assert effective_work_minutes(Project(), {"effective_work_minutes": {"hard": hard}}) == {
+        "target": 30, "warn": 45, "hard": 60}
+
+
+def test_effective_run_limits_use_a_valid_retry_hard_override():
+    from aiflow.v4.control.run_limits import effective_work_minutes
+
+    class Project:
+        def work_minutes(self):
+            return {"target": 30, "warn": 45, "hard": 60}
+
+    assert effective_work_minutes(Project(), {"effective_work_minutes": {
+        "target": 30, "warn": 45, "hard": 90}}) == {"target": 30, "warn": 45, "hard": 90}

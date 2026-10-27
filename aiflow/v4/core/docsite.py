@@ -59,6 +59,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "dashboardUsageTotals": ("cc",),
     "dashboardUsageShare": ("cc",),
     "dashboardWaitingTickets": ("cc",),
+    "loadDashboardTimeouts": ("cc",),
+    "dashboardTimeoutsPanel": ("cc",),
     "capacityPanel": ("cc",),
     "drawerTicket": ("cc",),
     "loadCapacity": ("cc",),
@@ -268,7 +270,7 @@ SCREEN_LINE_VIEWS += (
     (re.compile(r"JOIN_FIELDS"), "cc"),
     # The Projects environment editor can remain interactive when its save/scan toast is visible.
     (re.compile(r"^\s*\.toasts\{"), "projects"),
-    (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|capacity: \{ data:"), "cc"),
+    (re.compile(r"dashboardQuota|dashboardWaiting|dashboardTimeouts|dashboardDisagreements|capacity: \{ data:"), "cc"),
     (re.compile(r"^\s*\.(?:dashboard-tabs|dashboard-tab|dash-section|dash-section-title|dashboard-layout-headings|dash-kpis|dash-kpi|"
                 r"dash-grid|dash-flow|flow-step|dash-tools|sort-btn|dash-table|roadmap-list|roadmap-row|provider-legend|"
                 r"provider-swatch|provider-(?:claude|codex|grok|opencode)|provider-chart|usage-share|quota-ai-list|"
@@ -978,7 +980,7 @@ def changed_api_routes(base: str, changed: list[str]) -> dict[str, set[str]]:
         now = current.get(module, {})
         if not now and not previous:
             continue
-        diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", module], cwd=ROOT,
+        diff = subprocess.run(["git", "diff", "-U0", base, "--", module], cwd=ROOT,
                               text=True, capture_output=True, check=True).stdout
         hunks = _diff_hunks(diff)
         # A contract present at the base and gone now (even the module's last route) was removed: it needs docs.
@@ -1100,11 +1102,10 @@ def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str])
 def changed_views(base: str) -> set[str]:
     """Screens whose section or JavaScript renderer changed; fail when a UI hunk cannot be mapped."""
     rel = UI.relative_to(ROOT).as_posix()
-    diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", rel], cwd=ROOT, text=True,
+    diff = subprocess.run(["git", "diff", "-U0", base, "--", rel], cwd=ROOT, text=True,
                           capture_output=True, check=True).stdout
-    # Diff coordinates refer to HEAD. During a merge, the worktree/index can already contain upstream edits that
-    # shift those coordinates, so map against the exact file version used by the diff.
-    source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
+    # Diff coordinates refer to the working tree, which may include uncommitted edits on a developer run.
+    source = UI.read_text(encoding="utf-8")
     lines = source.splitlines()
     base_source = subprocess.run(["git", "show", f"{base}:{rel}"], cwd=ROOT, text=True,
                                  capture_output=True, check=True).stdout
@@ -1162,7 +1163,6 @@ def changed_views(base: str) -> set[str]:
                 if old_index < len(base_lines):
                     specific_views |= _changed_navigation_views(base_lines[old_index], changed_line, all_views)
             layout_markup = ('id="layout-live"' in changed_line
-                             or ('data-block="' in changed_line and 'data-block="first-run-setup"' not in changed_line)
                              or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
                              or "S.layouts." in changed_line or "layoutAction(act" in changed_line
                              or "applyLayout('delivery'" in changed_line
@@ -1238,9 +1238,11 @@ def changed_views(base: str) -> set[str]:
 
 
 def changed_files(base: str) -> list[str]:
-    result = subprocess.run(["git", "diff", "--name-only", f"{base}...HEAD"], cwd=ROOT, text=True,
+    result = subprocess.run(["git", "diff", "--name-only", base], cwd=ROOT, text=True,
                             capture_output=True, check=True)
-    return result.stdout.splitlines()
+    untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"], cwd=ROOT, text=True,
+                               capture_output=True, check=True)
+    return sorted(set(result.stdout.splitlines()) | set(untracked.stdout.splitlines()))
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -323,6 +324,52 @@ def test_master_actions_are_limited_to_safe_fenced_actions_and_audited(client, c
     direct = client.post("/v1/jira/TESTWP-210/comment", json={"run_id": master["run_id"], "fence": master["fence"],
                                                                 "body": "bypass"}, headers=cc)
     assert direct.status_code == 403
+
+
+def test_timeout_retry_limit_is_shared_by_watchdog_master_clock_and_restart(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    ticket = "TESTWP-215"
+    add_ticket(ctx.db, ticket, status="In Progress")
+    ctx.jira.status_of[ticket] = "In Progress"
+    run_id = str(uuid.uuid4())
+    lease = ctx.leases.claim(ticket, run_id, 3_600_000)
+    assert lease.ok
+    details = J({"effective_work_minutes": {"target": 30, "warn": 45, "hard": 90}})
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,details)"
+               " VALUES (%s,%s,'TESTWP','dev','codex-01','codex','node1',%s,'running','',%s)",
+               (run_id, ticket, lease.fence, details))
+    ctx.db.run("UPDATE runs SET started_at=now()-interval '60 minutes' WHERE id=%s", (run_id,))
+
+    context = client.get("/v1/master/context", params={"run_id": master["run_id"], "fence": master["fence"]},
+                         headers=cc).json()
+    clock = next(row for row in context["running_clocks"] if row["run_id"] == run_id)
+    assert clock["work_minutes"]["hard"] == 90 and clock["passed"] == ["target", "warn"]
+    from aiflow.v4.control import loops
+    run = ctx.db.one("SELECT id,ticket_key,project,step,account_id,node,started_at,details FROM runs WHERE id=%s",
+                     (run_id,))
+    loops._check_run_clock(ctx, run, datetime.now(timezone.utc))
+    assert not ctx.db.one("SELECT 1 FROM incidents WHERE kind='run_hard_limit' AND subject=%s", (ticket,))
+
+    too_early = action(client, cc, master, action="restart_run", ticket=ticket, target_run_id=run_id,
+                       intent="stop a timed out run", why="The worker limit is 90 minutes")
+    assert too_early.status_code == 409 and "90 minute" in too_early.text
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "running"
+
+    ctx.db.run("UPDATE runs SET started_at=now()-interval '90 minutes' WHERE id=%s", (run_id,))
+    context = client.get("/v1/master/context", params={"run_id": master["run_id"], "fence": master["fence"]},
+                         headers=cc).json()
+    clock = next(row for row in context["running_clocks"] if row["run_id"] == run_id)
+    assert clock["passed"] == ["target", "warn", "hard"]
+    run = ctx.db.one("SELECT id,ticket_key,project,step,account_id,node,started_at,details FROM runs WHERE id=%s",
+                     (run_id,))
+    loops._check_run_clock(ctx, run, datetime.now(timezone.utc))
+    assert ctx.db.one("SELECT 1 FROM incidents WHERE kind='run_hard_limit' AND subject=%s", (ticket,))
+    restarted = action(client, cc, master, action="restart_run", ticket=ticket, target_run_id=run_id,
+                       intent="stop a timed out run", why="The 90-minute worker limit elapsed")
+    assert restarted.status_code == 200
+    assert ctx.db.one("SELECT status,outcome FROM runs WHERE id=%s", (run_id,)) == {
+        "status": "lost", "outcome": "lost"}
 
 
 @pytest.mark.parametrize(("action_name", "intent", "category"), [

@@ -49,9 +49,10 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
 from ..core.work_limits import retry_hard_minutes
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from . import (ba_chat, business, dashboard_timeout_routes, escalations, jira_connect, knowledge, layouts, licensing,
-               log_viewer, memory,
+               log_viewer, memory, run_limits, work_claim,
                role_health, rollout, runtime_settings, setup_wizard, shared_accounts, support_bundle, tooling,
                ticket_splitting_routes, version_release)
+from .repositories import developer_runs
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -1862,12 +1863,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                                  " ('owner-escalated'=ANY(labels)) AS owner_escalated FROM tickets"
                                  " WHERE status='Needs owner'"
                                  " ORDER BY priority, jira_created NULLS LAST, key")
-        running = ctx.db.all("SELECT id, ticket_key, project, step, account_id, provider, model, node, fence, started_at"
+        running = ctx.db.all("SELECT id, ticket_key, project, step, account_id, provider, model, node, fence, started_at, details"
                              " FROM runs WHERE status='running' AND step<>'master' ORDER BY started_at")
         clocks = []
         for run in running:
             project = repo.projects.get(run["project"])
-            limits = project.work_minutes() if project else {"target": 30, "warn": 45, "hard": 60}
+            limits = run_limits.effective_work_minutes(project, run.get("details"))
             elapsed = max(0, (now - run["started_at"]).total_seconds() / 60)
             clocks.append({"run_id": str(run["id"]), "ticket": run["ticket_key"], "project": run["project"],
                            "step": run["step"], "account": run["account_id"], "provider": run["provider"],
@@ -4844,255 +4845,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
-        try:
-            state = licensing.enforce_work_entitlement(ctx, body.account, node,
-                                                        public_key=ctx.settings.license_public_key)
-        except licensing.LicenseError as exc:
-            return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
-        # a node outside the version skew policy gets no new work (docs/v4/fleet-upgrade.md)
-        policy = rollout.node_compatible(ctx, node, RELEASES)
-        if not policy["compatible"]:
-            return JSONResponse({"claimed": False, "reason": f"version skew: {policy['reason']}"}, status_code=409)
-        if body.step == "master":
-            candidates = [master_candidate(body.account, node)]
-        else:
-            candidates = eligible(body.account, node)
-            offered = next((candidate for candidate in candidates
-                            if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
-            if offered:
-                try:
-                    licensing.enforce_project_entitlement(ctx, offered["project"],
-                                                          public_key=ctx.settings.license_public_key, state=state)
-                except licensing.LicenseError as exc:
-                    return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
-        tickets = {(t["key"], t["step"]): t for t in candidates if t}
-        t = tickets.get((body.ticket, body.step))
-        if not t:
-            return JSONResponse({"claimed": False, "reason": "not eligible"}, status_code=409)
-        repo = ctx.repo()
-        acc = repo.account(body.account)
-        triage_context: dict[str, Any] = {}
-        if body.step == "triage":
-            verify = ctx.db.one("SELECT summary, details FROM runs WHERE ticket_key=%s AND step='verify'"
-                                " AND status<>'running' ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            comments = ctx.jira.recent_comments(t["key"], limit=10) if ctx.jira else []
-            triage_context = {"last_dev_summary": (last_dev(t["key"]) or {}).get("summary", ""),
-                              "verify_findings": ((verify["details"] or {}).get("findings") or verify["summary"])
-                              if verify else "", "recent_comments": comments}
-            # what the owner already decided, and how the question was classified when it was raised
-            triage_context["owner_register"] = [
-                {"id": d["id"], "title": d["title"], "decision": d["decision"]} for d in ctx.db.all(
-                    "SELECT id,title,decision FROM owner_decisions WHERE kind='decision' AND status='decided'"
-                    " AND (project='' OR project=%s) ORDER BY id LIMIT 60", (t["project"],))]
-            raised = escalations.open_escalation(ctx.db, t["key"])
-            triage_context["escalation_class"] = (raised or {}).get("class", "")
-            asked =ctx.db.one("SELECT ts,data FROM events WHERE ticket=%s AND type='review.action'"
-                               " AND data->>'action'='ask-ai' ORDER BY ts DESC LIMIT 1", (t["key"],))
-            prior_triage = ctx.db.one("SELECT started_at FROM runs WHERE ticket_key=%s AND step='triage'"
-                                      " ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            if asked and (not prior_triage or asked["ts"] > prior_triage["started_at"]):
-                question = str((asked.get("data") or {}).get("text") or "").strip()
-                if question:
-                    triage_context["last_dev_summary"] = f"Reviewer question: {question}"
-            prior_pr = ctx.db.one("SELECT pr_url FROM runs WHERE ticket_key=%s AND pr_url<>''"
-                                  " ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            prior_pr_match = re.search(r"/pull/(\d+)(?:/|$)", (prior_pr or {}).get("pr_url", ""))
-            if prior_pr_match:
-                triage_context["pr"] = {"url": prior_pr["pr_url"], "number": int(prior_pr_match.group(1))}
-        run_id = str(uuid.uuid4())
-        probation_id = None
-        if t.get("probation"):  # one easy ticket at a time for a switched-off role
-            probation_id = role_health.assign_probation(ctx.db, acc.id, role_health.role_of(body.step) or "", t["key"])
-            if probation_id is None:
-                return JSONResponse({"claimed": False, "reason": "a probation ticket is already running"},
-                                    status_code=409)
-        c = ctx.leases.claim(t["key"], run_id, ctx.settings.lease_ms)
-        if not c.ok:
-            if probation_id is not None:
-                role_health.drop_probation(ctx.db, probation_id)
-            return JSONResponse({"claimed": False, "reason": f"held by {c.holder}"}, status_code=409)
-        if body.step == "dev":
-            # The eligibility check above is a snapshot: reserve the hot files now, atomically with the claim, so
-            # two simultaneous claims of different tickets cannot both start on the same hot file.
-            taken = hotfiles.reserve(ctx.db, t["key"], run_id, hotfiles.predict(ctx.db, t, ticket_epic(t))["hot"],
-                                    slots=ctx.settings.hot_file_slots)
-            if taken:
-                ctx.leases.release(t["key"], run_id, c.fence)
-                if probation_id is not None:
-                    role_health.drop_probation(ctx.db, probation_id)
-                return JSONResponse({"claimed": False, "reason": f"hot file {', '.join(taken[1])} is reserved by "
-                                     f"{taken[0]}"}, status_code=409)
-        model, effort = repo.model_for(acc.provider, "senior" if "tier-senior" in t["labels"] else acc.tier)
-        run_token = secrets.token_urlsafe(32)
-        p = repo.projects.get(t["project"])
-        epic = ticket_epic(t)
-        ticket_data = {**{k: t[k] for k in ("key", "project", "summary", "description", "labels", "priority", "type")},
-                       "parent_key": t.get("parent_key"), "epic": epic}
-        prior_dev = None if body.step == "master" else (last_dev(t["key"], done=True) or last_dev(t["key"]))
-        selected_repo = p.settings_for_ticket(ticket_data) if p else {}
-        # Once development starts, verify and rework keep the repository that produced the PR even if
-        # the owner changes the epic mapping while that work waits for review.
-        prior_repository = str(((prior_dev or {}).get("details") or {}).get("repository") or "")
-        if p and prior_repository and body.step in {"dev", "verify", "qa", "triage", "post_merge"}:
-            prior_settings = ((prior_dev or {}).get("details") or {}).get("repository_settings")
-            selected_repo = dict(prior_settings) if isinstance(prior_settings, dict) else p.settings_for_repo(prior_repository)
-        run_details = ({"repository": selected_repo.get("repo", ""),
-                        "repository_settings": selected_repo} if selected_repo else {})
-        intake_estimate: dict[str, Any] | None = None
-        timeout_retries = 0
-        if body.step == "intake":
-            intake_estimate = capacity.estimate(t, capacity.history(ctx.db))
-            run_details["intake_estimate"] = intake_estimate
-        if body.step == "dev":
-            timeout_row = ctx.db.one("SELECT count(*) AS count FROM runs WHERE ticket_key=%s AND step='dev'"
-                                     " AND ended_at IS NOT NULL AND (outcome='timeout' OR error_kind='timeout')",
-                                     (t["key"],))
-            timeout_retries = int((timeout_row or {}).get("count") or 0)
-            if timeout_retries:
-                run_details["timeout_retry"] = {"previous_timeouts": timeout_retries,
-                                                 "hard_minutes": retry_hard_minutes(
-                                                     p.work_minutes()["hard"] if p else 60, timeout_retries)}
-            capacity_samples = capacity.history(ctx.db)
-            ticket_estimate = capacity.estimate(t, capacity_samples)
-            quota_accounts = ctx.db.all("SELECT id,quota_forecast FROM accounts ORDER BY id")
-            account_forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in quota_accounts}
-            fit = capacity.account_fit(acc.id, account_forecasts.get(acc.id, {}), ticket_estimate)
-            expected_tokens = ticket_estimate["tokens"]
-            expected_minutes = ticket_estimate["time_minutes"]
-            if fit["known"] and fit["fits"]:
-                senior_work = ("tier-senior" in (t.get("labels") or [])
-                               or ticket_estimate["size"] in {"L", "XL"} or t.get("priority") == "Highest")
-                tier_order = ("senior, then middle, then junior" if senior_work
-                              else "middle, then senior, then junior")
-                strength = f"tier preference for this ticket is {tier_order}"
-                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}): estimated work is "
-                          f"{expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
-                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; "
-                          f"{fit['reason']}; {strength}.")
-            elif fit["known"]:
-                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}) because it remains eligible and no "
-                          f"quota-safe eligible account was identified. The estimate is "
-                          f"{expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
-                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; {fit['reason']}.")
-            else:
-                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}) by the existing eligibility rules. "
-                          f"The estimate is {expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
-                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; "
-                          "quota history is not reliable enough to compare eligible accounts.")
-            run_details["capacity"] = {"estimate": ticket_estimate, "account_fit": fit,
-                                       "assignment_reason": reason, "assigned_at": utcnow().isoformat()}
-        if not shared_accounts.claim_run(ctx.db, acc, (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
-                                                       model, node, c.fence, h(run_token))):
-            ctx.leases.release(t["key"], run_id, c.fence)
-            hotfiles.unreserve(ctx.db, run_id)
-            return JSONResponse({"claimed": False, "reason": f"account {acc.id} is at its limit of {acc.sessions}"
-                                 " concurrent sessions"}, status_code=409)
-        if run_details:
-            ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
-        if body.step == "dev" and prior_dev and prior_dev.get("pr_url") and prior_dev.get("branch"):
-            # A rework run carries the PR identity that the previous developer run recorded. The CI-log endpoint
-            # uses this row to bind branch and SHA requests to this ticket's pull request. Preserve provenance so
-            # role health does not treat a later failed run as the run that produced the PR.
-            ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s, head_sha=%s, details=details || %s WHERE id=%s",
-                       (prior_dev["pr_url"], prior_dev["branch"], prior_dev.get("head_sha") or "",
-                        J({"pr_url_source": "inherited"}), run_id))
-        if probation_id is not None:
-            role_health.attach_probation_run(ctx.db, probation_id, run_id)
-            ctx.events.emit("role.probation", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
-                            account=acc.id, outcome="assigned",
-                            reason=f"probation ticket for role {role_health.role_of(body.step)}")
-        ctx.db.run("UPDATE accounts SET status='working', updated_at=now(), idle_since=NULL, cooldown_since=NULL WHERE id=%s",
-                   (acc.id,))
-        ctx.events.emit("run.claimed", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
-                        fence=c.fence, account=acc.id, provider=acc.provider, model=model, node=node)
-        extra: dict[str, Any] = {}
-        if body.step == "dev":
-            tooling.resolve_ticket(ctx, t["key"], node)
-            extra["machine_tools"] = tooling.machine_tools(
-                ctx.db.one("SELECT tools,metrics FROM nodes WHERE name=%s", (node,)) or {})
-        dev = prior_dev
-        if body.step == "verify" and dev:
-            extra["pr"] = {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
-                           "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],
-                           "dev_summary": (dev["summary"] or "") + handover.render(dev.get("details"))}
-        if body.step == "dev":
-            v = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s"
-                           " AND step IN ('verify','qa')"
-                           " AND outcome='rework' ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            if v and (not dev or v["started_at"] > dev["started_at"]):
-                extra["findings"] = (v["details"] or {}).get("findings") or v["summary"]
-            if dev and dev["branch"]:
-                extra["branch"] = dev["branch"]
-            # the master AI's answer to the question a dev run stopped on, until a dev run finishes or blocks again
-            a = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s AND step='triage'"
-                           " AND outcome='answered' ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            if a and not ctx.db.one("SELECT 1 AS x FROM runs WHERE ticket_key=%s AND step='dev' AND started_at > %s"
-                                    " AND outcome IN ('done', 'blocked') LIMIT 1", (t["key"], a["started_at"])):
-                q = ctx.db.one("SELECT summary FROM runs WHERE ticket_key=%s AND step='dev' AND outcome='blocked'"
-                               " AND started_at < %s ORDER BY started_at DESC LIMIT 1", (t["key"], a["started_at"]))
-                extra["triage_answer"] = (a["details"] or {}).get("answer") or a["summary"]
-                extra["triage_question"] = (q or {}).get("summary") or ""
-            # an escalation resolved without a triage run (register, policy message, machine, amendment) is answered
-            # the same way; the newer of the two wins
-            auto = escalations.pending_answer(ctx.db, t["key"])
-            if auto and (not extra.get("triage_answer") or not a or auto["created_at"] > a["started_at"]):
-                extra["triage_answer"], extra["triage_question"] = auto["answer"], auto["question"]
-            owner_answer = escalations.owner_answered_on_ticket(ctx, t["key"])
-            if owner_answer:
-                extra["triage_answer"] = owner_answer["answer"]
-                extra["triage_question"] = owner_answer["question"]
-        if body.step == "triage":
-            extra.update(triage_context)
-        if body.step == "post_merge":
-            extra["post_merge_criteria"] = next(
-                (item["criteria"] for item in environment_reports.pending_post_merge(ctx, t["project"], [t["key"]])), [])
-        if body.step == "intake":
-            # owners answer intake questions in comments as often as in the description
-            try:
-                extra["recent_comments"] = ctx.jira.recent_comments(t["key"], limit=10) if ctx.jira else []
-            except Exception as e:  # noqa: BLE001
-                log.warning("comments of %s for intake failed: %s", t["key"], e)
-        if body.step == "impact":
-            # the board the assessment compares against: the project's epics and its open work
-            extra["project_tickets"] = ctx.db.all(
-                "SELECT key, type, status, summary, parent_key FROM tickets WHERE project=%s AND status<>'Done'"
-                " AND key<>%s ORDER BY type<>'Epic', key LIMIT 300", (t["project"], t["key"]))
-        if body.step == "master":
-            extra["master_scope"] = "global"
-        else:
-            extra["related"] = related_hits(t)
-        try:
-            ticket_context = f"{t.get('summary', '')}\n{t.get('description', '')}"[:12_000]
-            extra["context_pack"] = knowledge.context_pack(ctx.db, project=t.get("project", ""), ticket=t["key"],
-                                                           epic=epic or "", query=ticket_context, run_id=run_id)
-        except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
-            log.warning("knowledge context pack for %s failed: %s", t["key"], type(exc).__name__)
-            extra["context_pack"] = {"project": t.get("project", ""), "ticket": t["key"], "items": []}
-        limits = p.work_minutes() if p else {"target": 30, "warn": 45, "hard": 60}
-        if body.step == "dev" and timeout_retries:
-            limits["hard"] = retry_hard_minutes(limits["hard"], timeout_retries)
-        project_data = ({"key": "", "repo": "", "base": "", "hotfix_base": "", "checks": [], "stack": "",
-                         "node": node,
-                         "work_minutes": {"target": 30, "warn": 45, "hard": 60},
-                         "merge": {"method": "squash", "auto": False, "require_human": True}}
-                        if body.step == "master" else
-                        {"key": p.key, **selected_repo, "hotfix_base": p.hotfix_base,
-                         "work_minutes": limits,
-                         "environment": ([item.public() for item in p.environment_items]
-                                         if body.step in ("intake", "dev", "verify", "post_merge") else []),
-                         "merge": {"method": (p.merge or {}).get("method", "squash"),
-                                   "auto": bool((p.merge or {}).get("auto", True)),
-                                   "require_human": bool((p.merge or {}).get("require_human", False))}}
-                        if p else {})
-        if body.step == "intake" and intake_estimate:
-            ticket_data["work_estimate"] = {**intake_estimate, "target_minutes": 30}
-        if body.step == "dev":
-            project_data["timeout_retries"] = timeout_retries
-        return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
-                "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,
-                "account": acc.id, "identity": bot_identity(),
-                "ticket": ticket_data,
-                "project": project_data}
+        helpers = work_claim.ClaimHelpers(eligible=eligible, master_candidate=master_candidate,
+                                          last_dev=last_dev, ticket_epic=ticket_epic,
+                                          related_hits=related_hits, bot_identity=bot_identity)
+        return work_claim.claim(ctx, body, node, helpers, RELEASES)
 
     # --- configured Jira version releases ------------------------------------------------------------------
     @app.get("/v1/version-releases/candidates")
@@ -5790,7 +5546,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if ticket_row["status"] in ("Done", "Needs owner", "Human review"):
                 refuse_master_action(f"a run on a ticket in {ticket_row['status']} cannot be restarted by the master")
             project = ctx.repo().projects.get(target["project"])
-            hard = project.work_minutes()["hard"] if project else 60
+            hard = run_limits.effective_work_minutes(project, target.get("details"))["hard"]
             elapsed = max(0.0, (utcnow() - target["started_at"]).total_seconds() / 60)
             if elapsed < hard:
                 refuse_master_action(f"target run has not passed its {hard} minute work-time limit")

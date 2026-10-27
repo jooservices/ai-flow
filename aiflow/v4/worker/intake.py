@@ -228,22 +228,7 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         wt = Path(srv_root) / "work" / project["key"] / f"{key}--intake"
         head = git.detached(mirror, wt, f"origin/{project['base']}")
         hb.progress = {"phase": "intake", "head": head[:10]}
-        logs = Path(srv_root) / "logs" / "runs"
-        logs.mkdir(parents=True, exist_ok=True)
-        spec = RunSpec(prompt=build_prompt(c, read_spec(wt)), cwd=str(wt),
-                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("target", 30)) * 60, control_url=control_url,
-                       run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
-        adapter = get_adapter(c.provider)
-        base_argv = adapter.argv
-        adapter.argv = lambda s: run_as + base_argv(s)
-        events = {"n": 0}
-
-        def on_progress(ev: dict) -> None:
-            events["n"] += 1
-            hb.progress = {"phase": "intake-ai", "events": events["n"], "elapsed_s": int(time.time() - t0)}
-
-        res = adapter.run(spec, on_progress, stop=hb.lost)
+        res = _run_refiner(c, project, wt, srv_root, control_url, run_as, hb, t0)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       details={"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})
@@ -298,6 +283,28 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         return result
     finally:
         hb.stop.set()
+
+
+def _run_refiner(c: Claimed, project: dict, wt: Path, srv_root: str, control_url: str,
+                 run_as: list[str], hb: Heartbeat, started_at: float):
+    """Run the intake AI with its target-time slice and progress heartbeat."""
+    logs = Path(srv_root) / "logs" / "runs"
+    logs.mkdir(parents=True, exist_ok=True)
+    spec = RunSpec(prompt=build_prompt(c, read_spec(wt)), cwd=str(wt),
+                   account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
+                   timeout_s=int(project.get("work_minutes", {}).get("target", 30)) * 60, control_url=control_url,
+                   run_token=c.run_token, log_path=str(logs / f"{c.ticket['key']}-{c.run_id}.jsonl"))
+    adapter = get_adapter(c.provider)
+    base_argv = adapter.argv
+    adapter.argv = lambda spec: run_as + base_argv(spec)
+    events = {"n": 0}
+
+    def on_progress(_event: dict) -> None:
+        events["n"] += 1
+        hb.progress = {"phase": "intake-ai", "events": events["n"],
+                       "elapsed_s": int(time.time() - started_at)}
+
+    return adapter.run(spec, on_progress, stop=hb.lost)
 
 
 def split(c: Claimed, result: dict, plan: list[dict[str, str]], api: ControlClient, estimate: dict) -> dict:

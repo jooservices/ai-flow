@@ -221,6 +221,26 @@ def account_fit(account_id: str, forecast: dict[str, Any], estimate_value: dict[
             "exhaustion_at": exhaustion_at.isoformat() if exhaustion_at else None, "reason": reason}
 
 
+def assignment_reason(account, ticket: dict[str, Any], estimate_value: dict[str, Any], fit: dict[str, Any]) -> str:
+    """Explain the account choice with estimate and tier preference evidence."""
+    tokens, minutes = estimate_value["tokens"], estimate_value["time_minutes"]
+    evidence = (f"estimated work is {tokens['low']:,.0f}–{tokens['high']:,.0f} tokens and "
+                f"{minutes['low']:,.0f}–{minutes['high']:,.0f} minutes; {fit['reason']}")
+    senior = ("tier-senior" in (ticket.get("labels") or []) or estimate_value["size"] in {"L", "XL"}
+              or ticket.get("priority") == "Highest")
+    tier_order = "senior, then middle, then junior" if senior else "middle, then senior, then junior"
+    if fit["known"] and fit["fits"]:
+        prefix = f"Assigned to {account.id} ({account.provider}, {account.tier}): "
+        return prefix + evidence + f"; tier preference for this ticket is {tier_order}."
+    if fit["known"]:
+        return (f"Assigned to {account.id} ({account.provider}, {account.tier}) because it remains eligible and no "
+                f"quota-safe eligible account was identified. The {evidence}.")
+    return (f"Assigned to {account.id} ({account.provider}, {account.tier}) by the existing eligibility rules. "
+            f"The estimate is {tokens['low']:,.0f}–{tokens['high']:,.0f} tokens and "
+            f"{minutes['low']:,.0f}–{minutes['high']:,.0f} minutes; quota history is not reliable enough to compare "
+            "eligible accounts.")
+
+
 def choose_account(candidates: list[dict[str, Any]], ticket: dict[str, Any],
                    estimate_value: dict[str, Any], forecasts: dict[str, dict[str, Any]],
                    now: datetime | None = None) -> tuple[str | None, dict[str, dict[str, Any]]]:

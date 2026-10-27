@@ -317,6 +317,45 @@ def test_repeating_an_intake_split_resumes_the_same_ordered_children(iclient, ct
     assert len(ctx.jira.created) == 2
 
 
+def test_oversized_child_is_rejected_before_any_split_child_is_created_or_offered(iclient, ctx):
+    add_ticket(ctx.db, "TESTWP-39", status="Intake", labels=("size-s",))
+    run = claim(iclient, "TESTWP-39")
+    too_large = "AC1: works\n" + ("Detailed implementation requirement. " * 30)
+    plan = [{"summary": "Small first part", "description": "AC1: first part works"},
+            {"summary": "Oversized second part", "description": too_large}]
+
+    response = iclient.post("/v1/jira/TESTWP-39/split", json={"run_id": run["run_id"],
+                              "fence": run["fence"], "tickets": plan})
+
+    assert response.status_code == 422 and "above the 30-minute target" in response.text
+    assert not getattr(ctx.jira, "created", [])
+    assert candidates(iclient, "claude-01") == []
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-39'")["status"] == "Intake"
+
+
+def test_split_children_keep_parent_routing_and_review_labels(iclient, ctx):
+    labels = ("size-s", "aiflow-ready", "ai-opencode", "tier-senior", "security", "area-flow", "customer-label")
+    add_ticket(ctx.db, "TESTWP-40", status="Intake", labels=labels)
+    run = claim(iclient, "TESTWP-40")
+    plan = [{"summary": "First secured part", "description": "AC1: first part works"},
+            {"summary": "Second secured part", "description": "AC1: second part works"}]
+
+    response = iclient.post("/v1/jira/TESTWP-40/split", json={"run_id": run["run_id"],
+                              "fence": run["fence"], "tickets": plan})
+
+    assert response.status_code == 200, response.text
+    children = response.json()["children"]
+    for key in children:
+        stored = ctx.db.one("SELECT labels FROM tickets WHERE key=%s", (key,))["labels"]
+        assert set(labels) - {"size-s", "aiflow-ready"} <= set(stored)
+        assert "size-s" not in stored and "aiflow-split-parent" not in stored
+        assert "aiflow-ready" in stored
+        jira_child = next(row for row in ctx.jira.created if row["key"] == key)
+        assert set(labels) - {"size-s", "aiflow-ready"} <= set(jira_child["labels"])
+    assert all((key, "dev") in candidates(iclient, "claude-01") for key in [children[0]])
+    assert all((key, "dev") not in candidates(iclient, "opencode-01") for key in children)
+
+
 @pytest.mark.parametrize("plan", [[], [{}], [{"summary": 5, "description": "AC1: yes"},
                                                {"summary": "second", "description": "AC1: yes"}],
                                    [{"summary": "first", "description": "missing AC"},

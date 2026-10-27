@@ -9,6 +9,29 @@ from .repositories import ticket_splits
 from ..core.ticket_splitting import InvalidSplitPlan, TARGET_MINUTES, validate_plan
 
 PARENT_LABEL = "aiflow-split-parent"
+_CHILD_LABEL_EXCLUDES = {"aiflow-ready", PARENT_LABEL}
+
+
+def _child_labels(parent: dict) -> list[str]:
+    """Keep routing, review and area metadata; size and split labels describe the parent only."""
+    return sorted({str(label) for label in parent.get("labels") or []
+                   if str(label) not in _CHILD_LABEL_EXCLUDES
+                   and not str(label).startswith("aiflow-split-")
+                   and not str(label).lower().startswith(("size-", "size:"))})
+
+
+def _estimate_children(parent: dict, plan: list[dict[str, str]], samples: list[dict]) -> list[dict]:
+    labels = _child_labels(parent)
+    estimates = []
+    for index, item in enumerate(plan, 1):
+        estimate = capacity.estimate({"type": "Story", "project": parent["project"],
+                                      "summary": item["summary"], "description": item["description"],
+                                      "labels": labels}, samples)
+        high = float(estimate["time_minutes"]["high"])
+        if high > TARGET_MINUTES:
+            raise SplitError(f"split ticket {index} is estimated at {high:g} minutes, above the 30-minute target")
+        estimates.append(estimate)
+    return estimates
 
 
 class SplitError(InvalidSplitPlan):
@@ -56,19 +79,23 @@ def _ticket_row(connection, key: str) -> dict:
 
 def _create_children(ctx, connection, parent: dict, plan: list[dict[str, str]]) -> list[str]:
     jira, child_keys = ctx.jira, []
+    labels = _child_labels(parent)
     for index, item in enumerate(plan, 1):
         marker = _marker(parent["key"], index)
         key = _find_child(jira, parent["project"], marker)
         if not key:
             key = jira.create_issue(parent["project"], item["summary"], item["description"], "Story",
-                                    labels=[marker])
+                                    labels=[*labels, marker])
+        else:
+            for label in labels:
+                jira.add_label(key, label)
         previous = child_keys[-1] if child_keys else ""
         _ensure_link(jira, parent["key"], key, "Relates")
         if previous:
             _ensure_link(jira, previous, key, "Blocks")
         child_keys.append(key)
         blocked_by = [previous] if previous else []
-        ticket_splits.save_child(connection, key, parent, marker, item, blocked_by)
+        ticket_splits.save_child(connection, key, parent, marker, item, blocked_by, labels)
     return child_keys
 
 
@@ -112,8 +139,12 @@ def _split_locked(ctx, connection, run: dict, requested_plan: Any) -> dict[str, 
         if float(estimate["time_minutes"]["high"]) <= TARGET_MINUTES:
             raise SplitError("ticket estimate is within the 30-minute target")
         plan = validate_plan(requested_plan)
+        _estimate_children(parent, plan, capacity.history(connection))
         saved = ticket_splits.save_plan(connection, parent, estimate, TARGET_MINUTES, plan)
         connection.commit()
+    else:
+        plan = validate_plan(saved["plan"])
+        _estimate_children(parent, plan, capacity.history(connection))
     plan = validate_plan(saved["plan"])
     child_keys = _create_children(ctx, connection, parent, plan)
     # Publish every child and ordering blocker in the registry before Jira labels can make children ready.

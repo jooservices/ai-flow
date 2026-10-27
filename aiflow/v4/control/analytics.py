@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .repositories import developer_runs
+
 FAILED = ("failed", "blocked", "timeout", "lost")
 DAILY_SQL = """
 SELECT (r.started_at AT TIME ZONE 'UTC')::date AS day, r.project, r.account_id AS account,
@@ -38,34 +40,6 @@ GROUP BY 1, 2
 ORDER BY 1 DESC, 2
 """
 
-TIMEOUT_DAILY_SQL = """
-SELECT (started_at AT TIME ZONE 'UTC')::date AS day,
-       count(*) AS developer_runs,
-       count(*) FILTER (WHERE outcome='timeout' OR error_kind='timeout') AS timeouts
-FROM runs
-WHERE step='dev'
-  AND ended_at IS NOT NULL
-  AND started_at >= ((now() AT TIME ZONE 'UTC')::date - %s::int)::timestamp AT TIME ZONE 'UTC'
-  AND (%s OR project = ANY(%s))
-GROUP BY 1 ORDER BY 1 DESC
-"""
-
-TIMEOUT_TICKET_SQL = """
-SELECT ticket_key AS ticket, project,
-       count(*) AS developer_runs,
-       count(*) FILTER (WHERE outcome='timeout' OR error_kind='timeout') AS timeouts,
-       max(started_at) FILTER (WHERE outcome='timeout' OR error_kind='timeout') AS latest_timeout
-FROM runs
-WHERE step='dev'
-  AND ended_at IS NOT NULL
-  AND started_at >= ((now() AT TIME ZONE 'UTC')::date - %s::int)::timestamp AT TIME ZONE 'UTC'
-  AND (%s OR project = ANY(%s))
-GROUP BY ticket_key,project
-HAVING count(*) FILTER (WHERE outcome='timeout' OR error_kind='timeout') > 0
-ORDER BY timeouts DESC, latest_timeout DESC, ticket
-"""
-
-
 def daily(db, days: int = 14, project: str = "") -> list[dict[str, Any]]:
     """One row per (day, project, account) that had runs in the last `days` UTC days, today included."""
     rows = db.all(DAILY_SQL, {"failed": list(FAILED), "back": days - 1, "project": project})
@@ -86,9 +60,7 @@ def timeouts(db, days: int = 30, project_keys: list[str] | tuple[str, ...] | Non
     """Timeout counts by UTC day and ticket, plus the developer-run timeout share."""
     if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 90:
         raise ValueError("days must be between 1 and 90")
-    params = (days - 1, project_keys is None, list(project_keys or ()))
-    daily_rows = db.all(TIMEOUT_DAILY_SQL, params)
-    ticket_rows = db.all(TIMEOUT_TICKET_SQL, params)
+    daily_rows, ticket_rows = developer_runs.timeout_analytics(db, days, project_keys)
     runs = sum(int(row["developer_runs"]) for row in daily_rows)
     timeout_count = sum(int(row["timeouts"]) for row in daily_rows)
     return {"days": days, "developer_runs": runs, "timeouts": timeout_count,

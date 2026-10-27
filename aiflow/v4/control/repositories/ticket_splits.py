@@ -24,12 +24,13 @@ def save_plan(connection, parent: dict, estimate: dict, target_minutes: int, pla
     return plan(connection, parent["key"]) or {}
 
 
-def save_child(connection, key: str, parent: dict, marker: str, item: dict, blocked_by: list[str]) -> None:
+def save_child(connection, key: str, parent: dict, marker: str, item: dict, blocked_by: list[str],
+               inherited_labels: list[str]) -> None:
     connection.execute("INSERT INTO tickets (key,project,status,type,priority,labels,summary,description,blocked_by,synced_at)"
                        " VALUES (%s,%s,'To Do','Story',%s,%s,%s,%s,%s,now()) ON CONFLICT (key) DO UPDATE SET"
                        " status='To Do',type='Story',labels=EXCLUDED.labels,summary=EXCLUDED.summary,"
                        " description=EXCLUDED.description,blocked_by=EXCLUDED.blocked_by,synced_at=now()",
-                       (key, parent["project"], parent["priority"], [marker], item["summary"],
+                       (key, parent["project"], parent["priority"], [*inherited_labels, marker], item["summary"],
                         item["description"], blocked_by))
     connection.execute("UPDATE ticket_split_plans SET child_keys=array_append(child_keys,%s),updated_at=now()"
                        " WHERE parent_key=%s AND NOT (%s=ANY(child_keys))", (key, parent["key"], key))

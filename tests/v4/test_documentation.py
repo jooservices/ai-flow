@@ -298,12 +298,50 @@ def test_ci_check_maps_changed_api_lines_to_their_route_contract(monkeypatch):
             self.stdout = stdout
 
     def fake_run(command, **kwargs):
+        assert "origin/develop...HEAD" not in command
         if command[1] == "diff":
             return Result("@@ -12,1 +12,1 @@\n")
         return Result("")
 
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
     assert docsite.changed_api_routes("origin/develop", [api]) == {api: {"GET /v1/cc"}}
+
+
+def test_changed_files_include_uncommitted_and_untracked_paths(monkeypatch):
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "diff":
+            return Result("aiflow/v4/control/api.py\n")
+        return Result("aiflow/v4/control/work_claim.py\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_files("origin/develop") == [
+        "aiflow/v4/control/api.py", "aiflow/v4/control/work_claim.py"]
+
+
+def test_dashboard_timeout_block_is_documented_as_a_dashboard_change(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    first = next(i for i, line in enumerate((ROOT / ui).read_text().splitlines(), 1)
+                 if 'data-block="timeouts"' in line)
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result("")
+        return Result(f"@@ -{first},0 +{first},1 @@\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == {"cc"}
 
 
 def test_changed_master_action_route_is_named_in_documentation():

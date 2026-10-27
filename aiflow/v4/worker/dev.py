@@ -275,351 +275,418 @@ def _handover_timed_out(api: ControlClient, c: Claimed, git: Git, worktree: Path
     return True
 
 
+@dataclass
+class DevSession:
+    api: ControlClient
+    claimed: Claimed
+    git: Git
+    heartbeat: Heartbeat
+    started_at: float
+    result: dict
+    key: str
+    project: dict
+    repo: str
+    branch: str
+    worktree: Path | None = None
+    branch_commit_count: int = 0
+    conflicts: list[str] = field(default_factory=list)
+    response: object | None = None
+    summary: str = ""
+    tests: str = ""
+    handover: dict = field(default_factory=dict)
+    suite_status: dict = field(default_factory=dict)
+    changed: list[str] = field(default_factory=list)
+
+
+def _jira(session: DevSession, path: str, **body) -> dict:
+    return session.api.call("POST", f"/v1/jira/{session.key}/{path}",
+                            {"run_id": session.claimed.run_id, "fence": session.claimed.fence, **body})
+
+
+def _prepare_worktree(session: DevSession, srv_root: str) -> None:
+    c, git, project, branch, api = session.claimed, session.git, session.project, session.branch, session.api
+    credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                          "repo": session.repo})
+    mirror = git.mirror(session.repo, credential["token"], credential.get("transport_url", ""))
+    session.worktree = Path(srv_root) / "work" / project["key"] / branch
+    moved = git.foreign_worktree(mirror, session.worktree, branch)
+    if moved:
+        log.warning("%s: repository changed from %s to %s; replacing worktree %s",
+                    session.key, moved["old_repo"], session.repo, session.worktree)
+        work = (f"{len(moved['commits'])} committed change(s) on branch {branch} in {moved['old_repo']}"
+                + (" (the branch is also pushed there):\n" if moved["pushed"] else " (not pushed anywhere):\n")
+                + "\n".join(f"- {item}" for item in moved["commits"][:20])) if moved["commits"] else "no committed work on the old branch"
+        _jira(session, "comment", body=note(c, "repository changed",
+              what=f"The ticket's repository changed from {moved['old_repo']} to {session.repo}",
+              why="The old worktree belongs to the old repository, so the AI could not find the code in it",
+              result=f"Old worktree and branch {branch} removed; {work}",
+              next_=f"A new worktree is created from {session.repo} {project['base']}", node=api_node(api)))
+        git.drop_foreign_worktree(session.worktree, branch, Path(moved["old_mirror"]))
+    start = git.worktree(mirror, session.worktree, branch, project["base"])
+    session.branch_commit_count = (git.commits_ahead(session.worktree, project["base"])
+                                   if start == f"origin/{branch}" else 0)
+    if start != f"origin/{project['base']}":
+        session.conflicts = git.merge_base_in(session.worktree, project["base"], c.identity)
+    session.heartbeat.progress = {"phase": "worktree", "start": start, "conflicts": len(session.conflicts)}
+    if moved:
+        session.heartbeat.progress["repo_change"] = f"{moved['old_repo']} -> {session.repo}"
+    env = project_env(project["key"], project.get("environment"), "dev")
+    _jira(session, "transition", to="In Progress")
+    _jira(session, "fields", fields={"Workspace": environment_status(project.get("environment"), "dev", env),
+                                      "Agent (AI)": {"value": PROVIDER_NAME.get(c.provider, c.provider)}})
+    why = "Rework after verify findings" if c.findings else "The ticket is ready and its blockers are done"
+    result = f", with the latest {project['base']} merged in ({len(session.conflicts)} conflicted files to resolve)" if session.conflicts else ""
+    _jira(session, "comment", body=note(c, "started", what=f"Develop the ticket on branch {branch} from {start}{result}",
+          why=why, next_="The AI implements the acceptance criteria and runs the checks; AI Flow commits and opens a draft PR",
+          node=api_node(api)))
+
+
+def _execute_dev_ai(session: DevSession, srv_root: str, control_url: str, run_as: list[str]) -> None:
+    c, project, api, hb = session.claimed, session.project, session.api, session.heartbeat
+    ci_log = fetch_ci_log(api, c, session.branch)
+    logs = Path(srv_root) / "logs" / "runs"
+    logs.mkdir(parents=True, exist_ok=True)
+    env = project_env(project["key"], project.get("environment"), "dev")
+    spec = RunSpec(prompt=build_prompt(c, session.branch, session.conflicts, ci_log, env), cwd=str(session.worktree),
+                   account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
+                   timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
+                   control_url=control_url, run_token=c.run_token,
+                   log_path=str(logs / f"{session.key}-{c.run_id}.jsonl"), extra_env=env)
+    adapter = get_adapter(c.provider)
+    base_argv = adapter.argv
+    adapter.argv = lambda current: run_as + base_argv(current)
+    wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
+    runtime = _dev_runtime(spec, run_as, project, wordpress)
+    with runtime as containers:
+        if wordpress:
+            hb.progress = {"phase": "wordpress-site"}
+            start_wordpress_site(containers, session.worktree, project, c.run_id, spec)
+            _jira(session, "comment", body=note(
+                c, "WordPress test site ready", what="A temporary WordPress test site is ready",
+                result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
+                next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
+                node=api_node(api)))
+        session.response = adapter.run(spec, _dev_progress(session), stop=hb.lost)
+    response = session.response
+    session.result.update(tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
+                          quota=response.quota, error_kind=response.error_kind,
+                          reset_at=response.reset_at.isoformat() if response.reset_at else None,
+                          details={"verdict": response.verdict, "permission_denials": response.permission_denials,
+                                   "verdict_reason": (response.verdict_reason or "")[:2000],
+                                   "exit_code": response.exit_code, "duration_s": int(response.duration_s),
+                                   "log": response.log_path})
+    if hb.lost.is_set():
+        raise LeaseLost()
+
+
+def _dev_runtime(spec: RunSpec, run_as: list[str], project: dict, wordpress: bool):
+    if project.get("containers") or wordpress:
+        from .containers import ContainerRuntime
+        return ContainerRuntime(spec, run_as)
+    return nullcontext()
+
+
+def _dev_progress(session: DevSession):
+    events = {"n": 0}
+
+    def on_progress(event: dict) -> None:
+        events["n"] += 1
+        session.heartbeat.progress = {"phase": "ai", "events": events["n"],
+                                      "last": str(event.get("type", ""))[:40],
+                                      "elapsed_s": int(time.time() - session.started_at)}
+    return on_progress
+
+
+def _record_dev_result(session: DevSession) -> None:
+    response = session.response
+    summary = SUMMARY.search(response.final_text or "")
+    tests = TESTS.search(response.final_text or "")
+    session.summary = summary.group(1).strip() if summary else ((response.final_text or "").strip()[-600:] or response.error_message)
+    session.tests = tests.group(1).strip() if tests else ""
+    session.result["summary"] = session.summary
+    session.handover = handover.parse(response.final_text or "", session.claimed.ticket.get("description") or "")
+    session.suite_status = _suite_status(response.final_text or "", response.error_kind == "timeout")
+    session.result.setdefault("details", {}).update(session.handover, full_suite=session.suite_status)
+    if session.suite_status["status"] == "unfinished":
+        suffix = "full suite unfinished: " + session.suite_status["reason"]
+        session.tests = (session.tests + "; " if session.tests else "") + suffix
+        session.result["details"]["handed_to_pipeline"] = True
+
+
+def _stop_for_quota(session: DevSession) -> None:
+    response = session.response
+    session.result["outcome"] = "quota"
+    _jira(session, "comment", body=note(session.claimed, "paused", what="The run stopped before finishing",
+          why=f"{session.claimed.account} cannot work now ({response.error_kind}): {response.error_message[:200]}",
+          result="No change was pushed", next_="Back to To Do for another account; this account pauses until its limit resets",
+          t0=session.started_at, node=api_node(session.api)))
+    _jira(session, "transition", to="To Do")
+
+
+def _environment_stop(session: DevSession, absent: list[str]) -> None:
+    if not absent:
+        reason = ("unaccepted missing environment report: name an item of the project's environment list, "
+                  f"not free text ({session.response.verdict_reason})")[:1000]
+        return _retry_failure(session, reason, "check could not run")
+    session.result["outcome"] = "environment_missing"
+    session.result["details"]["missing_environment"] = absent
+    _jira(session, "comment", body=note(session.claimed, "waiting for an environment item",
+          what="The run needs an item of the project environment that is not provided",
+          why=f"Missing environment item(s): {', '.join(absent)}",
+          result="No question goes to the owner; the item is recorded by name",
+          next_="Back to To Do; AI Flow provides the item or raises one environment ticket",
+          t0=session.started_at, node=api_node(session.api)))
+    _jira(session, "transition", to="To Do")
+
+
+def _missing_tools_stop(session: DevSession, missing: list[str], command_missing: list[str]) -> None:
+    response, c = session.response, session.claimed
+    raised = session.api.call("POST", "/v1/escalations/raise", {
+        "run_id": c.run_id, "fence": c.fence,
+        "question": (f"MISSING-TOOL: {', '.join(command_missing)} - executed command returned command not found"
+                     if command_missing and not has_missing_marker(response.verdict_reason or "")
+                     else response.verdict_reason)})
+    if raised.get("resolved") and raised.get("outcome") == "auto_answered":
+        session.result["outcome"] = "auto_answered"
+        session.result["details"].update(escalation_class=raised.get("class", ""), missing_tools=[])
+        cited = f" {redact(raised['citation'])}." if raised.get("citation") else ""
+        _jira(session, "comment", body=note(c, "question answered without the owner",
+              what="The developer AI stopped with a question that AI Flow answered automatically",
+              why=redact(f"Classified as: {raised.get('label', 'Resolved automatically')} "
+                         f"({raised.get('reason', 'the register answered this')}).{cited}"),
+              result=redact(raised.get("answer", "")), next_="Back to To Do; the next run gets this answer in its prompt",
+              t0=session.started_at, node=api_node(session.api)))
+        _jira(session, "transition", to="To Do")
+        return
+    session.result["outcome"] = "tool_missing"
+    session.result["details"].update(missing_tools=missing,
+        tool_missing_evidence="explicit_marker" if parse_missing_requirements(response.verdict_reason or "")
+        else "command_not_found", escalation_class=raised.get("class", ""))
+    if command_missing:
+        session.result["details"]["command_not_found_tools"] = command_missing
+    _jira(session, "comment", body=note(c, "waiting for a check tool", what="A configured check could not run",
+          why=f"Missing tool(s): {', '.join(missing)}. {redact(response.verdict_reason)[:300]}",
+          result="No question goes to the owner; the missing tool is recorded by name",
+          next_="Back to To Do; AI Flow offers it again when a worker with the tool is available",
+          t0=session.started_at, node=api_node(session.api)))
+    _jira(session, "transition", to="To Do")
+
+
+def _question_stop(session: DevSession) -> None:
+    response, c = session.response, session.claimed
+    raised = classify_question(session.api, c, response.verdict_reason)
+    if raised and raised.get("resolved"):
+        session.result["outcome"] = raised["outcome"]
+        if raised.get("missing_tools"):
+            session.result["details"]["missing_tools"] = raised["missing_tools"]
+        session.result["details"]["escalation_class"] = raised["class"]
+        cited = f" {redact(raised['citation'])}." if raised.get("citation") else ""
+        _jira(session, "comment", body=note(c, "question answered without the owner",
+              what="The developer AI stopped with a question that AI Flow answered automatically",
+              why=redact(f"Classified as: {raised['label']} ({raised['reason']}).{cited}"),
+              result=redact(raised["answer"]), next_="Back to To Do; the next run gets this answer in its prompt",
+              t0=session.started_at, node=api_node(session.api)))
+        _jira(session, "transition", to="To Do")
+        return
+    label = f" [{raised['label']}]" if raised and raised.get("label") else ""
+    session.result["outcome"] = "blocked"
+    _jira(session, "comment", body=note(c, "question for the owner",
+          what="The developer AI stopped before changing code", why=response.verdict_reason + label,
+          next_="Answer in a comment and move the ticket back to To Do", t0=session.started_at,
+          node=api_node(session.api)))
+    _jira(session, "transition", to="Needs owner")
+
+
+def _blocked_result(session: DevSession) -> bool:
+    response, project = session.response, session.project
+    if response.error_kind in ("quota", "auth"):
+        _stop_for_quota(session)
+        return True
+    if response.verdict != "BLOCKED":
+        return False
+    env_names, _other, env_marked = parse_missing_environment(response.verdict_reason,
+                                                              items_of(project.get("environment")))
+    if env_marked:
+        _environment_stop(session, env_names)
+        return True
+    missing = parse_missing_requirements(response.verdict_reason)
+    command_missing = parse_command_not_found_requirements(getattr(response, "command_results", []))
+    missing = list(dict.fromkeys(missing + command_missing))
+    machine = session.claimed.machine_tools or {}
+    available = set(machine.get("available") or {}) | set(machine.get("services") or [])
+    missing = [name for name in missing if name not in available]
+    if has_missing_marker(response.verdict_reason) and not missing:
+        _retry_failure(session, f"unaccepted missing requirement report: {response.verdict_reason}"[:1000],
+                       "check could not run")
+        return True
+    if missing:
+        _missing_tools_stop(session, missing, command_missing)
+    else:
+        _question_stop(session)
+    return True
+
+
+def _retry_failure(session: DevSession, reason: str, title: str) -> dict:
+    session.result.update(outcome="failed", summary=reason[:1000])
+    _jira(session, "comment", body=note(session.claimed, title,
+          what="The run ended without a change AI Flow can push", why=reason[:600],
+          result=(session.response.final_text or session.summary)[:600],
+          next_="Back to To Do; the next run retries after a short wait",
+          t0=session.started_at, node=api_node(session.api)))
+    _jira(session, "transition", to="To Do")
+    return session.result
+
+
+def _reuse_existing_work(session: DevSession) -> dict:
+    c, api, git = session.claimed, session.api, session.git
+    branch = session.branch
+    found = api.call("GET", "/v1/github/pr", params={"run_id": c.run_id, "fence": c.fence,
+                                                      "repo": session.repo, "head": branch})
+    existing = found if found and found.get("found") else None
+    if not existing and not session.branch_commit_count:
+        reason = (f"no changes to verify: branch {branch} has no committed work for this ticket and no open pull request")
+        session.result.update(outcome="failed", error_kind="no_work", summary=reason[:1000])
+        session.result.setdefault("details", {}).update(no_changes=True, no_work_reason=reason)
+        _jira(session, "comment", body=note(c, "no work to verify",
+              what="The developer found no changes and the ticket branch has no committed work", why=reason,
+              result=session.summary[:600] if session.summary else "The developer reported no changes needed",
+              next_="The flow doctor records the cause and decides whether to retry after the normal backoff",
+              t0=session.started_at, node=api_node(api)))
+        _jira(session, "transition", to="To Do")
+        return session.result
+    return _handover_existing_work(session, existing)
+
+
+def _handover_existing_work(session: DevSession, existing: dict | None) -> dict:
+    c, api, git = session.claimed, session.api, session.git
+    pushed = False
+    if session.branch_commit_count:
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                              "repo": session.repo, "branch": session.branch})
+        git.push(session.worktree, session.branch, credential["token"])
+        pushed = True
+    sha = (git.run("rev-parse", "HEAD", cwd=session.worktree).strip() if pushed or not existing
+           else existing.get("head_sha") or git.run("rev-parse", "HEAD", cwd=session.worktree).strip())
+    pr = existing or _open_existing_work_pr(session)
+    note_text = (f"The existing pull request already contains the ticket work: {pr['url']}" if existing else
+                 f"The ticket branch already contains {session.branch_commit_count} committed change(s); "
+                 f"AI Flow opened a draft pull request: {pr['url']}")
+    session.result.setdefault("details", {}).update(already_done=True, no_changes=True,
+                                                     branch_commits=session.branch_commit_count)
+    session.result.update(outcome="done", summary=f"Already done: no new changes were needed; {note_text}."[:1000],
+                          pr_url=pr["url"], head_sha=sha)
+    _jira(session, "comment", body=note(session.claimed, "already done; sent to verification",
+          what="The developer found the work already on the ticket branch", result=note_text,
+          next_="Another account verifies the pull request against the acceptance criteria",
+          t0=session.started_at, node=api_node(session.api)))
+    _jira(session, "transition", to="In Verify")
+    return session.result
+
+
+def _open_existing_work_pr(session: DevSession) -> dict:
+    c = session.claimed
+    body = (f"Jira: {c.ticket['key']}\n\n## Summary\nThe existing ticket branch already contains the work; "
+            "this developer run made no additional changes.\n\n"
+            f"## Tests\n{session.tests or 'see the existing branch history'}\n\n"
+            f"{handover.pr_sections(session.handover)}## Run\n"
+            f"- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
+            f"- run: {c.run_id}, fence {c.fence}\n- existing branch commits: {session.branch_commit_count}\n\n"
+            "Opened as a draft by AI Flow v4; verification runs next (In Verify).")
+    return session.api.call("POST", "/v1/github/pr", {"run_id": c.run_id, "fence": c.fence,
+        "repo": session.repo, "head": session.branch, "base": session.project["base"],
+        "title": pr_title(c.ticket), "body": body, "draft": True})
+
+
+def _finish_changes(session: DevSession) -> dict:
+    session.changed = session.git.changed(session.worktree)
+    response = session.response
+    if response.error_kind == "timeout" and _handover_timed_out(
+            session.api, session.claimed, session.git, session.worktree, session.branch, session.repo,
+            session.summary, session.handover, session.result, session.started_at):
+        return session.result
+    session.result.setdefault("details", {})["changed_files"] = session.changed[:100]
+    conflicted = any(CONFLICT_MARKER.search((session.worktree / name).read_text(errors="ignore"))
+                     for name in session.conflicts if (session.worktree / name).is_file())
+    if conflicted:
+        response.error_kind = response.error_kind or "unresolved conflicts"
+    failed = response.error_kind or response.verdict == "FAIL" or not session.changed
+    if failed:
+        clean = not response.error_kind and response.verdict != "FAIL" and not session.changed
+        if clean:
+            return _reuse_existing_work(session)
+        reason = response.error_kind or (response.verdict_reason or "AI reported RESULT: FAIL")
+        return _retry_failure(session, f"{reason}: {session.summary}"[:1000], "no usable change")
+    return _publish_changes(session)
+
+
+def _publish_changes(session: DevSession) -> dict:
+    c, api, git = session.claimed, session.api, session.git
+    session.heartbeat.progress = {"phase": "commit", "files": len(session.changed)}
+    sha = git.commit_all(session.worktree, commit_message(c, session.summary), c.identity)
+    credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                          "repo": session.repo, "branch": session.branch})
+    git.push(session.worktree, session.branch, credential["token"])
+    suite_note = ("\n\nThe full suite did not finish in the developer run; the pull request pipeline must complete "
+                  "the configured checks before merge." if session.suite_status["status"] == "unfinished" else "")
+    body = (f"Jira: {session.key}\n\n## Summary\n{session.summary}\n\n## Tests\n"
+            f"{session.tests or 'see the run log'}{suite_note}\n\n{handover.pr_sections(session.handover)}"
+            f"## Run\n- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
+            f"- run: {c.run_id}, fence {c.fence}\n- files changed: {len(session.changed)}\n\n"
+            "Opened as a draft by AI Flow v4; verification runs next (In Verify).")
+    pr = api.call("POST", "/v1/github/pr", {"run_id": c.run_id, "fence": c.fence, "repo": session.repo,
+        "head": session.branch, "base": session.project["base"], "title": pr_title(c.ticket),
+        "body": body, "draft": True})
+    _jira(session, "comment", body=note(c, "draft PR opened", what=session.summary[:700],
+          result=f"{len(session.changed)} files committed as {sha[:10]} on {session.branch}; draft PR {pr['url']}. Tests: {session.tests or 'not reported'}",
+          next_=("The pull request pipeline completes the configured checks before merge"
+                 if session.suite_status["status"] == "unfinished" else
+                 "Another account verifies the PR against the acceptance criteria and merges it"),
+          t0=session.started_at, node=api_node(api)))
+    _jira(session, "transition", to="In Verify")
+    session.result.update(outcome="done", pr_url=pr["url"], head_sha=sha)
+    return session.result
+
+
+def _finish_dev_response(session: DevSession) -> dict:
+    _record_dev_result(session)
+    if _blocked_result(session):
+        return session.result
+    return _finish_changes(session)
+
+
 def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,
             run_as: list[str]) -> dict:
-    key, project = c.ticket["key"], c.project
-    repo = project["repo"]
-    branch = c.branch or f"{key}-{slug(c.ticket['summary'])}"
-    git = Git(srv_root, run_as=run_as)
-    hb = Heartbeat(api, c, heartbeat_s)
-    hb.start()
-    t0 = time.time()
-    result: dict = {"fence": c.fence, "outcome": "failed", "branch": branch}
-
-    def jira(path: str, **body) -> dict:
-        return api.call("POST", f"/v1/jira/{key}/{path}", {"run_id": c.run_id, "fence": c.fence, **body})
-
+    project = c.project
+    branch = c.branch or f"{c.ticket['key']}-{slug(c.ticket['summary'])}"
+    heartbeat = Heartbeat(api, c, heartbeat_s)
+    session = DevSession(api, c, Git(srv_root, run_as=run_as), heartbeat, time.time(),
+                         {"fence": c.fence, "outcome": "failed", "branch": branch}, c.ticket["key"],
+                         project, project["repo"], branch)
+    heartbeat.start()
     try:
-        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": repo})
-        token = credential["token"]
-        mirror = git.mirror(repo, token, credential.get("transport_url", ""))
-        wt = Path(srv_root) / "work" / project["key"] / branch
-        moved = git.foreign_worktree(mirror, wt, branch)
-        if moved:  # the ticket's repository changed since the worktree was made: never reuse it
-            log.warning("%s: repository changed from %s to %s; replacing worktree %s", key, moved["old_repo"], repo, wt)
-            work = (f"{len(moved['commits'])} committed change(s) on branch {branch} in {moved['old_repo']}"
-                    + (" (the branch is also pushed there):\n" if moved["pushed"] else " (not pushed anywhere):\n")
-                    + "\n".join(f"- {x}" for x in moved["commits"][:20])) if moved["commits"] else "no committed work on the old branch"
-            jira("comment", body=note(c, "repository changed", what=f"The ticket's repository changed from {moved['old_repo']} to {repo}",
-                                      why="The old worktree belongs to the old repository, so the AI could not find the code in it",
-                                      result=f"Old worktree and branch {branch} removed; {work}",
-                                      next_=f"A new worktree is created from {repo} {project['base']}", node=api_node(api)))
-            git.drop_foreign_worktree(wt, branch, Path(moved["old_mirror"]))
-        start = git.worktree(mirror, wt, branch, project["base"])
-        branch_commit_count = (git.commits_ahead(wt, project["base"])
-                               if start == f"origin/{branch}" else 0)
-        conflicts: list[str] = []
-        if start != f"origin/{project['base']}":  # continuing the branch: bring in the latest base first
-            conflicts = git.merge_base_in(wt, project["base"], c.identity)
-        hb.progress = {"phase": "worktree", "start": start, "conflicts": len(conflicts)}
-        if moved:
-            hb.progress["repo_change"] = f"{moved['old_repo']} -> {repo}"
-        env = project_env(project["key"], project.get("environment"), "dev")
-        jira("transition", to="In Progress")
-        jira("fields", fields={"Workspace": environment_status(project.get("environment"), "dev", env),
-                               "Agent (AI)": {"value": PROVIDER_NAME.get(c.provider, c.provider)}})
-        jira("comment", body=note(c, "started", what=f"Develop the ticket on branch {branch} from {start}"
-                                  + (f", with the latest {project['base']} merged in ({len(conflicts)} conflicted files to resolve)" if conflicts else ""),
-                                  why=("Rework after verify findings" if c.findings else "The ticket is ready and its blockers are done"),
-                                  next_="The AI implements the acceptance criteria and runs the checks; AI Flow commits and opens a draft PR",
-                                  node=api_node(api)))
-        ci_log = fetch_ci_log(api, c, branch)
-        logs = Path(srv_root) / "logs" / "runs"
-        logs.mkdir(parents=True, exist_ok=True)
-        events = {"n": 0}
-
-        def on_progress(ev: dict) -> None:
-            events["n"] += 1
-            hb.progress = {"phase": "ai", "events": events["n"], "last": str(ev.get("type", ""))[:40],
-                           "elapsed_s": int(time.time() - t0)}
-
-        env = project_env(project["key"], project.get("environment"), "dev")
-        spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log, env), cwd=str(wt),
-                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
-                       control_url=control_url, run_token=c.run_token,
-                       log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=env)
-        adapter = get_adapter(c.provider)
-        adapter_argv = adapter.argv
-        adapter.argv = lambda s: run_as + adapter_argv(s)  # the AI runs as the unprivileged AI user
-        wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
-        if project.get("containers") or wordpress:
-            from .containers import ContainerRuntime
-            runtime = ContainerRuntime(spec, run_as)
-        else:
-            runtime = nullcontext()
-        # The site is started through the container runtime, so its limits and crash cleanup own it.
-        with runtime as containers:
-            if wordpress:
-                hb.progress = {"phase": "wordpress-site"}
-                start_wordpress_site(containers, wt, project, c.run_id, spec)
-                jira("comment", body=note(
-                    c, "WordPress test site ready", what="A temporary WordPress test site is ready",
-                    result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
-                    next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
-                    node=api_node(api)))
-            res = adapter.run(spec, on_progress, stop=hb.lost)
-        result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
-                      error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
-                      details={"verdict": res.verdict, "permission_denials": res.permission_denials,
-                               "verdict_reason": (res.verdict_reason or "")[:2000],
-                               "exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})
-        if hb.lost.is_set():
-            raise LeaseLost()
-        summary_m, tests_m = SUMMARY.search(res.final_text or ""), TESTS.search(res.final_text or "")
-        summary = summary_m.group(1).strip() if summary_m else ((res.final_text or "").strip()[-600:] or res.error_message)
-        tests = tests_m.group(1).strip() if tests_m else ""
-        result["summary"] = summary
-        handed = handover.parse(res.final_text or "", c.ticket.get("description") or "")
-        suite_status = _suite_status(res.final_text or "", res.error_kind == "timeout")
-        result.setdefault("details", {}).update(handed, full_suite=suite_status)
-        if suite_status["status"] == "unfinished":
-            tests = (tests + "; " if tests else "") + "full suite unfinished: " + suite_status["reason"]
-            result["details"]["handed_to_pipeline"] = True
-
-        if res.error_kind in ("quota", "auth"):
-            result["outcome"] = "quota"
-            jira("comment", body=note(c, "paused", what="The run stopped before finishing",
-                                      why=f"{c.account} cannot work now ({res.error_kind}): {res.error_message[:200]}",
-                                      result="No change was pushed", next_="Back to To Do for another account; this account pauses until its limit resets",
-                                      t0=t0, node=api_node(api)))
-            jira("transition", to="To Do")
-            return result
-        env_names, _env_other, env_marked = (parse_missing_environment(res.verdict_reason,
-                                                                       items_of(project.get("environment")))
-                                             if res.verdict == "BLOCKED" else ([], [], False))
-        if env_marked:
-            # a missing environment item is reported by its name in the project configuration, never as free text,
-            # and it is never a question for the owner (docs/v4/environment.md)
-            absent = env_names
-            if not absent:
-                reason = ("unaccepted missing environment report: name an item of the project's environment list, "
-                          f"not free text ({res.verdict_reason})")[:1000]
-                result.update(outcome="failed", summary=reason)
-                jira("comment", body=note(c, "check could not run", what="The run ended without a change AI Flow can push",
-                                          why=reason[:600], result=(res.final_text or summary)[:600],
-                                          next_="Back to To Do; the next run retries after a short wait",
-                                          t0=t0, node=api_node(api)))
-                jira("transition", to="To Do")
-                return result
-            result["outcome"] = "environment_missing"
-            result["details"]["missing_environment"] = absent
-            jira("comment", body=note(c, "waiting for an environment item",
-                                      what="The run needs an item of the project environment that is not provided",
-                                      why=f"Missing environment item(s): {', '.join(absent)}",
-                                      result="No question goes to the owner; the item is recorded by name",
-                                      next_="Back to To Do; AI Flow provides the item or raises one environment ticket",
-                                      t0=t0, node=api_node(api)))
-            jira("transition", to="To Do")
-            return result
-        missing = parse_missing_requirements(res.verdict_reason) if res.verdict == "BLOCKED" else []
-        command_missing = (parse_command_not_found_requirements(getattr(res, "command_results", []))
-                           if res.verdict == "BLOCKED" else [])
-        missing = list(dict.fromkeys(missing + command_missing))
-        machine = c.machine_tools or {}
-        available_tools = set(machine.get("available") or {})
-        available_services = set(machine.get("services") or [])
-        missing = [name for name in missing if name not in available_tools and name not in available_services]
-        if res.verdict == "BLOCKED" and has_missing_marker(res.verdict_reason) and not missing:
-            # A marker containing an unknown name, or a requirement the heartbeat said was present, is a normal
-            # failure. Keep the AI's exact reason on the run and return the ticket to the ordinary retry path.
-            reason = f"unaccepted missing requirement report: {res.verdict_reason}"[:1000]
-            result.update(outcome="failed", summary=reason)
-            jira("comment", body=note(c, "check could not run", what="The run ended without a change AI Flow can push",
-                                      why=reason[:600], result=(res.final_text or summary)[:600],
-                                      next_="Back to To Do; the next run retries after a short wait",
-                                      t0=t0, node=api_node(api)))
-            jira("transition", to="To Do")
-            return result
-        if missing:
-            # Record the class through the same fenced path as every other developer stop. The run result below
-            # still carries all missing requirements so the normal tool-wait path is preserved.
-            escalation_question = res.verdict_reason
-            if command_missing and not has_missing_marker(res.verdict_reason or ""):
-                # The escalation classifier receives question text, not adapter events. Pass a concise normalized
-                # marker only after the adapter recorded a failed command execution.
-                escalation_question = f"MISSING-TOOL: {', '.join(command_missing)} - executed command returned command not found"
-            raised = api.call("POST", "/v1/escalations/raise", {
-                "run_id": c.run_id, "fence": c.fence, "question": escalation_question})
-            if raised.get("resolved") and raised.get("outcome") == "auto_answered":
-                result["outcome"] = "auto_answered"
-                result["details"]["escalation_class"] = raised.get("class", "")
-                result["details"]["missing_tools"] = []
-                cited = f" {redact(raised['citation'])}." if raised.get("citation") else ""
-                jira("comment", body=note(c, "question answered without the owner",
-                                          what="The developer AI stopped with a question that AI Flow answered automatically",
-                                          why=redact(f"Classified as: {raised.get('label', 'Resolved automatically')} "
-                                                     f"({raised.get('reason', 'the register answered this')}).{cited}"),
-                                          result=redact(raised.get("answer", "")),
-                                          next_="Back to To Do; the next run gets this answer in its prompt",
-                                          t0=t0, node=api_node(api)))
-                jira("transition", to="To Do")
-                return result
-            result["outcome"] = "tool_missing"
-            result["details"]["missing_tools"] = missing
-            if command_missing:
-                result["details"]["command_not_found_tools"] = command_missing
-            result["details"]["tool_missing_evidence"] = (
-                "explicit_marker" if parse_missing_requirements(res.verdict_reason or "") else "command_not_found")
-            result["details"]["escalation_class"] = raised.get("class", "")
-            jira("comment", body=note(c, "waiting for a check tool", what="A configured check could not run",
-                                      why=f"Missing tool(s): {', '.join(missing)}. {redact(res.verdict_reason)[:300]}",
-                                      result="No question goes to the owner; the missing tool is recorded by name",
-                                      next_="Back to To Do; AI Flow offers it again when a worker with the tool is available",
-                                      t0=t0, node=api_node(api)))
-            jira("transition", to="To Do")
-            return result
-        if res.verdict == "BLOCKED":
-            # every escalation is classified when it is raised; only a new business decision or an irreversible or
-            # production action may reach a person (docs/v4/escalations.md)
-            raised = classify_question(api, c, res.verdict_reason)
-            if raised and raised.get("resolved"):
-                result["outcome"] = raised["outcome"]
-                if raised.get("missing_tools"):
-                    result["details"]["missing_tools"] = raised["missing_tools"]
-                result["details"]["escalation_class"] = raised["class"]
-                cited = f" {redact(raised['citation'])}." if raised.get("citation") else ""
-                jira("comment", body=note(c, "question answered without the owner",
-                                          what="The developer AI stopped with a question that AI Flow answered automatically",
-                                          why=redact(f"Classified as: {raised['label']} ({raised['reason']}).{cited}"),
-                                          result=redact(raised["answer"]),
-                                          next_="Back to To Do; the next run gets this answer in its prompt",
-                                          t0=t0, node=api_node(api)))
-                jira("transition", to="To Do")
-                return result
-            label = f" [{raised['label']}]" if raised and raised.get("label") else ""
-            result["outcome"] = "blocked"
-            jira("comment", body=note(c, "question for the owner", what="The developer AI stopped before changing code",
-                                      why=res.verdict_reason + label,
-                                      next_="Answer in a comment and move the ticket back to To Do",
-                                      t0=t0, node=api_node(api)))
-            jira("transition", to="Needs owner")
-            return result
-        changed = git.changed(wt)
-        if res.error_kind == "timeout" and _handover_timed_out(
-                api, c, git, wt, branch, repo, summary, handed, result, t0):
-            return result
-        result.setdefault("details", {})["changed_files"] = changed[:100]
-        if conflicts and any(CONFLICT_MARKER.search((wt / f).read_text(errors="ignore")) for f in conflicts if (wt / f).is_file()):
-            res.error_kind = res.error_kind or "unresolved conflicts"
-        failure_verdict = res.verdict == "FAIL"
-        if res.error_kind or failure_verdict or not changed:
-            clean_no_changes = not failure_verdict and not res.error_kind and not changed
-            reason = res.error_kind
-            if not reason:
-                reason = (res.verdict_reason or "AI reported RESULT: FAIL") if failure_verdict else "no changes"
-            if clean_no_changes:
-                found = api.call("GET", "/v1/github/pr", params={"run_id": c.run_id, "fence": c.fence,
-                                                                    "repo": repo, "head": branch})
-                existing_pr = found if found and found.get("found") else None
-                if existing_pr or branch_commit_count:
-                    pushed = False
-                    if branch_commit_count:
-                        # The latest base may have been merged into the existing branch above; publish that
-                        # integration commit before asking GitHub to create or return its pull request. The
-                        # relay only accepts pushes with a credential scoped to the branch.
-                        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
-                                                                              "repo": repo, "branch": branch})
-                        git.push(wt, branch, credential["token"])
-                        pushed = True
-                    # after a push the head to verify is the pushed commit, not the PR head fetched before it
-                    sha = (git.run("rev-parse", "HEAD", cwd=wt).strip() if pushed or not existing_pr
-                           else existing_pr.get("head_sha") or git.run("rev-parse", "HEAD", cwd=wt).strip())
-                    if existing_pr:
-                        pr = existing_pr
-                    else:
-                        pr_body = (f"Jira: {key}\n\n## Summary\nThe existing ticket branch already contains the work; "
-                                   "this developer run made no additional changes.\n\n"
-                                   f"## Tests\n{tests or 'see the existing branch history'}\n\n"
-                                   f"{handover.pr_sections(handed)}"
-                                   "## Run\n"
-                                   f"- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
-                                   f"- run: {c.run_id}, fence {c.fence}\n"
-                                   f"- existing branch commits: {branch_commit_count}\n\n"
-                                   "Opened as a draft by AI Flow v4; verification runs next (In Verify).")
-                        pr = api.call("POST", "/v1/github/pr", {
-                            "run_id": c.run_id, "fence": c.fence, "repo": repo, "head": branch,
-                            "base": project["base"], "title": pr_title(c.ticket), "body": pr_body, "draft": True,
-                        })
-                    note_text = (f"The existing pull request already contains the ticket work: {pr['url']}"
-                                 if existing_pr else
-                                 f"The ticket branch already contains {branch_commit_count} committed change(s); "
-                                 f"AI Flow opened a draft pull request: {pr['url']}")
-                    summary_done = f"Already done: no new changes were needed; {note_text}."
-                    result.setdefault("details", {}).update(already_done=True, no_changes=True,
-                                                             branch_commits=branch_commit_count)
-                    result.update(outcome="done", summary=summary_done[:1000], pr_url=pr["url"], head_sha=sha)
-                    jira("comment", body=note(
-                        c, "already done; sent to verification", what="The developer found the work already on the ticket branch",
-                        result=note_text, next_="Another account verifies the pull request against the acceptance criteria",
-                        t0=t0, node=api_node(api)))
-                    jira("transition", to="In Verify")
-                    return result
-
-                reason = (f"no changes to verify: branch {branch} has no committed work for this ticket and no open pull request")
-                result.update(outcome="failed", error_kind="no_work", summary=reason[:1000])
-                result.setdefault("details", {}).update(no_changes=True, no_work_reason=reason)
-                jira("comment", body=note(
-                    c, "no work to verify", what="The developer found no changes and the ticket branch has no committed work",
-                    why=reason, result=summary[:600] if summary else "The developer reported no changes needed",
-                    next_="The flow doctor records the cause and decides whether to retry after the normal backoff",
-                    t0=t0, node=api_node(api)))
-                jira("transition", to="To Do")
-                return result
-
-            result["outcome"] = "failed"
-            result["summary"] = f"{reason}: {summary}"[:1000]
-            jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",
-                                      why=reason, result=(summary[:600] if summary else "no output"),
-                                      next_="Back to To Do; the next run retries after a short wait",
-                                      t0=t0, node=api_node(api)))
-            jira("transition", to="To Do")
-            return result
-        hb.progress = {"phase": "commit", "files": len(changed)}
-        sha = git.commit_all(wt, commit_message(c, summary), c.identity)
-        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
-                                                              "repo": repo, "branch": branch})
-        token = credential["token"]
-        git.push(wt, branch, token)
-        pipeline_note = ("\n\nThe full suite did not finish in the developer run; the pull request pipeline must complete "
-                         "the configured checks before merge." if suite_status["status"] == "unfinished" else "")
-        body = (f"Jira: {key}\n\n## Summary\n{summary}\n\n## Tests\n{tests or 'see the run log'}{pipeline_note}\n\n"
-                f"{handover.pr_sections(handed)}"
-                f"## Run\n- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
-                f"- run: {c.run_id}, fence {c.fence}\n- files changed: {len(changed)}\n\n"
-                "Opened as a draft by AI Flow v4; verification runs next (In Verify).")
-        pr = api.call("POST", "/v1/github/pr", {"run_id": c.run_id, "fence": c.fence, "repo": repo, "head": branch,
-                                                "base": project["base"], "title": pr_title(c.ticket),
-                                                "body": body, "draft": True})
-        jira("comment", body=note(c, "draft PR opened", what=summary[:700],
-                                  result=f"{len(changed)} files committed as {sha[:10]} on {branch}; draft PR {pr['url']}. Tests: {tests or 'not reported'}",
-                                  next_=("The pull request pipeline completes the configured checks before merge"
-                                         if suite_status["status"] == "unfinished" else
-                                         "Another account verifies the PR against the acceptance criteria and merges it"),
-                                  t0=t0, node=api_node(api)))
-        jira("transition", to="In Verify")
-        result.update(outcome="done", pr_url=pr["url"], head_sha=sha)
-        return result
+        _prepare_worktree(session, srv_root)
+        _execute_dev_ai(session, srv_root, control_url, run_as)
+        return _finish_dev_response(session)
     except LeaseLost:
-        result.update(outcome="lost", summary="lease lost during the run; stopped without writing")
-        return result
+        session.result.update(outcome="lost", summary="lease lost during the run; stopped without writing")
+        return session.result
     except Conflict:
-        result.update(outcome="lost", summary="fencing token refused; another run owns the ticket")
-        return result
-    except Exception as e:  # noqa: BLE001
+        session.result.update(outcome="lost", summary="fencing token refused; another run owns the ticket")
+        return session.result
+    except Exception as exc:  # noqa: BLE001
         log.exception("dev step failed")
-        result.update(outcome="failed", summary=f"worker error: {e}"[:1000])
+        session.result.update(outcome="failed", summary=f"worker error: {exc}"[:1000])
         try:
-            jira("comment", body=note(c, "worker error", what="The worker failed before the AI could finish",
-                                      why=str(e)[:400], next_="Back to To Do; the next run retries after a short wait",
-                                      t0=t0, node=api_node(api)))
-            jira("transition", to="To Do")
+            _jira(session, "comment", body=note(c, "worker error",
+                  what="The worker failed before the AI could finish", why=str(exc)[:400],
+                  next_="Back to To Do; the next run retries after a short wait",
+                  t0=session.started_at, node=api_node(api)))
+            _jira(session, "transition", to="To Do")
         except Exception:  # noqa: BLE001
             pass
-        return result
+        return session.result
     finally:
-        hb.stop.set()
-
+        heartbeat.stop.set()
 
 def api_node(api: ControlClient) -> str:
     return getattr(api, "node_name", "node")

@@ -3,9 +3,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import uuid
+from types import SimpleNamespace
+
+import pytest
 
 from conftest import add_ticket, join_node
-from aiflow.v4.control import capacity, quota as quota_reporting
+from aiflow.v4.control import capacity, quota as quota_reporting, work_eligibility
 from aiflow.v4.control.db import J
 from aiflow.v4.control.repositories.tickets import TicketsRepository
 from aiflow.v4.control.ui import mount_ui
@@ -156,6 +159,32 @@ def test_capacity_routing_prefers_middle_tier_to_junior_for_ordinary_work():
 
     assert account == "middle-01"
     assert fits["junior-01"]["fits"] is True and fits["middle-01"]["fits"] is True
+
+
+def test_capacity_probe_ignores_peer_account_disappearing_after_enumeration():
+    peer = SimpleNamespace(id="peer-01")
+    offered = [{"key": "TESTWP-PEER-RACE", "step": "dev"}]
+
+    def unavailable(*_args, **_kwargs):
+        raise work_eligibility.CandidateAccountUnavailable("peer account no longer runs on node1")
+
+    assert capacity._account_offers(peer, "node1", "current-01", "cc", offered, unavailable, True) == []
+
+    def unexpected(*_args, **_kwargs):
+        raise RuntimeError("unexpected eligibility failure")
+
+    with pytest.raises(RuntimeError, match="unexpected eligibility failure"):
+        capacity._account_offers(peer, "node1", "current-01", "cc", offered, unexpected, True)
+
+
+def test_capacity_probe_uses_current_account_offers_without_rechecking_it():
+    current = SimpleNamespace(id="current-01")
+    offered = [{"key": "TESTWP-CURRENT", "step": "dev"}]
+
+    def should_not_probe(*_args, **_kwargs):
+        raise AssertionError("current account was already checked")
+
+    assert capacity._account_offers(current, "cc", "current-01", "cc", offered, should_not_probe, True) == offered
 
 
 def test_weekly_plan_counts_finishable_tickets_and_names_the_limiting_ai(client, ctx):

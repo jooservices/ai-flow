@@ -10,9 +10,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from fastapi import HTTPException
-
 from ..core.quota import as_utc
+from . import work_eligibility
 from .repositories.accounts import AccountsRepository
 from .repositories.runs import RunsRepository
 from .repositories.tickets import TicketsRepository
@@ -289,7 +288,7 @@ def _account_offers(account, machine: str, account_id: str, node: str, offered: 
     try:
         return eligible(account.id, machine, capacity_routing=False,
                         verify_retry_guard=verify_retry_guard)
-    except HTTPException:
+    except work_eligibility.CandidateAccountUnavailable:
         return []
 
 

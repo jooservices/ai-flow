@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +19,11 @@ class ReportTests(unittest.TestCase):
 
     def test_words_with_digits_are_kept(self):
         self.assertIn("E2E", report.normalize("E2E runtime failed after 12 tries"))
+
+    def test_http_status_codes_remain_distinct(self):
+        self.assertIn("HTTP 403", report.normalize("request failed with HTTP 403"))
+        self.assertNotEqual(report.signature("OpenObserve", "request failed with HTTP 403"),
+                            report.signature("OpenObserve", "request failed with HTTP 404"))
 
     def test_groups_count_tickets_and_projects(self):
         rows = [{"kind": "Config", "reason": "failed 1", "ticket": "A-1", "project": "A"}, {"kind": "Config", "reason": "failed 2", "ticket": "B-2", "project": "B"}]
@@ -100,6 +106,26 @@ class ReconcileTests(unittest.TestCase):
         issues = [{"key": "JAIF-5", "status": "Backlog", "summary": "a"}, {"key": "JAIF-6", "status": "Done"}, {"key": "JAIF-7", "status": "To Do"}]
         self.assertEqual([r["key"] for r in reconcile.mismatches({"JAIF-5", "JAIF-6"}, issues)], ["JAIF-5"])
 
+    def test_reads_jira_fields_shape(self):
+        issue = {"key": "JAIF-5", "fields": {"status": {"name": "Backlog"}, "summary": "Nested summary"}}
+        self.assertEqual(reconcile.mismatches({"JAIF-5"}, [issue]),
+                         [{"key": "JAIF-5", "status": "Backlog", "summary": "Nested summary"}])
+
+    def test_searches_merged_keys_in_bounded_batches(self):
+        class FakeJira:
+            def __init__(self): self.calls = []
+            def search(self, jql, limit):
+                self.calls.append((jql, limit))
+                return []
+
+        keys = {f"JAIF-{index}" for index in range(1, 206)}
+        jira = FakeJira()
+        self.assertEqual(reconcile.search_merged_issues(jira, keys, ["JAIF"]), [])
+        self.assertEqual([limit for _, limit in jira.calls], [100, 100, 5])
+        queried = [key for jql, _ in jira.calls for key in re.findall(r"JAIF-\d+", jql)]
+        self.assertEqual(set(queried), keys)
+        self.assertEqual(len(queried), len(keys))
+
 
 class FleetTests(unittest.TestCase):
     def test_flags(self):
@@ -122,9 +148,9 @@ class FleetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fleet.collect("c=nonsense", runner)
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_consensus_ties_follow_host_order(self):
+        self.assertEqual(fleet.consensus_commit(["a", "b", "b", "a"]), "a")
+        self.assertEqual(fleet.consensus_commit(["b", "a", "a", "b"]), "b")
 
 
 class ReviewFixTests(unittest.TestCase):
@@ -181,9 +207,66 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_fleet_timeout_and_missing_checkout(self):
         def hang(*a, **k): raise subprocess.TimeoutExpired("ssh", 90)
+        def cannot_start(*a, **k): raise FileNotFoundError("ssh")
         self.assertEqual(fleet.collect("vm=ssh:host", runner=hang), {"name": "vm"})
+        self.assertEqual(fleet.collect("vm=ssh:host", runner=cannot_start), {"name": "vm"})
         self.assertIn("checkout not found", fleet.flags({"control": "active", "units_failed": "0"}))
 
     def test_base_cannot_be_an_option(self):
         with self.assertRaises(ValueError):
             reconcile.git_subjects(Path("."), "--output=/tmp/x")
+
+    def test_preflight_malformed_ports_fail_without_stopping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reached = []
+            with mock.patch.object(preflight.common, "runtime", return_value={
+                    "obs_url": "https://obs.example:bad", "memory_url": "http://[::1"}), \
+                 mock.patch.object(preflight.common, "projects", return_value=[]), \
+                 mock.patch.object(preflight.shutil, "which", return_value=None), \
+                 mock.patch.dict(os.environ, {"AIFLOW_REDIS_PORT": "not-a-port"}, clear=True):
+                results = preflight.run(Path(tmp), skip_ai=True,
+                                        check_reach=lambda host, port: reached.append((host, port)) or True)
+        checks = {item["check"]: item for item in results}
+        self.assertFalse(checks["Redis reachable"]["ok"])
+        self.assertEqual(checks["Redis reachable"]["detail"], "invalid Redis port")
+        self.assertFalse(checks["OpenObserve reachable"]["ok"])
+        self.assertFalse(checks["memory service reachable"]["ok"])
+        self.assertEqual(reached, [])
+
+    def test_codex_secondary_only_window_is_known(self):
+        line = json.dumps({"payload": {"rate_limits": {"secondary": {
+            "used_percent": 70, "window_minutes": 10080, "resets_at": 9000}}}})
+        limits = quota.last_limits([line])
+        self.assertEqual([w["window"] for w in quota.windows(limits, now=1000)], ["10080 min"])
+
+    def test_newest_snapshot_is_found_beyond_newest_eight_files(self):
+        def line(stamp, used):
+            return json.dumps({"timestamp": stamp, "payload": {"rate_limits": {
+                "primary": {"used_percent": used, "window_minutes": 300}}}})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for index in range(10):
+                path = directory / f"rollout-{index}.jsonl"
+                stamp, used = ("2026-10-20T10:00:00Z", 10) if index == 0 else ("2026-10-20T08:00:00Z", 80)
+                path.write_text(line(stamp, used) + "\n")
+                os.utime(path, (index + 1, index + 1))
+            level = quota.codex_level(directory, now=1_792_500_000)
+        self.assertEqual(level["windows"][0]["used_percent"], 10.0)
+
+    def test_query_fails_instead_of_returning_truncated_rows(self):
+        class Reply:
+            def __init__(self, hits): self.hits = hits
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, *a): return json.dumps({"hits": self.hits}).encode()
+
+        pages = iter([[{"n": 1}, {"n": 2}], [{"n": 3}, {"n": 4}]])
+        with mock.patch.object(report, "LIMIT_ROWS", 2), mock.patch.object(report, "MAX_ROWS", 3):
+            with self.assertRaises(report.QueryLimitExceeded):
+                report.query("http://x", "o", "s", "u", "p", "select 1", 1,
+                             opener=lambda req, timeout: Reply(next(pages)))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -42,6 +42,20 @@ def version_matches(wanted: str, text: str) -> bool:
     return re.search(rf"(?<![\d.]){re.escape(wanted)}(?!\d)", text) is not None
 
 
+def service_address(url: str) -> tuple[str, int] | None:
+    """Return a valid HTTP(S) host and port, or None for a malformed service URL."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if parsed.scheme not in ("http", "https") or not host:
+        return None
+    port = port if port is not None else (443 if parsed.scheme == "https" else 80)
+    return (host, port) if 1 <= port <= 65535 else None
+
+
 def read_lock(path: Path) -> dict[str, str]:
     wanted = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -80,16 +94,27 @@ def run(root: Path, skip_ai: bool = False, lock: Path | None = None, check_reach
             continue
         clone = root / project.get("company", "JOOservices") / "projects" / project["repo"]
         add(f"clone of {project['jira_key']} ({project['repo']})", (clone / ".git").exists(), str(clone))
-    redis_host, redis_port = env.get("AIFLOW_REDIS_HOST", "127.0.0.1"), int(env.get("AIFLOW_REDIS_PORT", "16382") or 16382)
-    add("Redis reachable", check_reach(redis_host, redis_port), f"{redis_host}:{redis_port}")
+    redis_host = env.get("AIFLOW_REDIS_HOST", "127.0.0.1")
+    try:
+        redis_port = int(env.get("AIFLOW_REDIS_PORT", "16382") or 16382)
+    except (TypeError, ValueError):
+        add("Redis reachable", False, "invalid Redis port")
+    else:
+        if not 1 <= redis_port <= 65535:
+            add("Redis reachable", False, "invalid Redis port")
+        else:
+            add("Redis reachable", check_reach(redis_host, redis_port), f"{redis_host}:{redis_port}")
     for name, key in (("OpenObserve", "obs_url"), ("memory service", "memory_url")):
         url = runtime.get(key, "")
         if not url:
             add(f"{name} configured", False, f"{key} is empty")
             continue
-        parsed = urlparse(url)
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        add(f"{name} reachable", check_reach(parsed.hostname or "", port), f"{parsed.hostname}:{port}")
+        address = service_address(url)
+        if address is None:
+            add(f"{name} reachable", False, "invalid service URL or port")
+        else:
+            host, port = address
+            add(f"{name} reachable", check_reach(host, port), f"{host}:{port}")
     wanted = read_lock(lock) if lock else {}
     for tool in TOOLS:
         found = shutil.which(tool) is not None

@@ -10,6 +10,7 @@ import argparse
 import base64
 import json
 import re
+import sys
 import time
 import urllib.request
 from collections import Counter, defaultdict
@@ -25,12 +26,23 @@ LIMIT_ROWS = 5000
 MAX_ROWS = 200_000
 
 
+class QueryLimitExceeded(RuntimeError):
+    pass
+
+
 def normalize(reason: str) -> str:
     """The reason without ticket keys, paths and numbers, so the same cause gets the same text."""
     text = KEY.sub("<KEY>", reason or "")
     text = SLUG.sub("<KEY>", text)  # a worktree or branch name is the ticket key plus a slug of its title
     text = PATH.sub("<PATH>", text)
-    text = NUMBER.sub("<N>", text)
+
+    def replace_number(match: re.Match[str]) -> str:
+        prefix = text[:match.start()]
+        if len(match.group(0)) == 3 and re.search(r"\bHTTP\s+$", prefix, re.IGNORECASE):
+            return match.group(0)
+        return "<N>"
+
+    text = NUMBER.sub(replace_number, text)
     return re.sub(r"\s+", " ", text).strip()[:100]
 
 
@@ -43,15 +55,21 @@ def query(url: str, org: str, stream: str, user: str, password: str, sql: str, h
     end = int(time.time() * 1_000_000)
     auth = base64.b64encode(f"{user}:{password}".encode()).decode()
     rows: list[dict[str, Any]] = []
-    while True:  # page through the raw rows of one fixed window; aggregate queries fit in the first page
+    while True:  # page through a fixed window; aggregation queries fit in the first page
+        remaining = MAX_ROWS - len(rows)
+        request_size = min(LIMIT_ROWS, remaining + 1)
         body = json.dumps({"query": {"sql": sql.replace("{stream}", stream), "start_time": end - hours * 3600 * 1_000_000, "end_time": end,
-                                     "from": len(rows), "size": LIMIT_ROWS}}).encode()
+                                     "from": len(rows), "size": request_size}}).encode()
         request = urllib.request.Request(f"{url.rstrip('/')}/api/{org}/_search", data=body, method="POST",
                                          headers={"Content-Type": "application/json", "Authorization": "Basic " + auth})
         with opener(request, timeout=30) as response:
-            page = json.load(response).get("hits", [])
+            page = json.load(response).get("hits")
+        if not isinstance(page, list):
+            raise ValueError("OpenObserve search response has no hits list")
+        if len(page) > remaining:
+            raise QueryLimitExceeded(f"OpenObserve query exceeded the {MAX_ROWS} row safety limit; narrow --hours.")
         rows += page
-        if len(page) < LIMIT_ROWS or len(rows) >= MAX_ROWS:
+        if len(page) < request_size:
             return rows
 
 
@@ -127,7 +145,11 @@ def main(argv: list[str] | None = None) -> int:
         print("OpenObserve is not configured (obs_url in aiflow.toml, AIFLOW_OBS_USER/PASSWORD in the root .env).")
         return 2
     org, stream = runtime.get("obs_org", "default"), runtime.get("obs_stream", "aiflow_events")
-    data = build(lambda sql: query(url, org, stream, user, password, sql, args.hours), args.warn, args.limit)
+    try:
+        data = build(lambda sql: query(url, org, stream, user, password, sql, args.hours), args.warn, args.limit)
+    except QueryLimitExceeded as error:
+        print(str(error), file=sys.stderr)
+        return 1
     print(json.dumps(data, indent=2) if args.json else render(data, args.hours, args.warn, args.limit))
     return 0
 

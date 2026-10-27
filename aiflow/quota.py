@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,10 @@ SESSIONS = Path.home() / ".codex" / "sessions"
 def _find_limits(node: Any) -> dict | None:
     if isinstance(node, dict):
         limits = node.get("rate_limits")
-        if isinstance(limits, dict) and limits.get("primary") and limits.get("limit_id") in (None, "codex"):
+        has_window = isinstance(limits, dict) and any(
+            isinstance(limits.get(name), dict) for name in ("primary", "secondary")
+        )
+        if has_window and limits.get("limit_id") in (None, "codex"):
             return limits
         for value in node.values():
             found = _find_limits(value)
@@ -64,17 +68,30 @@ def windows(limits: dict, now: float) -> list[dict[str, Any]]:
         window = limits.get(name)
         if not isinstance(window, dict) or "used_percent" not in window:
             continue
-        reset = window.get("resets_at")
-        expired = bool(reset) and reset <= now
-        used = 0.0 if expired else float(window["used_percent"])
-        out.append({"window": f"{int(window.get('window_minutes') or 0)} min", "used_percent": used, "left_percent": round(100 - used, 1),
-                    "resets_at": reset, "window_already_reset": expired})
+        try:
+            reported_used = float(window["used_percent"])
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(reported_used):
+            continue
+        try:
+            reset_at = float(window["resets_at"]) if window.get("resets_at") is not None else None
+        except (TypeError, ValueError):
+            reset_at = None
+        try:
+            minutes = int(window.get("window_minutes") or 0)
+        except (TypeError, ValueError):
+            minutes = 0
+        expired = reset_at is not None and reset_at <= now
+        used = 0.0 if expired else reported_used
+        out.append({"window": f"{minutes} min", "used_percent": used, "left_percent": round(100 - used, 1),
+                    "resets_at": reset_at, "window_already_reset": expired})
     return out
 
 
-def codex_level(sessions: Path = SESSIONS, now: float | None = None, files: int = 8) -> dict[str, Any]:
+def codex_level(sessions: Path = SESSIONS, now: float | None = None) -> dict[str, Any]:
     now = time.time() if now is None else now
-    logs = sorted(sessions.rglob("rollout-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)[:files] if sessions.is_dir() else []
+    logs = sessions.rglob("rollout-*.jsonl") if sessions.is_dir() else []
     best: tuple[float, dict] | None = None
     for log in logs:
         try:

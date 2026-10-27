@@ -75,6 +75,11 @@ def collect(spec: str, runner=subprocess.run) -> dict[str, str]:
     return values
 
 
+def consensus_commit(commits: list[str]) -> str:
+    """Return the most common commit, breaking ties by first host order."""
+    return max(commits, key=commits.count, default="")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read-only status of every AI Flow machine.")
     parser.add_argument("--host", action="append", required=True, help="name=local or name=ssh:<ssh arguments>")
@@ -82,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     snapshots = [collect(spec) for spec in args.host]
     commits = [s.get("commit", "") for s in snapshots if s.get("commit")]
-    newest = max(set(commits), key=commits.count) if commits else ""
+    newest = consensus_commit(commits)
     rows: list[dict[str, Any]] = [{"snapshot": s, "flags": flags({k: v for k, v in s.items() if k != "name"}, newest)} for s in snapshots]
     if args.json:
         print(json.dumps(rows, indent=2))

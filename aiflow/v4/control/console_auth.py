@@ -182,6 +182,11 @@ def has_permission(role: str | Iterable[str], permission: str) -> bool:
     return role_satisfies(role, {permission})
 
 
+def can_view_machine_identities(user: "ConsoleUser | None") -> bool:
+    """Whether this console user may see account and machine identities in work responses."""
+    return user is None or has_permission(user.effective_roles, "view.machines_ai")
+
+
 def resolve_session_user(db, claims: "ConsoleUser") -> "ConsoleUser | None":
     """Refresh mutable account state from PostgreSQL while keeping support for pre-DB signed sessions."""
     row = db.one("SELECT role, roles, project_keys, disabled FROM console_users WHERE email=%s", (claims.subject,))

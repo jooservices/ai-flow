@@ -223,6 +223,54 @@ def test_state_scopes_slow_verifications_and_redacts_account_ids_for_business_us
     assert "OTHER-910" not in serialized and "Summary of OTHER-910" not in serialized
 
 
+def test_ticket_details_and_timeline_redact_account_ids_by_role(ctx):
+    key = "TESTWP-920"
+    account = "codex-01"
+    add_ticket(ctx.db, key, "In Verify", labels=())
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,status,outcome,"
+               "started_at,ended_at,details) VALUES (%s,%s,'TESTWP','dev',%s,'codex','model','node1',1,'finished',"
+               "'done',now()-interval '10 minutes',now()-interval '9 minutes',%s)",
+               (str(uuid.uuid4()), key, account, J({"capacity": {
+                   "estimate": {"tokens": 100}, "assignment_reason": f"Assigned to {account} (codex, senior)."}})))
+    ctx.db.run("INSERT INTO events (type,ticket,project,step,account,node,outcome,data)"
+               " VALUES ('run.finished',%s,'TESTWP','dev',%s,'node1','done',%s)",
+               (key, account, J({"account_id": account})))
+    ctx.db.run("INSERT INTO write_audit (target,action,ticket,actor,accepted,result)"
+               " VALUES ('jira','comment',%s,%s,true,'ok')", (key, account))
+
+    for role in ("business", "delivery"):
+        client = role_client(ctx, role, f"{role}-ticket@example.test")
+        detail = client.get(f"/v1/tickets/{key}").json()
+        timeline = client.get(f"/v1/tickets/{key}/timeline").json()
+
+        assert account not in str(detail)
+        assert account not in str(timeline)
+        assert detail["runs"][0]["account_id"] == "Verifier"
+        assert detail["runs"][0]["node"] == "Machine"
+        assert detail["capacity_decision"]["account"] == "Verifier"
+        assert account not in detail["capacity_decision"]["reason"]
+        assert detail["capacity_decision"]["reason"] == "Assignment rationale is restricted for this role."
+        assert detail["events"][0]["account"] == "Verifier"
+        assert detail["events"][0]["node"] == "Machine"
+        assert detail["events"][0]["data"]["account_id"] == "Verifier"
+        assert detail["writes"][0]["actor"] == "Actor"
+        assert timeline["segments"][0]["account"] == "Verifier"
+
+    privileged = role_client(ctx, "administrator", "admin-ticket@example.test")
+    detail = privileged.get(f"/v1/tickets/{key}").json()
+    timeline = privileged.get(f"/v1/tickets/{key}/timeline").json()
+
+    assert detail["runs"][0]["account_id"] == account
+    assert detail["runs"][0]["node"] == "node1"
+    assert detail["capacity_decision"]["account"] == account
+    assert account in detail["capacity_decision"]["reason"]
+    assert detail["events"][0]["account"] == account
+    assert detail["events"][0]["node"] == "node1"
+    assert detail["events"][0]["data"]["account_id"] == account
+    assert detail["writes"][0]["actor"] == account
+    assert timeline["segments"][0]["account"] == account
+
+
 def test_usage_analytics_respects_project_scope_for_projects_tickets_and_accounts(ctx):
     ctx.repo().projects["OTHER"] = Project("OTHER", "jooservices/other")
     for ticket, project, account, node, cost in (

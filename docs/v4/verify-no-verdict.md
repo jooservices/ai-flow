@@ -56,6 +56,10 @@ callers see account IDs; restricted authenticated users see verifier labels and 
 is `slow_verifications` in `/v1/state`; each ticket also has a nullable `slow_verify` description. The API schema
 describes both shapes for generated API reference users.
 
+The ticket drawer and its timeline follow the same `view.machines_ai` permission: authenticated users without it see
+generic verifier and machine labels in run, event and audit identities, and the capacity assignment rationale is
+hidden. Users with the permission retain the stored identities.
+
 ## API contracts touched
 
 - `POST /v1/work/claim` refuses an epic, and a verification this account may not take (barred, or an untried account

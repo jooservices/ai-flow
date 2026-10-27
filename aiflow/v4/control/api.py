@@ -52,9 +52,9 @@ from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts,
                version_release, work_eligibility)
 from . import environment as environment_reports
 from . import candidate_runtime as work_candidate_runtime
-from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
-                           issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
-                           verify_session)
+from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS,
+                           can_view_machine_identities, has_permission, issue_session, landing_page, normalize_role,
+                           normalize_roles, role_satisfies, resolve_session_user, verify_session)
 from . import account_sync, capacity, conflict_loss, hotfiles, merge_queue, review_metrics, verify_retry, work_claim
 from . import merge_flow
 from . import master_candidates
@@ -6256,12 +6256,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"repo": repo, "sha": sha, "state": ci_state(gateway, repo, sha)}
 
     @app.get("/v1/tickets/{key}/timeline")
-    def ticket_timeline(key: str) -> dict:
+    def ticket_timeline(key: str, request: Request) -> dict:
         from .timeline import timeline
         tl = timeline(ctx.db, key)
         if tl is None:
             raise HTTPException(404, "unknown ticket")
-        return tl
+        user = getattr(request.state, "console_user", None)
+        if can_view_machine_identities(user):
+            return tl
+        from .ticket_detail import redact_ticket_identities
+        return redact_ticket_identities(tl)
 
     @app.get("/v1/capacity")
     def capacity_plan(request: Request) -> dict:

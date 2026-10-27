@@ -37,6 +37,31 @@ def ticket_detail(ctx, key: str) -> dict:
     }
 
 
+def redact_ticket_identities(data: dict) -> dict:
+    """Replace account, machine and audit actor identities throughout a ticket response."""
+    _redact_account_fields(data)
+    decision = data.get("capacity_decision")
+    if decision:
+        decision["reason"] = "Assignment rationale is restricted for this role."
+    return data
+
+
+def _redact_account_fields(value) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"account", "account_id"} and item:
+                value[key] = "Verifier"
+            elif key == "actor" and item:
+                value[key] = "Actor"
+            elif key in {"node", "machine", "machine_id"} and item:
+                value[key] = "Machine"
+            else:
+                _redact_account_fields(item)
+    elif isinstance(value, list):
+        for item in value:
+            _redact_account_fields(item)
+
+
 def _run_details(runs_repository: RunsRepository, key: str) -> tuple[list[dict], dict | None]:
     runs = runs_repository.ticket_detail_rows(key)
     for run in runs:

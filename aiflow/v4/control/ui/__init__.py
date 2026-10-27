@@ -18,8 +18,9 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from ..console_auth import COOKIE_NAME, resolve_session_user, role_satisfies, verify_session
-from ..ticket_detail import TicketNotFound, ticket_detail
+from ..console_auth import (COOKIE_NAME, can_view_machine_identities, resolve_session_user, role_satisfies,
+                            verify_session)
+from ..ticket_detail import TicketNotFound, redact_ticket_identities, ticket_detail
 from . import assets
 
 HERE = Path(__file__).parent
@@ -119,11 +120,13 @@ def _register_settings_route(app: FastAPI, ctx, page: Path) -> None:
 
 def _register_ticket_route(app: FastAPI, ctx) -> None:
     @app.get("/v1/tickets/{key}")
-    def ticket(key: str) -> dict:
+    def ticket(key: str, request: Request) -> dict:
         try:
-            return ticket_detail(ctx, key)
+            data = ticket_detail(ctx, key)
         except TicketNotFound:
             raise HTTPException(404, "unknown ticket") from None
+        user = getattr(request.state, "console_user", None)
+        return data if can_view_machine_identities(user) else redact_ticket_identities(data)
 
 
 def _register_services_route(app: FastAPI) -> None:

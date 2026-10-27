@@ -63,6 +63,8 @@ describes both shapes for generated API reference users.
 - `GET /v1/capacity` reports `ready_tickets` for ready, unheld, non-epic tickets and provides quota and estimate
   data; it does not return an idle-ticket count.
 - `GET /v1/state` carries `slow_verifications` for the Dashboard.
+- `GET /v1/tickets/{key}` supplies the ticket drawer's ticket, parent and epic details, recent runs, events and audited writes.
+- `GET /v1/tickets/{key}/timeline` supplies the drawer's queued, development, rework, verification and waiting time segments.
 - `GET /v1/deploy/state` returns the shared registry snapshot, whose project status counts include epics. Epics
   remain excluded from the work candidate and claim paths.
 - `GET /v1/work/candidates` excludes epics from development, verification, triage, impact, intake and post-merge

@@ -805,6 +805,8 @@ def test_jaif_271_verification_behavior_has_its_own_linked_topic():
     assert "reports `ready_tickets`" in content and "does not return an idle-ticket count" in content
     assert "project status counts include epics" in content
     assert "work candidate and claim paths" in content
+    assert "GET /v1/tickets/{key}" in content
+    assert "GET /v1/tickets/{key}/timeline" in content
     assert "leaves epics out of the idle and capacity counts" not in content
     assert "leaves epics out of the work counts" not in content
     assert "[Epics and verification without a verdict](../../docs/v4/verify-no-verdict.md)" in topics

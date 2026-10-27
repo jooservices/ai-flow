@@ -11,6 +11,10 @@ class AccountsRepository:
         return bool(self.db.one("SELECT 1 AS paused FROM master_account_pauses"
                                 " WHERE account_id=%s AND paused_until > now()", (account_id,)))
 
+    def master_readiness(self, account_id: str, node: str) -> dict | None:
+        return self.db.one("SELECT a.status,n.status AS node_status FROM accounts a,nodes n"
+                           " WHERE a.id=%s AND n.name=%s", (account_id, node))
+
     def capacity_routing_accounts(self) -> list[dict]:
         """Account quota and role facts used to compare eligible development candidates."""
         return self.db.all("SELECT id,provider,tier,roles,quota_forecast FROM accounts ORDER BY id")
@@ -53,3 +57,22 @@ class AccountsRepository:
     def managed_machine_accounts(self) -> list[dict]:
         """Active accounts created by the machine account management screen."""
         return self.db.all("SELECT * FROM managed_ai_accounts WHERE removed_at IS NULL ORDER BY created_at,id")
+
+    def configured_account_exists(self, account_id: str) -> bool:
+        return bool(self.db.one("SELECT 1 AS found FROM accounts WHERE id=%s", (account_id,)))
+
+    def registered_count(self) -> int:
+        return int(self.db.one("SELECT count(*) AS count FROM accounts")["count"])
+
+    def sync_configured(self, account) -> None:
+        self.db.run("INSERT INTO accounts (id,provider,node,tier,roles) VALUES (%s,%s,%s,%s,%s)"
+                    " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider,node=EXCLUDED.node,"
+                    " tier=EXCLUDED.tier,roles=EXCLUDED.roles,updated_at=now()",
+                    (account.id, account.provider, account.node, account.tier, account.roles))
+
+    def quota_forecasts(self) -> list[dict]:
+        return self.db.all("SELECT id,quota_forecast FROM accounts ORDER BY id")
+
+    def mark_working(self, account_id: str) -> None:
+        self.db.run("UPDATE accounts SET status='working',updated_at=now(),idle_since=NULL,cooldown_since=NULL "
+                    "WHERE id=%s", (account_id,))

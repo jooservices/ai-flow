@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from ..console_auth import COOKIE_NAME, resolve_session_user, role_satisfies, verify_session
+from ..ticket_detail import TicketNotFound, ticket_detail
 from . import assets
 
 HERE = Path(__file__).parent
@@ -119,46 +120,10 @@ def _register_settings_route(app: FastAPI, ctx, page: Path) -> None:
 def _register_ticket_route(app: FastAPI, ctx) -> None:
     @app.get("/v1/tickets/{key}")
     def ticket(key: str) -> dict:
-        t = ctx.db.one("SELECT * FROM tickets WHERE key=%s", (key,))
-        if not t:
-            raise HTTPException(404, "unknown ticket")
-        from ...core.controlrepo import epic_for_ticket
-        project = ctx.repo().projects.get(t["project"])
-        ancestors = [t]
-        parent = str(t.get("parent_key") or "")
-        while parent and len(ancestors) < 8:
-            ancestor = ctx.db.one("SELECT key,type,parent_key FROM tickets WHERE key=%s", (parent,))
-            if not ancestor:
-                break
-            ancestors.append(ancestor)
-            parent = str(ancestor.get("parent_key") or "")
-        t["epic"] = epic_for_ticket(t, {item["key"]: item for item in ancestors})
-        t["repository"] = project.repo_for(t) if project else ""
-        runs = ctx.db.all("SELECT id, step, account_id, provider, model, node, fence, status, outcome, error_kind,"
-                          " started_at, ended_at, tokens_in, tokens_out, cost_usd, branch, pr_url, head_sha, summary"
-                          " FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 20", (key,))
-        decision = ctx.db.one(
-            "SELECT account_id,provider,started_at,details->'capacity'->'estimate' AS estimate,"
-            "details->'capacity'->'assignment_reason' AS reason,details->'capacity'->'account_fit' AS account_fit "
-            "FROM runs WHERE ticket_key=%s AND step='dev' AND details->'capacity' ? 'estimate' "
-            "ORDER BY started_at DESC LIMIT 1", (key,))
-        events = ctx.db.all("SELECT ts, type, account, node, outcome, reason, data FROM events WHERE ticket=%s"
-                            " ORDER BY id DESC LIMIT 80", (key,))
-        writes = ctx.db.all("SELECT ts, target, action, actor, fence, accepted, result FROM write_audit WHERE ticket=%s"
-                            " ORDER BY id DESC LIMIT 40", (key,))
-        for r in runs:
-            r["id"] = str(r["id"])
-            r["cost_usd"] = float(r["cost_usd"])
-        from ..timeline import timeline
-        from .. import merge_flow
-        capacity_decision = None if not decision else {
-            "account": decision["account_id"], "provider": decision["provider"],
-            "assigned_at": decision["started_at"].isoformat(), "estimate": decision.get("estimate") or {},
-            "reason": decision.get("reason") or "", "account_fit": decision.get("account_fit") or {}}
-        return {"ticket": t, "repository": t["repository"], "runs": runs, "events": events,
-                "writes": writes, "timeline": timeline(ctx.db, key), "capacity_decision": capacity_decision,
-                "merge": merge_flow.facts(t), "moves": merge_flow.moves(ctx.db, key),
-                "jira_url": f"{ctx.settings.jira_site}/browse/{key}"}
+        try:
+            return ticket_detail(ctx, key)
+        except TicketNotFound:
+            raise HTTPException(404, "unknown ticket") from None
 
 
 def _register_services_route(app: FastAPI) -> None:

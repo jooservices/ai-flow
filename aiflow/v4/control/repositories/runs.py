@@ -121,6 +121,70 @@ class RunsRepository:
         return self.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
                            + delivered + " ORDER BY started_at DESC LIMIT 1", (ticket_key,))
 
+    def latest_master_cycle(self) -> dict | None:
+        """Latest master run used to decide whether provider failover should wait one cycle."""
+        return self.db.one("SELECT id,fence,ticket_key,provider,status,outcome,ended_at FROM runs"
+                           " WHERE step='master' ORDER BY started_at DESC LIMIT 1")
+
+    def latest_verify_for_ticket(self, ticket_key: str) -> dict | None:
+        return self.db.one("SELECT summary,details FROM runs WHERE ticket_key=%s AND step='verify' "
+                           "AND status<>'running' ORDER BY started_at DESC LIMIT 1", (ticket_key,))
+
+    def latest_triage_for_ticket(self, ticket_key: str) -> dict | None:
+        return self.db.one("SELECT started_at FROM runs WHERE ticket_key=%s AND step='triage' "
+                           "ORDER BY started_at DESC LIMIT 1", (ticket_key,))
+
+    def latest_pull_request_for_ticket(self, ticket_key: str) -> dict | None:
+        return self.db.one("SELECT pr_url FROM runs WHERE ticket_key=%s AND pr_url<>'' "
+                           "ORDER BY started_at DESC LIMIT 1", (ticket_key,))
+
+    def latest_rework_for_ticket(self, ticket_key: str) -> dict | None:
+        return self.db.one("SELECT summary,details,started_at FROM runs WHERE ticket_key=%s "
+                           "AND step IN ('verify','qa') AND outcome='rework' ORDER BY started_at DESC LIMIT 1",
+                           (ticket_key,))
+
+    def latest_answered_triage(self, ticket_key: str) -> dict | None:
+        return self.db.one("SELECT summary,details,started_at FROM runs WHERE ticket_key=%s AND step='triage' "
+                           "AND outcome='answered' ORDER BY started_at DESC LIMIT 1", (ticket_key,))
+
+    def has_completed_development_after(self, ticket_key: str, started_at) -> bool:
+        return bool(self.db.one("SELECT 1 AS found FROM runs WHERE ticket_key=%s AND step='dev' "
+                                "AND started_at>%s AND outcome IN ('done','blocked') LIMIT 1",
+                                (ticket_key, started_at)))
+
+    def latest_blocked_development_before(self, ticket_key: str, started_at) -> dict | None:
+        return self.db.one("SELECT summary FROM runs WHERE ticket_key=%s AND step='dev' AND outcome='blocked' "
+                           "AND started_at<%s ORDER BY started_at DESC LIMIT 1", (ticket_key, started_at))
+
+    def save_claim_details(self, run_id: str, details) -> None:
+        from ..db import J
+        self.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(details), run_id))
+
+    def inherit_pull_request(self, run_id: str, prior: dict) -> None:
+        from ..db import J
+        self.db.run("UPDATE runs SET pr_url=%s,branch=%s,head_sha=%s,details=details || %s WHERE id=%s",
+                    (prior["pr_url"], prior["branch"], prior.get("head_sha") or "",
+                     J({"pr_url_source": "inherited"}), run_id))
+
+    def ticket_detail_rows(self, ticket_key: str) -> list[dict]:
+        """Recent run details shown in the ticket drawer."""
+        return self.db.all("SELECT id,step,account_id,provider,model,node,fence,status,outcome,error_kind,"
+                           "started_at,ended_at,tokens_in,tokens_out,cost_usd,branch,pr_url,head_sha,summary "
+                           "FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 20", (ticket_key,))
+
+    def latest_capacity_decision(self, ticket_key: str) -> dict | None:
+        """Latest development assignment estimate shown in the ticket drawer."""
+        return self.db.one(
+            "SELECT account_id,provider,started_at,details->'capacity'->'estimate' AS estimate,"
+            "details->'capacity'->'assignment_reason' AS reason,details->'capacity'->'account_fit' AS account_fit "
+            "FROM runs WHERE ticket_key=%s AND step='dev' AND details->'capacity' ? 'estimate' "
+            "ORDER BY started_at DESC LIMIT 1", (ticket_key,))
+
+    def timeline_rows(self, ticket_key: str) -> list[dict]:
+        """Run intervals used to calculate the ticket timeline."""
+        return self.db.all("SELECT id,step,account_id,status,outcome,started_at,ended_at,heartbeat_at FROM runs"
+                           " WHERE ticket_key=%s ORDER BY started_at", (ticket_key,))
+
     def cooling_tickets(self, step: str) -> set[str]:
         """Ticket keys waiting out the shared exponential backoff for a failed step."""
         return {row["ticket_key"] for row in self.db.all(_BACKOFF_SQL, {"step": step})}

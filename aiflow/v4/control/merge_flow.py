@@ -33,6 +33,7 @@ from typing import Any, Callable
 
 from . import merge_queue
 from .db import J
+from .repositories.ticket_moves import TicketMovesRepository
 
 log = logging.getLogger("aiflow4.merge_flow")
 
@@ -99,8 +100,7 @@ def record_move(ctx, ticket: str, from_status: str, to_status: str, cause: str, 
 
 
 def moves(db, ticket: str, limit: int = 30) -> list[dict]:
-    return db.all("SELECT ts, from_status, to_status, cause, detail FROM ticket_moves WHERE ticket=%s"
-                  " ORDER BY id DESC LIMIT %s", (ticket, limit))
+    return TicketMovesRepository(db).recent_for_ticket(ticket, limit)
 
 
 def facts(row: dict) -> dict[str, Any]:

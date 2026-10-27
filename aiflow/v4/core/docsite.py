@@ -1102,27 +1102,28 @@ def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str])
     return changed
 
 
-def changed_views(base: str) -> set[str]:
-    """Screens whose section or JavaScript renderer changed; fail when a UI hunk cannot be mapped."""
+def _console_diff_sources(base: str) -> tuple[str, list[str], list[str]]:
     rel = UI.relative_to(ROOT).as_posix()
     diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", rel], cwd=ROOT, text=True,
                           capture_output=True, check=True).stdout
     # Diff coordinates refer to HEAD. During a merge, the worktree/index can already contain upstream edits that
     # shift those coordinates, so map against the exact file version used by the diff.
-    source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
-    lines = source.splitlines()
+    source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True,
+                            capture_output=True, check=True).stdout
     base_source = subprocess.run(["git", "show", f"{base}:{rel}"], cwd=ROOT, text=True,
                                  capture_output=True, check=True).stdout
-    base_lines = base_source.splitlines()
-    all_views = set(console_views())
+    return diff, source.splitlines(), base_source.splitlines()
+
+
+def _view_context(lines: list[str], base_lines: list[str]) -> dict:
     hints_start = next((i for i, line in enumerate(lines) if line.startswith("var HINTS = {")), None)
     hints_end = next((i for i in range(hints_start + 1, len(lines)) if lines[i] == "};"), None) \
         if hints_start is not None else None
     spans = []
     for i, line in enumerate(lines):
-        if m := re.search(r'<section class="view" id="view-([a-z]+)"', line):
+        if match := re.search(r'<section class="view" id="view-([a-z]+)"', line):
             end = next((j for j in range(i, len(lines)) if "</section>" in lines[j]), i)
-            spans.append((i + 1, end + 1, m.group(1)))
+            spans.append((i + 1, end + 1, match.group(1)))
     functions = _function_spans(lines)
     layout_start = next((i + 1 for i, line in enumerate(lines)
                          if line.startswith("/* ---------- customizable layout")), None)
@@ -1130,115 +1131,167 @@ def changed_views(base: str) -> set[str]:
                        if line.startswith("/* ---------- interactions")), None)
     help_start = next((i for i, line in enumerate(lines) if line.startswith("/* Help: every screen")), None)
     help_end = functions.get("renderHelp", (0, 0))[1] - 1
-    touched: set[str] = set()
-    unmapped: set[int] = set()
-    for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, re.M):
-        old_first, old_count = int(m.group(1)), int(m.group(2) or 1)
-        first, count = int(m.group(3)), int(m.group(4) or 1)
-        hunk_touched: set[str] = set()
-        hunk_unmapped: set[int] = set()
-        if count == 0 and 1 <= old_first <= len(base_lines):
-            removed_section = re.search(r'<section class="view" id="view-([a-z]+)"',
-                                        base_lines[old_first - 1])
-            if removed_section:
-                # Old console snapshots can contain a duplicate empty panel. Removing the duplicate
-                # does not change the screen while its other section remains in the current console.
-                view = removed_section.group(1)
-                if view not in all_views:
-                    touched.add(view)
-                continue
-            removed_line = base_lines[old_first - 1]
-            if any(pattern.search(removed_line) for pattern in SCREEN_SHARED_UI_PATTERNS):
-                # A removed global theme initializer still affects every screen. Do not classify the new line
-                # now occupying the deletion coordinate; it is unrelated to this hunk.
-                touched |= all_views
-                continue
-        last = first + max(count, 1) - 1
-        for line_no in range(max(first, 1), last + 1):
-            line_views = {v for lo, hi, v in spans if lo <= line_no <= hi}
-            changed_line = lines[line_no - 1] if line_no <= len(lines) else ""
-            specific_views = {match.group(1) for pattern in SCREEN_VIEW_UI_PATTERNS
-                              if (match := pattern.search(changed_line)) and match.group(1) in all_views}
-            specific_views |= {view for pattern, view in SCREEN_LOCAL_LINE_VIEWS if pattern.search(changed_line)}
-            # Navigation objects are kept on one line. Compare the base and current lines so one
-            # added or edited view entry does not make all existing screens require doc changes.
-            if old_count == count and 1 <= old_first <= len(base_lines):
-                old_index = old_first - 1 + (line_no - first)
-                if old_index < len(base_lines):
-                    specific_views |= _changed_navigation_views(base_lines[old_index], changed_line, all_views)
-            layout_markup = ('id="layout-live"' in changed_line
-                             or ('data-block="' in changed_line and 'data-block="first-run-setup"' not in changed_line)
-                             or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
-                             or "S.layouts." in changed_line or "layoutAction(act" in changed_line
-                             or "applyLayout('delivery'" in changed_line
-                             or re.search(r"\bloadLayouts\(\)", changed_line))
-            layout_style = re.search(r"customizable layout|\.blocks|\.block-cell|\.layout-bar|\.layout-hidden|"
-                                     r"\.block-tools|\.block-sizes|\.block-handle|\.sr-only|"
-                                     r"dashboard-layout-headings|@media \(pointer:coarse\)", changed_line)
-            is_layout_ui = ((layout_start is not None and layout_end is not None
-                             and layout_start <= line_no <= layout_end)
-                            or layout_markup or layout_style)
-            hint_view = None
-            unmapped_renderer = False
-            for name, (lo, hi) in functions.items():
-                if lo <= line_no <= hi:
-                    if name not in SCREEN_RENDERER_VIEWS:
-                        line_views = set()
-                        unmapped_renderer = True
-                        break
-                    mapped = SCREEN_RENDERER_VIEWS[name]
-                    line_views |= ((specific_views or all_views) if mapped is None else set(mapped))
-            # Session polling handles every screen, but this guarded request refreshes only the Users page.
-            if ("editing: '', temporaryPassword" in changed_line
-                    or ("S.view === 'users'" in changed_line and "loadUsers(" in changed_line)):
-                line_views = {"users"}
-            if is_layout_ui:
-                # Layout controls affect each supported screen unless the changed line names a screen-specific block.
-                line_views = specific_views or set(LAYOUT_SCREEN_VIEWS)
-            # Keep a hint-text edit local to that screen. The declarations and shared Help plumbing affect every
-            # screen, including edits to the top-bar link, first-use container and dismiss behavior.
-            if hints_start is not None and hints_end is not None and hints_start <= line_no - 1 <= hints_end:
-                hint = re.match(r"\s*([a-z]+):\s*'", changed_line)
-                if hint:
-                    hint_view = hint.group(1)
-                    line_views.add(hint_view)
-                else:
-                    line_views |= all_views
-            if (help_start is not None and help_start <= line_no - 1 <= help_end and hint_view is None):
-                line_views |= all_views
-            shared_ui_change = any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS)
-            if shared_ui_change and not specific_views:
-                line_views |= all_views
-            for pattern, mapped in SCREEN_VIEW_PATTERNS:
-                if pattern.search(changed_line):
-                    line_views |= set(mapped)
-            if "rh-form" in changed_line:
-                line_views.add("machines")
-            for pattern, view in SCREEN_LINE_VIEWS:
-                if pattern.search(changed_line):
-                    line_views.add(view)
-            if "A signed-in person whose roles grant review.actions" in changed_line:
-                line_views.add("review")
-            if not changed_line.strip():
-                continue
-            if not unmapped_renderer:
-                line_views |= specific_views
-            if line_views:
-                touched |= line_views
-                hunk_touched |= line_views
-            elif changed_line.strip():
-                unmapped.add(line_no)
-                hunk_unmapped.add(line_no)
-        if hunk_touched:
-            # A closing brace is part of the changed block in a zero-context diff. Let the mapped lines in
-            # that same hunk provide its screen, instead of reporting the brace as an independent UI change.
-            for line_no in hunk_unmapped:
-                if line_no <= len(lines) and lines[line_no - 1].strip() == "}":
-                    unmapped.discard(line_no)
-    if unmapped:
-        lines_text = ", ".join(str(n) for n in sorted(unmapped))
-        raise ValueError("console UI change could not be mapped to a screen at line(s) " + lines_text
-                         + "; add the renderer to SCREEN_RENDERER_VIEWS or keep screen content inside its view section")
+    return {"lines": lines, "base_lines": base_lines, "all_views": set(console_views()), "spans": spans,
+            "functions": functions, "hints_start": hints_start, "hints_end": hints_end,
+            "layout_start": layout_start, "layout_end": layout_end,
+            "help_start": help_start, "help_end": help_end}
+
+
+def _removed_hunk_views(old_first: int, count: int, context: dict) -> tuple[set[str], bool]:
+    base_lines, all_views = context["base_lines"], context["all_views"]
+    if count != 0 or not 1 <= old_first <= len(base_lines):
+        return set(), False
+    removed = base_lines[old_first - 1]
+    section = re.search(r'<section class="view" id="view-([a-z]+)"', removed)
+    if section:
+        # Removing a duplicate empty panel does not alter the screen that still owns the section.
+        view = section.group(1)
+        return ({view} if view not in all_views else set()), True
+    if any(pattern.search(removed) for pattern in SCREEN_SHARED_UI_PATTERNS):
+        return set(all_views), True
+    return set(), False
+
+
+def _specific_line_views(line: str, line_no: int, context: dict, old_first: int,
+                         old_count: int, first: int, count: int) -> set[str]:
+    views = {match.group(1) for pattern in SCREEN_VIEW_UI_PATTERNS
+             if (match := pattern.search(line)) and match.group(1) in context["all_views"]}
+    views |= {view for pattern, view in SCREEN_LOCAL_LINE_VIEWS if pattern.search(line)}
+    if old_count == count and 1 <= old_first <= len(context["base_lines"]):
+        old_index = old_first - 1 + (line_no - first)
+        if old_index < len(context["base_lines"]):
+            views |= _changed_navigation_views(context["base_lines"][old_index], line, context["all_views"])
+    return views
+
+
+def _renderer_line_views(line_no: int, specific: set[str], context: dict) -> tuple[set[str], bool]:
+    views = {view for lo, hi, view in context["spans"] if lo <= line_no <= hi}
+    unmapped = False
+    for name, (lo, hi) in context["functions"].items():
+        if lo <= line_no <= hi:
+            mapped = SCREEN_RENDERER_VIEWS.get(name)
+            if name not in SCREEN_RENDERER_VIEWS:
+                return set(), True
+            views |= specific or context["all_views"] if mapped is None else set(mapped)
+    return views, unmapped
+
+
+def _has_layout_markup(line: str) -> bool:
+    return ('id="layout-live"' in line
+            or ('data-block="' in line and 'data-block="first-run-setup"' not in line)
+            or 'data-layout-section="' in line or "layouts: {" in line
+            or "S.layouts." in line or "layoutAction(act" in line
+            or "applyLayout('delivery'" in line or bool(re.search(r"\bloadLayouts\(\)", line)))
+
+
+def _has_layout_style(line: str) -> bool:
+    return bool(re.search(r"customizable layout|\.blocks|\.block-cell|\.layout-bar|\.layout-hidden|"
+                          r"\.block-tools|\.block-sizes|\.block-handle|\.sr-only|"
+                          r"dashboard-layout-headings|@media \(pointer:coarse\)", line))
+
+
+def _layout_line_views(line_no: int, line: str, specific: set[str], context: dict) -> set[str] | None:
+    layout_markup, layout_style = _has_layout_markup(line), _has_layout_style(line)
+    start, end = context["layout_start"], context["layout_end"]
+    if ((start is not None and end is not None and start <= line_no <= end)
+            or layout_markup or layout_style):
+        # Layout controls affect supported screens unless this line names a screen-specific block.
+        return specific or set(LAYOUT_SCREEN_VIEWS)
+    return None
+
+
+def _hint_line_views(line_no: int, line: str, views: set[str], context: dict) -> tuple[set[str], str | None]:
+    hint_view = None
+    start, end = context["hints_start"], context["hints_end"]
+    if start is not None and end is not None and start <= line_no - 1 <= end:
+        hint = re.match(r"\s*([a-z]+):\s*'", line)
+        if hint:
+            hint_view = hint.group(1)
+            views.add(hint_view)
+        else:
+            views |= context["all_views"]
+    help_start, help_end = context["help_start"], context["help_end"]
+    if help_start is not None and help_start <= line_no - 1 <= help_end and hint_view is None:
+        views |= context["all_views"]
+    return views, hint_view
+
+
+def _shared_line_views(line: str, views: set[str], specific: set[str], context: dict,
+                       unmapped_renderer: bool) -> set[str]:
+    if any(pattern.search(line) for pattern in SCREEN_SHARED_UI_PATTERNS) and not specific:
+        views |= context["all_views"]
+    for pattern, mapped in SCREEN_VIEW_PATTERNS:
+        if pattern.search(line):
+            views |= set(mapped)
+    if "rh-form" in line:
+        views.add("machines")
+    for pattern, view in SCREEN_LINE_VIEWS:
+        if pattern.search(line):
+            views.add(view)
+    if "A signed-in person whose roles grant review.actions" in line:
+        views.add("review")
+    if not unmapped_renderer:
+        views |= specific
+    return views
+
+
+def _classify_view_line(line_no: int, old_first: int, old_count: int, first: int, count: int,
+                        context: dict) -> tuple[set[str], bool]:
+    line = context["lines"][line_no - 1] if line_no <= len(context["lines"]) else ""
+    specific = _specific_line_views(line, line_no, context, old_first, old_count, first, count)
+    views, unmapped = _renderer_line_views(line_no, specific, context)
+    if "editing: '', temporaryPassword" in line or ("S.view === 'users'" in line and "loadUsers(" in line):
+        views = {"users"}
+    layout_views = _layout_line_views(line_no, line, specific, context)
+    if layout_views is not None:
+        views = layout_views
+    views, _hint_view = _hint_line_views(line_no, line, views, context)
+    return _shared_line_views(line, views, specific, context, unmapped), unmapped
+
+
+def _classify_hunk(old_first: int, old_count: int, first: int, count: int, context: dict) -> tuple[set[str], set[int]]:
+    touched, unmapped = set(), set()
+    last = first + max(count, 1) - 1
+    for line_no in range(max(first, 1), last + 1):
+        line_views, unmapped_renderer = _classify_view_line(
+            line_no, old_first, old_count, first, count, context)
+        line = context["lines"][line_no - 1] if line_no <= len(context["lines"]) else ""
+        if not line.strip():
+            continue
+        if line_views:
+            touched |= line_views
+        elif line.strip():
+            unmapped.add(line_no)
+    if touched:
+        unmapped = {line_no for line_no in unmapped
+                    if line_no > len(context["lines"]) or context["lines"][line_no - 1].strip() != "}"}
+    return touched, unmapped
+
+
+def _raise_unmapped_views(unmapped: set[int]) -> None:
+    if not unmapped:
+        return
+    lines_text = ", ".join(str(number) for number in sorted(unmapped))
+    raise ValueError("console UI change could not be mapped to a screen at line(s) " + lines_text
+                     + "; add the renderer to SCREEN_RENDERER_VIEWS or keep screen content inside its view section")
+
+
+def changed_views(base: str) -> set[str]:
+    """Screens whose section or JavaScript renderer changed; fail when a UI hunk cannot be mapped."""
+    diff, lines, base_lines = _console_diff_sources(base)
+    context = _view_context(lines, base_lines)
+    touched, unmapped = set(), set()
+    for match in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, re.M):
+        old_first, old_count = int(match.group(1)), int(match.group(2) or 1)
+        first, count = int(match.group(3)), int(match.group(4) or 1)
+        removed_views, handled = _removed_hunk_views(old_first, count, context)
+        if handled:
+            touched |= removed_views
+            continue
+        hunk_touched, hunk_unmapped = _classify_hunk(old_first, old_count, first, count, context)
+        touched |= hunk_touched
+        unmapped |= hunk_unmapped
+    _raise_unmapped_views(unmapped)
     return touched
 
 

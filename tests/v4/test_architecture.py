@@ -44,6 +44,28 @@ def _top_level_registration_functions(path: Path) -> set[str]:
             and node.name in {"install", "mount", "install_login"}}
 
 
+def _function_complexity(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    decisions = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.IfExp, ast.ExceptHandler)
+    complexity = 1 + sum(isinstance(item, decisions) for item in ast.walk(node))
+    complexity += sum(max(0, len(item.values) - 1) for item in ast.walk(node) if isinstance(item, ast.BoolOp))
+    complexity += sum(isinstance(item, ast.comprehension) for item in ast.walk(node))
+    return complexity
+
+
+def _assert_function_budget(node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+    lines = node.end_lineno - node.lineno + 1
+    assert lines <= 80, f"{node.name} has {lines} lines"
+    complexity = _function_complexity(node)
+    assert complexity <= 12, f"{node.name} has cyclomatic complexity {complexity}"
+
+
+def _route_path(node: ast.FunctionDef) -> str | None:
+    for decorator in node.decorator_list:
+        if isinstance(decorator, ast.Call) and decorator.args and isinstance(decorator.args[0], ast.Constant):
+            return str(decorator.args[0].value)
+    return None
+
+
 def _create_app_registrations(path: Path) -> set[tuple[str | None, str]]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     create_app = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "create_app")
@@ -313,6 +335,66 @@ def test_verify_worker_separates_setup_verdict_and_merge_within_architecture_bud
 
     assert not missing, f"verify stages are not extracted into focused helpers: {sorted(missing)}"
     assert not oversized, f"verify responsibilities exceed the 80-line limit: {oversized}"
+
+
+def test_jaif_271_routes_delegate_and_changed_workflows_meet_architecture_budgets():
+    api_path = ROOT / "aiflow/v4/control/api.py"
+    api_tree = ast.parse(api_path.read_text(encoding="utf-8"), filename=str(api_path))
+    routes = {path: node for node in ast.walk(api_tree) if isinstance(node, ast.FunctionDef)
+              if (path := _route_path(node)) in {"/v1/work/claim", "/v1/version-releases/claim"}}
+    assert set(routes) == {"/v1/work/claim", "/v1/version-releases/claim"}
+    for route in routes.values():
+        _assert_function_budget(route)
+    work_route = routes["/v1/work/claim"]
+    assert any(isinstance(item, ast.Call) and ast.unparse(item.func).endswith("work_claim.claim")
+               for item in ast.walk(work_route))
+    ui_path = ROOT / "aiflow/v4/control/ui/__init__.py"
+    ui_tree = ast.parse(ui_path.read_text(encoding="utf-8"), filename=str(ui_path))
+    ticket_route = next(node for node in ast.walk(ui_tree)
+                        if isinstance(node, ast.FunctionDef) and _route_path(node) == "/v1/tickets/{key}")
+    _assert_function_budget(ticket_route)
+    assert not any(isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
+                   and item.func.attr in {"all", "one", "run"}
+                   for item in ast.walk(ticket_route))
+    assert any(isinstance(item, ast.Call) and ast.unparse(item.func).endswith("ticket_detail")
+               for item in ast.walk(ticket_route))
+
+    modules = ("work_claim.py", "version_release_claim.py", "version_release_candidates.py", "master_candidates.py",
+               "account_sync.py", "ticket_detail.py", "repositories/version_releases.py")
+    for module in modules:
+        path = ROOT / "aiflow/v4/control" / module
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for function in (item for item in ast.walk(tree) if isinstance(item, ast.FunctionDef)):
+            _assert_function_budget(function)
+        if not module.startswith("repositories/"):
+            inline_sql = [item for item in ast.walk(tree) if isinstance(item, ast.Call)
+                          and isinstance(item.func, ast.Attribute) and item.func.attr in {"all", "one", "run"}
+                          and item.args and isinstance(item.args[0], ast.Constant)
+                          and isinstance(item.args[0].value, str)
+                          and item.args[0].value.lstrip().upper().startswith(
+                              ("SELECT", "INSERT", "UPDATE", "DELETE"))]
+            assert not inline_sql, f"{module} contains inline SQL"
+
+    changed_api_helpers = {item.name: item for item in ast.walk(api_tree) if isinstance(item, ast.FunctionDef)
+                           and item.name in {"sync_accounts", "master_candidate", "version_release_candidates"}}
+    assert changed_api_helpers.keys() >= {"sync_accounts", "master_candidate", "version_release_candidates"}
+    for function in changed_api_helpers.values():
+        _assert_function_budget(function)
+
+    loop_tree = ast.parse((ROOT / "aiflow/v4/control/loops.py").read_text(encoding="utf-8"))
+    sync_effects = next(item for item in ast.walk(loop_tree)
+                        if isinstance(item, ast.FunctionDef) and item.name == "_record_ticket_sync_effects")
+    _assert_function_budget(sync_effects)
+    docsite_tree = ast.parse((ROOT / "aiflow/v4/core/docsite.py").read_text(encoding="utf-8"))
+    view_functions = {item.name: item for item in docsite_tree.body if isinstance(item, ast.FunctionDef)
+                      and (item.name == "changed_views" or item.name.startswith("_classify_")
+                           or item.name in {"_specific_line_views", "_renderer_line_views", "_layout_line_views",
+                                            "_shared_line_views", "_hint_line_views", "_has_layout_markup",
+                                            "_has_layout_style", "_removed_hunk_views", "_console_diff_sources",
+                                            "_view_context", "_raise_unmapped_views"})}
+    assert "changed_views" in view_functions
+    for function in view_functions.values():
+        _assert_function_budget(function)
 
 
 def test_developer_and_verify_prompts_use_architecture_document():

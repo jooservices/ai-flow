@@ -55,8 +55,11 @@ from . import candidate_runtime as work_candidate_runtime
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
-from . import capacity, conflict_loss, hotfiles, merge_queue, review_metrics, verify_retry
+from . import account_sync, capacity, conflict_loss, hotfiles, merge_queue, review_metrics, verify_retry, work_claim
 from . import merge_flow
+from . import master_candidates
+from . import version_release_candidates as version_release_candidate_service
+from . import version_release_claim as version_release_service
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -76,8 +79,6 @@ from . import notify
 
 log = logging.getLogger("aiflow4.api")
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
-MASTER_SCOPE = "master:global"
-MASTER_CYCLE_S = 60
 DEFAULT_MASTER_DAILY_BUDGET_MINUTES = 60
 HUMAN_QUEUE_WAIT_S = 90  # an approve click waits this long for its turn in the merge queue
 HUMAN_QUEUE_POLL_S = 2
@@ -1260,48 +1261,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def sync_accounts() -> list[str]:
         """Sync configured accounts and machines that fit the current licence limits."""
-        repo = ctx._configured_repo()
-        warnings: list[str] = []
-        removed = {row["id"] for row in ctx.db.all(
-            "SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL")}
-        removed_nodes = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NOT NULL")}
-        for a in repo.accounts:
-            if a.id in removed or a.node in removed_nodes:
-                continue
-            if not ctx.db.one("SELECT 1 FROM accounts WHERE id=%s", (a.id,)):
-                try:
-                    # Startup admits configured accounts in order; use registered rows for admission because the
-                    # Licence screen's usage count also includes configured accounts that have not synced yet.
-                    registered_count = int(ctx.db.one("SELECT count(*) AS count FROM accounts")["count"])
-                    licensing.require_capacity(ctx, "ai_accounts", count=registered_count,
-                                                public_key=ctx.settings.license_public_key)
-                except licensing.LicenseError as exc:
-                    message = f"Configured AI account {a.id} was not synced: {exc}"
-                    warnings.append(message)
-                    log.warning("%s", message)
-                    continue
-            ctx.db.run(
-                "INSERT INTO accounts (id, provider, node, tier, roles) VALUES (%s,%s,%s,%s,%s)"
-                " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider, node=EXCLUDED.node, tier=EXCLUDED.tier,"
-                " roles=EXCLUDED.roles, updated_at=now()", (a.id, a.provider, a.node, a.tier, a.roles))
-        for n in repo.nodes.values():
-            removed_node = ctx.db.one("SELECT removed_at FROM nodes WHERE name=%s", (n.name,))
-            if removed_node and removed_node["removed_at"]:
-                continue
-            if not removed_node:
-                try:
-                    licensing.require_capacity(ctx, "machines", public_key=ctx.settings.license_public_key)
-                except licensing.LicenseError as exc:
-                    message = f"Configured machine {n.name} was not synced: {exc}"
-                    warnings.append(message)
-                    log.warning("%s", message)
-                    continue
-            # Keep the IP a node reported at join: a restart must not replace where it was last seen with
-            # the control repo value. Only a first insert (no join yet) takes the configured address.
-            ctx.db.run("INSERT INTO nodes (name, ip, role, slots_total, projects) VALUES (%s,%s,%s,%s,%s)"
-                       " ON CONFLICT (name) DO UPDATE SET role=EXCLUDED.role, slots_total=EXCLUDED.slots_total,"
-                       " projects=EXCLUDED.projects, dynamic=false",
-                       (n.name, n.ip, n.role, n.slots, n.projects))
+        warnings = account_sync.sync_configured(ctx, ctx.settings.license_public_key)
         app.state.license_sync_warnings = warnings
         return warnings
 
@@ -4343,57 +4303,12 @@ def create_app(ctx: Ctx) -> FastAPI:
         """The latest finished dev run, optionally limited to one that delivered work."""
         return RunsRepository(ctx.db).latest_development(key, delivered_only=done)
 
-    def master_ready(account_id: str, node: str) -> bool:
-        if ctx.leases.cooling(account_id) or account_master_paused(account_id):
-            return False
-        ready = ctx.db.one("SELECT a.status, n.status AS node_status FROM accounts a, nodes n"
-                           " WHERE a.id=%s AND n.name=%s", (account_id, node))
-        return bool(ready) and ready["status"] in ("idle", "working", "probing") and ready["node_status"] == "online"
-
     def master_candidate(account_id: str, node: str) -> dict | None:
-        repo = ctx.repo()
-        account = repo.account(account_id)
-        if not account or not account.runs_on(node):
-            raise HTTPException(403, f"account {account_id} does not run on {node}")
-        if account.paused or "master" not in (account.roles or []) or not master_ready(account_id, node):
-            return None
-        if candidate_path.account_quota_at_risk(account_id, {"master"}) \
-                or (account_id, "master") in role_health.disabled_roles(ctx.db):
-            return None
-        if not shared_accounts.may_take(ctx.db, account, node)[0]:
-            return None
-        if not master_budget_state()["enabled"]:
-            return None
-        held = set(ctx.leases.held_keys())
-        if MASTER_SCOPE in held:
-            return None
-        recent = ctx.db.one("SELECT id, fence, ticket_key, provider, status, outcome, ended_at FROM runs"
-                            " WHERE step='master' ORDER BY started_at DESC LIMIT 1")
-        failover = False
-        if recent:
-            lease_lost = (recent["status"] == "running" and
-                          ctx.leases.master_holder() != f"{recent['id']}:{recent['fence']}")
-            failed_over = recent["outcome"] in ("quota", "lost") or lease_lost
-            # Prefer the other provider for one cycle after a failure, and only while it has a ready master
-            # account. Otherwise any ready master account may take over: cooldown and node checks above
-            # already exclude the account that failed, so the flow never waits on an unavailable provider.
-            failed_at = recent["ended_at"] or utcnow()
-            if (failed_over and recent["provider"] == account.provider
-                    and failed_at > utcnow() - timedelta(seconds=MASTER_CYCLE_S)
-                    and any(a.provider != account.provider and "master" in (a.roles or [])
-                            and any(master_ready(a.id, m) for m in a.machines) for a in repo.accounts)):
-                return None
-            # A lost or quota-stopped holder is an account failure, not a failing cycle: no scope backoff.
-            failover = failed_over
-        if not failover and MASTER_SCOPE in RunsRepository(ctx.db).cooling_tickets("master"):
-            return None
-        if recent and recent["ended_at"] and recent["ended_at"] > utcnow() - timedelta(seconds=MASTER_CYCLE_S):
-            if recent["outcome"] == "done":
-                return None
-        return {"key": MASTER_SCOPE, "project": "", "status": "Master", "type": "Master", "priority": "Highest",
-                "labels": [], "summary": "Master monitoring cycle",
-                "description": "Review incidents and follow up on blocked or slow work.",
-                "jira_created": None, "step": "master"}
+        try:
+            return master_candidates.candidate(ctx, account_id, node, candidate_path,
+                                               account_master_paused, master_budget_state)
+        except master_candidates.MasterAccountUnavailable as exc:
+            raise HTTPException(403, str(exc)) from None
 
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
@@ -4443,437 +4358,34 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(409, "chat turn is no longer assigned to this worker")
         return {"accepted": True}
 
-    def related_hits(t: dict) -> list[dict]:
-        """Up to 3 past entries related to the ticket summary; memory is advice, so an error gives none."""
-        try:
-            return memory.related(ctx.db, t["project"], t["summary"], exclude_ticket=t["key"], limit=3)
-        except Exception as e:  # noqa: BLE001
-            log.warning("memory lookup for %s failed: %s", t["key"], e)
-            return []
-
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
         try:
-            state = licensing.enforce_work_entitlement(ctx, body.account, node,
-                                                        public_key=ctx.settings.license_public_key)
-        except licensing.LicenseError as exc:
-            return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
-        # a node outside the version skew policy gets no new work (docs/v4/fleet-upgrade.md)
-        policy = rollout.node_compatible(ctx, node, RELEASES)
-        if not policy["compatible"]:
-            return JSONResponse({"claimed": False, "reason": f"version skew: {policy['reason']}"}, status_code=409)
-        if body.step == "master":
-            candidates = [master_candidate(body.account, node)]
-        else:
-            try:
-                candidates = candidate_path.eligible(body.account, node)
-            except work_eligibility.CandidateAccountUnavailable as exc:
-                raise HTTPException(403, str(exc)) from None
-            offered = next((candidate for candidate in candidates
-                            if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
-            if offered:
-                try:
-                    licensing.enforce_project_entitlement(ctx, offered["project"],
-                                                          public_key=ctx.settings.license_public_key, state=state)
-                except licensing.LicenseError as exc:
-                    return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
-        tickets = {(t["key"], t["step"]): t for t in candidates if t}
-        t = tickets.get((body.ticket, body.step))
-        if not t:
-            return JSONResponse({"claimed": False, "reason": "not eligible"}, status_code=409)
-        repo = ctx.repo()
-        acc = repo.account(body.account)
-        triage_context: dict[str, Any] = {}
-        if body.step == "triage":
-            verify = ctx.db.one("SELECT summary, details FROM runs WHERE ticket_key=%s AND step='verify'"
-                                " AND status<>'running' ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            comments = ctx.jira.recent_comments(t["key"], limit=10) if ctx.jira else []
-            triage_context = {"last_dev_summary": (last_dev(t["key"]) or {}).get("summary", ""),
-                              "verify_findings": ((verify["details"] or {}).get("findings") or verify["summary"])
-                              if verify else "", "recent_comments": comments}
-            # what the owner already decided, and how the question was classified when it was raised
-            triage_context["owner_register"] = [
-                {"id": d["id"], "title": d["title"], "decision": d["decision"]} for d in ctx.db.all(
-                    "SELECT id,title,decision FROM owner_decisions WHERE kind='decision' AND status='decided'"
-                    " AND (project='' OR project=%s) ORDER BY id LIMIT 60", (t["project"],))]
-            raised = escalations.open_escalation(ctx.db, t["key"])
-            triage_context["escalation_class"] = (raised or {}).get("class", "")
-            asked =ctx.db.one("SELECT ts,data FROM events WHERE ticket=%s AND type='review.action'"
-                               " AND data->>'action'='ask-ai' ORDER BY ts DESC LIMIT 1", (t["key"],))
-            prior_triage = ctx.db.one("SELECT started_at FROM runs WHERE ticket_key=%s AND step='triage'"
-                                      " ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            if asked and (not prior_triage or asked["ts"] > prior_triage["started_at"]):
-                question = str((asked.get("data") or {}).get("text") or "").strip()
-                if question:
-                    triage_context["last_dev_summary"] = f"Reviewer question: {question}"
-            prior_pr = ctx.db.one("SELECT pr_url FROM runs WHERE ticket_key=%s AND pr_url<>''"
-                                  " ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            prior_pr_match = re.search(r"/pull/(\d+)(?:/|$)", (prior_pr or {}).get("pr_url", ""))
-            if prior_pr_match:
-                triage_context["pr"] = {"url": prior_pr["pr_url"], "number": int(prior_pr_match.group(1))}
-        run_id = str(uuid.uuid4())
-        probation_id = None
-        if t.get("probation"):  # one easy ticket at a time for a switched-off role
-            probation_id = role_health.assign_probation(ctx.db, acc.id, role_health.role_of(body.step) or "", t["key"])
-            if probation_id is None:
-                return JSONResponse({"claimed": False, "reason": "a probation ticket is already running"},
-                                    status_code=409)
-        c = ctx.leases.claim(t["key"], run_id, ctx.settings.lease_ms)
-        if not c.ok:
-            if probation_id is not None:
-                role_health.drop_probation(ctx.db, probation_id)
-            return JSONResponse({"claimed": False, "reason": f"held by {c.holder}"}, status_code=409)
-        if body.step == "dev":
-            # The eligibility check above is a snapshot: reserve the hot files now, atomically with the claim, so
-            # two simultaneous claims of different tickets cannot both start on the same hot file.
-            taken = hotfiles.reserve(ctx.db, t["key"], run_id, hotfiles.predict(ctx.db, t, ticket_epic(t))["hot"],
-                                    slots=ctx.settings.hot_file_slots)
-            if taken:
-                ctx.leases.release(t["key"], run_id, c.fence)
-                if probation_id is not None:
-                    role_health.drop_probation(ctx.db, probation_id)
-                return JSONResponse({"claimed": False, "reason": f"hot file {', '.join(taken[1])} is reserved by "
-                                     f"{taken[0]}"}, status_code=409)
-        model, effort = repo.model_for(acc.provider, "senior" if "tier-senior" in t["labels"] else acc.tier)
-        run_token = secrets.token_urlsafe(32)
-        p = repo.projects.get(t["project"])
-        epic = ticket_epic(t)
-        ticket_data = {**{k: t[k] for k in ("key", "project", "summary", "description", "labels", "priority", "type")},
-                       "parent_key": t.get("parent_key"), "epic": epic}
-        prior_dev = None if body.step == "master" else (last_dev(t["key"], done=True) or last_dev(t["key"]))
-        selected_repo = p.settings_for_ticket(ticket_data) if p else {}
-        # Once development starts, verify and rework keep the repository that produced the PR even if
-        # the owner changes the epic mapping while that work waits for review.
-        prior_repository = str(((prior_dev or {}).get("details") or {}).get("repository") or "")
-        if p and prior_repository and body.step in {"dev", "verify", "qa", "triage", "post_merge"}:
-            prior_settings = ((prior_dev or {}).get("details") or {}).get("repository_settings")
-            selected_repo = dict(prior_settings) if isinstance(prior_settings, dict) else p.settings_for_repo(prior_repository)
-        run_details = ({"repository": selected_repo.get("repo", ""),
-                        "repository_settings": selected_repo} if selected_repo else {})
-        if body.step == "dev":
-            capacity_samples = capacity.history(ctx.db)
-            ticket_estimate = capacity.estimate(t, capacity_samples)
-            quota_accounts = ctx.db.all("SELECT id,quota_forecast FROM accounts ORDER BY id")
-            account_forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in quota_accounts}
-            fit = capacity.account_fit(acc.id, account_forecasts.get(acc.id, {}), ticket_estimate)
-            expected_tokens = ticket_estimate["tokens"]
-            expected_minutes = ticket_estimate["time_minutes"]
-            if fit["known"] and fit["fits"]:
-                senior_work = ("tier-senior" in (t.get("labels") or [])
-                               or ticket_estimate["size"] in {"L", "XL"} or t.get("priority") == "Highest")
-                tier_order = ("senior, then middle, then junior" if senior_work
-                              else "middle, then senior, then junior")
-                strength = f"tier preference for this ticket is {tier_order}"
-                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}): estimated work is "
-                          f"{expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
-                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; "
-                          f"{fit['reason']}; {strength}.")
-            elif fit["known"]:
-                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}) because it remains eligible and no "
-                          f"quota-safe eligible account was identified. The estimate is "
-                          f"{expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
-                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; {fit['reason']}.")
-            else:
-                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}) by the existing eligibility rules. "
-                          f"The estimate is {expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
-                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; "
-                          "quota history is not reliable enough to compare eligible accounts.")
-            run_details["capacity"] = {"estimate": ticket_estimate, "account_fit": fit,
-                                       "assignment_reason": reason, "assigned_at": utcnow().isoformat()}
-        if not shared_accounts.claim_run(ctx.db, acc, (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
-                                                       model, node, c.fence, h(run_token))):
-            ctx.leases.release(t["key"], run_id, c.fence)
-            hotfiles.unreserve(ctx.db, run_id)
-            return JSONResponse({"claimed": False, "reason": f"account {acc.id} is at its limit of {acc.sessions}"
-                                 " concurrent sessions"}, status_code=409)
-        if run_details:
-            ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
-        if body.step == "dev" and prior_dev and prior_dev.get("pr_url") and prior_dev.get("branch"):
-            # A rework run carries the PR identity that the previous developer run recorded. The CI-log endpoint
-            # uses this row to bind branch and SHA requests to this ticket's pull request. Preserve provenance so
-            # role health does not treat a later failed run as the run that produced the PR.
-            ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s, head_sha=%s, details=details || %s WHERE id=%s",
-                       (prior_dev["pr_url"], prior_dev["branch"], prior_dev.get("head_sha") or "",
-                        J({"pr_url_source": "inherited"}), run_id))
-        if probation_id is not None:
-            role_health.attach_probation_run(ctx.db, probation_id, run_id)
-            ctx.events.emit("role.probation", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
-                            account=acc.id, outcome="assigned",
-                            reason=f"probation ticket for role {role_health.role_of(body.step)}")
-        ctx.db.run("UPDATE accounts SET status='working', updated_at=now(), idle_since=NULL, cooldown_since=NULL WHERE id=%s",
-                   (acc.id,))
-        ctx.events.emit("run.claimed", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
-                        fence=c.fence, account=acc.id, provider=acc.provider, model=model, node=node)
-        extra: dict[str, Any] = {}
-        if body.step == "dev":
-            tooling.resolve_ticket(ctx, t["key"], node)
-            extra["machine_tools"] = tooling.machine_tools(
-                ctx.db.one("SELECT tools,metrics FROM nodes WHERE name=%s", (node,)) or {})
-        dev = prior_dev
-        if body.step == "verify" and dev:
-            extra["pr"] = {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
-                           "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],
-                           "dev_summary": (dev["summary"] or "") + handover.render(dev.get("details"))}
-        if body.step == "dev":
-            v = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s"
-                           " AND step IN ('verify','qa')"
-                           " AND outcome='rework' ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            if v and (not dev or v["started_at"] > dev["started_at"]):
-                extra["findings"] = (v["details"] or {}).get("findings") or v["summary"]
-            if dev and dev["branch"]:
-                extra["branch"] = dev["branch"]
-            # the master AI's answer to the question a dev run stopped on, until a dev run finishes or blocks again
-            a = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s AND step='triage'"
-                           " AND outcome='answered' ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            if a and not ctx.db.one("SELECT 1 AS x FROM runs WHERE ticket_key=%s AND step='dev' AND started_at > %s"
-                                    " AND outcome IN ('done', 'blocked') LIMIT 1", (t["key"], a["started_at"])):
-                q = ctx.db.one("SELECT summary FROM runs WHERE ticket_key=%s AND step='dev' AND outcome='blocked'"
-                               " AND started_at < %s ORDER BY started_at DESC LIMIT 1", (t["key"], a["started_at"]))
-                extra["triage_answer"] = (a["details"] or {}).get("answer") or a["summary"]
-                extra["triage_question"] = (q or {}).get("summary") or ""
-            # an escalation resolved without a triage run (register, policy message, machine, amendment) is answered
-            # the same way; the newer of the two wins
-            auto = escalations.pending_answer(ctx.db, t["key"])
-            if auto and (not extra.get("triage_answer") or not a or auto["created_at"] > a["started_at"]):
-                extra["triage_answer"], extra["triage_question"] = auto["answer"], auto["question"]
-            owner_answer = escalations.owner_answered_on_ticket(ctx, t["key"])
-            if owner_answer:
-                extra["triage_answer"] = owner_answer["answer"]
-                extra["triage_question"] = owner_answer["question"]
-        if body.step == "triage":
-            extra.update(triage_context)
-        if body.step == "post_merge":
-            extra["post_merge_criteria"] = next(
-                (item["criteria"] for item in environment_reports.pending_post_merge(ctx, t["project"], [t["key"]])), [])
-        if body.step == "intake":
-            # owners answer intake questions in comments as often as in the description
-            try:
-                extra["recent_comments"] = ctx.jira.recent_comments(t["key"], limit=10) if ctx.jira else []
-            except Exception as e:  # noqa: BLE001
-                log.warning("comments of %s for intake failed: %s", t["key"], e)
-        if body.step == "impact":
-            # the board the assessment compares against: the project's epics and its open work
-            extra["project_tickets"] = ctx.db.all(
-                "SELECT key, type, status, summary, parent_key FROM tickets WHERE project=%s AND status<>'Done'"
-                " AND key<>%s ORDER BY type<>'Epic', key LIMIT 300", (t["project"], t["key"]))
-        if body.step == "master":
-            extra["master_scope"] = "global"
-        else:
-            extra["related"] = related_hits(t)
-        try:
-            ticket_context = f"{t.get('summary', '')}\n{t.get('description', '')}"[:12_000]
-            extra["context_pack"] = knowledge.context_pack(ctx.db, project=t.get("project", ""), ticket=t["key"],
-                                                           epic=epic or "", query=ticket_context, run_id=run_id)
-        except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
-            log.warning("knowledge context pack for %s failed: %s", t["key"], type(exc).__name__)
-            extra["context_pack"] = {"project": t.get("project", ""), "ticket": t["key"], "items": []}
-        project_data = ({"key": "", "repo": "", "base": "", "hotfix_base": "", "checks": [], "stack": "",
-                         "node": node,
-                         "work_minutes": {"target": 30, "warn": 45, "hard": 60},
-                         "merge": {"method": "squash", "auto": False, "require_human": True}}
-                        if body.step == "master" else
-                        {"key": p.key, **selected_repo, "hotfix_base": p.hotfix_base,
-                         "work_minutes": p.work_minutes(),
-                         "environment": ([item.public() for item in p.environment_items]
-                                         if body.step in ("intake", "dev", "verify", "post_merge") else []),
-                         "merge": {"method": (p.merge or {}).get("method", "squash"),
-                                   "auto": bool((p.merge or {}).get("auto", True)),
-                                   "require_human": bool((p.merge or {}).get("require_human", False))}}
-                        if p else {})
-        return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
-                "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,
-                "account": acc.id, "identity": bot_identity(),
-                "ticket": ticket_data,
-                "project": project_data}
+            return work_claim.claim(ctx, body, node, candidate_path, RELEASES,
+                                   master_candidate=master_candidate, last_dev=last_dev,
+                                   ticket_epic=ticket_epic, bot_identity=bot_identity)
+        except work_eligibility.CandidateAccountUnavailable as exc:
+            raise HTTPException(403, str(exc)) from None
+        except work_claim.ClaimRejected as exc:
+            if exc.status_code == 403:
+                raise HTTPException(403, exc.reason) from None
+            return JSONResponse({"claimed": False, "reason": exc.reason}, status_code=exc.status_code)
 
     # --- configured Jira version releases ------------------------------------------------------------------
     @app.get("/v1/version-releases/candidates")
     def version_release_candidates(account: str, node: str = Depends(node_auth)) -> dict:
-        try:
-            state = licensing.enforce_work_entitlement(ctx, account, node,
-                                                        public_key=ctx.settings.license_public_key)
-        except licensing.LicenseError as exc:
-            return {"versions": [], "reason": str(exc)}
-        policy = rollout.node_compatible(ctx, node, RELEASES)
-        if not policy["compatible"]:
-            return {"versions": [], "reason": f"version skew: {policy['reason']}"}
-        repo = ctx.repo()
-        node_row = ctx.db.one("SELECT accepting_work,tools FROM nodes WHERE name=%s AND removed_at IS NULL", (node,))
-        if not node_row or not node_row["accepting_work"]:
-            return {"versions": [], "reason": "machine is not accepting new work"}
-        if account_master_paused(account):
-            return {"versions": [], "reason": "account is paused by master monitoring"}
-        if ctx.leases.cooling(account):
-            return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
-        versions = version_release.candidates(ctx, account, node)
-        versions = [item for item in versions
-                    if not (item.get("project") in repo.projects
-                            and repo.projects[item["project"]].settings_for_repo(item.get("repository", "")).get("containers")
-                            and toolchain_gaps(node_row.get("tools") or {}, [CONTAINER_RUNTIME_TOOL], repo.versions))]
-        peer_candidates = candidate_path.quota_peer_release_candidates(account)
-        available = [candidate for candidate in versions
-                     if (candidate["project"], str(candidate["version_id"]),
-                         str(candidate.get("repository") or "")) not in peer_candidates]
-        if versions and not available:
-            return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
-        allowed, refused = [], []
-        for candidate in available:
-            try:
-                licensing.enforce_project_entitlement(ctx, candidate["project"],
-                                                      public_key=ctx.settings.license_public_key, state=state)
-            except licensing.LicenseError as exc:
-                refused.append(str(exc))
-            else:
-                allowed.append(candidate)
-        result = {"versions": allowed}
-        if refused and not allowed:
-            result["reason"] = refused[0]
-        return result
+        return version_release_candidate_service.candidates(
+            ctx, account, node, candidate_path, RELEASES, account_master_paused)
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
         try:
-            state = licensing.enforce_work_entitlement(ctx, body.account, node,
-                                                        public_key=ctx.settings.license_public_key)
-        except licensing.LicenseError as exc:
-            raise HTTPException(409, str(exc)) from None
-        policy = rollout.node_compatible(ctx, node, RELEASES)
-        if not policy["compatible"]:
-            raise HTTPException(409, f"node version skew: {policy['reason']}")
-        repo = ctx.repo()
-        project = repo.projects.get(body.project)
-        acc = repo.account(body.account)
-        if account_master_paused(body.account):
-            raise HTTPException(409, "account is paused by master monitoring")
-        if ctx.leases.cooling(body.account):
-            raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
-        if (not project or not version_release.enabled(project)
-                or project.repo.lower().rstrip("/") == "jooservices/ai-flow"):
-            raise HTTPException(403, "project is not enabled for version releases")
-        if not acc or not acc.runs_on(node) or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
-            raise HTTPException(403, "a master or release account assigned to this node is required")
-        try:
-            licensing.enforce_project_entitlement(ctx, project.key,
-                                                  public_key=ctx.settings.license_public_key, state=state)
-        except licensing.LicenseError as exc:
-            raise HTTPException(409, str(exc)) from None
-        can_take, reason = shared_accounts.may_take(ctx.db, acc, node)
-        if not can_take:
-            raise HTTPException(409, reason)
-        node_row = ctx.db.one("SELECT projects,dynamic,status,accepting_work FROM nodes WHERE name=%s", (node,)) or {}
-        if not node_row.get("accepting_work", False):
-            raise HTTPException(409, "machine is not accepting new work")
-        if project.key not in repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False)):
-            raise HTTPException(403, "project is not assigned to this node")
-        version = next((v for v in version_release.project_versions(ctx, project) if v["id"] == body.version_id), None)
-        if not version:
-            raise HTTPException(404, "configured unreleased Jira version not found")
-        requested_repository = body.repository or version.get("repository") or project.repo
-        if requested_repository not in (version.get("repositories") or [project.repo]):
-            raise HTTPException(422, "repository is not represented in this Jira version")
-        version = {**version, "repository": requested_repository}
-        project = version_release.project_for_version(ctx, project, version)
-        if not version_release.enabled(project) or project.repo.lower().rstrip("/") == "jooservices/ai-flow":
-            raise HTTPException(403, "version release is not enabled for the selected repository")
-        if (project.settings_for_repo(project.repo).get("containers")
-                and toolchain_gaps((ctx.db.one("SELECT tools FROM nodes WHERE name=%s", (node,)) or {}).get("tools") or {},
-                                   [CONTAINER_RUNTIME_TOOL], repo.versions)):
-            raise HTTPException(409, "safe container runtime is missing on this node")
-        candidate_key = (project.key, str(version["id"]), project.repo)
-        if candidate_key in candidate_path.quota_peer_release_candidates(body.account):
-            raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
-        state = ctx.db.one("SELECT status FROM version_releases WHERE project=%s AND version_id=%s AND repository=%s",
-                           (project.key, version["id"], project.repo))
-        if state and state["status"] in ("checking", "released"):
-            raise HTTPException(409, "version already has an active or completed release run")
-        claim_github = github_gateway(ctx, project.repo)
-        if claim_github is None:
-            raise HTTPException(503, "GitHub is not connected")
-        release_ctx = replace(ctx, github=claim_github)
-        snapshot = version_release.post_merge_resume(release_ctx, project, version)
-        if snapshot is None:
-            snapshot = version_release.evaluate(release_ctx, project, version)
-        if not snapshot["ready"]:
-            if not snapshot.get("resume_after_merge"):
-                version_release.record_gate(ctx, project, version, snapshot)
-            raise HTTPException(409, {"reason": "version release gates are not met", "tickets": snapshot["tickets"],
-                                      "missing": snapshot["reasons"]})
-        key = version_release.version_identity(project.key, version["id"])
-        run_id = str(uuid.uuid4())
-        lease = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)
-        if not lease.ok:
-            raise HTTPException(409, "version release is already claimed")
-        try:
-            github = github_gateway(ctx, project.repo)
-            if github is None:
-                raise HTTPException(503, "GitHub App is not connected")
-            connection_id = github_connection_used.get() or DEFAULT_ID
-            source_branch = version_release.source_branch(project)
-            if snapshot.get("resume_after_merge"):
-                source_sha = snapshot["source_sha"]
-                release_branch = snapshot["release_branch"]
-                branch_created = not github.branch_exists(project.repo_name, release_branch)
-                if branch_created:
-                    github.create_branch_at_sha(project.repo_name, release_branch, snapshot["release_head_sha"])
-            else:
-                source_sha = github.branch_sha(project.repo_name, source_branch)
-                release_branch = version_release.release_branch(project, version["name"], source_sha)
-                branch_created = not github.branch_exists(project.repo_name, release_branch)
-                if branch_created:
-                    github.create_branch(project.repo_name, release_branch, source_branch)
-            tracker = version_release.tracker_for(ctx, project, version["id"], version["name"])
-            selected_settings = {"repo": project.repo, "base": project.base,
-                                 "checks": version_release.check_commands(project), "stack": project.stack,
-                                 "containers": bool(project.settings_for_repo(project.repo).get("containers"))}
-            if not shared_accounts.claim_run(
-                    ctx.db, acc,
-                    (run_id, key, project.key, "version_release", acc.id, acc.provider, "", node, lease.fence, "")):
-                raise HTTPException(409, f"account {acc.id} has no shared session capacity on {node}")
-            ctx.db.run("UPDATE runs SET details=%s WHERE id=%s",
-                       (J({"repository": project.repo, "repository_settings": selected_settings,
-                          "github_connection": connection_id}), run_id))
-            ctx.db.run("INSERT INTO version_releases (project,version_id,version_name,tracker_key,status,gate_detail,ticket_snapshot,repository)"
-                       " VALUES (%s,%s,%s,%s,'checking','',%s,%s)"
-                       " ON CONFLICT (project,version_id,repository) DO UPDATE SET"
-                       " version_name=EXCLUDED.version_name,tracker_key=EXCLUDED.tracker_key,status='checking',"
-                       " gate_detail='',ticket_snapshot=EXCLUDED.ticket_snapshot,updated_at=now()",
-                       (project.key, version["id"], version["name"], tracker, J(snapshot["tickets"]), project.repo))
-            version_release._audit(ctx, project, tracker,
-                                   {"id": run_id, "fence": lease.fence, "account_id": acc.id,
-                                    "github_connection": connection_id},
-                                   "github-release-branch", "created" if branch_created else "existing",
-                                   {"branch": release_branch, "source": source_branch, "source_sha": source_sha})
-        except Exception:
-            ctx.leases.release(key, run_id, lease.fence)
-            raise
-        ctx.db.run("UPDATE accounts SET status='working',updated_at=now(),idle_since=NULL,cooldown_since=NULL WHERE id=%s",
-                   (acc.id,))
-        ctx.events.emit("version_release.claimed", ticket=tracker, project=project.key, step="version_release",
-                        run_id=run_id, fence=lease.fence, account=acc.id, provider=acc.provider, node=node,
-                        outcome="checking", reason=version["name"], data={"version_id": version["id"],
-                                                                            "tickets": snapshot["tickets"]})
-        project_data = {"key": project.key, "repo": project.repo, "base": project.base,
-                        "checks": version_release.check_commands(project), "source_branch": version_release.source_branch(project),
-                        "target_branch": version_release.target_branch(project),
-                        "release_branch": release_branch, "source_sha": source_sha,
-                        "environment": ([item.public() for item in project.environment_items
-                                         if "post_merge" in item.runs]),
-                        "containers": bool(project.settings_for_repo(project.repo).get("containers")),
-                        "work_minutes": project.work_minutes()}
-        ticket = {"key": key, "project": project.key, "summary": f"Release {version['name']}",
-                  "description": f"Run full configured project checks on {release_branch}, cut from {source_branch}.",
-                  "labels": [], "priority": "Highest", "type": "Release"}
-        try:
-            context_pack = knowledge.context_pack(ctx.db, project=project.key, ticket=key,
-                                                  query=f"{ticket['summary']}\n{ticket['description']}", run_id=run_id)
-        except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
-            log.warning("knowledge context pack for release %s failed: %s", version["name"], type(exc).__name__)
-            context_pack = {"project": project.key, "ticket": key, "items": []}
-        return {"claimed": True, "step": "version_release", "run_id": run_id, "fence": lease.fence,
-                "run_token": secrets.token_urlsafe(32), "lease_ms": ctx.settings.lease_ms,
-                "provider": acc.provider, "model": "", "effort": "", "account": acc.id,
-                "identity": bot_identity(), "ticket": ticket, "project": project_data, "context_pack": context_pack,
-                "version": version, "tracker_key": tracker, "tickets": snapshot["tickets"]}
+            return version_release_service.claim(
+                ctx, body, node, candidate_path, RELEASES, account_paused=account_master_paused,
+                gateway_for_repository=lambda target_ctx, repository: github_gateway(target_ctx, repository),
+                connection_id=lambda: github_connection_used.get(), bot_identity=bot_identity)
+        except version_release_service.ReleaseClaimRejected as exc:
+            raise HTTPException(exc.status_code, exc.detail) from None
 
     @app.post("/v1/version-releases/{version_id}/complete")
     def version_release_complete(version_id: str, body: VersionReleaseCompleteBody,

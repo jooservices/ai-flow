@@ -144,6 +144,31 @@ class TicketsRepository:
         """Ticket row for a work item selected by another control-plane query."""
         return self.db.one("SELECT * FROM tickets WHERE key=%s", (key,))
 
+    def with_ancestors(self, key: str, limit: int = 8) -> tuple[dict | None, list[dict]]:
+        """Ticket and parent rows used to render its detail drawer."""
+        ticket = self.by_key(key)
+        if not ticket:
+            return None, []
+        ancestors = [ticket]
+        parent = str(ticket.get("parent_key") or "")
+        while parent and len(ancestors) < limit:
+            row = self.db.one("SELECT key,type,parent_key FROM tickets WHERE key=%s", (parent,))
+            if not row:
+                break
+            ancestors.append(row)
+            parent = str(row.get("parent_key") or "")
+        return ticket, ancestors
+
+    def timeline_ticket(self, key: str) -> dict | None:
+        """Ticket state required to calculate its control-plane timeline."""
+        return self.db.one("SELECT key,status,labels,done_at FROM tickets WHERE key=%s", (key,))
+
+    def impact_context(self, project: str, exclude_key: str) -> list[dict]:
+        """Open project tickets compared by an impact assessment."""
+        return self.db.all("SELECT key,type,status,summary,parent_key FROM tickets WHERE project=%s "
+                           "AND status<>'Done' AND key<>%s ORDER BY type<>'Epic',key LIMIT 300",
+                           (project, exclude_key))
+
     def epic_key(self, ticket: dict) -> str:
         """Resolve the ticket's parent chain to its Jira epic key."""
         if str(ticket.get("type") or "").strip().lower() == "epic":

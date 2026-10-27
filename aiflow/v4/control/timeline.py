@@ -16,9 +16,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .repositories.events import EventsRepository
+from .repositories.runs import RunsRepository
+from .repositories.tickets import TicketsRepository
+
 READY = "aiflow-ready"
 WAITING = {"Needs owner", "Human review"}
-STATUS_EVENTS = ("ticket.status", "jira.transition")
 
 
 def _secs(start: datetime, end: datetime) -> int:
@@ -27,8 +30,7 @@ def _secs(start: datetime, end: datetime) -> int:
 
 def _status_changes(db, key: str, ready_now: bool) -> list[dict]:
     """[{ts, status, ready}] in order; `ready` carries forward when an event does not say (jira.transition)."""
-    rows = db.all("SELECT ts, type, outcome, data FROM events WHERE ticket=%s AND type = ANY(%s) AND outcome <> ''"
-                  " ORDER BY ts, id", (key, list(STATUS_EVENTS)))
+    rows = EventsRepository(db).ticket_status_changes(key)
     known = [r["data"].get("ready") for r in rows if r["type"] == "ticket.status" and "ready" in (r["data"] or {})]
     ready = bool(known[0]) if known else ready_now
     out = []
@@ -78,12 +80,11 @@ def _run_segments(runs: list[dict], now: datetime) -> list[dict]:
 
 
 def timeline(db, key: str, now: datetime | None = None) -> dict[str, Any] | None:
-    t = db.one("SELECT key, status, labels, done_at FROM tickets WHERE key=%s", (key,))
+    t = TicketsRepository(db).timeline_ticket(key)
     if not t:
         return None
     now = now or datetime.now(timezone.utc)
-    runs = db.all("SELECT id, step, account_id, status, outcome, started_at, ended_at, heartbeat_at FROM runs"
-                  " WHERE ticket_key=%s ORDER BY started_at", (key,))
+    runs = RunsRepository(db).timeline_rows(key)
     changes = _status_changes(db, key, READY in (t["labels"] or []))
     run_segs = _run_segments(runs, now)
 

@@ -76,21 +76,35 @@ def _record_completed_epic(ctx: Ctx, ticket: dict, old: dict | None) -> None:
         log.warning("could not generate completion report for epic %s: %s", ticket["key"], exc)
 
 
-def _record_ticket_sync_effects(ctx: Ctx, ticket: dict, old: dict | None) -> None:
-    if not old:
+def _record_new_ticket_sync_effects(ctx: Ctx, ticket: dict, old: dict | None) -> None:
+    if old is None:
         project_lifecycle.reopen_for_new_ticket(ctx, ticket["project"], ticket["key"])
-    _record_completed_epic(ctx, ticket, old)
-    if old and old["status"] != "Human review" and ticket["status"] == "Human review":
+
+
+def _record_ticket_status_sync_effects(ctx: Ctx, ticket: dict, old: dict | None) -> None:
+    if old is None:
+        return
+    if old["status"] != "Human review" and ticket["status"] == "Human review":
         notify_human_review(ctx, ticket["key"], ticket)
-    if old and old["status"] != ticket["status"]:
+    if old["status"] != ticket["status"]:
         merge_flow.record_move(ctx, ticket["key"], old["status"], ticket["status"], merge_flow.PERSON,
                                "moved in Jira")
+
+
+def _record_ticket_status_event(ctx: Ctx, ticket: dict, old: dict | None) -> None:
     ready = "aiflow-ready" in ticket["labels"]
     old_ready = "aiflow-ready" in (old.get("labels") or []) if old else False
     if not old or old["status"] != ticket["status"] or old_ready != ready:
         ctx.events.emit("ticket.status", ticket=ticket["key"], project=ticket["project"],
                         outcome=ticket["status"], reason=f"from {old['status']}" if old else "first seen",
                         from_status=old["status"] if old else "", ready=ready, source="jira_sync")
+
+
+def _record_ticket_sync_effects(ctx: Ctx, ticket: dict, old: dict | None) -> None:
+    _record_new_ticket_sync_effects(ctx, ticket, old)
+    _record_completed_epic(ctx, ticket, old)
+    _record_ticket_status_sync_effects(ctx, ticket, old)
+    _record_ticket_status_event(ctx, ticket, old)
 
 
 def _capture_closed_tickets(ctx: Ctx) -> None:

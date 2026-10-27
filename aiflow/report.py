@@ -43,7 +43,7 @@ def normalize(reason: str) -> str:
         return "<N>"
 
     text = NUMBER.sub(replace_number, text)
-    return re.sub(r"\s+", " ", text).strip()[:100]
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def signature(kind: str, reason: str) -> str:

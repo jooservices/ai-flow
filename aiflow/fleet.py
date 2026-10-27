@@ -26,7 +26,7 @@ echo "units_failed=$(systemctl --user list-units 'aiflow-*' --no-legend --all 2>
 echo "control=$(systemctl --user is-active aiflow-control 2>/dev/null || true)"
 echo "ai_processes=$(ps -eo args | grep -E '^(claude|codex|grok|opencode)( |$)' | wc -l)"
 echo "errors_1h=$(journalctl --user -u 'aiflow-*' --since '-1h' --no-pager -q 2>/dev/null | grep -ciE 'traceback|worker.error|tick failed|ConfigError')"
-echo "commit=$(git -C "${AIFLOW_WORKSPACES:-$HOME/Workspaces}/JOOservices/projects/ai-flow" log -1 --format=%h 2>/dev/null)"
+echo "commit=$(git -C "${AIFLOW_WORKSPACES:-$HOME/Workspaces}/JOOservices/projects/ai-flow" rev-parse HEAD 2>/dev/null | cut -c1-12)"
 '''
 
 

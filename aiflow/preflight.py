@@ -13,6 +13,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tomllib
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -82,10 +83,26 @@ def run(root: Path, skip_ai: bool = False, lock: Path | None = None, check_reach
     def add(name: str, ok: bool, detail: str = "") -> None:
         results.append({"check": name, "ok": ok, "detail": detail})
 
-    env, runtime, projects = common.env_values(root), common.runtime(root), common.projects(root)
+    config_errors = (OSError, UnicodeError, tomllib.TOMLDecodeError, AttributeError, TypeError)
+    env = common.env_values(root)
     cfg = common.config_dir(root)
-    add("config: aiflow.toml", (cfg / "aiflow.toml").is_file(), str(cfg / "aiflow.toml"))
-    add("config: project files", bool(projects), ", ".join(p["jira_key"] for p in projects) or "none found")
+    config_path = cfg / "aiflow.toml"
+    try:
+        runtime = common.runtime(root)
+    except config_errors as error:
+        runtime = {}
+        add("config: aiflow.toml", False, f"{config_path}: {error.__class__.__name__}: {error}")
+    else:
+        add("config: aiflow.toml", config_path.is_file(), str(config_path))
+
+    project_dir = cfg / "aiflow"
+    try:
+        projects = common.projects(root)
+    except config_errors as error:
+        projects = []
+        add("config: project files", False, f"{project_dir}: {error.__class__.__name__}: {error}")
+    else:
+        add("config: project files", bool(projects), ", ".join(p["jira_key"] for p in projects) or "none found")
     for company in sorted({p.get("company", "JOOservices") for p in projects}):
         add(f"worktree directory: {company}", (root / company / "worktree").is_dir(), str(root / company / "worktree"))
     for project in projects:
@@ -115,7 +132,14 @@ def run(root: Path, skip_ai: bool = False, lock: Path | None = None, check_reach
         else:
             host, port = address
             add(f"{name} reachable", check_reach(host, port), f"{host}:{port}")
-    wanted = read_lock(lock) if lock else {}
+    wanted = {}
+    if lock is not None:
+        try:
+            wanted = read_lock(lock)
+        except (OSError, UnicodeError) as error:
+            add("version lock file", False, f"{lock}: {error.__class__.__name__}: {error}")
+        else:
+            add("version lock file", True, str(lock))
     for tool in TOOLS:
         found = shutil.which(tool) is not None
         text = version(tool) if found else ""

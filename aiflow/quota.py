@@ -10,13 +10,20 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 MINIMUM = {"Claude": 20.0, "Codex": 5.0, "Grok": 10.0, "OpenCode": 3.0}
-SESSIONS = Path.home() / ".codex" / "sessions"
+
+
+def session_directory() -> Path:
+    """Return the configured Codex session directory, falling back to the default home."""
+    codex_home = os.environ.get("CODEX_HOME")
+    home = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+    return home / "sessions"
 
 
 def _find_limits(node: Any) -> dict | None:
@@ -62,7 +69,7 @@ def last_limits(lines: list[str], with_time: bool = False):
     return (None, None) if with_time else None
 
 
-def windows(limits: dict, now: float) -> list[dict[str, Any]]:
+def windows(limits: dict, now: float, observed_at: float | None = None) -> list[dict[str, Any]]:
     out = []
     for name in ("primary", "secondary"):
         window = limits.get(name)
@@ -82,17 +89,21 @@ def windows(limits: dict, now: float) -> list[dict[str, Any]]:
             minutes = int(window.get("window_minutes") or 0)
         except (TypeError, ValueError):
             minutes = 0
-        expired = reset_at is not None and reset_at <= now
-        used = 0.0 if expired else reported_used
-        out.append({"window": f"{minutes} min", "used_percent": used, "left_percent": round(100 - used, 1),
-                    "resets_at": reset_at, "window_already_reset": expired})
+        reset_since_snapshot = (reset_at is not None and reset_at <= now
+                                and (observed_at is None or observed_at < reset_at))
+        remaining = 100 - reported_used
+        out.append({"window": f"{minutes} min",
+                    "used_percent": None if reset_since_snapshot else reported_used,
+                    "left_percent": None if reset_since_snapshot else round(remaining, 1),
+                    "resets_at": reset_at, "window_already_reset": reset_since_snapshot})
     return out
 
 
-def codex_level(sessions: Path = SESSIONS, now: float | None = None) -> dict[str, Any]:
+def codex_level(sessions: Path | None = None, now: float | None = None) -> dict[str, Any]:
     now = time.time() if now is None else now
+    sessions = session_directory() if sessions is None else sessions
     logs = sessions.rglob("rollout-*.jsonl") if sessions.is_dir() else []
-    best: tuple[float, dict] | None = None
+    best: tuple[float, float | None, dict] | None = None
     for log in logs:
         try:
             lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -100,11 +111,14 @@ def codex_level(sessions: Path = SESSIONS, now: float | None = None) -> dict[str
         except OSError:
             continue
         limits, stamp = last_limits(lines, with_time=True)
-        if limits and (best is None or (stamp or modified) > best[0]):
-            best = (stamp or modified, limits)
+        ordering_stamp = stamp if stamp is not None else modified
+        if limits and (best is None or ordering_stamp > best[0]):
+            best = (ordering_stamp, stamp, limits)
     if best:
-        return {"known": True, "source": "codex session log", "observed_age_minutes": round((now - best[0]) / 60),
-                "windows": windows(best[1], now)}
+        ordering_stamp, observed_at, limits = best
+        return {"known": True, "source": "codex session log",
+                "observed_age_minutes": round((now - ordering_stamp) / 60),
+                "windows": windows(limits, now, observed_at=observed_at)}
     return {"known": False, "source": "no Codex rate_limits found"}
 
 
@@ -112,14 +126,20 @@ def eligibility(ai: str, level: dict[str, Any], minimum: dict[str, float] = MINI
     floor = minimum.get(ai, 5.0)
     if not level.get("known"):
         return {"ai": ai, "known": False, "minimum_left": floor, "eligible": None, "why": "quota level unknown: the cooldown fallback applies"}
-    lowest = min((w["left_percent"] for w in level["windows"]), default=None)
+    windows = level.get("windows", [])
+    if any(window.get("window_already_reset") for window in windows):
+        return {"ai": ai, "known": False, "minimum_left": floor, "eligible": None,
+                "why": "a quota window reset after the last recorded snapshot"}
+    lowest = min((100 - w["used_percent"] if "used_percent" in w else w["left_percent"]
+                  for w in windows), default=None)
     if lowest is None:
         return {"ai": ai, "known": False, "minimum_left": floor, "eligible": None, "why": "no window reported"}
-    return {"ai": ai, "known": True, "minimum_left": floor, "lowest_left": lowest, "eligible": lowest >= floor,
-            "why": "ok" if lowest >= floor else f"{lowest}% left in the tightest window, below {floor}%"}
+    displayed = round(lowest, 1)
+    return {"ai": ai, "known": True, "minimum_left": floor, "lowest_left": displayed, "eligible": lowest >= floor,
+            "why": "ok" if lowest >= floor else f"{displayed}% left in the tightest window, below {floor}%"}
 
 
-def collect(now: float | None = None, sessions: Path = SESSIONS) -> list[dict[str, Any]]:
+def collect(now: float | None = None, sessions: Path | None = None) -> list[dict[str, Any]]:
     levels = {"Codex": codex_level(sessions, now)}
     for ai in ("Claude", "Grok", "OpenCode"):
         levels[ai] = {"known": False, "source": "no verified source yet"}

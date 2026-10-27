@@ -25,6 +25,11 @@ class ReportTests(unittest.TestCase):
         self.assertNotEqual(report.signature("OpenObserve", "request failed with HTTP 403"),
                             report.signature("OpenObserve", "request failed with HTTP 404"))
 
+    def test_long_normalized_reasons_remain_distinct(self):
+        prefix = "same cause " * 12
+        self.assertNotEqual(report.signature("Config", prefix + "first"),
+                            report.signature("Config", prefix + "second"))
+
     def test_groups_count_tickets_and_projects(self):
         rows = [{"kind": "Config", "reason": "failed 1", "ticket": "A-1", "project": "A"}, {"kind": "Config", "reason": "failed 2", "ticket": "B-2", "project": "B"}]
         groups = report.by_signature(rows)
@@ -60,10 +65,25 @@ class QuotaTests(unittest.TestCase):
         limits = quota.last_limits(["noise", self.LINE, "{}"])
         self.assertEqual(limits["primary"]["used_percent"], 97.0)
 
-    def test_a_window_that_reset_counts_as_unused(self):
+    def test_a_window_that_reset_since_snapshot_is_unknown(self):
         windows = quota.windows(quota.last_limits([self.LINE]), now=3000)
-        self.assertEqual([w["left_percent"] for w in windows], [100.0, 80.0])
+        self.assertEqual([w["used_percent"] for w in windows], [None, 20.0])
+        self.assertIsNone(windows[0]["left_percent"])
         self.assertTrue(windows[0]["window_already_reset"])
+        result = quota.eligibility("Codex", {"known": True, "windows": windows})
+        self.assertFalse(result["known"])
+        self.assertIsNone(result["eligible"])
+
+    def test_snapshot_after_reset_uses_the_reported_usage(self):
+        windows = quota.windows(quota.last_limits([self.LINE]), now=3000, observed_at=2500)
+        self.assertEqual(windows[0]["used_percent"], 97.0)
+        self.assertFalse(windows[0]["window_already_reset"])
+
+    def test_unrounded_remaining_quota_controls_eligibility(self):
+        level = {"known": True, "windows": [{"used_percent": 95.04, "left_percent": 5.0}]}
+        result = quota.eligibility("Codex", level)
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["lowest_left"], 5.0)
 
     def test_below_the_minimum_is_not_eligible(self):
         level = {"known": True, "windows": [{"left_percent": 4.0}, {"left_percent": 70.0}]}
@@ -81,6 +101,16 @@ class QuotaTests(unittest.TestCase):
             self.assertTrue(level["known"])
             self.assertEqual(level["windows"][0]["left_percent"], 3.0)
 
+    def test_uses_configured_codex_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex-home"
+            sessions = home / "sessions"
+            sessions.mkdir(parents=True)
+            (sessions / "rollout-1.jsonl").write_text(self.LINE + "\n")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}, clear=True):
+                level = quota.codex_level(now=1000)
+        self.assertTrue(level["known"])
+
 
 class PreflightTests(unittest.TestCase):
     def test_lock_file_lines(self):
@@ -97,10 +127,75 @@ class PreflightTests(unittest.TestCase):
             self.assertIn("config: aiflow.toml", failed)
             self.assertIn("Redis reachable", failed)
 
+    def test_malformed_configs_are_reported_and_independent_checks_continue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "JOOservices" / "config"
+            project_dir = config / "aiflow"
+            project_dir.mkdir(parents=True)
+            (config / "aiflow.toml").write_text("[runtime\n", encoding="utf-8")
+            (project_dir / "JAIF.toml").write_text("[project\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AIFLOW_CONFIG_DIR": str(config)}, clear=True), \
+                 mock.patch.object(preflight.shutil, "which", return_value=None):
+                results = preflight.run(root, skip_ai=True, check_reach=lambda host, port: False)
+        checks = {item["check"]: item for item in results}
+        self.assertFalse(checks["config: aiflow.toml"]["ok"])
+        self.assertFalse(checks["config: project files"]["ok"])
+        self.assertIn("TOMLDecodeError", checks["config: aiflow.toml"]["detail"])
+        self.assertIn("Redis reachable", checks)
+
+    def test_unreadable_lock_is_reported_and_other_checks_continue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config"
+            config.mkdir()
+            (config / "aiflow.toml").write_text("[runtime]\n", encoding="utf-8")
+            lock = root / "missing-tools.lock"
+            with mock.patch.dict(os.environ, {"AIFLOW_CONFIG_DIR": str(config)}, clear=True), \
+                 mock.patch.object(preflight.shutil, "which", return_value=None):
+                results = preflight.run(root, skip_ai=True, lock=lock, check_reach=lambda host, port: False)
+        checks = {item["check"]: item for item in results}
+        self.assertFalse(checks["version lock file"]["ok"])
+        self.assertIn("FileNotFoundError", checks["version lock file"]["detail"])
+        self.assertIn("Redis reachable", checks)
+
 
 class ReconcileTests(unittest.TestCase):
-    def test_keys_come_from_the_subject_end(self):
-        self.assertEqual(reconcile.merged_keys(["feat(x): A thing (JAIF-5)", "Merge pull request #1 from a/JAIF-6-b", "docs: no key"]), {"JAIF-5"})
+    def test_keys_come_from_commit_and_merge_subjects(self):
+        self.assertEqual(reconcile.merged_keys(["feat(x): A thing (JAIF-5)",
+                                                "Merge pull request #1 from a/JAIF-6-b",
+                                                "docs: no key"]), {"JAIF-5", "JAIF-6"})
+
+    def test_merged_pull_request_metadata_is_paginated_and_uses_jira_field(self):
+        calls = []
+
+        def runner(command, **kwargs):
+            calls.append(command)
+            if command[0] == "git":
+                return subprocess.CompletedProcess(command, 0, "git@github.com:jooservices/ai-flow.git", "")
+            pages = [[{"merged_at": "2026-10-23T12:00:00Z", "body": "Jira: JAIF-353"}],
+                     [{"merged_at": "2026-10-24T12:00:00Z", "body": None,
+                       "head": {"ref": "JAIF-7-title"}}]]
+            return subprocess.CompletedProcess(command, 0, json.dumps(pages), "")
+
+        pull_requests = reconcile.merged_pull_requests(Path("/repo"), "origin/develop", runner=runner)
+        self.assertEqual(reconcile.pull_request_keys(pull_requests), {"JAIF-353", "JAIF-7"})
+        self.assertEqual(calls[1][1:3], ["api", "--paginate"])
+        self.assertIn("--slurp", calls[1])
+        self.assertIn("repos/jooservices/ai-flow/pulls?state=closed&base=develop&per_page=100", calls[1][-1])
+
+    def test_base_must_be_a_branch_not_a_commit_revision(self):
+        with self.assertRaises(ValueError):
+            reconcile.github_base_branch("abc123456789")
+
+    def test_custom_repository_requires_project_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                reconcile.main(["--repo", tmp])
+
+    def test_invalid_project_key_is_not_silently_omitted(self):
+        with self.assertRaises(SystemExit):
+            reconcile.main(["--keys", "JAIF,JAVM_"])
 
     def test_only_not_done_tickets_are_listed(self):
         issues = [{"key": "JAIF-5", "status": "Backlog", "summary": "a"}, {"key": "JAIF-6", "status": "Done"}, {"key": "JAIF-7", "status": "To Do"}]
@@ -128,6 +223,10 @@ class ReconcileTests(unittest.TestCase):
 
 
 class FleetTests(unittest.TestCase):
+    def test_snapshot_uses_a_fixed_length_commit_hash(self):
+        self.assertIn("rev-parse HEAD 2>/dev/null | cut -c1-12", fleet.SNAPSHOT)
+        self.assertNotIn("--format=%h", fleet.SNAPSHOT)
+
     def test_flags(self):
         ok = {"units_failed": "0", "control": "active", "errors_1h": "0", "disk_used_pct": "10", "commit": "abc"}
         self.assertEqual(fleet.flags(ok, "abc"), [])

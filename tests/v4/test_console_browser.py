@@ -112,7 +112,7 @@ def _redact(value, secrets: tuple[str, ...]):
                         sanitized[key].append(_redact(entry, secrets))
                 continue
             sensitive = (normalized in {"authorization", "cookie", "set_cookie", "token", "secret", "command",
-                                        "initial_password", "sign_in_url", "signin_url", "private_key", "pem",
+                                        "sign_in_url", "signin_url", "private_key", "pem",
                                         "postdata", "post_data", "requestbody", "request_body"}
                          or any(part in normalized for part in ("password", "_token", "_secret", "_cookie")))
             if sensitive:

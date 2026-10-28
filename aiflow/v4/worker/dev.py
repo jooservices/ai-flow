@@ -16,6 +16,7 @@ import threading
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 
 from ..adapters import RunResult, RunSpec, get_adapter
@@ -180,8 +181,8 @@ def run_with_inbox(adapter, spec: RunSpec, heartbeat: Heartbeat, on_progress=Non
     continuations = 0
     while True:
         if current_messages:
-            on_start = lambda batch=current_messages: heartbeat.include(batch)
-            response = adapter.run(current, on_progress, stop=heartbeat.lost, on_start=on_start)
+            response = adapter.run(current, on_progress, stop=heartbeat.lost,
+                                   on_start=partial(heartbeat.include, current_messages))
         else:
             response = adapter.run(current, on_progress, stop=heartbeat.lost)
         if aggregate is None:
@@ -200,14 +201,16 @@ def run_with_inbox(adapter, spec: RunSpec, heartbeat: Heartbeat, on_progress=Non
             aggregate.final_text = response.final_text or aggregate.final_text
             aggregate.verdict = response.verdict or aggregate.verdict
             aggregate.verdict_reason = response.verdict_reason or aggregate.verdict_reason
-        if response.error_kind or heartbeat.lost.is_set() or continuations >= max_continuations:
+        remaining = int(spec.timeout_s - aggregate.duration_s)
+        if response.error_kind or heartbeat.lost.is_set() or continuations >= max_continuations or remaining <= 0:
             return aggregate
         messages = heartbeat.checkpoint()
         if not messages or heartbeat.lost.is_set():
             return aggregate
         continuations += 1
         current_messages = messages
-        current = replace(spec, prompt=_continuation_prompt(spec.prompt, response.final_text, messages), log_append=True)
+        current = replace(spec, prompt=_continuation_prompt(spec.prompt, response.final_text, messages),
+                          timeout_s=remaining, log_append=True)
 
 
 def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci_log: str = "",

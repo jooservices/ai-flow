@@ -39,7 +39,7 @@ def queued(connection, run_id: str) -> list[dict]:
 
 def latest(db, run_id: str, limit: int = 100) -> list[dict]:
     rows = db.all(
-        "SELECT id,client_id,author,kind,body,status,created_at,received_at,included_at,terminal_reason"
+        "SELECT id,run_id,client_id,author,kind,body,status,created_at,received_at,included_at,terminal_reason"
         " FROM run_inbox_messages WHERE run_id=%s ORDER BY id DESC LIMIT %s", (run_id, limit))
     return list(reversed(rows))
 

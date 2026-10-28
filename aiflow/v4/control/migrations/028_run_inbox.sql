@@ -1,4 +1,6 @@
 -- Owner messages queued for a live worker and applied after the current provider invocation finishes.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS result_received_at timestamptz;
+
 CREATE TABLE IF NOT EXISTS run_inbox_messages (
     id              bigserial PRIMARY KEY,
     run_id          uuid NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

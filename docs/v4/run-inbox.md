@@ -32,9 +32,13 @@ it to the next active run. Repeated submission with the same client ID is idempo
 | `GET /v1/runs/{run_id}/inbox` | Console session with `review.actions` | Read the latest 100 messages, oldest first. |
 | `POST /v1/runs/{run_id}/inbox` | Console session with `review.actions` | Add `{client_id?, kind?, body}`. Kinds: `context`, `request`, `idea`; body: 1–8,000 characters. |
 | `POST /v1/runs/{run_id}/heartbeat` | Owning node bearer token | Renew the fenced lease, acknowledge `inbox_received` and `inbox_included` IDs, and receive queued/received messages. |
-| `POST /v1/runs/{run_id}/result` | Owning node bearer token | Finish a run and atomically mark guidance that missed its last checkpoint as undelivered. |
+| `POST /v1/runs/{run_id}/result` | Owning node bearer token | Finish a running run and atomically mark guidance that missed its last checkpoint as undelivered. |
 | `POST /v1/runs/{run_id}/release` | Owning node bearer token | Release a run and mark guidance that missed its last checkpoint as undelivered. |
 | `POST /v1/master/actions` | Owning node bearer token | A master restart closes the target run and marks its pending guidance undelivered. |
+
+All three closure endpoints emit `run.inbox.undelivered` with the message IDs. A result for a lost run is accepted once
+to retain token and cost usage, while preserving its `lost` outcome and avoiding changes to account ownership; other
+closed runs and duplicate results return HTTP 409. A result for a run that is not running or lost also returns 409.
 
 Console writes require a writable license and must match the user's project scope. The API accepts messages only while
 the run row is `running` and its lease/fence remains valid. Run closure and enqueue serialize on the run row: messages

@@ -62,6 +62,42 @@ def test_run_closure_marks_unconsumed_guidance_undelivered_and_rejects_late_mess
     assert late.status_code == 409
 
 
+def test_lost_run_accepts_late_usage_once_without_reopening_or_resetting_account(client, ctx):
+    from aiflow.v4.control.loops import watchdog
+
+    node, run = _claim(client, ctx, "TESTWP-INBOX-LATE-RESULT")
+    queued = client.post(f"/v1/runs/{run['run_id']}/inbox", json={"kind": "context", "body": "Keep this branch."})
+    assert queued.status_code == 201
+    ctx.leases.release("TESTWP-INBOX-LATE-RESULT", run["run_id"], run["fence"])
+
+    watchdog(ctx)
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run["run_id"],))["status"] == "lost"
+    assert ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account_id"],))["status"] == "idle"
+    _, replacement = _claim(client, ctx, "TESTWP-INBOX-REPLACEMENT")
+    assert replacement["account"] == run["account"]
+
+    result_body = {"fence": run["fence"], "outcome": "done", "tokens_in": 17,
+                   "tokens_out": 9, "cost_usd": 0.42, "summary": "The worker finished after losing its lease."}
+    stale_fence = {**result_body, "fence": run["fence"] + 1}
+    assert client.post(f"/v1/runs/{run['run_id']}/result", json=stale_fence, headers=node).status_code == 409
+    account_status_before = ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account_id"],))["status"]
+    late = client.post(f"/v1/runs/{run['run_id']}/result", json=result_body, headers=node)
+
+    assert late.status_code == 200 and not late.json()["still_owner"]
+    saved = ctx.db.one("SELECT status,outcome,tokens_in,tokens_out,cost_usd,result_received_at FROM runs WHERE id=%s",
+                       (run["run_id"],))
+    assert saved["status"] == "lost" and saved["outcome"] == "lost"
+    assert saved["tokens_in"] == 17 and saved["tokens_out"] == 9 and float(saved["cost_usd"]) == 0.42
+    assert saved["result_received_at"] is not None
+    assert ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account_id"],))["status"] == account_status_before
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (replacement["run_id"],))["status"] == "running"
+    assert client.get(f"/v1/runs/{run['run_id']}/inbox").json()["messages"][0]["status"] == "undelivered"
+    assert client.post(f"/v1/runs/{run['run_id']}/result", json=result_body, headers=node).status_code == 409
+    after_duplicate = ctx.db.one("SELECT tokens_in,tokens_out,cost_usd FROM runs WHERE id=%s", (run["run_id"],))
+    assert after_duplicate["tokens_in"] == 17 and after_duplicate["tokens_out"] == 9
+    assert float(after_duplicate["cost_usd"]) == 0.42
+
+
 def test_run_inbox_requires_an_allowed_console_role_and_project_scope(client, ctx):
     from fastapi.testclient import TestClient
 

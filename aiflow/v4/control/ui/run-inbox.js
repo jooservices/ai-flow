@@ -3,7 +3,7 @@
   window.addEventListener('aiflow-console-ready', function () {
     var app = window.AIFlowConsole, S = app.state;
     S.runInbox = { runId: '', runLabel: '', messages: [], loadedAt: 0, loading: false, sending: false,
-      draft: '', kind: 'context', error: '', notice: '' };
+      requestId: 0, requestRunId: '', draft: '', kind: 'context', error: '', notice: '' };
     try {
       var saved = JSON.parse(sessionStorage.getItem('aiflow4-run-inbox-selection') || 'null');
       if (saved && typeof saved.id === 'string') {
@@ -18,13 +18,15 @@
     }
     function load(runId, force) {
       var state = S.runInbox;
-      if (!runId || state.loading || (!force && state.runId === runId && Date.now() - state.loadedAt < 12000)) return;
-      state.runId = runId; state.loading = true; state.error = '';
+      if (!runId || (state.loading && state.requestRunId === runId) ||
+          (!force && state.runId === runId && Date.now() - state.loadedAt < 12000)) return;
+      var requestId = ++state.requestId;
+      state.loading = true; state.requestRunId = runId; state.error = '';
       fetch('/v1/runs/' + encodeURIComponent(runId) + '/inbox', { cache: 'no-store' })
         .then(app.projectResponseError)
-        .then(function (data) { state.messages = data.messages || []; state.loadedAt = Date.now(); state.error = ''; })
-        .catch(function (error) { state.error = String(error.message || error); })
-        .then(function () { state.loading = false; if (S.view === 'work' || S.view === 'delivery') app.renderDBody(); });
+        .then(function (data) { if (state.requestId === requestId && state.runId === runId) { state.messages = data.messages || []; state.loadedAt = Date.now(); state.error = ''; } })
+        .catch(function (error) { if (state.requestId === requestId && state.runId === runId) { state.error = String(error.message || error); state.loadedAt = Date.now(); } })
+        .then(function () { if (state.requestId === requestId) { state.loading = false; if (state.runId !== runId) load(state.runId, true); else if (S.view === 'work' || S.view === 'delivery') app.renderDBody(); } });
     }
     function panel() {
       var state = S.runInbox;
@@ -74,15 +76,15 @@
       return html + '</div></section>';
     }
     function send() {
-      var state = S.runInbox, runId = state.runId, text = state.draft.trim();
+      var state = S.runInbox, runId = state.runId, draft = state.draft, text = draft.trim(), kind = state.kind;
       if (!runId || !text || state.sending) return;
       state.sending = true; state.error = ''; state.notice = ''; app.renderDBody();
       var clientId = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() :
         'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) { var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); });
       fetch('/v1/runs/' + encodeURIComponent(runId) + '/inbox', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client_id: clientId, kind: state.kind, body: text }) }).then(app.projectResponseError)
-        .then(function () { state.draft = ''; state.notice = 'Message queued for the next AI attempt checkpoint.'; state.loadedAt = 0; load(runId, true); })
-        .catch(function (error) { state.error = String(error.message || error); })
+        body: JSON.stringify({ client_id: clientId, kind: kind, body: text }) }).then(app.projectResponseError)
+        .then(function () { if (state.runId === runId) { if (state.draft === draft) state.draft = ''; state.notice = 'Message queued for the next AI attempt checkpoint.'; state.loadedAt = 0; load(runId, true); } })
+        .catch(function (error) { if (state.runId === runId) state.error = String(error.message || error); })
         .then(function () { state.sending = false; app.renderDBody(); });
     }
 
@@ -94,7 +96,7 @@
     document.addEventListener('input', function (event) {
       if (event.target.id !== 'run-inbox-draft') return;
       S.runInbox.draft = event.target.value;
-      var button = document.querySelector('[data-act="run-inbox-send"]');
+      var board = app.activeBoard(), button = board && board.querySelector('[data-act="run-inbox-send"]');
       if (button) button.disabled = !event.target.value.trim() || S.runInbox.sending;
     });
     document.addEventListener('change', function (event) {

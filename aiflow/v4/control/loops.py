@@ -27,9 +27,9 @@ from urllib.parse import quote
 
 from . import environment as environment_reports
 from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
+from . import run_inbox as run_inbox_lifecycle
 from . import projects as project_lifecycle
 from . import rollout
-from .repositories import run_inbox
 from . import version_release
 from ..core.services import service_gaps
 from ..core.toolchains import toolchain_gaps
@@ -361,20 +361,14 @@ def watchdog(ctx: Ctx) -> None:
     for r in ctx.db.all("SELECT * FROM runs WHERE status='running'"):
         holder = ctx.leases.holder(r["ticket_key"])
         if holder != f"{r['id']}:{r['fence']}":
-            with ctx.db.pool.connection() as connection:
-                connection.execute("SELECT id FROM runs WHERE id=%s FOR UPDATE", (r["id"],))
-                undelivered = run_inbox.mark_undelivered(
-                    connection, str(r["id"]), "run lost before the next safe checkpoint")
-                connection.execute("UPDATE runs SET status='lost', outcome='lost', ended_at=now() WHERE id=%s"
-                                   " AND status='running'", (r["id"],))
-            ctx.db.run("UPDATE accounts SET status='idle', updated_at=now() WHERE id=%s AND status='working'", (r["account_id"],))
+            lost, _undelivered = run_inbox_lifecycle.watchdog_lost(ctx, r)
+            if not lost:
+                continue
+            ctx.db.run("UPDATE accounts SET status='idle', updated_at=now() WHERE id=%s AND status='working'"
+                       " AND NOT EXISTS (SELECT 1 FROM runs WHERE account_id=%s AND status='running' AND id<>%s)",
+                       (r["account_id"], r["account_id"], r["id"]))
             ctx.events.emit("run.lost", ticket=r["ticket_key"], run_id=str(r["id"]), fence=r["fence"], account=r["account_id"],
                             node=r["node"], reason="lease expired")
-            if undelivered:
-                ctx.events.emit("run.inbox.undelivered", ticket=r["ticket_key"], project=r["project"],
-                                run_id=str(r["id"]), fence=r["fence"], node=r["node"],
-                                reason="run lost before the next safe checkpoint",
-                                data={"message_ids": undelivered})
             if ctx.jira and not holder:
                 try:
                     st = ctx.jira.status(r["ticket_key"])

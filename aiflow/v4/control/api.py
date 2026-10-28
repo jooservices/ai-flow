@@ -1808,8 +1808,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         cooling = ctx.leases.cooling(account_id)
         status = "cooldown" if cooling else "working" if active else "idle" if other_machine_ready else "signed_out"
         ctx.db.run("UPDATE accounts SET status=%s,last_error=%s,updated_at=now(),"
-                   "idle_since=CASE WHEN %s='idle' THEN coalesce(idle_since,now()) ELSE NULL END WHERE id=%s",
-                   (status, summary[:300], status, account_id))
+                   "idle_since=CASE WHEN %s='idle' THEN coalesce(idle_since,now()) ELSE NULL END WHERE id=%s"
+                   " AND (%s='working' OR NOT EXISTS (SELECT 1 FROM runs WHERE account_id=%s AND status='running'))",
+                   (status, summary[:300], status, account_id, status, account_id))
 
     def quota_forecast_at_risk(account_id: str) -> bool:
         """Read the latest watchdog forecast without rebuilding weeks of run and probe history per poll."""
@@ -5464,12 +5465,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         run = run_row(run_id)
         if run["node"] != node:
             raise HTTPException(403, "run belongs to another node")
+        if int(run["fence"]) != body.fence:
+            raise HTTPException(409, "run fence is no longer active")
         still_owner = ctx.leases.valid(run["ticket_key"], run_id, body.fence)
         details = dict(body.details)
         details.pop("pr_url_source", None)  # provenance is set by the control API, never trusted from the worker
         if body.pr_url:
             details["pr_url_source"] = "current"
-        if run["step"] == "verify" and body.outcome in ("merged", "human"):
+        if still_owner and run["step"] == "verify" and body.outcome in ("merged", "human"):
             try:
                 details["post_merge_criteria"] = environment_reports.record_post_merge_criteria(
                     ctx, run, details.get("post_merge_criteria") or [])
@@ -5477,37 +5480,47 @@ def create_app(ctx: Ctx) -> FastAPI:
                 raise HTTPException(422, str(exc)) from exc
         run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
         details.pop("support_log_truncated", None)
-        if isinstance(run_log, str) and run_log:
+        outcome = body.outcome
+        late_result = run_inbox_control.finish(ctx, run, run_id, body, details, node)
+        account_update_allowed = not late_result and run_inbox_control.account_update_allowed(
+            ctx, run_id, run["account_id"], still_owner)
+        if late_result:
+            outcome = "lost"
+        elif isinstance(run_log, str) and run_log:
             try:
                 support_bundle.store_run_log(ctx, run_id, run_log)
             except Exception as exc:  # noqa: BLE001 - a missing diagnostic log must not lose the run result
                 log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
-        outcome = body.outcome
-        run_inbox_control.finish(ctx, run, run_id, body, details, node)
-        if body.quota:
-            ctx.db.run("UPDATE accounts SET quota=%s, updated_at=now() WHERE id=%s", (J(body.quota), run["account_id"]))
         sample_quota = body.quota or (ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}).get("quota") or {}
         ctx.db.run("INSERT INTO account_quota_samples (account_id,provider,model,quota,tokens_in,tokens_out,cost_usd,"
                    "duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                    (run["account_id"], run["provider"], run["model"], J(sample_quota), body.tokens_in,
                     body.tokens_out, body.cost_usd,
                     int((utcnow() - run["started_at"]).total_seconds() * 1000)))
-        if body.quota or body.error_kind == "quota":
+        if account_update_allowed and (body.quota or body.error_kind == "quota"):
             refresh_quota_forecast(run["account_id"], run["provider"], sample_quota)
-        if body.error_kind == "quota":
-            until = body.reset_at or (utcnow() + timedelta(minutes=30))
-            seconds = max(60, int((until - utcnow()).total_seconds()))
-            ctx.leases.cooldown(run["account_id"], seconds, "quota")
-            ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s, updated_at=now(),"
-                       " cooldown_since=coalesce(cooldown_since,now()), idle_since=NULL WHERE id=%s",
-                       ("cooldown", until, body.summary[:300], run["account_id"]))
-        elif body.error_kind == "auth":
-            mark_machine_auth_failure(run["account_id"], node, body.summary)
-        else:
-            ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
-                       " updated_at=now(), idle_since=coalesce(idle_since,now()), cooldown_since=NULL"
-                       " WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
-        if body.outcome == "tool_missing" and run["step"] == "dev":
+        if account_update_allowed:
+            if body.quota:
+                ctx.db.run("UPDATE accounts SET quota=%s, updated_at=now() WHERE id=%s",
+                           (J(body.quota), run["account_id"]))
+            if body.error_kind == "quota":
+                until = body.reset_at or (utcnow() + timedelta(minutes=30))
+                seconds = max(60, int((until - utcnow()).total_seconds()))
+                changed = ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s, updated_at=now(),"
+                                     " cooldown_since=coalesce(cooldown_since,now()), idle_since=NULL WHERE id=%s"
+                                     " AND NOT EXISTS (SELECT 1 FROM runs WHERE account_id=%s AND status='running')",
+                                     ("cooldown", until, body.summary[:300], run["account_id"], run["account_id"]))
+                if changed:
+                    ctx.leases.cooldown(run["account_id"], seconds, "quota")
+            elif body.error_kind == "auth":
+                mark_machine_auth_failure(run["account_id"], node, body.summary)
+            else:
+                ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
+                           " updated_at=now(), idle_since=coalesce(idle_since,now()), cooldown_since=NULL"
+                           " WHERE id=%s AND status='working' AND NOT EXISTS"
+                           " (SELECT 1 FROM runs WHERE account_id=%s AND status='running')",
+                           (body.outcome, body.summary[:300], run["account_id"], run["account_id"]))
+        if not late_result and body.outcome == "tool_missing" and run["step"] == "dev":
             recorded = tooling.record_missing(ctx, run, [str(x) for x in body.details.get("missing_tools") or []],
                                               body.summary)
             details["missing_tools"] = recorded
@@ -5519,7 +5532,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                             run_id))
             else:
                 ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s", (J({"missing_tools": recorded}), run_id))
-        if body.outcome == "environment_missing" and run["step"] == "dev":
+        if not late_result and body.outcome == "environment_missing" and run["step"] == "dev":
             recorded = environment_reports.record_missing(
                 ctx, run, [str(x) for x in body.details.get("missing_environment") or []], body.summary)
             ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s",
@@ -5528,13 +5541,14 @@ def create_app(ctx: Ctx) -> FastAPI:
                 outcome = "failed"
                 ctx.db.run("UPDATE runs SET outcome='failed', error_kind=coalesce(nullif(error_kind,''),"
                            "'missing_environment_unaccepted') WHERE id=%s", (run_id,))
-        try:
-            knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
-            knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
-        except Exception as exc:  # noqa: BLE001 - capture cannot undo a completed worker run
-            log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
+        if not late_result:
+            try:
+                knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
+                knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
+            except Exception as exc:  # noqa: BLE001 - capture cannot undo a completed worker run
+                log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
         dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
-        if ctx.jira and run["step"] == "dev" and body.outcome not in ("lost",):
+        if ctx.jira and run["step"] == "dev" and not late_result and body.outcome not in ("lost",):
             try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve
                 ctx.jira.add_worklog(run["ticket_key"], max(60, dur // 1000), run["started_at"],
                                      f"AI Flow {run['step']} by {run['account_id']} ({run['provider']}"
@@ -5548,11 +5562,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                         tokens_in=body.tokens_in, tokens_out=body.tokens_out, cost_usd=body.cost_usd,
                         still_owner=still_owner, pr_url=body.pr_url)
         try:  # quality by role: this result may switch the role off or settle a probation ticket
-            role_health.evaluate(ctx, run["account_id"])
-            if run["step"] == "verify":  # a verdict also decides the dev run it judged
-                dev = last_dev(run["ticket_key"])
-                if dev and dev["account_id"] != run["account_id"]:
-                    role_health.evaluate(ctx, dev["account_id"])
+            if not late_result:
+                role_health.evaluate(ctx, run["account_id"])
+                if run["step"] == "verify":  # a verdict also decides the dev run it judged
+                    dev = last_dev(run["ticket_key"])
+                    if dev and dev["account_id"] != run["account_id"]:
+                        role_health.evaluate(ctx, dev["account_id"])
         except Exception as e:  # noqa: BLE001
             log.warning("role health after run %s failed: %s", run_id, e)
         return {"ok": True, "still_owner": still_owner}

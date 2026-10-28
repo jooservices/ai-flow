@@ -16,15 +16,21 @@ def _emit_undelivered(ctx, run: dict, run_id: str, fence: int, node: str, reason
 
 
 def _close_messages(ctx, run: dict, run_id: str, fence: int, node: str, reason: str,
-                    update_sql: str, params: tuple = (), *, require_running: bool = False) -> list[int]:
+                    update_sql: str, params: tuple = (), *, require_running: bool = False,
+                    allowed_statuses: tuple[str, ...] = (), require_unrecorded: bool = False) -> tuple[list[int], str]:
     with ctx.db.pool.connection() as connection:
-        current = connection.execute("SELECT status FROM runs WHERE id=%s FOR UPDATE", (run_id,)).fetchone()
+        current = connection.execute("SELECT status,result_received_at FROM runs WHERE id=%s FOR UPDATE",
+                                     (run_id,)).fetchone()
         if require_running and (not current or current["status"] != "running"):
             raise HTTPException(409, "run is no longer active")
+        if allowed_statuses and (not current or current["status"] not in allowed_statuses):
+            raise HTTPException(409, "run is no longer active")
+        if require_unrecorded and current["result_received_at"]:
+            raise HTTPException(409, "run result was already recorded")
         message_ids = run_inbox.mark_undelivered(connection, run_id, reason)
         connection.execute(update_sql, params)
     _emit_undelivered(ctx, run, run_id, fence, node, reason, message_ids)
-    return message_ids
+    return message_ids, current["status"]
 
 
 def heartbeat(ctx, run: dict, run_id: str, body, node: str) -> dict:
@@ -66,21 +72,48 @@ def heartbeat(ctx, run: dict, run_id: str, body, node: str) -> dict:
                        "included_at": None} for message in messages]}
 
 
-def finish(ctx, run: dict, run_id: str, body, details: dict, node: str) -> None:
+def finish(ctx, run: dict, run_id: str, body, details: dict, node: str) -> bool:
     reason = "run ended before the next safe checkpoint"
-    with ctx.db.pool.connection() as connection:
-        current = connection.execute("SELECT status FROM runs WHERE id=%s FOR UPDATE", (run_id,)).fetchone()
-        if not current or current["status"] != "running":
-            raise HTTPException(409, "run is no longer active")
-        message_ids = run_inbox.mark_undelivered(connection, run_id, reason)
-        connection.execute(
-            "UPDATE runs SET outcome=%s, error_kind=%s, reset_at=%s, tokens_in=tokens_in+%s, tokens_out=tokens_out+%s,"
-            " cost_usd=cost_usd+%s, branch=coalesce(nullif(%s,''),branch), pr_url=coalesce(nullif(%s,''),pr_url),"
-            " head_sha=coalesce(nullif(%s,''),head_sha), summary=%s, details=details || %s, status='finished', ended_at=now()"
-            " WHERE id=%s",
-            (body.outcome, body.error_kind, body.reset_at, body.tokens_in, body.tokens_out, body.cost_usd,
-             body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(details), run_id))
-    _emit_undelivered(ctx, run, run_id, body.fence, node, reason, message_ids)
+    update_sql = (
+        "UPDATE runs SET outcome=CASE WHEN status='running' THEN %s ELSE outcome END,"
+        " error_kind=CASE WHEN status='running' THEN %s ELSE error_kind END,"
+        " reset_at=CASE WHEN status='running' THEN %s ELSE reset_at END,"
+        " tokens_in=tokens_in+%s,tokens_out=tokens_out+%s,cost_usd=cost_usd+%s,"
+        " branch=CASE WHEN status='running' THEN coalesce(nullif(%s,''),branch) ELSE branch END,"
+        " pr_url=CASE WHEN status='running' THEN coalesce(nullif(%s,''),pr_url) ELSE pr_url END,"
+        " head_sha=CASE WHEN status='running' THEN coalesce(nullif(%s,''),head_sha) ELSE head_sha END,"
+        " summary=CASE WHEN status='running' THEN %s ELSE summary END,"
+        " details=CASE WHEN status='running' THEN details || %s ELSE details END,"
+        " status=CASE WHEN status='running' THEN 'finished' ELSE status END,"
+        " ended_at=CASE WHEN status='running' THEN now() ELSE ended_at END,result_received_at=now()"
+        " WHERE id=%s AND status IN ('running','lost') AND result_received_at IS NULL")
+    params = (body.outcome, body.error_kind, body.reset_at, body.tokens_in, body.tokens_out, body.cost_usd,
+              body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(details), run_id)
+    _message_ids, run_status = _close_messages(ctx, run, run_id, body.fence, node, reason, update_sql, params,
+                                               allowed_statuses=("running", "lost"), require_unrecorded=True)
+    late = run_status == "lost"
+    return late
+
+
+def account_update_allowed(ctx, run_id: str, account_id: str, still_owner: bool) -> bool:
+    if not still_owner:
+        return False
+    return not ctx.db.one("SELECT 1 AS active FROM runs WHERE account_id=%s AND status='running' AND id<>%s LIMIT 1",
+                          (account_id, run_id))
+
+
+def watchdog_lost(ctx, run: dict) -> tuple[bool, list[int]]:
+    run_id, fence = str(run["id"]), int(run["fence"])
+    reason = "run lost before the next safe checkpoint"
+    try:
+        message_ids, _ = _close_messages(ctx, run, run_id, fence, run["node"], reason,
+                                         "UPDATE runs SET status='lost', outcome='lost', ended_at=now()"
+                                         " WHERE id=%s AND status='running'", (run["id"],), require_running=True)
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        return False, []
+    return True, message_ids
 
 
 def release(ctx, run: dict, run_id: str, body, node: str) -> bool:

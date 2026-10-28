@@ -12,8 +12,10 @@ class FakeHeartbeat:
         self.messages = list(messages)
         self.lost = threading.Event()
         self.included = []
+        self.checkpoints = 0
 
     def checkpoint(self):
+        self.checkpoints += 1
         if self.messages:
             return [self.messages.pop(0)]
         return []
@@ -59,6 +61,25 @@ def test_worker_does_not_start_a_continuation_when_no_guidance_arrived():
     result = run_with_inbox(adapter, RunSpec(prompt="Original", cwd="/tmp", account_home="/tmp"), FakeHeartbeat([]))
     assert result.final_text == "Done"
     assert len(adapter.specs) == 1
+
+
+def test_continuations_share_the_original_run_time_budget():
+    adapter = FakeAdapter([RunResult(final_text="First pass", duration_s=9),
+                           RunResult(final_text="Updated pass", duration_s=5)])
+    heartbeat = FakeHeartbeat([{"id": 1, "kind": "context", "author": "owner", "body": "Keep the change small."}])
+
+    run_with_inbox(adapter, RunSpec(prompt="Original", cwd="/tmp", account_home="/tmp", timeout_s=30), heartbeat)
+
+    assert len(adapter.specs) == 2 and adapter.specs[1].timeout_s == 21
+
+
+def test_expired_run_budget_does_not_receive_guidance_for_an_unstarted_continuation():
+    adapter = FakeAdapter([RunResult(final_text="First pass", duration_s=61)])
+    heartbeat = FakeHeartbeat([{"id": 1, "kind": "request", "author": "owner", "body": "Fix one more test."}])
+
+    run_with_inbox(adapter, RunSpec(prompt="Original", cwd="/tmp", account_home="/tmp", timeout_s=60), heartbeat)
+
+    assert len(adapter.specs) == 1 and heartbeat.checkpoints == 0
 
 
 def test_heartbeat_receipt_is_retryable_and_inclusion_happens_only_after_provider_start():

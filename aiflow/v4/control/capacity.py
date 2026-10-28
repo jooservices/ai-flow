@@ -242,10 +242,10 @@ def reported_run_tokens(run: dict[str, Any]) -> int:
     return reservation_tokens(details)
 
 
-def lost_run_reservation_tokens(run: dict[str, Any], quota_observed_at: datetime | None) -> int:
-    """Keep a lost run's estimate until a provider snapshot taken after the loss reconciles it."""
-    lost_at = run.get("ended_at")
-    if lost_at and quota_observed_at and quota_observed_at > lost_at:
+def unresolved_run_reservation_tokens(run: dict[str, Any], quota_observed_at: datetime | None) -> int:
+    """Keep an unreported terminal run's estimate until a newer provider snapshot reconciles it."""
+    terminal_at = run.get("ended_at")
+    if terminal_at and quota_observed_at and quota_observed_at > terminal_at:
         return 0
     details = run.get("details") if isinstance(run.get("details"), dict) else {}
     return reservation_tokens(details)
@@ -260,16 +260,16 @@ def with_active_quota_reservations(db, forecasts: dict[str, dict[str, Any]]) -> 
         "SELECT id,quota_observed_at FROM accounts WHERE id=ANY(%s)", (account_ids,))}
     reservations: dict[str, int] = {}
     for run in db.all("SELECT r.account_id,r.status,r.details,r.tokens_in,r.tokens_out,r.ended_at,r.started_at"
-                      " FROM runs r WHERE r.account_id=ANY(%s) AND (r.status IN ('running','lost') OR"
+                      " FROM runs r WHERE r.account_id=ANY(%s) AND (r.status IN ('running','lost','released') OR"
                       " (r.status='finished' AND r.ended_at>(SELECT a.quota_observed_at FROM accounts a"
                       " WHERE a.id=r.account_id)))", (account_ids,)):
         account_id = str(run["account_id"])
         forecast = forecasts.get(account_id) or {}
         is_active = run["status"] == "running"
-        is_lost = run["status"] == "lost"
+        is_unresolved = run["status"] in {"lost", "released"}
         snapshot_at = observed_at.get(account_id)
-        if is_lost:
-            tokens = lost_run_reservation_tokens(run, snapshot_at)
+        if is_unresolved:
+            tokens = unresolved_run_reservation_tokens(run, snapshot_at)
             if not tokens:
                 continue
             reservations[account_id] = reservations.get(account_id, 0) + tokens

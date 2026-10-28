@@ -4754,7 +4754,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
         if capacity_routing and out:
             out = route_capacity(account_id, node, out, ticket_key=ticket_key)
-        return worker_candidates.diversify_dev_candidates(out, account_id, prio, PRIORITY)
+        return out
 
     def route_capacity(account_id: str, node: str, offered: list[dict],
                        ticket_key: str | None = None) -> list[dict]:
@@ -4869,11 +4869,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "description": "Review incidents and follow up on blocked or slow work.",
                 "jira_created": None, "step": "master"}
 
-    def entitled_candidates(account: str, node: str) -> tuple[list[dict], str]:
+    def entitled_candidates(account: str, node: str, worker_id: str = "") -> tuple[list[dict], str]:
         """Filter offers by account, machine, and project plan limits without affecting active runs."""
         state = licensing.enforce_work_entitlement(ctx, account, node,
                                                     public_key=ctx.settings.license_public_key)
         candidates = eligible(account, node)
+        project_priorities = {key: int(getattr(project, "priority", 5) or 5)
+                              for key, project in ctx.repo().projects.items()}
         allowed: list[dict] = []
         refused: list[str] = []
         for ticket in candidates:
@@ -4884,13 +4886,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                 refused.append(str(exc))
             else:
                 allowed.append(ticket)
+        allowed = worker_candidates.diversify_dev_candidates(allowed, account, worker_id,
+                                                              project_priorities, PRIORITY)
         reason = refused[0] if candidates and not allowed and refused else ""
         return allowed, reason
 
     @app.get("/v1/work/candidates")
-    def candidates(account: str, node: str = Depends(node_auth)) -> dict:
+    def candidates(account: str, node: str = Depends(node_auth), worker_id: str = Query("", max_length=128)) -> dict:
         try:
-            tickets, reason = entitled_candidates(account, node)
+            tickets, reason = entitled_candidates(account, node, worker_id)
         except licensing.LicenseError as exc:
             return {"tickets": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)

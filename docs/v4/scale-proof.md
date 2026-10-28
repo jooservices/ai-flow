@@ -15,9 +15,10 @@ One run drives the real FastAPI control application in process and uses real Pos
 - **50 machines**, each joined with a join token and heartbeating like a node agent; every machine serves 4
   projects and every project is served by 2 machines.
 - **100 licensed AI accounts and 200 simulated sessions** (two concurrent sessions per Business-plan account).
-  Sessions are spread across the 50 simulated machines and four provider types. A session polls
-  `GET /v1/work/candidates`, claims with `POST /v1/work/claim`, heartbeats, reports `done` and releases the lease. No AI
-  provider or real machine is used.
+  Sessions are spread across the 50 simulated machines and four provider types. Each sends a stable `worker_id` to
+  `GET /v1/work/candidates`, claims with `POST /v1/work/claim`, heartbeats, reports `done` and releases the lease.
+  This matches production's per-worker identity and tests concurrent sessions sharing one account. No AI provider or
+  real machine is used.
 - **Ticket traffic** in three waves (200, 80 and 80 tickets that become ready together): a morning burst that keeps
   about 170 sessions working at once, then trickles. About 5 % of the tickets are held (`aiflow-hold`) and about 5 %
   are blocked by an earlier ticket and become ready when it is Done. Priorities and projects are skewed like real

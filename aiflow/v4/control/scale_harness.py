@@ -316,7 +316,8 @@ def _claim_session(client, session: dict[str, str], headers: dict[str, dict[str,
     conflicts = 0
     for attempt in range(max(1, max_attempts)):
         started = time.perf_counter()
-        candidates = call("get", "/v1/work/candidates", params={"account": session["id"]}, headers=h)
+        candidates = call("get", "/v1/work/candidates",
+                          params={"account": session["id"], "worker_id": session["session"]}, headers=h)
         if candidates.status_code != 200:
             return {"session": session, "conflicts": conflicts,
                     "error": f"/v1/work/candidates answered HTTP {candidates.status_code}"}

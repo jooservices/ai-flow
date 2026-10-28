@@ -50,6 +50,8 @@ class CodexAdapter(Adapter):
             u = ev.get("usage") or {}
             res.tokens_in += int(u.get("input_tokens") or 0)
             res.tokens_out += int(u.get("output_tokens") or 0) + int(u.get("reasoning_output_tokens") or 0)
+            if u.get("input_tokens") is not None and u.get("output_tokens") is not None:
+                res.token_usage_reported = True
         elif t in ("error", "turn.failed"):
             msg = str(ev.get("message") or (ev.get("error") or {}).get("message") or "")
             res.final_text = res.final_text or ""

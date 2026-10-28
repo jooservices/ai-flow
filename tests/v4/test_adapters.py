@@ -69,7 +69,8 @@ def test_codex_and_grok_events_from_spikes():
     res = RunResult()
     CodexAdapter().parse_event({"type": "item.completed", "item": {"type": "agent_message", "text": "SUMMARY: x\nRESULT: DONE"}}, res)
     CodexAdapter().parse_event({"type": "turn.completed", "usage": {"input_tokens": 14152, "output_tokens": 17, "reasoning_output_tokens": 3}}, res)
-    assert res.tokens_in == 14152 and res.tokens_out == 20 and "RESULT: DONE" in res.final_text
+    assert res.tokens_in == 14152 and res.tokens_out == 20 and res.token_usage_reported
+    assert "RESULT: DONE" in res.final_text
     g = RunResult()
     GrokAdapter().parse_event({"type": "error", "message": "Internal error: { \"message\": \"API error (status 402 Payment Required):"
                                                             " Grok Build usage balance exhausted\" }"}, g)
@@ -77,6 +78,35 @@ def test_codex_and_grok_events_from_spikes():
     auth = RunResult()
     GrokAdapter().parse_event({"type": "error", "message": "You are not signed in. Please run /login."}, auth)
     assert auth.error_kind == "auth"
+
+
+def test_adapters_distinguish_measured_zero_usage_from_missing_usage():
+    codex_zero, codex_missing = RunResult(), RunResult()
+    CodexAdapter().parse_event({"type": "turn.completed", "usage": {"input_tokens": 0, "output_tokens": 0}}, codex_zero)
+    CodexAdapter().parse_event({"type": "turn.completed", "usage": {}}, codex_missing)
+    assert codex_zero.token_usage_reported is True
+    assert codex_missing.token_usage_reported is False
+
+    claude_zero, claude_missing = RunResult(), RunResult()
+    ClaudeAdapter().parse_event({"type": "result", "usage": {"input_tokens": 0, "output_tokens": 0}}, claude_zero)
+    ClaudeAdapter().parse_event({"type": "result", "usage": {}}, claude_missing)
+    assert claude_zero.token_usage_reported is True
+    assert claude_missing.token_usage_reported is False
+
+    grok_zero, grok_missing = RunResult(), RunResult()
+    GrokAdapter().parse_event({"type": "usage", "usage": {"input_tokens": 0, "output_tokens": 0}}, grok_zero)
+    GrokAdapter().parse_event({"type": "usage", "usage": {}}, grok_missing)
+    assert grok_zero.token_usage_reported is True
+    assert grok_missing.token_usage_reported is False
+    grok_invalid = RunResult()
+    GrokAdapter().parse_event({"type": "usage", "usage": {"input_tokens": "unknown", "output_tokens": 0}},
+                              grok_invalid)
+    assert grok_invalid.token_usage_reported is False
+
+    grok_aggregate = RunResult()
+    GrokAdapter().parse_event({"type": "usage", "usage": {"input_tokens": 10, "output_tokens": 4}}, grok_aggregate)
+    GrokAdapter().parse_event({"type": "end", "usage": {}}, grok_aggregate)
+    assert (grok_aggregate.tokens_in, grok_aggregate.tokens_out) == (10, 4)
 
 
 def test_codex_records_failed_command_execution_output():

@@ -61,6 +61,18 @@ def refresh_forecasts(ctx):
         ctx.db.run("UPDATE accounts SET quota_forecast=%s WHERE id=%s", (J(forecast), account_id))
 
 
+def test_reported_run_tokens_preserves_measured_zero_and_falls_back_when_unknown():
+    measured_zero = {"tokens_in": 0, "tokens_out": 0, "details": {
+        "token_usage_reported": True, "quota_reservation": {"tokens": 25_000}}}
+    missing = {"tokens_in": 0, "tokens_out": 0, "details": {
+        "token_usage_reported": False, "quota_reservation": {"tokens": 25_000}}}
+    legacy = {"tokens_in": 0, "tokens_out": 0, "details": {"quota_reservation": {"tokens": 25_000}}}
+
+    assert capacity.reported_run_tokens(measured_zero) == 0
+    assert capacity.reported_run_tokens(missing) == 25_000
+    assert capacity.reported_run_tokens(legacy) == 25_000
+
+
 def test_estimate_uses_ticket_type_size_and_area_history_as_ranges(db):
     add_history_ticket(db, "TESTWP-EST-1", tokens=10_000, seconds=600)
     add_history_ticket(db, "TESTWP-EST-2", tokens=12_000, seconds=900, reworked=True)
@@ -198,6 +210,26 @@ def test_capacity_reserves_running_estimates_and_unobserved_reported_run_usage(c
     ctx.db.run("UPDATE accounts SET quota_observed_at=%s WHERE id='claude-01'", (ended_at + timedelta(seconds=1),))
     reconciled = capacity.with_active_quota_reservations(ctx.db, {"claude-01": forecast})
     assert reconciled["claude-01"]["windows"][0]["left_tokens"] == 100_000
+
+
+def test_capacity_uses_measured_zero_instead_of_the_run_reservation(ctx):
+    observed_at = datetime.now(UTC) - timedelta(minutes=5)
+    forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
+    ctx.db.run("INSERT INTO accounts (id,provider,node) VALUES ('claude-01','claude','cc')"
+               " ON CONFLICT (id) DO NOTHING")
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s,quota_observed_at=%s WHERE id='claude-01'",
+               (J(forecast), observed_at))
+    run_id = str(uuid.uuid4())
+    details = {"quota_reservation": {"tokens": 25_000}, "token_usage_reported": True}
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,started_at,"
+               "ended_at,tokens_in,tokens_out,details)"
+               " VALUES (%s,'TESTWP-MEASURED-ZERO','TESTWP','dev','claude-01','claude','cc',1,'finished','done',%s,%s,0,0,%s)",
+               (run_id, observed_at + timedelta(seconds=1), datetime.now(UTC), J(details)))
+
+    remaining = capacity.with_active_quota_reservations(ctx.db, {"claude-01": forecast})
+
+    assert remaining["claude-01"]["windows"][0]["left_tokens"] == 100_000
 
 
 @pytest.mark.parametrize("status", ["lost", "released"])

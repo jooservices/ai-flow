@@ -236,9 +236,11 @@ def reported_run_tokens(run: dict[str, Any]) -> int:
         tokens = max(0, int(run.get("tokens_in") or 0)) + max(0, int(run.get("tokens_out") or 0))
     except (TypeError, ValueError):
         tokens = 0
+    details = run.get("details") if isinstance(run.get("details"), dict) else {}
+    if "token_usage_reported" in details:
+        return tokens if details["token_usage_reported"] is True else reservation_tokens(details)
     if tokens:
         return tokens
-    details = run.get("details") if isinstance(run.get("details"), dict) else {}
     return reservation_tokens(details)
 
 

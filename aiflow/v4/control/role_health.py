@@ -42,6 +42,7 @@ UNSCORED_KINDS = {"quota", "auth", "infra", "network", "machine", "node", "tool"
                   "missing-tool", "offline", "toolchain", "services"}
 SUCCESS_OUTCOMES = {"merged", "human", "refined", "questions", "assessed", "answered", "escalated"}
 STOPPED_OUTCOMES = {"timeout", "lost"}
+STOPPED_KINDS = {"timeout", "lost"}  # a timed-out run is stored as outcome failed with this error kind
 STOPPED_WEIGHT = 0.25        # share of a failure that a run stopped by the time limit or a lost lease counts
 
 RUNS_SQL = """
@@ -105,7 +106,7 @@ def classify(run: dict) -> Scored | None:
         return Scored("finished", 0.0, rework=True)
     if outcome == "done" or outcome in SUCCESS_OUTCOMES:
         return Scored("finished", 0.0)
-    if outcome in STOPPED_OUTCOMES:
+    if outcome in STOPPED_OUTCOMES or (outcome == "failed" and kind in STOPPED_KINDS):
         # Stopped by the time limit or the loss of its lease: mostly the size of the ticket or the load of the
         # machine, not the quality of the AI. It weighs a quarter of a failed run, so at the default 60% threshold a
         # busy machine alone cannot switch a role off (it did: 7 of the last 10 runs of the best account were

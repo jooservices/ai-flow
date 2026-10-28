@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import threading
+import re
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 import redis
@@ -20,8 +22,9 @@ from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.fencing import Leases
 from aiflow.v4.core.settings import Settings
 
-REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "redis://127.0.0.1:16399/5")
-DATABASE_URL = os.environ.get("AIFLOW4_TEST_DATABASE_URL", "postgresql://aiflow:test@127.0.0.1:15499/aiflow4")
+REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "")
+DATABASE_URL = os.environ.get("AIFLOW4_TEST_DATABASE_URL", "")
+REDIS_PREFIX = os.environ.get("AIFLOW4_TEST_REDIS_PREFIX", os.environ.get("REDIS_PREFIX", "aiflow4_test:"))
 
 
 @pytest.fixture(autouse=True)
@@ -32,8 +35,15 @@ def runtime_operation_key_in_test_workspace(tmp_path, monkeypatch):
 
 @pytest.fixture
 def leases():
+    if not REDIS_URL:
+        pytest.fail("AIFLOW4_TEST_REDIS_URL must point at an isolated test Redis database")
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        redis_db = urlsplit(REDIS_URL).path.strip("/")
+        if redis_db in {"", "0", "5"} or not (
+                REDIS_PREFIX.endswith("_test:") or re.search(r"_wt[a-z0-9]+:$", REDIS_PREFIX)):
+            pytest.fail("local tests require a non-live Redis index and a *_test: or *_wt<id>: key prefix")
     r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-    prefix = f"t{uuid.uuid4().hex[:8]}:"
+    prefix = f"{REDIS_PREFIX}t{uuid.uuid4().hex[:8]}:"
     yield Leases(r, prefix)
     for k in r.scan_iter(match=prefix + "*"):
         r.delete(k)
@@ -41,41 +51,16 @@ def leases():
 
 @pytest.fixture(scope="session")
 def test_database_url():
-    """A database of its own for this pytest session (created next to the configured one, dropped at the end), so
-    parallel dev runs sharing one PostgreSQL server never drop each other's schema or wait on its migration lock.
-    Falls back to the configured database when the role may not create databases."""
-    import psycopg
-    from psycopg import sql
-    from psycopg.conninfo import make_conninfo
-    from aiflow.v4.core import testdb
-    name = testdb.new_name()
-    try:
-        try:  # leftovers of killed sessions: keep at most a handful of idle databases around
-            testdb.sweep(DATABASE_URL)
-        except Exception:  # noqa: BLE001 - a missing right to list or drop must not stop the tests
-            pass
-        admin = psycopg.connect(DATABASE_URL, autocommit=True)
-        template = os.environ.get("AIFLOW4_TEST_DATABASE_TEMPLATE")  # a database that already carries extensions (pgvector)
-        admin.execute(sql.SQL("CREATE DATABASE {}" + (" TEMPLATE {}" if template else ""))
-                      .format(sql.Identifier(name), *([sql.Identifier(template)] if template else [])))
-    except psycopg.Error:
-        yield DATABASE_URL
-        return
-    own = make_conninfo(DATABASE_URL, dbname=name)
-    # Keep the per-session database visible as active to the node agent's idle test-database sweeper. Individual
-    # test DB pools close between tests, and a long docs/browser check must not make this still-running session
-    # look like an abandoned database.
-    session_guard = psycopg.connect(own, autocommit=True)
-    try:
-        yield own
-    finally:
-        session_guard.close()
-        try:
-            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
-        except psycopg.Error:
-            pass
-        admin.close()
+    """Use only the database supplied by the test runner; never create, sweep or drop databases here."""
+    if not DATABASE_URL:
+        pytest.fail("AIFLOW4_TEST_DATABASE_URL must point at a dedicated test or worktree database")
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        from psycopg.conninfo import conninfo_to_dict
 
+        name = str(conninfo_to_dict(DATABASE_URL).get("dbname") or urlsplit(DATABASE_URL).path.lstrip("/"))
+        if not (name.endswith("_test") or re.search(r"_wt[a-z0-9]+$", name)):
+            pytest.fail("local tests require a dedicated *_test or *_wt<id> database")
+    yield DATABASE_URL
 
 @pytest.fixture
 def db(test_database_url):
@@ -431,7 +416,7 @@ class FakeGitHub:
 def ctx(db, leases, control_repo):
     s = Settings(join_token="join-secret", join_control_url="https://control.example.test",
                  reviewer_token="review-secret", owner_token="owner-secret", lease_ms=90_000,
-                 jira_projects=["TESTWP"])
+                 jira_projects=["TESTWP"], canary_bug_project="TESTFLOW")
     snap = ControlRepo.load(control_repo)
     c = Ctx(settings=s, db=db, leases=leases, events=Events(db), repo=lambda: snap, jira=FakeJira(), github=FakeGitHub())
     # General integration fixtures exercise multi-node, multi-account flows; the licensing tests restore the

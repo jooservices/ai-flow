@@ -84,6 +84,34 @@ def test_developer_pr_lookup_is_fenced_and_scoped_to_the_run_repository(client, 
     assert wrong_repo.status_code == 403
 
 
+def test_worker_poll_counts_running_project_tickets_only_when_a_limit_is_configured(client, ctx):
+    node = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-PARALLEL-LIMIT")
+    original_all = ctx.db.all
+    project_count_queries = []
+
+    def recording_all(sql, params=()):
+        if "SELECT project,count(*) AS count FROM runs" in sql:
+            project_count_queries.append((sql, params))
+        return original_all(sql, params)
+
+    ctx.db.all = recording_all
+    response = client.get("/v1/work/candidates?account=claude-01", headers=node)
+    assert response.status_code == 200
+    assert "TESTWP-PARALLEL-LIMIT" in {ticket["key"] for ticket in response.json()["tickets"]}
+    assert project_count_queries == []  # the fixture project's limit is zero (unlimited)
+
+    ctx.repo().projects["TESTWP"].limits["parallel"] = 1
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status)"
+               " VALUES (%s,'TESTWP-ACTIVE','TESTWP','dev','codex-01','codex','node1',1,'running')",
+               (str(uuid.uuid4()),))
+    response = client.get("/v1/work/candidates?account=claude-01", headers=node)
+    assert response.status_code == 200
+    assert response.json()["tickets"] == []
+    assert len(project_count_queries) == 1
+    assert "project=ANY(%s)" in project_count_queries[0][0]
+
+
 def test_board_snapshot_marks_already_done_runs_and_keeps_the_pull_request_link(client, ctx):
     add_ticket(ctx.db, "TESTWP-8", status="In Verify")
     url = "https://github.com/jooservices/test-aiflow-wp/pull/43"
@@ -242,9 +270,12 @@ def test_sync_accounts_restores_projects_for_configured_node_rows_without_join_t
 
 def test_command_center_shows_copyable_join_command_and_device_code_sign_in_guide(client):
     page = Path("aiflow/v4/control/ui/console.html").read_text()
-    docs = Path("docs/v4/node-join.md").read_text()
-    assert "Join a node" in page and "join-tokens" in page and "--token ' + d.token" in page
-    assert "AIFLOW4_JOIN_TOKEN" in page and "codex login --device-auth" in docs
+    docs = " ".join(Path("docs/v4/node-join.md").read_text().split())
+    assert "Join a node" in page and "join-command" in page and "Show one-time command" in page
+    assert "--token ' + d.token" not in page and "AIFLOW4_JOIN_TOKEN" not in page
+    assert "AIFLOW4_JOIN_TOKEN" not in docs and "one-use enrollment grant" in docs
+    assert "sign-in link and code" in docs and "browser" in docs
+    assert "provider login commands in a terminal" in docs and "codex login --device-auth" not in docs
     assert "AI provider credential" in docs and "never sent to the control plane" in docs
 
 
@@ -428,7 +459,7 @@ def test_command_center_events_survive_many_heartbeats(client, ctx):
     assert "policy.denied" in types and "node.joined" in types
 
 
-def test_full_claim_flow_with_fencing(client, ctx):
+def test_full_claim_flow_with_fencing(client, ctx, monkeypatch):
     cc = join(client, "cc")
     assert client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "workers": [{"account": "claude-01", "state": "idle"}]},
                        headers=cc).json()["desired"]["accounts"] == ["claude-01", "opencode-01"]
@@ -444,12 +475,19 @@ def test_full_claim_flow_with_fencing(client, ctx):
     # explicit-only account gets nothing without its label
     assert client.get("/v1/work/candidates", params={"account": "opencode-01"}, headers=cc).json()["tickets"] == []
 
-    r = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).json()
+    with monkeypatch.context() as patch:
+        patch.setattr(ctx.leases, "held_keys", lambda: (_ for _ in ()).throw(
+            AssertionError("a scoped claim should not scan every Redis lease")))
+        r = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).json()
     assert r["claimed"] and r["fence"] == 1 and r["model"] == "opus" and r["provider"] == "claude"
     assert r["project"]["repo"] == "jooservices/test-aiflow-wp" and r["identity"][0].endswith("[bot]")
     run_id, fence = r["run_id"], r["fence"]
     # second claim of the same ticket is refused (held), candidate list no longer shows it
-    assert client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).status_code == 409
+    with monkeypatch.context() as patch:
+        patch.setattr(ctx.leases, "held_keys", lambda: (_ for _ in ()).throw(
+            AssertionError("an already-held claim should not scan every Redis lease")))
+        duplicate = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc)
+        assert duplicate.status_code == 409 and duplicate.json()["reason"] == "ticket is already claimed"
     assert [t["key"] for t in client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"]] == ["TESTWP-2"]
 
     assert client.post(f"/v1/runs/{run_id}/heartbeat", json={"fence": fence, "progress": {"phase": "ai"}}, headers=cc).status_code == 200
@@ -478,6 +516,24 @@ def test_full_claim_flow_with_fencing(client, ctx):
     refused = ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE accepted = false")["n"]
     assert refused == 1
     assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "lost"
+
+
+def test_worker_claim_reuses_the_live_repo_overlay_once_per_request(client, ctx, monkeypatch):
+    cc = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-13")
+    original_one = ctx.db.one
+    overlay_reads = []
+
+    def count_overlay_reads(sql, params=None):
+        if "EXISTS(SELECT 1 FROM nodes WHERE removed_at IS NOT NULL)" in sql:
+            overlay_reads.append(sql)
+        return original_one(sql, params)
+
+    monkeypatch.setattr(ctx.db, "one", count_overlay_reads)
+    response = client.post("/v1/work/claim", json={"ticket": "TESTWP-13", "account": "claude-01"}, headers=cc)
+
+    assert response.status_code == 200 and response.json()["claimed"] is True
+    assert len(overlay_reads) == 1
 
 
 def test_quota_result_cools_the_account_down(client, ctx):

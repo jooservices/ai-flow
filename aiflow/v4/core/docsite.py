@@ -48,6 +48,8 @@ CROSS_SCREEN_DOCS = {"docs/v4/console-layouts.md": LAYOUT_SCREEN_VIEWS}
 # feature documentation to live under docs/v4. Keep the generated Help URL available without duplicating it in
 # docs/guide/screens.
 SCREEN_TOPIC_DOCS = {"settings": "docs/v4/runtime-settings.md"}
+# Feature topics linked from screen guides are copied into the Help site so those links work after packaging.
+TOPIC_DOCS = {"scale-proof": "docs/v4/scale-proof.md"}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
@@ -56,6 +58,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderGitHubIntegrations": ("integrations",),
     "renderLive": None,
     "renderDashboard": ("cc",),
+    "scaleProofPanel": ("cc",),
     "dashboardProjectCounts": ("cc",),
     "providerUsageChart": ("cc",),
     "dashboardSpark": ("cc",),
@@ -80,6 +83,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "saveConsoleTheme": None,
     "renderCC": ("cc", "machines"),
     "renderNodeJoin": ("cc",),
+    "submitNodeJoin": ("cc",),
     "renderSA": ("sa",),
     "renderDHead": ("work", "delivery"),
     "renderProjectPicker": ("work", "delivery"),
@@ -177,7 +181,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "viewAllowed": None,
     "syncMenuVisibility": None,
     "applyRoleNavigation": None,
-    "pollConsoleSession": None,
+    "pollConsoleSession": ("cc",),
     "loadPrefs": ("cc", "work"),
     "savePrefs": ("cc", "work"),
     "projTickets": ("work", "delivery"),
@@ -206,6 +210,9 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # `HINTS` are mapped to their own screen instead.
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
+    (re.compile(r"^\s+(?:release_running|release_failed|scale_proof_(?:missing|failed)): function"), "cc"),
+    (re.compile(r"^\s+(?:release_running|release_failed|scale_proof_(?:missing|failed)): function"), "business"),
+    (re.compile(r"Scale proof \(/v1/state scale_proof\)|value against every budget"), "cc"),
     (re.compile(r"runtimeSettings|data-runtime|runtime-setting"), "settings"),
     (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
@@ -273,6 +280,7 @@ SCREEN_VIEW_PATTERNS = (
 # Styles for the V2 dashboard and its Work board destination are outside the static view sections.
 SCREEN_LINE_VIEWS += (
     (re.compile(r"conflictsError"), "delivery"),
+    (re.compile(r"JOIN_FIELDS"), "cc"),
     # The Projects environment editor can remain interactive when its save/scan toast is visible.
     (re.compile(r"^\s*\.toasts\{"), "projects"),
     (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|capacity: \{ data:"), "cc"),
@@ -294,6 +302,12 @@ SCREEN_LINE_VIEWS += (
 # Lines that belong to one screen even inside a shared renderer: they narrow that renderer to this screen.
 SCREEN_LOCAL_LINE_VIEWS = (
     (re.compile(r"logs-nav"), "cc"),
+)
+
+# A new panel inserted into the shared Command Center renderer can be specific to one screen.
+SCREEN_RENDERER_LINE_VIEWS = (
+    (re.compile(r"scaleProofPanel\(d\.scale_proof(?:,.*)?\)"), ("cc",)),
+    (re.compile(r"var READY_TEXT = window\.AIFlowReadyText"), ("cc", "business")),
 )
 
 # A change to one of these needs a documentation change in the same pull request.
@@ -623,7 +637,7 @@ nav a,a{color:#6cb0ff}pre{background:#1c2227}td,th{border-color:#2c353d}blockquo
 @media(max-width:700px){body{display:block}nav{width:auto}main{padding:16px}}
 """
 SECTIONS = [("", "Start"), ("user", "User guides"), ("screens", "Console screens"), ("admin", "Administrator guide"),
-            ("runbooks", "Runbooks"), ("reference", "Reference")]
+            ("topics", "Topics"), ("runbooks", "Runbooks"), ("reference", "Reference")]
 
 
 def collect_pages(guide: Path = GUIDE, with_api: bool = True, version: str = "") -> dict[str, str]:
@@ -634,6 +648,10 @@ def collect_pages(guide: Path = GUIDE, with_api: bool = True, version: str = "")
             source = _read_doc(source_path)
             if source:
                 pages[f"screens/{view}.md"] = source
+        for topic, source_path in TOPIC_DOCS.items():
+            source = _read_doc(source_path)
+            if source:
+                pages[f"topics/{topic}.md"] = source
     if with_api:
         pages[API_PAGE] = api_reference_markdown(version)
     return pages
@@ -712,6 +730,13 @@ def site_dir() -> Path | None:
 
 
 # --- CI: documentation must follow the product ----------------------------------------------------------------------
+# These helpers are reached from many API handlers but only implement first-use persistence setup. Their source edits
+# must not be mistaken for changes to every route's public contract. Keep walking through them so contract-bearing
+# helpers they call are still discovered; response helpers such as `state.snapshot` remain tracked normally.
+API_IMPLEMENTATION_ONLY_HELPERS = {
+    "aiflow/v4/control/licensing.py": frozenset({"_row", "_row_in_connection"}),
+}
+
 @lru_cache(maxsize=1)
 def _control_function_registry():
     """Parse control functions and imports so route contracts include shared response helpers they call."""
@@ -787,33 +812,42 @@ def _called_control_function_spans(endpoint, registry) -> list[tuple[str, tuple[
     if endpoint_node is None:
         return []
 
-    imports = dict(module_imports[module])
-    for inner in ast.walk(endpoint_node):
-        if isinstance(inner, (ast.Import, ast.ImportFrom)):
-            imports.update(imported_targets(module, inner))
-    calls = set()
-    for inner in ast.walk(endpoint_node):
-        if not isinstance(inner, ast.Call):
-            continue
-        func = inner.func
-        if isinstance(func, ast.Name):
-            if func.id in functions.get(module, {}):
-                calls.add((module, func.id))
-            elif func.id in imports and imports[func.id][1]:
-                calls.add(imports[func.id])
-        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            target = imports.get(func.value.id)
-            if target and target[1] is None:
-                calls.add((target[0], func.attr))
-    result = []
-    for target_module, target_function in sorted(calls):
-        target_node = functions.get(target_module, {}).get(target_function or "")
-        if target_node is None or (target_module == module and target_function == endpoint.__name__):
-            continue
-        decorators = getattr(target_node, "decorator_list", ())
-        first = min([target_node.lineno, *(item.lineno for item in decorators)])
-        result.append((modules[target_module][0], (first, target_node.end_lineno or target_node.lineno)))
-    return result
+    pending = [(module, endpoint_node)]
+    visited = {(module, endpoint.__name__)}
+    result = {}
+    while pending:
+        source_module, source_node = pending.pop()
+        imports = dict(module_imports[source_module])
+        for inner in ast.walk(source_node):
+            if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                imports.update(imported_targets(source_module, inner))
+        calls = set()
+        for inner in ast.walk(source_node):
+            if not isinstance(inner, ast.Call):
+                continue
+            func = inner.func
+            if isinstance(func, ast.Name):
+                if func.id in functions.get(source_module, {}):
+                    calls.add((source_module, func.id))
+                elif func.id in imports and imports[func.id][1]:
+                    calls.add(imports[func.id])
+            elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                target = imports.get(func.value.id)
+                if target and target[1] is None:
+                    calls.add((target[0], func.attr))
+        for target_module, target_function in sorted(calls):
+            key = (target_module, target_function or "")
+            target_node = functions.get(target_module, {}).get(key[1])
+            if target_node is None or key in visited:
+                continue
+            visited.add(key)
+            decorators = getattr(target_node, "decorator_list", ())
+            first = min([target_node.lineno, *(item.lineno for item in decorators)])
+            path = modules[target_module][0]
+            if target_function not in API_IMPLEMENTATION_ONLY_HELPERS.get(path, ()):
+                result[(path, first, target_node.end_lineno or target_node.lineno)] = None
+            pending.append((target_module, target_node))
+    return [(path, (first, last)) for path, first, last in sorted(result)]
 
 
 @lru_cache(maxsize=1)
@@ -1122,8 +1156,14 @@ def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str])
 def changed_views(base: str) -> set[str]:
     """Screens whose section or JavaScript renderer changed; fail when a UI hunk cannot be mapped."""
     rel = UI.relative_to(ROOT).as_posix()
+    extension_rel = UI.with_name("system-check.js").relative_to(ROOT).as_posix()
     diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", rel], cwd=ROOT, text=True,
                           capture_output=True, check=True).stdout
+    extension_diff = subprocess.run(["git", "diff", "--quiet", f"{base}...HEAD", "--", extension_rel],
+                                    cwd=ROOT, check=False)
+    extension_views = {"system-check", "projects"} if extension_diff.returncode == 1 else set()
+    if extension_diff.returncode not in {0, 1}:
+        raise subprocess.CalledProcessError(extension_diff.returncode, extension_diff.args)
     # Diff coordinates refer to HEAD. During a merge, the worktree/index can already contain upstream edits that
     # shift those coordinates, so map against the exact file version used by the diff.
     source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
@@ -1135,7 +1175,7 @@ def changed_views(base: str) -> set[str]:
     base_source = subprocess.run(["git", "show", f"{merge_base}:{rel}"], cwd=ROOT, text=True,
                                  capture_output=True, check=True).stdout
     base_lines = base_source.splitlines()
-    all_views = set(console_views())
+    all_views = set(console_views(UI))
     hints_start = next((i for i, line in enumerate(lines) if line.startswith("var HINTS = {")), None)
     hints_end = next((i for i in range(hints_start + 1, len(lines)) if lines[i] == "};"), None) \
         if hints_start is not None else None
@@ -1190,7 +1230,8 @@ def changed_views(base: str) -> set[str]:
                               and (match := pattern.search(changed_line)) and match.group(1) in all_views}
             specific_views |= navigation_views
             specific_views |= {view for pattern, view in SCREEN_LOCAL_LINE_VIEWS if pattern.search(changed_line)}
-            layout_markup = ('id="layout-live"' in changed_line or 'data-block="' in changed_line
+            layout_markup = ('id="layout-live"' in changed_line
+                             or ('data-block="' in changed_line and 'data-block="first-run-setup"' not in changed_line)
                              or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
                              or "S.layouts." in changed_line or "layoutAction(act" in changed_line
                              or "applyLayout('delivery'" in changed_line
@@ -1211,6 +1252,9 @@ def changed_views(base: str) -> set[str]:
                         break
                     mapped = SCREEN_RENDERER_VIEWS[name]
                     line_views |= ((specific_views or all_views) if mapped is None else set(mapped))
+            for pattern, mapped in SCREEN_RENDERER_LINE_VIEWS:
+                if pattern.search(changed_line):
+                    line_views = set(mapped)
             # Session polling handles every screen, but this guarded request refreshes only the Users page.
             if ("editing: '', temporaryPassword" in changed_line
                     or ("S.view === 'users'" in changed_line and "loadUsers(" in changed_line)):
@@ -1262,7 +1306,7 @@ def changed_views(base: str) -> set[str]:
         lines_text = ", ".join(str(n) for n in sorted(unmapped))
         raise ValueError("console UI change could not be mapped to a screen at line(s) " + lines_text
                          + "; add the renderer to SCREEN_RENDERER_VIEWS or keep screen content inside its view section")
-    return touched
+    return touched | extension_views
 
 
 def changed_files(base: str) -> list[str]:

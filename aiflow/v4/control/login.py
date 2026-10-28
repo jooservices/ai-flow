@@ -47,6 +47,7 @@ from .console_auth import (COOKIE_NAME, PAGE_VIEWS, ROLE_LABELS, ROLE_PERMISSION
                            issue_session, landing_page, normalize_roles, permissions_for_view, resolve_session_user,
                            verify_session)
 from .db import J
+from .emails import EMAIL, normalize_email  # noqa: F401 - re-exported for callers of login.normalize_email
 from .ui import CONSOLE_PAGE_PATHS
 
 log = logging.getLogger(__name__)
@@ -59,10 +60,9 @@ RATE_PER_IP = 30          # sign-in attempts per client IP per window
 RATE_PER_IP_EMAIL = 10    # sign-in attempts per client IP and email per window
 AUDIT_FAILED_PER_MIN = 30
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
-EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}")
 REFUSED = "invalid email or password"
 
-PAGES = frozenset(CONSOLE_PAGE_PATHS) | frozenset(PAGE_VIEWS)
+PAGES = frozenset(CONSOLE_PAGE_PATHS) | frozenset(PAGE_VIEWS) | {"/setup"}
 OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/install.sh", "/v1/nodes/join", "/v1/nodes/join-tokens",
               "/v1/nodes/join-tokens/inspect",
               # provider redirects arrive from another site without the Strict cookie; a one-use state protects them
@@ -113,13 +113,6 @@ def _dummy_hash() -> str:
 
 
 # --- users -------------------------------------------------------------------------------------------------------
-def normalize_email(email: str) -> str:
-    email = (email or "").strip().lower()
-    if not EMAIL.fullmatch(email):
-        raise ValueError("enter a valid email address")
-    return email
-
-
 def write_password_file(path: str, password: str) -> None:
     """Write `password` to `path`, private from the first byte: the final component may not be a symlink, an existing
     file must be a regular file of this user with one link, and mode 0600 is set on the open descriptor."""
@@ -270,6 +263,8 @@ else{m.textContent=x[1].detail||"Sign-in failed";b.disabled=false}})
 
 
 def install_login(app: FastAPI, ctx) -> None:
+    from . import setup_wizard
+
     settings = ctx.settings
     token_routes: dict[int, bool] = {}
 
@@ -364,7 +359,9 @@ def install_login(app: FastAPI, ctx) -> None:
         return 200, user_json(email, row.get("roles") or [row["role"]], row["display_name"]), {}
 
     @app.get("/login", include_in_schema=False)
-    def login_page() -> HTMLResponse:
+    def login_page(request: Request) -> HTMLResponse:
+        if setup_wizard.user_count(ctx) == 0:
+            return setup_wizard.setup_form_response(request, ctx)
         return HTMLResponse(LOGIN_PAGE, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
     @app.post("/v1/auth/login")
@@ -475,6 +472,9 @@ def install_login(app: FastAPI, ctx) -> None:
                              "message": "Account created. Copy the initial password and share it securely."},
                             status_code=201, headers={"Cache-Control": "no-store"})
 
+    from .route_registry import mount_discovered_routers
+    mount_discovered_routers(app)
+
     if not settings.console_login:
         return
 
@@ -555,7 +555,9 @@ def install_login(app: FastAPI, ctx) -> None:
     @app.middleware("http")
     async def gate(request: Request, call_next):
         path = request.url.path
-        if path in OPEN_PATHS or path.startswith(OPEN_PREFIXES):
+        setup_path = path == "/setup" or path.startswith("/v1/setup/")
+        setup_open = setup_path and setup_wizard.user_count(ctx) == 0
+        if path in OPEN_PATHS or path.startswith(OPEN_PREFIXES) or setup_open:
             return await call_next(request)
         bearer_route = bool(request.headers.get("authorization") and checks_token(request))
         user = active_user(request)

@@ -237,6 +237,29 @@ def test_all_four_results_and_action_text_are_reported_per_project(client, ctx):
         "not_possible_on_this_machine"
 
 
+def test_projects_screen_batches_node_readiness_query(client, ctx, monkeypatch):
+    monkeypatch.setattr(system_check_api, "schedule_join_readiness", lambda *_args: None)
+    join_node(client, "cc")
+    join_node(client, "node1")
+    repo = ctx.repo()
+    original_all = ctx.db.all
+    node_queries = []
+
+    def recording_all(sql, params=()):
+        if "SELECT name,readiness,projects,dynamic FROM nodes" in sql:
+            node_queries.append(sql)
+        return original_all(sql, params)
+
+    ctx.db.all = recording_all
+    response = client.get("/v1/projects")
+
+    assert response.status_code == 200
+    assert len(node_queries) == 1
+    projects = response.json()["projects"]
+    testwp = next(project for project in projects if project["key"] == "TESTWP")
+    assert [node["name"] for node in testwp["node_readiness"]] == ["cc", "node1"]
+
+
 def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition(client, ctx, monkeypatch):
     deliveries = []
 
@@ -456,6 +479,47 @@ def test_revoked_github_app_permission_is_reported_with_required_action(client, 
         "The GitHub App installation is missing these required permissions: Workflows: write.")
     assert permission["action"] == (
         "Grant Workflows: write to the GitHub App installation in GitHub settings.")
+
+
+def test_revoked_jira_workflow_status_blocks_an_admitted_project(client, ctx):
+    join_node(client, "cc")
+    system_check.refresh_node(ctx, "cc", "hourly")
+    ctx.jira.project_workflows["TESTWP"] = ["Backlog", "Intake", "To Do", "In Progress", "In Verify", "Needs owner"]
+
+    readiness = system_check.refresh_node(ctx, "cc", "manual")
+    workflow = next(item for item in readiness["projects"]["TESTWP"] if item["id"] == "jira-workflow-statuses")
+
+    assert workflow["result"] == "needs_action"
+    assert workflow["detail"] == "Jira project TESTWP is missing required workflow statuses: Done."
+    assert "Restore the required workflow statuses in Jira project TESTWP" in workflow["action"]
+    assert workflow in system_check.blocking_reasons(readiness, "TESTWP", "claude-01", ["claude-01"])
+
+
+def test_auto_fixed_base_and_provider_tools_survive_readiness_sanitization():
+    readiness = system_check._safe_readiness({"auto_fixed_tools": ["git", "codex-code-mode-host", "unknown-secret"]})
+
+    assert readiness["auto_fixed_tools"] == ["codex-code-mode-host", "git"]
+
+
+def test_upgrade_keeps_provider_baseline_until_revocation_is_verified(client, ctx, monkeypatch):
+    join_node(client, "cc")
+    notifications = []
+    monkeypatch.setattr(system_check.notify, "send", lambda *args, **kwargs: notifications.append(args))
+    healthy = system_check.refresh_node(ctx, "cc", "hourly")
+    old_permission = next(item for item in healthy["projects"]["TESTWP"] if item["id"] == "github-app-permissions")
+    assert old_permission["result"] == "ready"
+
+    pending = system_check.refresh_node(ctx, "cc", "upgrade", provider_checks=False)
+    pending_permission = next(item for item in pending["projects"]["TESTWP"]
+                              if item["id"] == "github-app-permissions")
+    assert pending_permission["result"] == "ready"
+    assert notifications == []
+
+    ctx.github.app_permissions["workflows"] = "read"
+    refreshed = system_check.refresh_node(ctx, "cc", "upgrade", provider_checks=True)
+    revoked = next(item for item in refreshed["projects"]["TESTWP"] if item["id"] == "github-app-permissions")
+    assert revoked["result"] == "needs_action"
+    assert any("GitHub App permissions" in args[1] for args in notifications)
 
 
 def test_projects_readiness_shows_account_failures_but_blocks_only_without_a_usable_account(client, ctx):

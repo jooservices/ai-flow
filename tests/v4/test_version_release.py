@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from aiflow.v4.control import api, environment as environment_reports, system_check_api, version_release
+from aiflow.v4.control import api, environment as environment_reports, scale_proof, system_check_api, version_release
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.control.github_connections import GitHubConnections
@@ -26,7 +26,7 @@ def issue(key: str, status: str = "Done") -> dict:
     return {"key": key, "fields": {"summary": f"Summary {key}", "status": {"name": status}}}
 
 
-def configure(ctx, versions=(("101", CORE),), issues=None) -> None:
+def configure(ctx, versions=(("101", CORE),), issues=None, *, with_scale_proof=True) -> None:
     project = ctx.repo().projects["TESTWP"]
     project.version_release = {"enabled": True, "versions": [name for _, name in versions],
                                "tag_prefixes": {CORE: "testwp-core-v", THEME: "testwp-theme-v"}}
@@ -34,6 +34,12 @@ def configure(ctx, versions=(("101", CORE),), issues=None) -> None:
                                        for version_id, name in versions]
     for version_id, _ in versions:
         ctx.jira.version_issue_data[("TESTWP", version_id)] = list((issues or {}).get(version_id, []))
+    if with_scale_proof:
+        for _, name in versions:
+            scale_proof.record(ctx, {
+                "measurements": {budget.key: {"value": budget.limit} for budget in scale_proof.BUDGETS},
+                "checks": [],
+            }, name, "test")
 
 
 def evidence(ctx, key: str, *, status: str = "Done", reviewer: bool = True, qa: bool = True,
@@ -350,6 +356,10 @@ def test_quota_risk_keeps_release_available_when_same_provider_peer_lacks_projec
                                      version_release={"enabled": True, "versions": ["Other 1.0"]})
     ctx.jira.version_data["OTHER"] = [{"id": "201", "name": "Other 1.0", "released": False}]
     ctx.jira.version_issue_data[("OTHER", "201")] = [issue("OTHER-1")]
+    scale_proof.record(ctx, {
+        "measurements": {budget.key: {"value": budget.limit} for budget in scale_proof.BUDGETS},
+        "checks": [],
+    }, "Other 1.0", "test")
     add_ticket(ctx.db, "OTHER-1", status="Done", labels=())
     now = datetime.now(timezone.utc)
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,started_at)"
@@ -838,7 +848,7 @@ def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_bac
     assert "TESTWP-50" in release["body"] and "TESTWP-51" in release["body"]
     assert "composer install" in release["body"]
     assert ctx.jira.released_versions == ["101"]
-    assert ctx.jira.version_release_dates["101"] == datetime.now(timezone.utc).date().isoformat()
+    assert ctx.jira.version_release_dates["101"] == date.today().isoformat()
     release_tracker = next(row for row in ctx.jira.created if row["issuetype"] == "Release")
     assert release_tracker["version_field"] == CORE
     assert not [transition for transition in ctx.jira.transitions if transition[1] == "Human review"]

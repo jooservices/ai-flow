@@ -11,8 +11,7 @@ from ..core.toolchains import missing_tools, toolchain_gaps
 from . import role_health
 from . import tooling
 from .sa import dashboard_data, thresholds
-from .shared_accounts import machines_view
-from .quota import assessments as quota_assessments
+from .shared_accounts import machines_views
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
@@ -26,7 +25,7 @@ def _iso(ts: datetime | None) -> str | None:
 
 
 def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
-    from . import api as control_api, release_progress, release_readiness, rollout
+    from . import api as control_api, release_progress, release_readiness, rollout, scale_proof
     db = ctx.db
     repo = ctx.repo()
     releases = control_api.RELEASES
@@ -93,7 +92,13 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
     accounts = []
     account_rows = db.all("SELECT * FROM accounts ORDER BY node, provider, id")
-    quota_by_account = quota_assessments(db, account_rows)
+    cooldowns = ctx.leases.cooling_many([str(row["id"]) for row in account_rows])
+    # The watchdog refreshes account quota forecasts. `/v1/state` is loaded by every console
+    # view, so replaying history here would repeat the same run/sample scans per page request.
+    quota_by_account = {str(row["id"]): row.get("quota_forecast") or {} for row in account_rows}
+    account_configs = {str(row["id"]): repo.account(str(row["id"])) for row in account_rows}
+    machine_views = machines_views(db, [acc for acc in account_configs.values() if acc], node_status,
+                                   include_signin=include_signin)
     today_by_account = {row["account_id"]: row for row in db.all(
         "SELECT account_id,coalesce(sum(tokens_in),0) AS tokens_in,coalesce(sum(tokens_out),0) AS tokens_out,"
         "coalesce(sum(cost_usd),0) AS cost_usd FROM runs WHERE started_at >= date_trunc('day',now()) "
@@ -102,7 +107,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
     shared_managed = {row["id"] for row in db.all("SELECT id FROM shared_accounts WHERE managed")}
     for a in account_rows:
-        cool = ctx.leases.cooling(a["id"])
+        cool = cooldowns.get(str(a["id"]))
         r = running.get(a["id"])
         model, effort = repo.model_for(a["provider"], a["tier"])
         acc = repo.account(a["id"])
@@ -123,7 +128,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         accounts.append({
             "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc.machines else ""),
             "tier": a["tier"], "roles": acc.roles,
-            "machines": machines_view(db, acc, node_status, include_signin=include_signin),
+            "machines": machine_views.get(a["id"], []),
             "session_limit": acc.sessions, "shared": len(acc.machines) > 1,
             "shared_managed": a["id"] in shared_managed,
             "explicit_only": bool(acc and acc.explicit_only),
@@ -150,12 +155,14 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                                         "progress": r["progress"]},
         })
     active = []
-    for r in db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
-                    " WHERE r.status='running' ORDER BY r.started_at"):
+    active_rows = db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
+                         " WHERE r.status='running' ORDER BY r.started_at")
+    lease_ttls = ctx.leases.ttl_ms_many([r["ticket_key"] for r in active_rows])
+    for r, lease_ms in zip(active_rows, lease_ttls):
         active.append({"id": str(r["id"]), "ticket": r["ticket_key"], "project": r["project"], "summary": r["summary"],
                        "step": r["step"], "account": r["account_id"], "provider": r["provider"], "model": r["model"],
                        "node": r["node"], "fence": r["fence"], "elapsed_s": _age(r["started_at"]),
-                       "heartbeat_age_s": _age(r["heartbeat_at"]), "lease_ms": ctx.leases.ttl_ms(r["ticket_key"]),
+                       "heartbeat_age_s": _age(r["heartbeat_at"]), "lease_ms": lease_ms,
                        "progress": r["progress"]})
     recent = []
     for r in db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
@@ -185,8 +192,10 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
     # The marker comes from the ticket's latest successful developer run, so a later verifier run that ends
     # without a verdict (quota, timeout) does not hide it while the ticket stays in verification.
     already_done = {}
+    verify_keys = [ticket["key"] for ticket in tickets if ticket["status"] == "In Verify"]
     for r in db.all("SELECT DISTINCT ON (ticket_key) id, ticket_key, pr_url, details FROM runs"
-                    " WHERE step='dev' AND outcome='done' ORDER BY ticket_key, started_at DESC"):
+                    " WHERE ticket_key=ANY(%s) AND step='dev' AND outcome='done'"
+                    " ORDER BY ticket_key, started_at DESC", (verify_keys,)) if verify_keys else []:
         if (r["details"] or {}).get("already_done"):
             already_done[r["ticket_key"]] = {"pr_url": r["pr_url"] or "", "run_id": str(r["id"])}
     for t in tickets:
@@ -229,7 +238,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets,
         "release_readiness": release_readiness.all_versions(db, repo.projects),
-        "release_progress": release_progress.all_versions(db, repo.projects), "incidents": incidents, "incidents_recent": incidents_recent,
+        "release_progress": release_progress.all_versions(db, repo.projects), "scale_proof": scale_proof.summary(db),
+        "incidents": incidents, "incidents_recent": incidents_recent,
         "events": events, "sa": sa, "role_health": role_health.summary(ctx), "rollout": rollout.summary(db),
         "version_policy": {"control": ctx.settings.control_version or VERSION,
                            "max_minor_lag": ctx.settings.version_max_minor_lag},

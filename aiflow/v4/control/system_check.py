@@ -7,12 +7,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..core.system_check import condition
-from ..core.toolchains import CONTAINER_RUNTIME_TOOL, STACK_TOOLS, toolchain_gaps
+from ..core.toolchains import (BASE_TOOLS, CONTAINER_RUNTIME_TOOL, PROVIDER_TOOLS, STACK_TOOLS, toolchain_gaps)
 from .db import J
 from . import notify
 from .github import GITHUB_APP_REQUIRED_PERMISSIONS
 
 BLOCKING = {"needs_action", "not_possible_on_this_machine"}
+REQUIRED_PROJECT_STATUSES = ("Backlog", "Intake", "To Do", "In Progress", "In Verify", "Needs owner", "Done")
+AUTO_FIXED_TOOL_IDS = frozenset(BASE_TOOLS) | frozenset(
+    tool for tools in PROVIDER_TOOLS.values() for tool in tools
+) | frozenset(tool for tools in STACK_TOOLS.values() for tool in tools)
 MACHINE_CONDITION_TEXT = {
     "disk-space": ("Free disk space", {
         "ready": ("At least 5 GiB of free disk space is available.", ""),
@@ -454,6 +458,42 @@ def _jira_write_permission_condition(ctx, project_key: str, trigger: str,
         f"The connected Jira account can create, edit, link, transition and comment on issues in project {project_key}.")
 
 
+def _jira_workflow_condition(ctx, project_key: str, trigger: str,
+                             provider_checks: bool = True) -> dict[str, object]:
+    """Keep Jira's required project workflow statuses in the ongoing work-readiness gate."""
+    jira = getattr(ctx, "jira", None)
+    name = f"Jira workflow statuses · {project_key}"
+    if jira is None or not jira:
+        return condition("jira-workflow-statuses", name, "needs_action",
+                         "Required Jira workflow statuses could not be checked because Jira is not connected.",
+                         "Connect Jira on the Integrations screen and rerun the System check.")
+    if not provider_checks:
+        return condition("jira-workflow-statuses", name, "needs_action",
+                         f"Required Jira workflow statuses for {project_key} have not been verified.",
+                         "Wait for the provider-backed System check to finish before starting work.")
+
+    site = str(getattr(ctx.settings, "jira_site", ""))
+    try:
+        statuses = _cached_integration_probe(
+            ctx, ("jira-workflow-statuses", site, project_key), trigger,
+            lambda: jira.project_statuses(project_key))
+    except Exception:  # noqa: BLE001 - provider output and request metadata stay out of readiness
+        statuses = None
+    if not isinstance(statuses, (list, tuple, set)):
+        return condition("jira-workflow-statuses", name, "needs_action",
+                         "Required Jira workflow statuses could not be verified.",
+                         f"Restore control-plane access to Jira and rerun the System check for {project_key}.")
+    available = {status for status in statuses if isinstance(status, str)}
+    missing = [status for status in REQUIRED_PROJECT_STATUSES if status not in available]
+    if missing:
+        labels = ", ".join(missing)
+        return condition("jira-workflow-statuses", name, "needs_action",
+                         f"Jira project {project_key} is missing required workflow statuses: {labels}.",
+                         f"Restore the required workflow statuses in Jira project {project_key} and rerun the System check.")
+    return condition("jira-workflow-statuses", name, "ready",
+                     f"Jira project {project_key} has all required workflow statuses.")
+
+
 def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, metrics: dict,
                         auto_fixed_tools: set[str], credentials: dict[str, dict],
                         trigger: str = "heartbeat", provider_checks: bool = True) -> list[dict[str, object]]:
@@ -524,6 +564,7 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
                              "Jira credential validity has not been checked yet.",
                              "Wait for the provider-backed System check to finish before starting work."))
     out.append(_jira_write_permission_condition(ctx, project_key, trigger, provider_checks))
+    out.append(_jira_workflow_condition(ctx, project_key, trigger, provider_checks))
 
     account_rows = {row["id"]: row for row in ctx.db.all(
         "SELECT id,status,worker_state FROM accounts WHERE node=%s ORDER BY id", (node,))}
@@ -531,7 +572,7 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
     if not account_ids:
         out.append(condition("ai-account", "AI account", "not_possible_on_this_machine",
                              f"No AI account is assigned to node {node} for this project.",
-                             f"Assign an AI account to node {node} for project {project_key} in the control repo."))
+                             f"Assign an AI account to project {project_key} on the Machines and AI screen."))
     else:
         for account_id in account_ids:
             out.append(credentials.get(account_id) or _account_condition(account_rows.get(account_id), account_id))
@@ -666,8 +707,7 @@ def _safe_readiness(readiness: object, account_ids: list[str] | None = None) -> 
     for field in ("auto_fixed_tools", "auto_fixed_conditions"):
         values = readiness.get(field)
         if isinstance(values, list):
-            allowed = {tool for tools in STACK_TOOLS.values() for tool in tools} \
-                if field == "auto_fixed_tools" else MACHINE_CONDITION_IDS
+            allowed = AUTO_FIXED_TOOL_IDS if field == "auto_fixed_tools" else MACHINE_CONDITION_IDS
             safe[field] = sorted({value for value in values if isinstance(value, str) and value in allowed})
     return safe
 
@@ -697,10 +737,9 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
     credential_statuses = _validated_credential_statuses(
         credential_checks if credential_checks is not None else stored.get("credential_statuses"),
         assigned_accounts)
-    allowed_tools = {tool for tools in STACK_TOOLS.values() for tool in tools}
     auto_fixed = {item for item in (auto_fixed_tools if auto_fixed_tools is not None
                                     else stored.get("auto_fixed_tools", []))
-                  if isinstance(item, str) and item in allowed_tools}
+                  if isinstance(item, str) and item in AUTO_FIXED_TOOL_IDS}
     auto_fixed_condition_ids = {item for item in (auto_fixed_conditions if auto_fixed_conditions is not None
                                                    else stored.get("auto_fixed_conditions", []))
                                 if isinstance(item, str) and item in MACHINE_CONDITION_IDS}
@@ -719,13 +758,13 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
                                  auto_fixed, credentials, trigger, provider_checks)
         for key in project_keys
     }
-    if not provider_checks and trigger == "heartbeat":
-        # A normal heartbeat refreshes node-reported conditions. Reuse a previously verified provider snapshot
-        # while its background refresh runs; otherwise every heartbeat would turn a healthy project into a
-        # temporary blocker. An upgrade deliberately does not take this path and remains fail-closed.
+    if not provider_checks and trigger in {"heartbeat", "upgrade"}:
+        # Heartbeats and upgrades refresh node-reported conditions before the background provider probe finishes.
+        # Keep the last verified provider snapshot during that gap so an upgrade cannot erase a healthy baseline
+        # and hide a newly revoked permission. With no baseline, the pending result remains fail-closed.
         provider_condition = lambda item: (
             item.get("id") in {"github-installation", "github-app-permissions", "jira-credentials",
-                                "jira-write-permissions"}
+                                "jira-write-permissions", "jira-workflow-statuses"}
             or str(item.get("id", "")).startswith(("repository-access:", "base-branch:"))
         )
         previous_projects = stored.get("projects") if isinstance(stored.get("projects"), dict) else {}
@@ -749,6 +788,7 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
         changed = old is None or old.get("result") != item.get("result")
         provider_pending = not provider_checks and key[1] in {
             "github-installation", "github-app-permissions", "jira-credentials", "jira-write-permissions",
+            "jira-workflow-statuses",
         } or (not provider_checks and key[1].startswith(("repository-access:", "base-branch:")))
         if (not changed or provider_pending or not item.get("affects_work") or item.get("result") not in BLOCKING
                 or (trigger == "machine_joined" and row.get("last_heartbeat") is None)

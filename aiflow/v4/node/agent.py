@@ -513,7 +513,7 @@ def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: t
                 except OSError:  # Linux PTYs report EIO once the child has closed its slave.
                     break
                 if not chunk:
-                    continue
+                    break  # macOS PTYs report EOF as an empty read rather than EIO.
                 output = (output + chunk)[-16_000:]
                 clean_output = _ANSI.sub("", output)
                 if not copied_auth_url and re.search(

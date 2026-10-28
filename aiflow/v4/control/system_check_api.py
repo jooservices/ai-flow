@@ -94,14 +94,23 @@ def refresh_heartbeat(ctx, node: str, body, previous: dict | None, reported_rele
     schedule_heartbeat_readiness(ctx, node, trigger)
 
 
+def projects_readiness(ctx, repo) -> dict[str, list[dict[str, object]]]:
+    """Return machine readiness for every project with one node query for the Projects screen."""
+    nodes = ctx.db.all("SELECT name,readiness,projects,dynamic FROM nodes ORDER BY name")
+    project_nodes = {key: [] for key in repo.projects}
+    for node in nodes:
+        name = node["name"]
+        accounts = [account.id for account in repo.accounts_on(name)]
+        for key in repo.projects_for_node(name, node.get("projects") or [], node.get("dynamic", False)):
+            if key in project_nodes:
+                project_nodes[key].append({"name": name, **system_check.project_node_readiness(
+                    node.get("readiness"), key, accounts)})
+    return project_nodes
+
+
 def project_readiness(ctx, project, repo) -> list[dict[str, object]]:
     """Return safe machine readiness summaries for one project row in the Projects screen."""
-    nodes = ctx.db.all("SELECT name,readiness,projects,dynamic FROM nodes ORDER BY name")
-    return [{"name": node["name"], **system_check.project_node_readiness(
-        node.get("readiness"), project.key,
-        [account.id for account in repo.accounts_on(node["name"])])}
-        for node in nodes if project.key in repo.projects_for_node(
-            node["name"], node.get("projects") or [], node.get("dynamic", False))]
+    return projects_readiness(ctx, repo).get(project.key, [])
 
 
 def block_reason(readiness: dict | None, project: str, account: str,

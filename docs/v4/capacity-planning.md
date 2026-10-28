@@ -44,9 +44,11 @@ estimates and ranges update from new work.
 
 ## Quota-aware assignment
 
-The control plane keeps existing eligibility checks for project, account role, machine, worker capacity, tools,
-license and account cooldown. `POST /v1/work/claim` records the selected account, estimate, quota fit and rationale
-with the development run. Among eligible accounts that can claim a development ticket, it reads the latest
+`GET /v1/work/candidates` applies the existing eligibility checks for project, account role, machine, worker
+capacity, tools, license and account cooldown. `POST /v1/work/claim` rechecks the requested ticket against those
+rules before claiming it, without rebuilding the account's full offer list. It records the selected account,
+estimate, quota fit and rationale with the development run. Among eligible accounts that can claim a development
+ticket, it reads the latest
 quota assessment persisted by the 15-second watchdog, so candidate polling does not rebuild weeks of run and probe
 history. An account is quota-safe only if the upper token estimate fits every quota window with a known
 remaining-token balance and every predicted exhaustion time is later than the upper time estimate. A window without
@@ -58,6 +60,11 @@ reason and estimate are retained with that run. The per-ticket drawer loads the 
 `GET /v1/tickets/{key}`, so it remains available when older assignments are outside the Dashboard's recent list.
 The latest quota forecast is retained on the account. If forecasts are missing or every eligible account is predicted to run
 out, the existing eligible route remains available so a ticket is not starved; the reason records that fallback.
+
+Workers include their instance name as `worker_id` when calling `GET /v1/work/candidates`. Within a development
+priority group, it interleaves projects only for tickets created in the same minute; each project's ticket order,
+older creation-minute groups, and higher-priority groups stay intact. This spreads a burst across worker sessions
+without changing the order for older workers that omit `worker_id`.
 
 ## Weekly capacity
 

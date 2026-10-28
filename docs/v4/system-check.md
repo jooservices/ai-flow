@@ -4,9 +4,8 @@
 
 The Console has a **System check** screen at `/system-check`. It shows machine-wide conditions and each configured
 project's conditions on every machine assigned to that project. The same readiness snapshot is available from
-`GET /v1/system-check`; `GET /v1/support-bundle` downloads a safe JSON support bundle that includes it. The Support
-screen also creates a scanned archive with `POST /v1/support/bundles` and downloads it through
-`GET /v1/support/bundles/{bundle_id}/download`.
+`GET /v1/system-check` and is included in the reviewed archive created by `POST /v1/support/bundles` and downloaded
+through `GET /v1/support/bundles/{bundle_id}/download`. `GET /v1/support-bundle` also returns a safe JSON snapshot.
 
 Each row has one result: **ready**, **fixed automatically**, **needs an action**, or **not possible on this machine**.
 Rows that need a person include one direct action. Credential checks expose only whether a credential is present
@@ -62,3 +61,5 @@ The readiness gate and trigger points touch these control API routes:
   `POST /v1/nodes/{name}/check-probes/token`, `POST /v1/events`, `POST /v1/integrations/github/imports` and
   `GET /v1/integrations/github/imports/{pending_id}/installations` keep their contracts; they only use the
   shared readiness helpers.
+- `GET /v1/integrations/github/setup` begins GitHub App setup, and
+  `POST /v1/integrations/github/imports/{pending_id}/connect` verifies and connects an imported installation.

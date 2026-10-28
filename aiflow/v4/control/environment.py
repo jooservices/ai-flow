@@ -59,9 +59,16 @@ def record_missing(ctx, run: dict, names: list[str], detail: str) -> list[str]:
     return recorded
 
 
-def parked_tickets(ctx) -> set[str]:
+def parked_tickets(ctx, ticket_keys: list[str] | None = None) -> set[str]:
     """Tickets waiting for an environment item; they are not offered again until it is provided."""
-    return {r["ticket_key"] for r in ctx.db.all("SELECT ticket_key FROM environment_reports WHERE resolved_at IS NULL")}
+    if ticket_keys is not None and not ticket_keys:
+        return set()
+    sql = "SELECT ticket_key FROM environment_reports WHERE resolved_at IS NULL"
+    params = ()
+    if ticket_keys is not None:
+        sql += " AND ticket_key=ANY(%s)"
+        params = (ticket_keys,)
+    return {r["ticket_key"] for r in ctx.db.all(sql, params)}
 
 
 def provide(ctx, project: str, item: str, how: str = "provided", *, machine: str = "",

@@ -55,6 +55,7 @@ class Settings:
     jira_oauth_revoke_url: str = "https://auth.atlassian.com/oauth/revoke"
     jira_oauth_resources_url: str = "https://api.atlassian.com/oauth/token/accessible-resources"
     jira_api_base: str = "https://api.atlassian.com/ex/jira"
+    hot_file_slots: int = 1  # tickets that may work on the same hot file at once (AIFLOW4_HOT_FILE_SLOTS)
     canary_bug_project: str = "JAIF"  # the AI Flow project: a canary rollback files its bug there
     maintenance_project: str = "JAIF"  # the AI Flow project: tooling tickets (docs/v4/missing-tools.md)
     github_org: str = "jooservices"
@@ -74,6 +75,7 @@ class Settings:
     trusted_proxies: list[str] = field(default_factory=list)  # CIDRs allowed to supply forwarding headers
     reviewer_token: str = ""
     owner_token: str = ""
+    setup_ownership_capability: str = ""
     github_webhook_secret: str = ""  # optional: GitHub pull request events trigger the reconcile loop at once
     o2_url: str = ""
     o2_basic: str = ""
@@ -113,6 +115,10 @@ class Settings:
         s.jira_oauth_resources_url = _env("JIRA_OAUTH_RESOURCES_URL", s.jira_oauth_resources_url)
         s.jira_api_base = _env("JIRA_API_BASE", s.jira_api_base)
         s.canary_bug_project = _env("CANARY_BUG_PROJECT", s.canary_bug_project)
+        try:
+            s.hot_file_slots = max(1, int(_env("HOT_FILE_SLOTS", str(s.hot_file_slots))))
+        except ValueError:
+            pass
         s.maintenance_project = _env("MAINTENANCE_PROJECT", s.maintenance_project)
         s.github_org = _env("GITHUB_ORG", s.github_org)
         s.github_app_dir = _env("GITHUB_APP_DIR", s.github_app_dir)
@@ -156,6 +162,8 @@ class Settings:
         s.join_token = os.environ.get("AIFLOW4_JOIN_TOKEN") or secrets.get("AIFLOW4_JOIN_TOKEN", "")
         s.reviewer_token = os.environ.get("AIFLOW4_REVIEWER_TOKEN") or secrets.get("AIFLOW4_REVIEWER_TOKEN", "")
         s.owner_token = os.environ.get("AIFLOW4_OWNER_TOKEN") or secrets.get("AIFLOW4_OWNER_TOKEN", "")
+        s.setup_ownership_capability = (os.environ.get("AIFLOW4_SETUP_OWNERSHIP_CAPABILITY")
+                                        or secrets.get("AIFLOW4_SETUP_OWNERSHIP_CAPABILITY", ""))
         s.github_webhook_secret = (os.environ.get("AIFLOW4_GITHUB_WEBHOOK_SECRET")
                                    or secrets.get("AIFLOW4_GITHUB_WEBHOOK_SECRET", ""))
         s.o2_basic = os.environ.get("O2_BASIC") or secrets.get("O2_BASIC", "")

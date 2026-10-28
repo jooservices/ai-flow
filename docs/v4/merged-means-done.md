@@ -92,6 +92,10 @@ implies. The Dashboard block **Jira and GitHub disagree** lists the tickets that
 the Jira status, the state of the pull request, the status the flow will set, how long, and why it is not fixed yet. The
 list is empty when everything matches. API: `GET /v1/dashboard/disagreements`.
 
+For a ticket-level history of queue, AI work, verification, rework and human-wait time, use
+`GET /v1/tickets/{key}/timeline`. The timeline is calculated from AI Flow runs and recorded status events, not Jira
+worklogs.
+
 ## Control API routes that take part
 
 The merge and the move of a ticket are also made by these routes, which record the cause and the merge facts:

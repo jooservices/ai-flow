@@ -147,11 +147,15 @@ def may_take(db, acc: Account, node: str, *, as_peer: bool = False) -> tuple[boo
         return False, "this machine has not signed in to the account yet"
     if not acc.runs_on(node):
         return False, "this account is not enabled on this machine"
+    # Ordinary control-repo accounts have no shared session_limit; their node agent enforces `parallel`.
+    # Capacity aggregation only changes admission for shared accounts and quota-routing peers.
+    bounded = bool(acc.session_limit or as_peer)
+    if not bounded:
+        return True, ""
     candidates = [n for n in acc.machines if n not in pending]
     capacities = machine_capacities(db, candidates, acc.id)
     # A configured account without a shared limit is bounded by its `sessions` and machine slots only when it is
     # judged as a quota-routing peer; its own claims keep the worker-level limits they always had.
-    bounded = bool(acc.session_limit or as_peer)
     if bounded and capacities.get(node, {}).get("free", 0) <= 0:
         return False, "this machine has no free worker slots; its capacity is full"
     running = running_by_node(db, acc.id)
@@ -271,6 +275,58 @@ def machines_view(db, acc: Account | None, node_status: dict[str, str], *,
                     "credential_expires_at": (row["credential_expires_at"].isoformat()
                                               if row and row["credential_expires_at"] else None)})
     return out
+
+
+def machines_views(db, accounts: list[Account], node_status: dict[str, str], *,
+                   include_signin: bool = False) -> dict[str, list[dict[str, Any]]]:
+    """Read machine details for a fleet snapshot in batches instead of five queries per account."""
+    ids = list(dict.fromkeys(acc.id for acc in accounts if acc))
+    if not ids:
+        return {}
+    machines_by_account: dict[str, dict[str, dict]] = {}
+    for row in db.all("SELECT * FROM account_machines WHERE account_id=ANY(%s)", (ids,)):
+        machines_by_account.setdefault(str(row["account_id"]), {})[str(row["node"])] = row
+    active: dict[tuple[str, str], int] = {}
+    for row in db.all("SELECT account_id,node,count(*) AS n FROM runs WHERE account_id=ANY(%s)"
+                      " AND status='running' GROUP BY account_id,node", (ids,)):
+        active[(str(row["account_id"]), str(row["node"]))] = int(row["n"])
+    managed = {str(row["id"]) for row in db.all(
+        "SELECT id FROM managed_ai_accounts WHERE id=ANY(%s) AND removed_at IS NULL", (ids,))}
+    recent: dict[tuple[str, str], int] = {}
+    for row in db.all("SELECT account_id,node,count(*) AS n FROM runs WHERE account_id=ANY(%s)"
+                      " AND started_at > now() - interval '24 hours' GROUP BY account_id,node", (ids,)):
+        recent[(str(row["account_id"]), str(row["node"]))] = int(row["n"])
+    usage: dict[tuple[str, str], dict] = {}
+    for row in db.all("SELECT account_id,node,coalesce(sum(tokens_in + tokens_out),0) AS tokens,"
+                      "coalesce(sum(cost_usd),0) AS cost FROM runs WHERE account_id=ANY(%s)"
+                      " AND started_at >= date_trunc('day',now()) GROUP BY account_id,node", (ids,)):
+        usage[(str(row["account_id"]), str(row["node"]))] = row
+
+    now = datetime.now(timezone.utc)
+    result: dict[str, list[dict[str, Any]]] = {}
+    for acc in accounts:
+        rows = machines_by_account.get(acc.id, {})
+        out = []
+        for node in acc.machines:
+            row = rows.get(node)
+            pending = bool(row and row["status"] == "pending")
+            node_usage = usage.get((acc.id, node), {})
+            prompt = None
+            if (include_signin and pending and row["signin_link"] and row["signin_expires_at"]
+                    and row["signin_expires_at"] > now):
+                prompt = {"link": row["signin_link"], "code": row["signin_code"],
+                          "expires_at": row["signin_expires_at"].isoformat()}
+            out.append({"node": node, "node_status": node_status.get(node, "offline"), "signed_in": not pending,
+                        "sign_in_pending": pending, "shared_assignment": bool(row),
+                        "removable": acc.id not in managed and (node == acc.node or bool(row)),
+                        "runs_active": active.get((acc.id, node), 0), "runs_24h": recent.get((acc.id, node), 0),
+                        "tokens_today": int(node_usage.get("tokens", 0)),
+                        "cost_today": float(node_usage.get("cost", 0)),
+                        "state": ((row or {}).get("worker_state") or {}).get("state", ""), "signin": prompt,
+                        "credential_expires_at": (row["credential_expires_at"].isoformat()
+                                                  if row and row["credential_expires_at"] else None)})
+        result[acc.id] = out
+    return result
 
 
 # --- request bodies ---------------------------------------------------------------------------------------

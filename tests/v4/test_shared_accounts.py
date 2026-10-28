@@ -51,6 +51,21 @@ def claim(client, headers, ticket, account="shared-01"):
     return client.post("/v1/work/claim", json={"ticket": ticket, "account": account}, headers=headers)
 
 
+def test_unshared_account_skips_capacity_aggregation(monkeypatch):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.core.controlrepo import Account
+
+    account = Account(id="claude-01", provider="claude", node="cc", parallel=2)
+    monkeypatch.setattr(shared_accounts, "pending_nodes", lambda *_args: set())
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unshared accounts do not need shared-capacity queries")
+
+    monkeypatch.setattr(shared_accounts, "machine_capacities", unexpected)
+    monkeypatch.setattr(shared_accounts, "running_by_node", unexpected)
+    assert shared_accounts.may_take(object(), account, "cc") == (True, "")
+
+
 def two_machines(client, ctx, limit=2):
     """Account `shared-01` created in Command Center, enabled on cc and node1, signed in on both."""
     sign_in(client, ctx)

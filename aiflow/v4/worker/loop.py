@@ -200,7 +200,7 @@ class Worker:
             return True
         master = self.api.call("GET", "/v1/master/candidate", params={"account": self.account}).get("candidate")
         cands = ([master] if master else []) + self.api.call(
-            "GET", "/v1/work/candidates", params={"account": self.account})["tickets"]
+            "GET", "/v1/work/candidates", params={"account": self.account, "worker_id": self.instance})["tickets"]
         if not cands:
             return False
         for cand in cands:

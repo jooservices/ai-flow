@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aiflow import agents, events, usage
 from aiflow.events import Events
@@ -30,12 +31,23 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((got["total"], got["cost_usd_list"], got["turns"], got["model"], got["usage_known"]), (28 + 4747 + 480673 + 25157, 0.19622, 21, "claude-sonnet-5-5", True))
 
     def test_codex_json_turns_are_added_and_cached_is_split_out(self):
-        got = usage.parse("Codex", CODEX_JSON)
+        got = usage.parse("Codex", CODEX_JSON, model="gpt-6-luna")
         self.assertEqual((got["input"], got["cache_read"], got["output"], got["reasoning"], got["total"]), (16809 + 200 - 1100, 1100, 20, 10, 17009 + 20))
+        self.assertEqual((got["cost_usd_list"], got["cost_known"], got["cost_model"]), (0.001612, True, "gpt-6-luna"))
+
+    def test_codex_cost_estimate_separates_cache_writes_and_unknown_models_stay_unknown(self):
+        text = json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 100, "cached_input_tokens": 20, "cache_write_input_tokens": 10,
+            "output_tokens": 5, "reasoning_output_tokens": 2}})
+        got = usage.parse("Codex", text, model="gpt-6-luna")
+        self.assertEqual((got["input"], got["cache_read"], got["cache_write"], got["output"], got["total"]), (70, 20, 10, 5, 105))
+        self.assertEqual((got["cost_usd_list"], got["cost_known"]), (0.000011, True))
+        unknown = usage.parse("Codex", text, model="unlisted-model")
+        self.assertEqual((unknown["cost_usd_list"], unknown["cost_known"]), (None, False))
 
     def test_codex_plain_log_gives_the_total_only(self):
         got = usage.parse("Codex", "work\ntokens used\n64,945\n")
-        self.assertEqual((got["total"], got["input"], got["usage_known"]), (64945, 0, True))
+        self.assertEqual((got["total"], got["input"], got["usage_known"], got["cost_known"]), (64945, 0, True, False))
 
     def test_opencode_steps_are_added(self):
         got = usage.parse("OpenCode", OPENCODE)
@@ -46,6 +58,13 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(usage.parse("Claude", "stopped before the result"), {"usage_known": False})
         self.assertEqual(usage.parse("Codex", "{broken json"), {"usage_known": False})
         self.assertEqual(usage.parse("Nobody", ""), {"usage_known": False})
+
+    def test_malformed_codex_event_shapes_are_unknown(self):
+        for payload in (None, [], "not usage", 7):
+            with self.subTest(payload=payload):
+                text = json.dumps({"type": "turn.completed", "usage": payload})
+                self.assertEqual(usage.parse("Codex", text), {"usage_known": False})
+        self.assertEqual(usage.parse("Codex", "[]"), {"usage_known": False})
 
     def test_report_emits_one_event_with_the_numbers_and_the_run(self):
         sink = Events("http://obs", "default", "s", "u", "p", {}, Sender(), thread=False)
@@ -60,6 +79,7 @@ class ParseTests(unittest.TestCase):
             events._sink = None
         row = sink.sender.calls[0][1][0]
         self.assertEqual((row["event"], row["ticket"], row["agent"], row["role"], row["output"], row["usage_known"]), ("ai.usage", "JAIF-5", "Claude", "developer", 4747, True))
+        self.assertEqual(row["run_id"], "run")
         self.assertEqual(got["total"], row["total"])
 
 
@@ -86,6 +106,11 @@ class ReportWithTheRequestedModelTests(unittest.TestCase):
                 self.assertEqual(row["model_requested"], "sonnet")
                 if answered is not None:
                     self.assertEqual(row["model"], answered)
+
+    def test_malformed_codex_usage_report_is_emitted_as_unknown(self):
+        row = self.run_report("Codex", json.dumps({"type": "turn.completed", "usage": []}))
+        self.assertEqual(row["event"], "ai.usage")
+        self.assertFalse(row["usage_known"])
 
 
 class CommandTests(unittest.TestCase):
@@ -137,6 +162,13 @@ class StatusTests(unittest.TestCase):
         self.sup.record_status("JAIF-1", "To Do", "observed")
         self.assertEqual(len(self.rows()), 1)
 
+    def test_status_and_start_time_are_stored_without_expiry(self):
+        with mock.patch.object(self.sup.redis, "set_persistent", wraps=self.sup.redis.set_persistent) as persistent, \
+                mock.patch.object(self.sup.redis, "set", wraps=self.sup.redis.set) as expiring:
+            self.sup.record_status("JAIF-7", "In Progress", "supervisor")
+        self.assertEqual([call.args[0] for call in persistent.call_args_list], ["status:JAIF-7", "statussince:JAIF-7"])
+        expiring.assert_not_called()
+
     def test_a_move_the_owner_made_is_noticed_once_across_workers(self):
         issue = {"key": "JAIF-2", "status": "To Do", "updated": stamp(0), "labels": []}
         self.sup.observe([issue])
@@ -166,19 +198,30 @@ class StatusTests(unittest.TestCase):
 
 
 class SpoolAndSummaryTests(unittest.TestCase):
-    def test_rows_that_could_not_be_sent_survive_the_process(self):
+    def test_delivery_failure_spools_rows_before_shutdown_and_a_new_process_replays_them(self):
         with tempfile.TemporaryDirectory() as tmp:
             spool = Path(tmp) / "events.jsonl"
             down = Events("http://obs", "default", "s", "u", "p", {}, Sender(fail=99), thread=False, spool=spool)
             down.emit("a")
             down.emit("b")
-            down.close()
+            self.assertFalse(down.flush())
             self.assertEqual(len(spool.read_text().splitlines()), 2)
+            down.close()
             up = Sender()
             fresh = Events("http://obs", "default", "s", "u", "p", {}, up, thread=False, spool=spool)
             fresh.flush()
             self.assertEqual([r["event"] for r in up.rows()], ["a", "b"])
             self.assertFalse(spool.exists())
+
+    def test_closing_persists_unsent_rows_without_waiting_for_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spool = Path(tmp) / "events.jsonl"
+            sender = Sender(fail=99)
+            sink = Events("http://obs", "default", "s", "u", "p", {}, sender, thread=False, spool=spool)
+            sink.emit("pending")
+            sink.close()
+            self.assertEqual([json.loads(line)["event"] for line in spool.read_text().splitlines()], ["pending"])
+            self.assertEqual(sender.calls, [])
 
     def test_the_daily_summary_shows_tokens_and_list_price(self):
         redis = FakeRedis()

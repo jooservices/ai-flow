@@ -137,10 +137,10 @@ def test_project_environment_runtime_values_override_static_values(monkeypatch):
         {"name": "WP_BASE_URL", "kind": "base_url", "value": "http://shared-site", "runs": ["dev"]},
         {"name": "WP_CORE_VERSION", "kind": "secret", "runs": ["dev"]}],
         runtime_env={"WP_BASE_URL": "http://127.0.0.1:12345",
-                     "WP_ADMIN_USER": "aiflow-admin", "WP_ADMIN_PASSWORD": "one-run"})
+                     "WP_ADMIN_USER": "aiflow-admin", "WP_ADMIN_PASSWORD": "test"})
     assert merged["WP_BASE_URL"] == "http://127.0.0.1:12345"
     assert merged["WP_CORE_VERSION"] == "6.8.3"
-    assert merged["WP_ADMIN_PASSWORD"] == "one-run"
+    assert merged["WP_ADMIN_PASSWORD"] == "test"
 
 
 def test_non_wordpress_project_starts_no_site_and_no_runtime(monkeypatch, tmp_path):

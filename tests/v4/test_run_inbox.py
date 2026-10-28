@@ -16,6 +16,8 @@ def _claim(client, ctx, key: str):
 
 def test_run_inbox_is_ordered_idempotent_and_delivered_by_worker_heartbeat(client, ctx):
     node, run = _claim(client, ctx, "TESTWP-INBOX-1")
+    ticket_before = ctx.db.one("SELECT status,description FROM tickets WHERE key='TESTWP-INBOX-1'")
+    jira_transitions_before = list(ctx.jira.transitions)
     client_id = str(uuid4())
     first = client.post(f"/v1/runs/{run['run_id']}/inbox",
                         json={"client_id": client_id, "kind": "request", "body": "Please add a regression test."})
@@ -49,6 +51,21 @@ def test_run_inbox_is_ordered_idempotent_and_delivered_by_worker_heartbeat(clien
     assert [row["status"] for row in history.json()["messages"]] == ["included", "included"]
     assert history.json()["messages"][0]["body"] == "Please add a regression test."
     assert ctx.db.one("SELECT inbox_pending_count FROM runs WHERE id=%s", (run["run_id"],))["inbox_pending_count"] == 0
+
+    audit = ctx.db.all("SELECT type,ticket,project,run_id,fence,node,outcome,data FROM events"
+                       " WHERE run_id=%s AND type LIKE 'run.inbox.%%' ORDER BY id", (run["run_id"],))
+    assert [event["type"] for event in audit] == ["run.inbox.queued", "run.inbox.queued",
+                                                   "run.inbox.received", "run.inbox.included"]
+    for event in audit:
+        assert (event["ticket"], event["project"], event["run_id"], event["fence"], event["node"]) == (
+            "TESTWP-INBOX-1", "TESTWP", run["run_id"], run["fence"], "cc")
+    assert [event["data"]["message_id"] for event in audit[:2]] == [message["id"], second["id"]]
+    assert audit[2]["outcome"] == "received" and audit[2]["data"]["message_ids"] == [message["id"], second["id"]]
+    assert audit[3]["outcome"] == "included" and audit[3]["data"]["message_ids"] == [message["id"], second["id"]]
+
+    ticket_after = ctx.db.one("SELECT status,description FROM tickets WHERE key='TESTWP-INBOX-1'")
+    assert ticket_after == ticket_before  # run guidance is audited separately from ticket acceptance criteria
+    assert ctx.jira.transitions == jira_transitions_before
 
 
 def test_run_closure_marks_unconsumed_guidance_undelivered_and_rejects_late_messages(client, ctx):

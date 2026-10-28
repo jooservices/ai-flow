@@ -93,8 +93,8 @@ class Scenario:
     seed: int = 236
     page_samples: int = 3
     picker_samples: int = 5
-    claim_concurrency: int = 14
-    measurement_concurrency: int = 2
+    claim_concurrency: int = 32
+    measurement_concurrency: int = 1
     measurement_min_active: int = 150
     max_rounds: int = 20
 
@@ -578,7 +578,7 @@ def _claim_round(client, sessions: list[dict[str, str]], headers: dict[str, dict
     picker_result = None
     measurement_client = measurement_client or client
     with ThreadPoolExecutor(max_workers=claim_workers, thread_name_prefix="scale-worker") as claims_pool:
-        # The bounded pool queues 200 sessions behind 20 request slots. Interleave that queue by node so the
+        # The bounded pool queues 200 sessions behind the configured request slots. Interleave that queue by node so the
         # first in-flight burst represents the fleet rather than six machines repeated four times each.
         claim_futures = [claims_pool.submit(_claim_session, client, session, headers,
                                             gate if gate is not None and i < claim_workers else None,

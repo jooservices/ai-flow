@@ -13,8 +13,8 @@ from aiflow.v4.node import agent, operations, probes
 from aiflow.v4.worker import dev
 from aiflow.v4.worker.dev import Claimed, build_prompt, machine_block
 
-CC_TOOLS = {"git": "git version 2.43", "uv": "uv 0.5", "claude": "2.1.305", "php": "missing"}
-NODE1_TOOLS = {"git": "git version 2.43", "uv": "uv 0.5", "codex": "1.0", "php": "PHP 8.3.1", "composer": "2.8"}
+CC_TOOLS = {"git": "git version 2.43", "uv": "uv 0.5", "claude": "2.1.305", "opencode": "1.0", "php": "missing"}
+NODE1_TOOLS = {"git": "git version 2.43", "uv": "uv 0.5", "codex": "1.0", "codex-code-mode-host": "1.0", "php": "PHP 8.3.1", "composer": "2.8"}
 
 
 def join(client, name):
@@ -430,6 +430,7 @@ def test_missing_catalogue_tool_is_installed_from_heartbeat_request_and_wait_res
                                                       desired["tool_repairs"])
     assert installed == [("gitleaks", "")]
     assert prepared["request_gaps"] == []
+    assert prepared["installed"] == ["gitleaks"]
     heartbeat(client, "cc", cc, {**CC_TOOLS, "gitleaks": available["gitleaks"]})
     wait = ctx.db.one("SELECT resolved_at,resolution FROM tool_waits WHERE ticket_key='TESTWP-5'")
     assert wait["resolved_at"] is not None and wait["resolution"] == "available on cc"

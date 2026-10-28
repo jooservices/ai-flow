@@ -151,7 +151,7 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     machine = next(row for row in state["nodes"] if row["name"] == "node1")
     assert account["status"] == "signed_out" and account["parallel"] == 2 and account["jobs"]
     assert account["sign_in_pending"] is True
-    assert machine["sessions_busy"] == 0 and machine["metrics"] == {}
+    assert machine["sessions_busy"] == 0 and set(machine["metrics"]) <= {"disk_free", "services"}
 
     # The machine starts the provider's own device flow and relays the provider-issued code to the console.
     again = client.post(f"/v1/accounts/{account_id}/sign-in")

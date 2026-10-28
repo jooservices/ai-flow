@@ -36,6 +36,9 @@ SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto"})
 
 # Console screens (`id="view-<name>"` in console.html) touched by each named renderer or screen helper.
 SCREEN_PAGE = "screens/{view}.md"
+# JAIF-249's required feature document also serves as the System check screen guide, keeping the change in
+# `docs/v4/` while preserving the Console Help target and the documentation-site screen coverage.
+SCREEN_DOC_OVERRIDES = {"system-check": "docs/v4/system-check.md"}
 
 # Layout controls are a cross-screen feature documented as one topic under docs/v4. Those pages may satisfy the
 # screen documentation gate for the complete set they explicitly cover; unrelated screens still need their page.
@@ -45,6 +48,8 @@ CROSS_SCREEN_DOCS = {"docs/v4/console-layouts.md": LAYOUT_SCREEN_VIEWS}
 # feature documentation to live under docs/v4. Keep the generated Help URL available without duplicating it in
 # docs/guide/screens.
 SCREEN_TOPIC_DOCS = {"settings": "docs/v4/runtime-settings.md"}
+# Feature topics linked from screen guides are copied into the Help site so those links work after packaging.
+TOPIC_DOCS = {"scale-proof": "docs/v4/scale-proof.md"}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
@@ -54,6 +59,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderLive": None,
     "renderDashboard": ("cc",),
     "flowDoctorPanel": ("cc",),
+    "scaleProofPanel": ("cc",),
     "dashboardProjectCounts": ("cc",),
     "providerUsageChart": ("cc",),
     "dashboardSpark": ("cc",),
@@ -78,6 +84,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "saveConsoleTheme": None,
     "renderCC": ("cc", "machines"),
     "renderNodeJoin": ("cc",),
+    "submitNodeJoin": ("cc",),
     "renderSA": ("sa",),
     "renderDHead": ("work", "delivery"),
     "renderProjectPicker": ("work", "delivery"),
@@ -104,6 +111,9 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "drawerInc": ("cc", "machines"),
     "renderFooter": None,
     "renderBackup": ("backup",),
+    "renderSystemCheck": ("system-check",),
+    "loadSystemCheck": ("system-check",),
+    "runSystemCheck": ("system-check",),
     "renderNotifications": ("notifications",),
     "notificationConfigFromForm": ("notifications",),
     "notificationFormSubmit": ("notifications",),
@@ -172,7 +182,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "viewAllowed": None,
     "syncMenuVisibility": None,
     "applyRoleNavigation": None,
-    "pollConsoleSession": None,
+    "pollConsoleSession": ("cc",),
     "loadPrefs": ("cc", "work"),
     "savePrefs": ("cc", "work"),
     "projTickets": ("work", "delivery"),
@@ -203,12 +213,17 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 SCREEN_LINE_VIEWS = (
     # The changed pointer behavior lets Dashboard actions remain clickable beneath the toast area.
     (re.compile(r"^\s*\.toasts\{"), "cc"),
+    (re.compile(r"^\s+(?:release_running|release_failed|scale_proof_(?:missing|failed)): function"), "cc"),
+    (re.compile(r"^\s+(?:release_running|release_failed|scale_proof_(?:missing|failed)): function"), "business"),
+    (re.compile(r"Scale proof \(/v1/state scale_proof\)|value against every budget"), "cc"),
     (re.compile(r"runtimeSettings|data-runtime|runtime-setting"), "settings"),
     (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|repositoryEditor|"
                 r"envEditor|envMissing|envScan|data-env-(?:field|run)|envItems|envItem|envField|containers:\s*false|"
                 r"config\[fieldName\]|fieldName === 'containers'"), "projects"),
+    (re.compile(r"^\s*(?:S\.)?systemCheck(?:Error|Busy)?\s*(?::|=)|system-check(?:-run)?|"
+                r"S\.view === 'system-check'"), "system-check"),
     (re.compile(r"service_undeclared: 'Undeclared services'"), "cc"),
     (re.compile(r"service_undeclared: 'Undeclared services'"), "machines"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
@@ -240,15 +255,16 @@ SCREEN_SHARED_UI_PATTERNS = (
 
 # View-specific navigation, state and event branches live outside the section/render functions. Infer their
 # documentation target from the view name instead of treating them as unmapped shared UI.
+SCREEN_VIEW_ARRAY_LOOP = re.compile(r",\s*'([a-z-]+)'\]\s*\.forEach")
 SCREEN_VIEW_UI_PATTERNS = (
-    re.compile(r'\bid="tab-([a-z]+)"'),
+    re.compile(r'\bid="tab-([a-z-]+)"'),
     re.compile(r"\bS\.([a-z]+)\s*=\s*\{"),
-    re.compile(r"\bHINTS\.([a-z]+)\s*="),
-    re.compile(r"\bpath\.indexOf\('/([a-z]+)'"),
-    re.compile(r"\{\s*view:\s*'([a-z]+)'"),
-    re.compile(r",\s*'([a-z]+)'\]\s*\.forEach"),
-    re.compile(r"\b(?:S\.view|v)\s*===\s*'([a-z]+)'"),
-    re.compile(r"\bact\s*===\s*'([a-z]+)-[\w-]+'"),
+    re.compile(r"\bHINTS\.([a-z-]+)\s*="),
+    re.compile(r"\bpath\.indexOf\('/([a-z-]+)'"),
+    re.compile(r"\{\s*view:\s*'([a-z-]+)'"),
+    SCREEN_VIEW_ARRAY_LOOP,
+    re.compile(r"\b(?:S\.view|v)\s*===\s*'([a-z-]+)'"),
+    re.compile(r"\bact\s*===\s*'([a-z-]+)-[\w-]+'"),
 )
 
 # Small pieces of shared console code live outside named renderers. Keep their screen impact explicit so the UI
@@ -267,6 +283,7 @@ SCREEN_VIEW_PATTERNS = (
 # Styles for the V2 dashboard and its Work board destination are outside the static view sections.
 SCREEN_LINE_VIEWS += (
     (re.compile(r"conflictsError"), "delivery"),
+    (re.compile(r"JOIN_FIELDS"), "cc"),
     # The Projects environment editor can remain interactive when its save/scan toast is visible.
     (re.compile(r"^\s*\.toasts\{"), "projects"),
     (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|capacity: \{ data:"), "cc"),
@@ -288,6 +305,12 @@ SCREEN_LINE_VIEWS += (
 # Lines that belong to one screen even inside a shared renderer: they narrow that renderer to this screen.
 SCREEN_LOCAL_LINE_VIEWS = (
     (re.compile(r"logs-nav"), "cc"),
+)
+
+# A new panel inserted into the shared Command Center renderer can be specific to one screen.
+SCREEN_RENDERER_LINE_VIEWS = (
+    (re.compile(r"scaleProofPanel\(d\.scale_proof(?:,.*)?\)"), ("cc",)),
+    (re.compile(r"var READY_TEXT = window\.AIFlowReadyText"), ("cc", "business")),
 )
 
 # A change to one of these needs a documentation change in the same pull request.
@@ -325,7 +348,11 @@ def incident_kinds(source_root: Path = ROOT / "aiflow" / "v4") -> set[str]:
 
 def console_views(page: Path = UI) -> list[str]:
     """Screens of the console: the `view-*` sections of console.html."""
-    return re.findall(r'<section class="view" id="view-([a-z]+)"', page.read_text(encoding="utf-8"))
+    views = re.findall(r'<section class="view" id="view-([a-z-]+)"', page.read_text(encoding="utf-8"))
+    extension = page.with_name("system-check.js")
+    if extension.is_file() and "system-check" not in views:
+        views.append("system-check")
+    return views
 
 
 def role_names() -> list[str]:
@@ -613,20 +640,32 @@ nav a,a{color:#6cb0ff}pre{background:#1c2227}td,th{border-color:#2c353d}blockquo
 @media(max-width:700px){body{display:block}nav{width:auto}main{padding:16px}}
 """
 SECTIONS = [("", "Start"), ("user", "User guides"), ("screens", "Console screens"), ("admin", "Administrator guide"),
-            ("runbooks", "Runbooks"), ("reference", "Reference")]
+            ("topics", "Topics"), ("runbooks", "Runbooks"), ("reference", "Reference")]
 
 
 def collect_pages(guide: Path = GUIDE, with_api: bool = True, version: str = "") -> dict[str, str]:
     """Relative page path (`screens/cc.md`) -> Markdown source."""
     pages = {p.relative_to(guide).as_posix(): p.read_text(encoding="utf-8") for p in sorted(guide.rglob("*.md"))}
     if guide.resolve() == GUIDE.resolve():
-        for view, source_path in SCREEN_TOPIC_DOCS.items():
+        for view, source_path in {**SCREEN_DOC_OVERRIDES, **SCREEN_TOPIC_DOCS}.items():
             source = _read_doc(source_path)
             if source:
                 pages[f"screens/{view}.md"] = source
+        for topic, source_path in TOPIC_DOCS.items():
+            source = _read_doc(source_path)
+            if source:
+                pages[f"topics/{topic}.md"] = source
     if with_api:
         pages[API_PAGE] = api_reference_markdown(version)
     return pages
+
+
+def screen_doc_source(view: str, guide: Path = GUIDE) -> Path:
+    """Return the authored Markdown source used for a screen's Console Help page."""
+    override = SCREEN_DOC_OVERRIDES.get(view) or SCREEN_TOPIC_DOCS.get(view)
+    if override and guide.resolve() == GUIDE.resolve() and (ROOT / override).is_file():
+        return ROOT / override
+    return guide / SCREEN_PAGE.format(view=view)
 
 
 def check_links(pages: dict[str, str]) -> list[str]:
@@ -694,6 +733,13 @@ def site_dir() -> Path | None:
 
 
 # --- CI: documentation must follow the product ----------------------------------------------------------------------
+# These helpers are reached from many API handlers but only implement first-use persistence setup. Their source edits
+# must not be mistaken for changes to every route's public contract. Keep walking through them so contract-bearing
+# helpers they call are still discovered; response helpers such as `state.snapshot` remain tracked normally.
+API_IMPLEMENTATION_ONLY_HELPERS = {
+    "aiflow/v4/control/licensing.py": frozenset({"_row", "_row_in_connection"}),
+}
+
 @lru_cache(maxsize=1)
 def _control_function_registry():
     """Parse control functions and imports so route contracts include shared response helpers they call."""
@@ -769,33 +815,42 @@ def _called_control_function_spans(endpoint, registry) -> list[tuple[str, tuple[
     if endpoint_node is None:
         return []
 
-    imports = dict(module_imports[module])
-    for inner in ast.walk(endpoint_node):
-        if isinstance(inner, (ast.Import, ast.ImportFrom)):
-            imports.update(imported_targets(module, inner))
-    calls = set()
-    for inner in ast.walk(endpoint_node):
-        if not isinstance(inner, ast.Call):
-            continue
-        func = inner.func
-        if isinstance(func, ast.Name):
-            if func.id in functions.get(module, {}):
-                calls.add((module, func.id))
-            elif func.id in imports and imports[func.id][1]:
-                calls.add(imports[func.id])
-        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            target = imports.get(func.value.id)
-            if target and target[1] is None:
-                calls.add((target[0], func.attr))
-    result = []
-    for target_module, target_function in sorted(calls):
-        target_node = functions.get(target_module, {}).get(target_function or "")
-        if target_node is None or (target_module == module and target_function == endpoint.__name__):
-            continue
-        decorators = getattr(target_node, "decorator_list", ())
-        first = min([target_node.lineno, *(item.lineno for item in decorators)])
-        result.append((modules[target_module][0], (first, target_node.end_lineno or target_node.lineno)))
-    return result
+    pending = [(module, endpoint_node)]
+    visited = {(module, endpoint.__name__)}
+    result = {}
+    while pending:
+        source_module, source_node = pending.pop()
+        imports = dict(module_imports[source_module])
+        for inner in ast.walk(source_node):
+            if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                imports.update(imported_targets(source_module, inner))
+        calls = set()
+        for inner in ast.walk(source_node):
+            if not isinstance(inner, ast.Call):
+                continue
+            func = inner.func
+            if isinstance(func, ast.Name):
+                if func.id in functions.get(source_module, {}):
+                    calls.add((source_module, func.id))
+                elif func.id in imports and imports[func.id][1]:
+                    calls.add(imports[func.id])
+            elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                target = imports.get(func.value.id)
+                if target and target[1] is None:
+                    calls.add((target[0], func.attr))
+        for target_module, target_function in sorted(calls):
+            key = (target_module, target_function or "")
+            target_node = functions.get(target_module, {}).get(key[1])
+            if target_node is None or key in visited:
+                continue
+            visited.add(key)
+            decorators = getattr(target_node, "decorator_list", ())
+            first = min([target_node.lineno, *(item.lineno for item in decorators)])
+            path = modules[target_module][0]
+            if target_function not in API_IMPLEMENTATION_ONLY_HELPERS.get(path, ()):
+                result[(path, first, target_node.end_lineno or target_node.lineno)] = None
+            pending.append((target_module, target_node))
+    return [(path, (first, last)) for path, first, last in sorted(result)]
 
 
 @lru_cache(maxsize=1)
@@ -1011,7 +1066,7 @@ def _read_doc(name: str) -> str:
 def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set[str]] | None = None,
                        views: set[str] | None = None,
                        changed_routes: dict[str, set[str]] | None = None) -> list[str]:
-    """Reasons a change fails the check. A changed screen needs a change to a page of `docs/guide/screens/` (the
+    """Reasons a change fails the check. A changed screen needs a change to its mapped documentation page (the
     page of each changed screen when `views` names them); a changed API route module needs changed documentation
     that names every changed method/path contract. When route-level diff data is unavailable, every registered
     route is required so an unrelated route cannot satisfy the check. Unrelated edits do not count."""
@@ -1019,7 +1074,7 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
     docs = [f for f in files if f.startswith(DOC_PATHS) and f.endswith(".md")]
     gaps = []
     if any(f.startswith(SCREEN_PATHS) for f in files):
-        pages = {f for f in docs if re.fullmatch(r"docs/guide/screens/[a-z]+\.md", f)}
+        pages = {f for f in docs if re.fullmatch(r"docs/guide/screens/[a-z-]+\.md", f)}
         guide_views = {Path(f).stem for f in pages}
         topic_views: set[str] = set()
         for doc in docs:
@@ -1028,18 +1083,21 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
             for line in read(doc).splitlines():
                 marker = re.match(r"\s*\*\*Console screens:\*\*\s*(.*?)\s*$", line, re.I)
                 if marker:
-                    topic_views.update(re.findall(r"`([a-z]+)`", marker.group(1), re.I))
+                    topic_views.update(re.findall(r"`([a-z-]+)`", marker.group(1), re.I))
         covered = set().union(*(CROSS_SCREEN_DOCS.get(f, frozenset()) for f in docs))
-        documented_views = guide_views | topic_views | covered
+        override_views = {view for view, page in SCREEN_DOC_OVERRIDES.items() if page in docs}
+        documented_views = (guide_views | topic_views | covered) - set(SCREEN_DOC_OVERRIDES)
+        documented_views |= override_views
         if views is not None:
             missing_views = set(views) - documented_views
             complete = not missing_views
         else:
             missing_views = set()
-            complete = bool(pages or topic_views or covered)
+            complete = bool(pages or topic_views or covered or override_views)
         if not complete:
             gaps.append("a console screen changed (aiflow/v4/control/ui) without a change in "
-                        + (", ".join(f"docs/guide/screens/{view}.md" for view in sorted(missing_views))
+                        + (", ".join(SCREEN_DOC_OVERRIDES.get(view, f"docs/guide/screens/{view}.md")
+                                     for view in sorted(missing_views))
                            if views is not None else
                            "its page under docs/guide/screens or a docs/v4 topic page naming its screen"))
     api_files = [f for f in files if f.endswith(".py") and f.startswith("aiflow/v4/control/")]
@@ -1082,7 +1140,7 @@ def _function_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
 
 def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str]) -> set[str]:
     """Map edits to shared navigation tables to the view entries that actually changed."""
-    item = r"([a-z]+)\s*:\s*(['\"])(.*?)\2"
+    item = r"['\"]?([a-z-]+)['\"]?\s*:\s*(['\"])(.*?)\2"
     old_items = {name: value for name, _, value in re.findall(item, old_line) if name in all_views}
     new_items = {name: value for name, _, value in re.findall(item, new_line) if name in all_views}
     changed = {name for name in old_items.keys() | new_items.keys()
@@ -1091,7 +1149,7 @@ def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str])
     # VIEW_GROUPS and the renderer list are inline arrays. Compare screen names so adding one
     # screen does not make every existing screen require an unrelated documentation edit.
     if old_line.lstrip().startswith("[") and new_line.lstrip().startswith("["):
-        quoted = re.compile(r"['\"]([a-z]+)['\"]")
+        quoted = re.compile(r"['\"]([a-z-]+)['\"]")
         old_names = {name for name in quoted.findall(old_line) if name in all_views}
         new_names = {name for name in quoted.findall(new_line) if name in all_views}
         changed |= old_names ^ new_names
@@ -1101,22 +1159,32 @@ def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str])
 def changed_views(base: str) -> set[str]:
     """Screens whose section or JavaScript renderer changed; fail when a UI hunk cannot be mapped."""
     rel = UI.relative_to(ROOT).as_posix()
+    extension_rel = UI.with_name("system-check.js").relative_to(ROOT).as_posix()
     diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", rel], cwd=ROOT, text=True,
                           capture_output=True, check=True).stdout
+    extension_diff = subprocess.run(["git", "diff", "--quiet", f"{base}...HEAD", "--", extension_rel],
+                                    cwd=ROOT, check=False)
+    extension_views = {"system-check", "projects"} if extension_diff.returncode == 1 else set()
+    if extension_diff.returncode not in {0, 1}:
+        raise subprocess.CalledProcessError(extension_diff.returncode, extension_diff.args)
     # Diff coordinates refer to HEAD. During a merge, the worktree/index can already contain upstream edits that
     # shift those coordinates, so map against the exact file version used by the diff.
     source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
     lines = source.splitlines()
-    base_source = subprocess.run(["git", "show", f"{base}:{rel}"], cwd=ROOT, text=True,
+    # `base...HEAD` diffs from the merge base, so old-side hunk coordinates belong to that tree rather than
+    # the possibly advanced base branch. Resolve against the same tree to keep screen mapping stable after merges.
+    merge_base = subprocess.run(["git", "merge-base", base, "HEAD"], cwd=ROOT, text=True,
+                                capture_output=True, check=True).stdout.strip()
+    base_source = subprocess.run(["git", "show", f"{merge_base}:{rel}"], cwd=ROOT, text=True,
                                  capture_output=True, check=True).stdout
     base_lines = base_source.splitlines()
-    all_views = set(console_views())
+    all_views = set(console_views(UI))
     hints_start = next((i for i, line in enumerate(lines) if line.startswith("var HINTS = {")), None)
     hints_end = next((i for i in range(hints_start + 1, len(lines)) if lines[i] == "};"), None) \
         if hints_start is not None else None
     spans = []
     for i, line in enumerate(lines):
-        if m := re.search(r'<section class="view" id="view-([a-z]+)"', line):
+        if m := re.search(r'<section class="view" id="view-([a-z-]+)"', line):
             end = next((j for j in range(i, len(lines)) if "</section>" in lines[j]), i)
             spans.append((i + 1, end + 1, m.group(1)))
     functions = _function_spans(lines)
@@ -1153,16 +1221,20 @@ def changed_views(base: str) -> set[str]:
         for line_no in range(max(first, 1), last + 1):
             line_views = {v for lo, hi, v in spans if lo <= line_no <= hi}
             changed_line = lines[line_no - 1] if line_no <= len(lines) else ""
-            specific_views = {match.group(1) for pattern in SCREEN_VIEW_UI_PATTERNS
-                              if (match := pattern.search(changed_line)) and match.group(1) in all_views}
-            specific_views |= {view for pattern, view in SCREEN_LOCAL_LINE_VIEWS if pattern.search(changed_line)}
+            navigation_views: set[str] = set()
             # Navigation objects are kept on one line. Compare the base and current lines so one
             # added or edited view entry does not make all existing screens require doc changes.
             if old_count == count and 1 <= old_first <= len(base_lines):
                 old_index = old_first - 1 + (line_no - first)
                 if old_index < len(base_lines):
-                    specific_views |= _changed_navigation_views(base_lines[old_index], changed_line, all_views)
-            layout_markup = ('id="layout-live"' in changed_line or 'data-block="' in changed_line
+                    navigation_views = _changed_navigation_views(base_lines[old_index], changed_line, all_views)
+            specific_views = {match.group(1) for pattern in SCREEN_VIEW_UI_PATTERNS
+                              if not (pattern is SCREEN_VIEW_ARRAY_LOOP and navigation_views)
+                              and (match := pattern.search(changed_line)) and match.group(1) in all_views}
+            specific_views |= navigation_views
+            specific_views |= {view for pattern, view in SCREEN_LOCAL_LINE_VIEWS if pattern.search(changed_line)}
+            layout_markup = ('id="layout-live"' in changed_line
+                             or ('data-block="' in changed_line and 'data-block="first-run-setup"' not in changed_line)
                              or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
                              or "S.layouts." in changed_line or "layoutAction(act" in changed_line
                              or "applyLayout('delivery'" in changed_line
@@ -1183,6 +1255,9 @@ def changed_views(base: str) -> set[str]:
                         break
                     mapped = SCREEN_RENDERER_VIEWS[name]
                     line_views |= ((specific_views or all_views) if mapped is None else set(mapped))
+            for pattern, mapped in SCREEN_RENDERER_LINE_VIEWS:
+                if pattern.search(changed_line):
+                    line_views = set(mapped)
             # Session polling handles every screen, but this guarded request refreshes only the Users page.
             if ("editing: '', temporaryPassword" in changed_line
                     or ("S.view === 'users'" in changed_line and "loadUsers(" in changed_line)):
@@ -1193,7 +1268,7 @@ def changed_views(base: str) -> set[str]:
             # Keep a hint-text edit local to that screen. The declarations and shared Help plumbing affect every
             # screen, including edits to the top-bar link, first-use container and dismiss behavior.
             if hints_start is not None and hints_end is not None and hints_start <= line_no - 1 <= hints_end:
-                hint = re.match(r"\s*([a-z]+):\s*'", changed_line)
+                hint = re.match(r"\s*['\"]?([a-z-]+)['\"]?:\s*'", changed_line)
                 if hint:
                     hint_view = hint.group(1)
                     line_views.add(hint_view)
@@ -1202,7 +1277,7 @@ def changed_views(base: str) -> set[str]:
             if (help_start is not None and help_start <= line_no - 1 <= help_end and hint_view is None):
                 line_views |= all_views
             shared_ui_change = any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS)
-            if shared_ui_change and not specific_views:
+            if shared_ui_change and not (specific_views or navigation_views):
                 line_views |= all_views
             for pattern, mapped in SCREEN_VIEW_PATTERNS:
                 if pattern.search(changed_line):
@@ -1234,7 +1309,7 @@ def changed_views(base: str) -> set[str]:
         lines_text = ", ".join(str(n) for n in sorted(unmapped))
         raise ValueError("console UI change could not be mapped to a screen at line(s) " + lines_text
                          + "; add the renderer to SCREEN_RENDERER_VIEWS or keep screen content inside its view section")
-    return touched
+    return touched | extension_views
 
 
 def changed_files(base: str) -> list[str]:

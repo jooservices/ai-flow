@@ -153,7 +153,7 @@ class Store:
         """Give a vector to the entries that have none (or one of another model). Returns how many were filled; 0 when Ollama is not available."""
         if self.embedder is None:
             return 0
-        rows = self.run("select id, title, body, tags from memory_entry where status <> 'decayed' and (embedding is null or embedding_model is distinct from %s) "
+        rows = self.run("select id, title, body, tags from memory_entry where embedding is null or embedding_model is distinct from %s "
                         "order by created_at limit %s", (self.embedder.model, batch))
         if not rows:
             return 0

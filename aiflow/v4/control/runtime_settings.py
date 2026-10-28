@@ -24,11 +24,12 @@ PROJECT = re.compile(r"[A-Z][A-Z0-9]{1,15}\Z")
 VALUE = re.compile(r"[\x21-\x7e]{1,4096}\Z")
 _RESERVED = {
     "JIRA_EMAIL", "JIRA_API_TOKEN", "GH_TOKEN", "O2_BASIC", "AIFLOW4_DATABASE_URL", "AIFLOW4_REDIS_URL",
-    "AIFLOW4_JOIN_TOKEN", "AIFLOW4_OWNER_TOKEN", "AIFLOW4_REVIEWER_TOKEN", "AIFLOW4_CONSOLE_SESSION_SECRET",
+    "AIFLOW4_JOIN_TOKEN", "AIFLOW4_OWNER_TOKEN", "AIFLOW4_SETUP_OWNERSHIP_CAPABILITY", "AIFLOW4_REVIEWER_TOKEN",
+    "AIFLOW4_CONSOLE_SESSION_SECRET",
     "AIFLOW4_CONSOLE_LOGIN", "AIFLOW4_PUBLIC_URL", "AIFLOW4_GITHUB_APP_DIR", "AIFLOW4_JIRA_SECRET_DIR",
     "POSTGRES_PASSWORD", "ZO_ROOT_USER_PASSWORD",
 }
-_SECRET_WORDS = ("TOKEN", "PASSWORD", "SECRET", "PRIVATE_KEY", "API_KEY", "CREDENTIAL", "BASIC")
+_SECRET_WORDS = ("TOKEN", "PASSWORD", "SECRET", "CAPABILITY", "PRIVATE_KEY", "API_KEY", "CREDENTIAL", "BASIC")
 # These values are read by control-loops for scheduled S3 backups. That process does not load runtime.env,
 # so reject them here rather than accept a change that would appear successful but leave backup auth unchanged.
 _UNSUPPORTED_CONTROL_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
@@ -84,9 +85,9 @@ def _serves_project(ctx, node: dict, project: str) -> bool:
         return project in (node.get("projects") or [])
 
 
-def _worker_units(ctx, node_name: str) -> list[str]:
+def _worker_units(ctx, node_name: str, repo=None) -> list[str]:
     units: list[str] = []
-    for account in ctx.repo().accounts_on(node_name):
+    for account in (repo or ctx.repo()).accounts_on(node_name):
         if account.paused:
             continue
         workers = max(1, int(account.parallel or 1))
@@ -156,6 +157,65 @@ def _targets(ctx, scope: str, project: str = "") -> tuple[list[dict], list[str]]
     return targets, reported_services
 
 
+def _project_services_inventory(ctx, projects: list[str], nodes: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Build the Settings view's per-project service list from one fleet snapshot.
+
+    `_targets` is intentionally strict for writes and checks every serving node. Calling it once for each project
+    made the read-only inventory repeat the node/account scan for the whole project list. Here those same checks
+    are applied to a single node snapshot, while worker units and project assignments are computed once per node.
+    """
+    repo = ctx.repo()
+    projects_by_node: dict[str, set[str]] = {}
+    units_by_node: dict[str, list[str]] = {}
+    for node in nodes:
+        name = str(node["name"])
+        try:
+            projects_by_node[name] = set(repo.projects_for_node(
+                name, node.get("projects") or [], bool(node.get("dynamic"))))
+        except (KeyError, ValueError):
+            projects_by_node[name] = set(node.get("projects") or [])
+        units_by_node[name] = _worker_units(ctx, name, repo)
+
+    control_nodes = [node for node in nodes if node.get("role") == "control" and node.get("token_hash")]
+    if not control_nodes:
+        return {project: [] for project in projects}
+    control = control_nodes[0]
+    now = datetime.now(timezone.utc)
+    control_heartbeat = control.get("last_heartbeat")
+    control_ready = bool(control.get("status") == "online" and control_heartbeat
+                         and (now - control_heartbeat).total_seconds() <= 75
+                         and control.get("runtime_settings_public_key"))
+
+    inventory: dict[str, list[str]] = {}
+    for project in projects:
+        assigned = [node for node in nodes if node.get("token_hash")
+                    and project in projects_by_node.get(str(node["name"]), set())]
+        if not assigned or not control_ready:
+            inventory[project] = []
+            continue
+        ready = True
+        for node in assigned:
+            heartbeat = node.get("last_heartbeat")
+            if (node.get("status") != "online" or not heartbeat
+                    or (now - heartbeat).total_seconds() > 75
+                    or not node.get("accepting_work", True)
+                    or not node.get("runtime_settings_public_key")):
+                ready = False
+                break
+        if not ready:
+            inventory[project] = []
+            continue
+        services = [f"{node['name']}: {unit}" for node in assigned
+                    for unit in units_by_node.get(str(node["name"]), [])]
+        if not services:
+            targets = list(assigned)
+            if all(node["name"] != control["name"] for node in targets):
+                targets.append(control)
+            services = [f"worker services on {node['name']}" for node in targets]
+        inventory[project] = services
+    return inventory
+
+
 def _display_inventory(ctx) -> dict[str, Any]:
     secret_file = Path(ctx.settings.runtime_secret_file)
     rows = _file_rows(secret_file, "secret")
@@ -166,7 +226,9 @@ def _display_inventory(ctx) -> dict[str, Any]:
             if PROJECT.fullmatch(project):
                 rows.extend(_file_rows(path, "project", project))
     project_rows: dict[tuple[str, str], dict] = {}
-    for node in ctx.db.all("SELECT name,runtime_settings FROM nodes WHERE removed_at IS NULL ORDER BY name"):
+    nodes = ctx.db.all("SELECT name,role,status,token_hash,last_heartbeat,accepting_work,projects,dynamic,"
+                       "runtime_settings_public_key,runtime_settings FROM nodes WHERE removed_at IS NULL ORDER BY name")
+    for node in nodes:
         inventories = node.get("runtime_settings") or {}
         for project, entries in inventories.items():
             if not PROJECT.fullmatch(str(project)):
@@ -193,7 +255,7 @@ def _display_inventory(ctx) -> dict[str, Any]:
     projects = sorted(ctx.repo().projects)
     return {"settings": rows, "projects": projects, "changes": _recent_changes(ctx),
             "secret_services": ["control-api-a", "control-api-b"],
-            "project_services": {project: _project_services(ctx, project) for project in projects}}
+            "project_services": _project_services_inventory(ctx, projects, nodes)}
 
 
 def _project_services(ctx, project: str) -> list[str]:

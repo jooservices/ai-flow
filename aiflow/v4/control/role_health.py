@@ -1,7 +1,7 @@
 """Role health: quality by AI account and role (docs/v4/role-health.md).
 
 Completed pull requests and clean no-change results are successes; failures, timeouts and real tool-missing stops
-are scored, while quota, sign-in and machine problems are excluded. A role can be switched off on only a subset of
+are scored (a timeout or a lost lease at a quarter of a failure, since the machine and the size of the ticket are often the cause), while quota, sign-in and machine problems are excluded. A role can be switched off on only a subset of
 its ready accounts: never the last two, and never more than half. When every such account scores
 badly, all remain on and one role-level incident reports the common cause. Disabled roles return as soon as their
 history no longer exceeds the threshold or the recorded missing tool is available; otherwise successful probation
@@ -42,6 +42,8 @@ UNSCORED_KINDS = {"quota", "auth", "infra", "network", "machine", "node", "tool"
                   "missing-tool", "offline", "toolchain", "services"}
 SUCCESS_OUTCOMES = {"merged", "human", "refined", "questions", "assessed", "answered", "escalated"}
 STOPPED_OUTCOMES = {"timeout", "lost"}
+STOPPED_KINDS = {"timeout", "lost"}  # a timed-out run is stored as outcome failed with this error kind
+STOPPED_WEIGHT = 0.25        # share of a failure that a run stopped by the time limit or a lost lease counts
 
 RUNS_SQL = """
 WITH recent AS (
@@ -104,8 +106,12 @@ def classify(run: dict) -> Scored | None:
         return Scored("finished", 0.0, rework=True)
     if outcome == "done" or outcome in SUCCESS_OUTCOMES:
         return Scored("finished", 0.0)
-    if outcome in STOPPED_OUTCOMES:
-        return Scored("stopped", 1.0)
+    if outcome in STOPPED_OUTCOMES or (outcome == "failed" and kind in STOPPED_KINDS):
+        # Stopped by the time limit or the loss of its lease: mostly the size of the ticket or the load of the
+        # machine, not the quality of the AI. It weighs a quarter of a failed run, so at the default 60% threshold a
+        # busy machine alone cannot switch a role off (it did: 7 of the last 10 runs of the best account were
+        # timeouts on an overloaded host).
+        return Scored("stopped", STOPPED_WEIGHT)
     if outcome == "blocked":
         return Scored("blocked", 1.0)
     if outcome == "failed":

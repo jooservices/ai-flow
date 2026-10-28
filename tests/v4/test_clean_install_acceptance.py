@@ -25,6 +25,7 @@ import subprocess
 import tarfile
 import threading
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,7 +37,7 @@ from fastapi.testclient import TestClient
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from test_control_install import ROOT, FakeHost, installer, machine  # noqa: F401 - `machine` is a fixture
+from test_control_install import ROOT, FakeHost, console_seeds, installer, machine  # noqa: F401 - `machine` is a fixture
 from test_projects import SITE, prepare_project_control, project_body
 from aiflow.v4 import cli
 from aiflow.v4.control.github import GitHubApp
@@ -45,7 +46,9 @@ from aiflow.v4.control import api as control_api
 from aiflow.v4.control import login
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control.loops import jira_sync
+from aiflow.v4.control.ui import mount_ui
 from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.core.system_check import condition
 from aiflow.v4.install import backup
 from aiflow.v4.install import secrets as sec
 from aiflow.v4.install.control import Layout
@@ -54,7 +57,12 @@ ADMIN = "owner@example.test"
 SESSION_SECRET = "acceptance-session-secret-with-32-bytes"
 DOC = ROOT / "docs/v4/clean-install-acceptance.md"
 TOOLS = {"git": "git version 2.43", "uv": "uv 0.8.1", "python3": "Python 3.12.2",
-         "codex": "codex 1.0", "codex-code-mode-host": "present"}
+         "claude": "Claude Code 2.1.305", "codex": "codex 1.0",
+         "codex-code-mode-host": "codex-code-mode-host 1.0", "grok": "grok 1.0",
+         "opencode": "opencode 1.0", "docker": "Docker version 29.1", "node": "node v24.0.0",
+         "gh": "gh version 2.58.0", "php": "PHP 8.3.10", "composer": "Composer 2.8.4",
+         "wp": "WP-CLI 2.12.0", "playwright": "Version 1.56.0",
+         "playwright-browser": "Playwright Chromium 1.56.0"}
 
 
 def issue(key, summary, status, labels, issuetype="Story"):
@@ -71,7 +79,7 @@ class Fresh:
 
     def install_control(self, version="v4.1.0", **opts):
         out: list[str] = []
-        assert installer(self.machine, out, version=version, admin_email=ADMIN, **opts).run() == 0, out
+        assert installer(self.machine, out, version=version, admin_email="", **opts).run() == 0, out
         return out
 
     def start_control_api(self):
@@ -81,16 +89,22 @@ class Fresh:
         ctx.settings.console_login = True
         ctx.settings.console_session_secret = SESSION_SECRET
         ctx.settings.owner_token = env["AIFLOW4_OWNER_TOKEN"]
+        ctx.settings.setup_ownership_capability = env["AIFLOW4_SETUP_OWNERSHIP_CAPABILITY"]
         prepare_project_control(ctx, self.control_repo)
         self.app = create_app(ctx)
+        mount_ui(self.app, ctx)
         self.app.state.sync_accounts()
+        self.anonymous = TestClient(self.app, follow_redirects=False, client=("127.0.0.1", 50001))
         self.client = TestClient(self.app, follow_redirects=False, client=("127.0.0.1", 50000))
-        self.password = login.seed_user(ctx.db, ADMIN, "super_admin", "Owner")  # `console-user seed` of the install
-        assert self.password
-        pw_file = self.machine.p("/etc/aiflow/secrets/console/super-admin-password")  # what the seed CLI leaves behind
-        pw_file.parent.mkdir(parents=True, exist_ok=True)
-        pw_file.write_text(self.password + "\n")
-        pw_file.chmod(0o600)
+        assert "Create Administrator" in self.anonymous.get("/login").text
+        assert self.anonymous.get("/cc").headers["location"].startswith("/login")
+        self.password = "clean-install-browser-password-2026"
+        setup = self.client.get("/v1/setup/status")
+        assert setup.status_code == 200 and setup.json()["admin_exists"] is False
+        created = self.client.post("/v1/setup/bootstrap", json={"public_url": "http://127.0.0.1",
+            "email": ADMIN, "password": self.password}, headers={"X-AIFLOW4-Setup": setup.json()["bootstrap_token"],
+            "X-AIFLOW4-Ownership": ctx.settings.setup_ownership_capability})
+        assert created.status_code == 200, created.text
         return self.client
 
     def sign_in(self):
@@ -111,9 +125,29 @@ class Fresh:
         joined = self.client.post("/v1/nodes/join", json={"name": name, "join_token": token})
         assert joined.status_code == 200, joined.text
         headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
-        beat = self.client.post(f"/v1/nodes/{name}/heartbeat", json={"tools": TOOLS, "slots_total": 2}, headers=headers)
+        beat = self.heartbeat(name, headers)
         assert beat.status_code == 200, beat.text
         return headers, beat.json()
+
+    def heartbeat(self, name, headers):
+        """Report the ready machine and credential checks a current node agent sends."""
+        accounts = self.ctx.repo().accounts_on(name)
+        body = {
+            "tools": TOOLS,
+            "slots_total": 2,
+            "metrics": {"disk_free": 20 * 1024 ** 3},
+            "system_conditions": [
+                condition("disk-space", "Free disk space", "ready", "20 GiB is available."),
+                condition("workspace-permissions", "Work directory permissions", "ready",
+                          "The node can write its work and state directories."),
+                condition("control-network", "Control API network", "ready",
+                          "The machine reached the control API and sent this heartbeat."),
+                condition("repository-network", "Repository network", "ready",
+                          "The machine can reach GitHub over HTTPS."),
+            ],
+            "credential_checks": {account.id: {"present": True, "valid": True} for account in accounts},
+        }
+        return self.client.post(f"/v1/nodes/{name}/heartbeat", json=body, headers=headers)
 
     def machine_client(self):
         """A client without the console cookie: what a machine's own call looks like."""
@@ -144,12 +178,13 @@ def fresh(machine, ctx, control_repo, tmp_path, monkeypatch):  # noqa: F811
 def test_clean_control_machine_asks_for_sign_in_and_first_run_setup_needs_only_the_documented_steps(fresh):
     m, client = fresh.machine, fresh.client
     assert m.p("/srv/aiflow/control/releases/CURRENT").read_text().strip() == "v4.1.0"
-    assert (m.p("/etc/aiflow/secrets/console/super-admin-password")).parent.is_dir()
+    assert (m.p("/etc/aiflow/secrets/console")).is_dir()
+    assert not console_seeds(m)  # the browser created the Administrator; installer did not require an email or file
     # the console and the read APIs refuse anonymous callers; the sign-in page and the join endpoints stay open
-    assert client.get("/v1/state").status_code == 401
-    assert client.get("/cc").status_code == 302 and client.get("/cc").headers["location"].startswith("/login")
-    assert client.get("/healthz").status_code == 200
-    assert client.post("/v1/auth/login", json={"email": ADMIN, "password": "wrong"}).status_code == 401
+    assert fresh.anonymous.get("/v1/state").status_code == 401
+    assert fresh.anonymous.get("/cc").status_code == 302 and fresh.anonymous.get("/cc").headers["location"].startswith("/login")
+    assert fresh.anonymous.get("/healthz").status_code == 200
+    assert fresh.anonymous.post("/v1/auth/login", json={"email": ADMIN, "password": "wrong"}).status_code == 401
     fresh.sign_in()
     assert client.get("/v1/state").status_code == 200
 
@@ -158,11 +193,25 @@ def test_clean_control_machine_asks_for_sign_in_and_first_run_setup_needs_only_t
     assert beat["desired"]["accounts"]
     nodes = {n["name"]: n for n in client.get("/v1/state").json()["nodes"]}
     assert {"cc", "node1"} <= set(nodes)
+    readiness = client.get("/v1/system-check").json()["nodes"]
+    readiness_by_node = {row["name"]: row["readiness"] for row in readiness}
+    assert {"cc", "node1"} <= set(readiness_by_node)
+    assert all(row["machine"] and row["projects"].get("TESTWP") for row in readiness_by_node.values())
+    bundle = client.post("/v1/support/bundles", json={})
+    assert bundle.status_code == 200
+    downloaded = client.get(bundle.json()["download_url"])
+    assert downloaded.status_code == 200 and downloaded.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
+        support_readiness = json.loads(archive.read("system-check.json"))
+    archived_nodes = support_readiness["system_check"]["nodes"]
+    assert len(archived_nodes) >= 2
+    assert all(row["readiness"]["machine"] and row["readiness"]["projects"].get("TESTWP")
+               for row in archived_nodes)
 
 
 def test_every_setup_step_the_test_takes_is_in_the_document():
     text = DOC.read_text()
-    for step in ("aiflow4-control-install", "--admin-email", "super-admin-password", "/login", "Projects",
+    for step in ("aiflow4-control-install", "browser setup", "Administrator", "/setup", "Projects",
                  "join command", "/review", "signed candidate", "clean-install-acceptance.sh"):
         assert step in text, step
 
@@ -189,6 +238,8 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
     ctx.repo = lambda: snap
     ctx.refresh_repo = lambda: None
     fresh.app.state.sync_accounts()
+    heartbeat = fresh.heartbeat("cc", cc)
+    assert heartbeat.status_code == 200, heartbeat.text
 
     # Jira (the fake) is the source of truth: the registry only mirrors what the sync reads from it
     jira_now = {"NEWAPP-1": issue("NEWAPP-1", "Sample ticket", "Intake", []),
@@ -439,7 +490,6 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     (github_dir / "app.pem").chmod(0o600)
 
     secret_files = [fresh.machine.p("/etc/aiflow/secrets/control/aiflow4.env"),
-                    fresh.machine.p("/etc/aiflow/secrets/console/super-admin-password"),
                     jira_dir / "oauth-app.json", jira_dir / "credential.json",
                     github_dir / "app.json", github_dir / "app.pem"]
     secrets_before = {p: p.read_bytes() for p in secret_files}
@@ -451,7 +501,7 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     with tarfile.open(archive) as tar:
         names = tar.getnames()
     assert "manifest.json" in names and "db/console_users.copy" in names
-    assert "secrets/console/super-admin-password" in names and "secrets/control/aiflow4.env" in names
+    assert "secrets/control/aiflow4.env" in names
     assert {"secrets/jira/oauth-app.json", "secrets/jira/credential.json",
             "secrets/github/app.json", "secrets/github/app.pem"} <= set(names)
 
@@ -568,7 +618,7 @@ def test_backup_over_an_existing_world_readable_file_ends_with_mode_0600(fresh, 
 def test_upgrade_keeps_sign_in_and_data_and_rollback_returns_to_the_previous_release(fresh):
     m = fresh.machine
     before = (m.p("/etc/aiflow/secrets/control/aiflow4.env").read_bytes(),
-              m.p("/etc/aiflow/secrets/console/super-admin-password").parent.is_dir())
+              m.p("/etc/aiflow/secrets/console").is_dir())
     out: list[str] = []
     assert installer(m, out, version="v4.2.0", admin_email=ADMIN).run() == 0, out
     assert m.p("/srv/aiflow/control/releases/CURRENT").read_text().strip() == "v4.2.0"
@@ -735,9 +785,9 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
 def test_real_machine_run_uses_command_center_project_and_machine_setup():
     script = (ROOT / "deploy/v4/ci/clean-install-containers.sh").read_text()
     assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/ci/clean-install-containers.sh")]).returncode == 0
-    for step in ("--domain", "--admin-email", "AIFLOW4_CONSOLE_LOGIN=1", "/v1/projects/catalog",
+    for step in ("--domain", "AIFLOW4_CONSOLE_LOGIN=1", "/v1/setup/bootstrap", "/v1/projects/catalog",
                  "/v1/projects/preflight", "$URL/v1/projects", "/v1/nodes/$1/join-command",
-                 "acceptance-backup.py create", "acceptance-backup.py restore", "super-admin-password"):
+                 "acceptance-backup.py create", "acceptance-backup.py restore"):
         assert step in script, step
     assert "NODES=(" in script and "node-a" in script and "node-b" in script  # a control machine and two machines
     assert "aiflow4-acceptance-provider" in script and "acceptance-providers.py" in script
@@ -764,12 +814,12 @@ def test_release_install_helper_matches_the_release_or_candidate_under_test():
 def test_the_signed_candidate_uses_documented_install_and_join_before_publishing():
     real_machine = (ROOT / "deploy/v4/ci/clean-install-containers.sh").read_text()
     candidate_adapter = (ROOT / "deploy/v4/ci/candidate-deploy.sh").read_text()
-    assert "--version \"$VERSION\" --domain \"$DOMAIN\" --admin-email \"$ADMIN\"" in real_machine
+    assert "--version \"$VERSION\" --domain \"$DOMAIN\"" in real_machine
     assert "cosign verify-blob" in candidate_adapter
     assert "enable -q --now aiflow4-autodeploy.timer" not in candidate_adapter
     assert "aiflow4-control-install" in real_machine
     assert "/v1/install.sh" in real_machine and "join-command" in real_machine
-    assert "AIFLOW4_CONSOLE_LOGIN=1" in real_machine and "/v1/auth/login" in real_machine
+    assert "AIFLOW4_CONSOLE_LOGIN=1" in real_machine and "/v1/setup/bootstrap" in real_machine and "/v1/auth/login" in real_machine
     assert "AIFLOW4_DATABASE_URL=postgresql://" not in real_machine
     steps = _workflow("release-v4.yml")["jobs"]["release"]["steps"]
     names = [s.get("name", "") for s in steps]

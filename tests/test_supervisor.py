@@ -932,7 +932,6 @@ class MergedPullRequestGateTests(unittest.TestCase):
 
         self.assertEqual(repo.cleaned, ("JAIF-9", True))
 
-
 class PullRequestBodyTests(unittest.TestCase):
     values = {"summary": "Adds the thing.", "why": "Because it is needed.", "tests": "- [x] Reviewed by Grok\n- [ ] CI green\n- [ ] QA",
               "deployment": "None", "ticket": "JAIF-9", "footer": github.MARKER}

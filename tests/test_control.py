@@ -1,14 +1,16 @@
+import io
 import tempfile
 import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from aiflow import health
 from aiflow.config import ConfigError, load, parse_worker
 from aiflow.control import MAX_CHANGES, Control, config_hash, make_plan
 from aiflow.projects import desired_ids
-from tests.test_supervisor import FakeJira, FakeRedis, make
+from tests.test_supervisor import FakeJira, FakeRedis
 
 
 def write(path: Path, text: str) -> None:
@@ -232,6 +234,25 @@ class WorkerBehaviourTests(Machine):
 
 
 class HealthTests(Machine):
+    def test_health_report_shows_configured_and_running_worker_counts(self):
+        cfg = replace(self.load(), expected_slots=("wsl:1", "wsl:2"), heartbeat_stale_seconds=60)
+        redis = FakeRedis()
+        now = int(time.time())
+        redis.set("hb:wsl:1", str(now), 300)
+        redis.set("hb:wsl:2", str(now - 61), 300)
+        redis.set("hb:wsl:control", str(now), 300)
+
+        with mock.patch("aiflow.health.load", return_value=cfg), \
+             mock.patch("aiflow.health.Redis", return_value=redis), \
+             mock.patch("aiflow.health.Jira", return_value=FakeJira()), \
+             mock.patch("aiflow.health.problems", return_value=[]), \
+             mock.patch("aiflow.health.usage_summary", return_value=None), \
+             mock.patch("aiflow.health.events.configure"), mock.patch("aiflow.health.events.emit"), \
+             mock.patch("aiflow.health.events.close"), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(health.main(), 0)
+
+        self.assertIn("WORKERS wsl: configured 2, running 1", output.getvalue())
+
     def test_control_alerts(self):
         cfg = self.load()
         redis = FakeRedis()

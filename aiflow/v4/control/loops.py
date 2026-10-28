@@ -28,6 +28,7 @@ from urllib.parse import quote
 from . import environment as environment_reports
 from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
 from . import flow_doctor
+from . import system_check
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -241,6 +242,7 @@ def watchdog(ctx: Ctx) -> None:
             ctx.events.emit("node.offline", node=n["name"], reason=f"no heartbeat for {int(age or 0)} s")
             open_incident(ctx, "node_down", n["name"], "critical", f"node {n['name']} is down",
                           f"No heartbeat for {int(age or 0)} seconds. Its runs lose their lease after 90 s and go back to To Do.")
+            system_check.refresh_node(ctx, n["name"], "heartbeat_lost")
         elif n["status"] == "online":
             close_incident(ctx, "node_down", n["name"], "heartbeat is back")
     # version skew: a node outside the control/node policy gets no new work until it runs a compatible release
@@ -521,7 +523,7 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
     support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
     stop = stop or threading.Event()
     last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
-    last_doctor = last_ba_chat = 0.0
+    last_doctor = last_system_check = last_ba_chat = 0.0
     last_merge = 0.0
     from . import api as control_api
     ctx.events.start()
@@ -559,15 +561,18 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
             if now - last_release >= 30 and ctx.leases.leader("version_release_scan", OWNER, 60_000):
                 version_release_scan(ctx)
                 last_release = now
+            if now - last_system_check >= 3600 and ctx.leases.leader("system_check", OWNER, 3_700_000):
+                system_check.refresh_all(ctx, "hourly")
+                last_system_check = now
             if now - last_mem >= 60 and ctx.leases.leader("memory_index", OWNER, 120_000):
                 written = memory.index(ctx.db)
                 if any(written.values()):
                     log.info("memory indexed: %s", written)
                 last_mem = now
             if now - last_backup_jobs >= 60 and ctx.leases.leader("backup_jobs", OWNER, 14_400_000):
-                from ..worker import backups as backup_worker
-                backup_worker.scheduled_backup(ctx)
-                backup_worker.weekly_restore_test(ctx)
+                from . import backups as backup_jobs
+                backup_jobs.scheduled_backup(ctx)
+                backup_jobs.weekly_restore_test(ctx)
                 last_backup_jobs = now
         except Exception as e:  # noqa: BLE001
             log.exception("loop error: %s", e)

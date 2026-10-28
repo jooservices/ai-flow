@@ -6,24 +6,31 @@ the effective permission list, and the UI builds its menu from that list. The AP
 table for direct view URLs and protected actions. See [Role-based console views](role-based-views.md) for the role
 table, landing page priority, people management and view-as behavior.
 
-## Installation turns it on
+## First start
 
-`aiflow4 install control --version vX.Y.Z --domain D --admin-email you@example.com` (see
-[control-install.md](control-install.md)):
+The control installer turns on `AIFLOW4_CONSOLE_LOGIN=1` and generates the session signing key. It does not need an
+Administrator email or password. With no console user, `/login` serves the first-run setup screen instead of the
+sign-in form. The browser asks for the public address, installation ownership capability, email and password, then
+creates the first Administrator and signs them in. The capability is checked against the installation's
+`AIFLOW4_SETUP_OWNERSHIP_CAPABILITY` and atomically consumed with first-user creation; the public status endpoint
+never returns it. On an interactive first install, choose the capability during the install command's hidden
+prompt and enter the same value in the browser.
+Passwords are stored only as salted scrypt hashes; the setup request and audit record do not retain the password.
+The selected public address is kept in PostgreSQL and used by every API replica for provider callbacks and generated
+links, so no environment file edit is needed.
 
-- sets `AIFLOW4_CONSOLE_LOGIN=1` and the external `https://<domain>` `AIFLOW4_PUBLIC_URL` in
-  `/etc/aiflow/secrets/control/aiflow4.env` (an owner's explicit login setting `0` is kept); the signing key
-  `AIFLOW4_CONSOLE_SESSION_SECRET` is generated there too;
-- in its `admin` step runs `aiflow4 console-user seed --role super_admin` from the release image, after the
-  migrations and before the deploy. The installed account is shown as Administrator. The generated password is written once to
-  `/etc/aiflow/secrets/console/super-admin-password` (0600) and is never printed;
-- remembers the email in `/etc/aiflow/control.env` (`AIFLOW4_CONSOLE_ADMIN_EMAIL`), so later runs and upgrades need
-  no `--admin-email` and change nothing for an existing user.
+After the first Administrator exists, `/setup` redirects to the Dashboard. Its "Finish setting up AI Flow" panel
+checks Jira, GitHub, a machine, AI accounts, the first project and a sample ticket. Each incomplete step names the
+next action in plain words. Jira and GitHub actions stay in Integrations, machine join and account sign-in stay in
+Machines and AI, and project setup stays in Projects. A skipped step remains on the Dashboard with a resume link.
+The panel disappears only after every step is ready. The user-created password is never written to a local file.
 
-After the install the owner opens `https://<domain>/login` and only uses the UI. The lab's Super Administrator is
-`jooservices@gmail.com`. The environment variable and the CLI below remain installer and developer tools. The
-installer sets `AIFLOW4_PUBLIC_URL` to the public `https://` address so the cookie is marked `Secure`. Without
-`AIFLOW4_CONSOLE_LOGIN=1` the console is open as before.
+An existing Administrator is still supported: a prior install can keep using its account and sign in at `/login`.
+The optional installer `--admin-email` and `aiflow4 console-user seed` command remain available for controlled legacy
+and CI setups, not as a required fresh-install step. The installer sets the initial public URL from `--domain` so
+the console can be reached; the setup screen lets the Administrator confirm or change the browser-visible address.
+HTTPS is recommended so the session cookie is marked `Secure`. Without `AIFLOW4_CONSOLE_LOGIN=1`, the console is open
+as before.
 
 ## What the gate does
 
@@ -42,10 +49,16 @@ installer sets `AIFLOW4_PUBLIC_URL` to the public `https://` address so the cook
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /login` | the sign-in page |
+| `GET /login` | first-run setup when no console user exists, otherwise the sign-in page |
+| `GET /setup` | first Administrator bootstrap before any user exists; redirects to the Dashboard afterwards |
+| `GET /v1/setup/status` | before an Administrator exists, returns only the bootstrap token and lock state; after sign-in, checks each first-run step and reports its missing action |
+| `POST /v1/setup/bootstrap` | creates the first Administrator and saves the public address after the installation capability is supplied and consumed; it checks the plan's user limit in the same admission transaction |
+| `POST /v1/setup/steps/{step}` | skip a step or resume it later |
+| `POST /v1/setup/sample-ticket` | creates and confirms the sample ticket in Intake; the Dashboard panel remains until all steps are ready |
 | `POST /v1/auth/login` | `{email, password}`; returns the user and sets the HttpOnly `aiflow4_session` cookie (SameSite=Strict, Secure behind HTTPS, 12 hours) |
 | `POST /v1/auth/logout`, `GET /logout` | clears the cookie |
 | `GET /v1/auth/me` | the signed-in user, or 401 |
+| `POST /v1/auth/users` | creates a console user for an Administrator with user-management permission, subject to the plan's user limit |
 | `GET /v1/console/session` | the signed-in user, assigned roles, effective permissions, role options and sign-in landing page |
 
 Because the cookie is Strict, a console page reached from another site arrives without it; the sign-in page then

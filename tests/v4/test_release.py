@@ -566,7 +566,8 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, reque
         "docker": f'echo "docker $*" >> {log}\n'
                   f'[ "$1" = exec ] && [ "$4" = notify ] && {{ echo "alert $8" >> {log}; exit 0; }}\n'
                   f'case "$*" in *"canary evaluate"*) cat {decision_file} ;; esac\nexit 0\n',
-        "curl": f'case "$*" in *"/v1/state"*) exit 22 ;; *"/v1/deploy/state"*) cat {state} ;;'
+        "curl": f'case "$*" in *"@-"*) cat >/dev/null ;; esac\n'
+                f'case "$*" in *"/v1/state"*) exit 22 ;; *"/v1/deploy/state"*) cat {state} ;;'
                 f' */healthz*|*/cc*) exit {0 if healthy else 7} ;; *) exit 7 ;; esac\n',
         "python3": py,
         "sleep": "exit 0\n",
@@ -719,10 +720,10 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
     if api_port is None:
         served = f'*"/v1/deploy/state"*) cat {state} ;; *"/v1/deploy/ci-state"*) echo \'{{"state":"{ci}"}}\' ;; '
     else:  # the real curl, aimed at the test server instead of port 80
-        served = ('*"/v1/deploy/"*|*"/healthz"*|*"/cc"*) args=(); for a in "$@"; do '
-                  f'args+=("${{a/\\/\\/127.0.0.1\\//\\/\\/127.0.0.1:{api_port}\\/}}"); done; '
-                  f'exec {shutil.which("curl")} "${{args[@]}}" ;; ')
-    curl_stub = (f'case "$*" in *"/v1/state"*) exit 22 ;; {served}*/healthz*|*/cc*) exit {0 if healthy else 7} ;;'
+        served = f'*"/v1/deploy/"*|*"/healthz"*|*"/cc"*) exec {shutil.which("curl")} "$@" ;; '
+    # the script pipes the header to `curl -H @-`: read it so the writer never dies on SIGPIPE under pipefail
+    drain = 'case "$*" in *"@-"*) cat >/dev/null ;; esac\n' if api_port is None else ""
+    curl_stub = (f'{drain}case "$*" in *"/v1/state"*) exit 22 ;; {served}*/healthz*|*/cc*) exit {0 if healthy else 7} ;;'
                  f' *) exit 7 ;; esac\n')
     py = (f'if [ "$1" = - ] && [ "$#" = 3 ]; then echo "alert $2" >> {log}; cat >/dev/null; exit 0; fi\n'
           f'exec {sys.executable} "$@"\n')
@@ -741,6 +742,8 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
         "sleep": "exit 0\n",
     }
     env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret"}
+    if api_port is not None:
+        env["AIFLOW4_CONTROL_URL"] = f"http://127.0.0.1:{api_port}"
     result = subprocess.run(["bash", str(DEVELOP_AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
     canary_file = releases / "CANARY.json"
     current = (releases / "CURRENT").read_text().strip()

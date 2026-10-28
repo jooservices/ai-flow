@@ -40,6 +40,37 @@ def test_jira_reads_project_versions_and_normalizes_fix_version_ids():
     assert Jira.normalize(jira_issue("TESTWP-1", "To Do", ("100", "200")))["fix_versions"] == ["100", "200"]
 
 
+def test_jira_reads_browse_and_write_permissions_without_writing():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"permissions": {
+            "BROWSE_PROJECTS": {"havePermission": True},
+            "CREATE_ISSUES": {"havePermission": True},
+            "EDIT_ISSUES": {"havePermission": False},
+            "LINK_ISSUES": {"havePermission": True},
+            "TRANSITION_ISSUES": {"havePermission": True},
+            "ADD_COMMENTS": {"havePermission": False},
+        }})
+
+    jira = Jira("https://jira.example.test", "person@example.test", "token",
+                client=httpx.Client(transport=httpx.MockTransport(respond), base_url="https://jira.example.test"))
+
+    assert jira.project_write_permissions("TESTWP") == {
+        "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": False, "LINK_ISSUES": True,
+        "TRANSITION_ISSUES": True, "ADD_COMMENTS": False,
+    }
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.path == "/rest/api/3/mypermissions"
+    assert requests[0].url.params["projectKey"] == "TESTWP"
+    assert set(requests[0].url.params["permissions"].split(",")) == {
+        "BROWSE_PROJECTS", "CREATE_ISSUES", "EDIT_ISSUES", "LINK_ISSUES", "TRANSITION_ISSUES",
+        "ADD_COMMENTS",
+    }
+
+
 def test_releasing_a_jira_version_sets_released_flag_and_release_date():
     requests = []
 

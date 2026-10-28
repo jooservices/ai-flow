@@ -8,12 +8,12 @@ come from the owner's `jooservices/server-installer`. AI Flow does not contain i
 ## Install
 
 On the new machine, as a user with sudo, run this command. Use a published release in place of `vX.Y.Z` and the
-host name the console will be reached on in place of `aiflow.example.com`, and the email of the first Super
-Administrator of Command Center in place of `owner@example.com` (needed on the first install only; it is remembered):
+host name the console will be reached on in place of `aiflow.example.com`. The first Administrator is created in
+the browser after install:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jooservices/ai-flow/vX.Y.Z/deploy/v4/bin/aiflow4-control-install \
-  | sudo bash -s -- --version vX.Y.Z --domain aiflow.example.com --admin-email owner@example.com
+  | sudo bash -s -- --version vX.Y.Z --domain aiflow.example.com
 ```
 
 `aiflow4-control-install` installs `curl`, `git`, cosign v3.1.4 (pinned digest) and uv. It downloads the release
@@ -22,7 +22,7 @@ tarball, `SHA256SUMS` and the Sigstore bundle, then checks the checksum and the 
 command as `/usr/local/sbin/aiflow4`. Then it runs:
 
 ```sh
-sudo aiflow4 install control --version vX.Y.Z --domain aiflow.example.com --admin-email owner@example.com
+sudo aiflow4 install control --version vX.Y.Z --domain aiflow.example.com
 ```
 
 On a host that already has `aiflow4`, run this second command directly. Every later run, upgrade or rollback uses
@@ -34,11 +34,11 @@ it. The steps run in this order, and each one prints `==> [n/12] step`:
 | os | server-installer v1.1.0: `plan --modules M`, then `apply --modules M` (see below) |
 | tools | AI Flow's own needs: `git`, `curl`, cosign, `aiflow4-deploy`, the `jooservices/ai-flow` checkout in `/srv/aiflow/control/repos/ai-flow` (for tag checks) |
 | release | `aiflow4-deploy --stage-only vX.Y.Z`: release assets, SHA-256 and cosign checks of the tarball and of `ghcr.io/jooservices/ai-flow/control-api:vX.Y.Z`, compose bundle in `/srv/aiflow/build/vX.Y.Z` |
-| secrets | generates any internal secrets that are missing (below) and writes `/etc/aiflow/control.env` (domain and join URL; no secrets) |
+| secrets | generates any internal secrets that are missing (below), asks for an ownership capability on an interactive first install, and writes `/etc/aiflow/control.env` (domain and join URL; no secrets) |
 | operator-audit | installs `auditd` and the interactive shell, configuration, and control-repository audit rules used by the Dashboard intervention ledger |
 | infra | copies `deploy/v4/control/infra.yaml`, `gatus.yaml` and `deploy/v4/o2/lab.env` of the release to `/srv/aiflow/control/infra/`, then `docker compose up -d`; waits for PostgreSQL and Redis |
 | migrate | for an upgrade, the pre-upgrade check first; then `aiflow4 migrate` from the release image |
-| admin | `aiflow4 console-user seed` from the release image creates the first Super Administrator once; the password goes to `/etc/aiflow/secrets/console/super-admin-password` (0600) and is never printed. Console login is on (`AIFLOW4_CONSOLE_LOGIN=1`); see [console login](console-login.md) |
+| admin | Console login is on (`AIFLOW4_CONSOLE_LOGIN=1`). On first browser visit, `/setup` saves the public address and creates the first Administrator; no email or password file is required. A legacy `--admin-email` may still seed a user for controlled CI installs; see [console login](console-login.md) |
 | deploy | `aiflow4-deploy vX.Y.Z`: control-api a and b one at a time, control-loops, `CURRENT` |
 | health | every component (below); a failed component is named |
 | cli | points `aiflow4` at the installed release (`aiflow4-control-install --cli-only vX.Y.Z`) |
@@ -48,7 +48,7 @@ downloaded or verified; `5` a health check failed (after an upgrade, the previou
 healthy); `6` the rollback is unhealthy too; `8` another install is running; `9` the pre-upgrade check blocked the
 upgrade and nothing changed.
 
-On a machine with a normal network connection, Command Center (`https://<domain>/cc`) answers within 10 minutes.
+On a machine with a normal network connection, Command Center (`https://<domain>/cc`) answers within 10 minutes. With no Administrator seeded by a legacy option, `/login` shows the setup wizard and the first browser visit creates the Administrator without writing a file.
 Most of that time goes to downloading Docker and the images. Gatus runs on port 8081 (`http://<domain>:8081/`) and
 OpenObserve on `/o2/`. Traefik serves plain HTTP on port 80; terminate TLS at the public proxy and restrict origin
 ingress to that proxy. The installer sets the public URL to HTTPS, so session cookies carry `Secure`.
@@ -89,7 +89,14 @@ URLs, so control-api is recreated with the new join URL.
 |---|---|---|
 | `postgres.env` | `POSTGRES_PASSWORD` (and the user and database names) | PostgreSQL |
 | `openobserve.env` | OpenObserve root user and password | OpenObserve |
-| `aiflow4.env` | database and Redis URLs, `AIFLOW4_JOIN_TOKEN` (provisioning key), `AIFLOW4_OWNER_TOKEN`, `AIFLOW4_REVIEWER_TOKEN`, `AIFLOW4_CONSOLE_SESSION_SECRET`, `O2_BASIC` | control-api, control-loops |
+| `aiflow4.env` | database and Redis URLs, `AIFLOW4_JOIN_TOKEN` (provisioning key), `AIFLOW4_OWNER_TOKEN`, `AIFLOW4_SETUP_OWNERSHIP_CAPABILITY`, `AIFLOW4_REVIEWER_TOKEN`, `AIFLOW4_CONSOLE_SESSION_SECRET`, `O2_BASIC` | control-api, control-loops |
+
+On an interactive first install, the installer asks twice for a 32-character-or-longer ownership capability with
+hidden input. Use that value in the browser's first-run setup screen. The installer stores it as
+`AIFLOW4_SETUP_OWNERSHIP_CAPABILITY` in the same root-only `aiflow4.env` file, and the browser setup consumes it
+atomically with first-Administrator creation. It is not returned by any public setup endpoint. A noninteractive
+install generates a random capability; provide it to the first owner through the installation's secure credential
+delivery channel before they open setup.
 
 They are never printed. Command output that the installer captures has every secret value replaced by `***`.
 They are not in the release tarball or the image: both are built from the repository, which holds no secrets

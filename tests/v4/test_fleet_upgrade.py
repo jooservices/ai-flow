@@ -252,6 +252,7 @@ def test_failed_upgrade_mid_rollout_requeues_running_tickets_and_loses_none(clie
     assert set(beat(client, n, fleet.headers[n], fleet.version[n]) for n in ("cc", "node2", "node3")) == {OLD}
     fleet.install("cc", "node2", version=OLD)
     ctx.db.run("UPDATE nodes SET status='online', last_heartbeat=now() WHERE name='node1'")
+    assert client.post("/v1/nodes/node1/heartbeat", json={}, headers=fleet.headers["node1"]).status_code == 200
     fleet_rollout(ctx)
     assert rollout.latest(ctx.db)["rollback"] == "succeeded"
     assert ctx.db.one("SELECT title FROM incidents WHERE kind='fleet_rollback'")["title"] == "rollback of v4.3.0 succeeded"

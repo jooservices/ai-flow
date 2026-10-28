@@ -63,7 +63,8 @@ def find_incidents(state: dict[str, Any]) -> list[Incident]:
         ci_waiting = (status == "In QA" and not ticket.get("leased") and pull_request
                       and pr_state in ("", "OPEN") and ticket.get("ci_state") in ("none", "pending"))
         rounds = max(ticket.get("cycles", 0), ticket.get("rework_rounds", 0))
-        rework_over_limit = rounds > rework_limit
+        limit = ticket.get("loop_limit", rework_limit)
+        rework_over_limit = rounds > limit
         if (status == "Blocked" and blocked_kind not in RETURNS_BY_ITSELF
                 and not (blocked_kind == "Rework" and rework_over_limit)
                 and minutes >= blocked_minutes):

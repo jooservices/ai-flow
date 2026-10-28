@@ -61,7 +61,31 @@ def test_prediction_reads_paths_areas_epic_and_history(db):
 
 def test_keyword_area_points_to_the_console_page(db):
     footprint = hotfiles.predict(db, {"key": "TESTWP-9", "summary": "New dashboard card", "description": ""})
-    assert footprint["hot"] == [CONSOLE]
+    assert footprint["hot"] == [CONSOLE, "aiflow/v4/control/ui/licensing_notice.js"]
+
+
+def test_hot_scheduling_covers_develop_giants_node_agent_and_shared_tests():
+    develop_baseline_giants = (
+        "aiflow/v4/control/api.py",
+        "aiflow/v4/control/ui/console.html",
+        "aiflow/supervisor.py",
+        "tests/v4/test_console.py",
+        "aiflow/v4/worker/containers.py",
+        "tests/test_supervisor.py",
+    )
+    shared_test_paths = (
+        "tests/v4/conftest.py",
+        "tests/v4/fixtures/grok-streaming-json.jsonl",
+        "tests/v4/test_api.py",
+        "tests/v4/console_browser_suite.cjs",
+        "tests/v4/log_viewer_browser_suite.cjs",
+    )
+
+    for path in (*develop_baseline_giants, "aiflow/v4/node/agent.py", *shared_test_paths):
+        assert hotfiles.is_hot(path), f"{path} is missing from JAIF-253 hot-file scheduling"
+    assert hotfiles.paths_in("Update tests/v4/fixtures/grok-streaming-json.jsonl") == [
+        "tests/v4/fixtures/grok-streaming-json.jsonl"
+    ]
 
 
 def test_blocking_needs_a_shared_hot_file():
@@ -146,7 +170,7 @@ def test_simultaneous_claims_reserve_a_hot_file_for_one_ticket_only(db):
 
 
 @pytest.mark.parametrize(("holder_status", "pr_state"), [
-    ("Human review", ""), ("Ready to merge", ""), ("To Do", "open")
+    ("Human review", ""), ("Ready to merge", ""), ("In Verify", "open")
 ])
 def test_live_or_open_pr_reservation_cannot_be_replaced_after_six_hours(db, holder_status, pr_state):
     add_ticket(db, "TESTWP-1", status=holder_status)
@@ -683,3 +707,40 @@ def test_conflicts_endpoint_reads_the_runs_and_the_console_shows_it(client, ctx)
     assert client.get("/v1/analytics/conflicts", params={"project": "NOPE"}).json()["current"]["verifications"] == 0
     page = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
     assert "/v1/analytics/conflicts" in page and "Lost to merge conflicts" in page and "c.definition" in page
+
+
+def test_a_ticket_waiting_for_rework_with_an_open_pull_request_holds_no_hot_file(db):
+    add_ticket(db, "TESTWP-1", status="To Do")
+    db.run("UPDATE tickets SET pr_state='open' WHERE key='TESTWP-1'")
+    add_ticket(db, "TESTWP-2", status="In Verify")
+    describe(db, "TESTWP-1", "Card", "Edit " + CONSOLE)
+    describe(db, "TESTWP-2", "Card two", "Edit " + CONSOLE)
+
+    flying = hotfiles.in_flight_hot_files(db, lambda ticket: hotfiles.predict(db, ticket, ""))
+
+    assert "TESTWP-1" not in flying and "TESTWP-2" in flying
+    assert hotfiles.reserve(db, "TESTWP-1", "gone", [CONSOLE]) is None
+    assert hotfiles.reserve(db, "TESTWP-3", "run-3", [CONSOLE]) == ("TESTWP-1", [CONSOLE])  # fresh claim still counts
+    db.run("UPDATE hot_file_reservations SET reserved_at = now() - interval '1 hour'")
+    assert hotfiles.reserve(db, "TESTWP-3", "run-3", [CONSOLE]) is None  # an open pull request alone does not keep it
+
+
+def test_blocking_ticket_waits_until_every_slot_of_the_file_is_taken():
+    footprint = {"hot": [CONSOLE]}
+    in_flight = {"TESTWP-1": [CONSOLE], "TESTWP-2": [CONSOLE]}
+
+    assert hotfiles.blocking_ticket(footprint, in_flight) == ("TESTWP-1", [CONSOLE])  # one slot: blocked
+    assert hotfiles.blocking_ticket(footprint, in_flight, slots=3) is None  # two of three taken
+    assert hotfiles.blocking_ticket(footprint, in_flight, slots=2) == ("TESTWP-1", [CONSOLE])  # both taken
+
+
+def test_reservations_hold_as_many_tickets_as_there_are_slots(db):
+    assert hotfiles.reserve(db, "TESTWP-1", "run-1", [CONSOLE], slots=2) is None
+    assert hotfiles.reserve(db, "TESTWP-2", "run-2", [CONSOLE], slots=2) is None
+    assert hotfiles.reserve(db, "TESTWP-3", "run-3", [CONSOLE], slots=2) == ("TESTWP-1", [CONSOLE])
+    assert hotfiles.reserve(db, "TESTWP-3", "run-3", [CONSOLE], slots=3) is None  # a third slot: taken
+
+    hotfiles.unreserve(db, "run-2")
+
+    assert hotfiles.reserve(db, "TESTWP-4", "run-4", [CONSOLE], slots=3) is None
+    assert db.one("SELECT count(*) AS n FROM hot_file_reservations WHERE path=%s", (CONSOLE,))["n"] == 3

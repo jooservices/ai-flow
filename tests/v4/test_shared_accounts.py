@@ -26,7 +26,18 @@ def join(client, name):
 
 
 def beat(client, node, headers):
-    r = client.post(f"/v1/nodes/{node}/heartbeat", json={"slots_total": 4}, headers=headers)
+    ctx = client.app.state.ctx
+    row = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,)) or {}
+    readiness = row.get("readiness") or {}
+    credential_checks = dict(readiness.get("credential_statuses") or {})
+    for account in ctx.repo().accounts_on(node):
+        machine = ctx.db.one("SELECT status FROM account_machines WHERE account_id=%s AND node=%s",
+                             (account.id, node))
+        if machine:
+            signed_in = machine.get("status") == "signed_in"
+            credential_checks[account.id] = {"present": signed_in, "valid": signed_in}
+    r = client.post(f"/v1/nodes/{node}/heartbeat",
+                    json={"slots_total": 4, "credential_checks": credential_checks}, headers=headers)
     assert r.status_code == 200
     return r.json()["desired"]
 
@@ -38,6 +49,21 @@ def candidates(client, headers, account="shared-01"):
 
 def claim(client, headers, ticket, account="shared-01"):
     return client.post("/v1/work/claim", json={"ticket": ticket, "account": account}, headers=headers)
+
+
+def test_unshared_account_skips_capacity_aggregation(monkeypatch):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.core.controlrepo import Account
+
+    account = Account(id="claude-01", provider="claude", node="cc", parallel=2)
+    monkeypatch.setattr(shared_accounts, "pending_nodes", lambda *_args: set())
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unshared accounts do not need shared-capacity queries")
+
+    monkeypatch.setattr(shared_accounts, "machine_capacities", unexpected)
+    monkeypatch.setattr(shared_accounts, "running_by_node", unexpected)
+    assert shared_accounts.may_take(object(), account, "cc") == (True, "")
 
 
 def two_machines(client, ctx, limit=2):
@@ -333,6 +359,7 @@ def test_account_from_the_control_repo_can_be_shared_with_another_machine(client
     beat(client, "cc", cc)
     beat(client, "node1", node1)
     assert client.post("/v1/accounts/claude-01/probe", json={"ok": True}, headers=node1).status_code == 200
+    beat(client, "node1", node1)
     add_ticket(ctx.db, "TESTWP-1")
 
     # Removing the accounts.yaml primary detaches just that assignment; the other machine can still take work.

@@ -1,5 +1,7 @@
 # Licensing and usage
 
+**Console screens:** `licensing`
+
 Owners and Super Administrators open **Licence** in the console to view the installation ID, current plan, expiry,
 resource limits and usage. They can activate online with a licence key or select a signed licence file for offline
 activation. The key is sent only to the configured licence service; AI Flow does not save it. A rejected key or file
@@ -21,7 +23,7 @@ rejected.
 
 ## Plans and limits
 
-The initial Free limits are 1 machine, 2 AI accounts, 3 projects and 3 users. Team starts at 5, 12, 25 and 25;
+The initial Free limits are 3 machines, 6 AI accounts, 3 projects and 3 users. Team starts at 5, 12, 25 and 25;
 Business starts at 50, 100, 250 and 250. An owner can edit each plan's limits on the Licence screen. The current
 usage counts are registered machines, configured AI accounts, configured projects and enabled console users.
 
@@ -45,3 +47,42 @@ The Licence screen reports tickets whose current status is **Done**, grouped by 
 `done_at`. AI input/output tokens and cost are grouped separately by project and the UTC month in `runs.started_at`.
 The **Export spreadsheet** action downloads a UTF-8 CSV that opens in common spreadsheet applications. The report
 reads the existing ticket and run records and does not duplicate or discard usage data.
+
+## No licence configured, over-limit grace and alerts
+
+When neither an issuer public key (`AIFLOW4_LICENSE_PUBLIC_KEY`) nor a stored licence exists (self-hosted,
+development, a lab), nothing can be licensed, so the installation runs **without any licence limit or grace
+period** and the Licence screen shows "No licence required". Limits apply as soon as an issuer key is configured.
+
+The Free plan defaults are 3 machines, 6 AI accounts, 3 projects and 3 users, enough to evaluate the product on one
+project; the owner can edit them on the Licence screen. Installations that still carry the old Free defaults
+(1 machine, 2 AI accounts) are updated by the migration; edited limits are kept.
+
+When a limit is newly applied or lowered below current usage, the first time usage is found above it starts the
+existing 14-day grace period (recorded once as `over_limit_since`, cleared when usage is back within every limit).
+During it, machines, AI accounts and projects already over the limit keep working and keep getting work; only
+creating new ones is refused. If usage is still over the limit when the grace period ends, the limit stops new work
+for the extra ones. That stop opens a **critical `licence_limit` incident** at once, naming the limit, the usage and
+the action (raise the limit in the Licence screen or remove the extra ones), and alerts the owner's channels. The
+incident closes by itself when work resumes (usage within the limit, limit raised, or grace applies). The idle-flow
+alert names the licence limit as the cause when ready tickets get no worker because of it.
+
+## Control API
+
+The control API reads the licence state on these routes:
+
+- `GET /v1/licensing` returns the plan, limits, usage, grace state and the "no licence required" flag.
+- `GET /v1/licensing/status` returns the short state used by the console banner: `status`, `reason`, `plan`,
+  `expires_at`, `grace_until`, `read_only` and `licence_required`. The notice on the Licence screen is rendered by
+  `aiflow/v4/control/ui/licensing_notice.js`, served at `/console-assets/licensing-notice.js`.
+- `GET /v1/work/candidates` and `POST /v1/work/claim` offer and claim tickets; a limit that stops new work is named
+  in the `reason` and opens the `licence_limit` incident.
+- `GET /v1/ba-chat/candidate`, `GET /v1/master/candidate`, `GET /v1/version-releases/candidates` and
+  `POST /v1/version-releases/claim` apply the same AI account entitlement to the other roles.
+- Resource-creation limits are checked by `POST /v1/console/users`, `POST /v1/auth/users` and
+  `POST /v1/setup/bootstrap` (the first Administrator), `POST /v1/machines/{name}/accounts`,
+  `POST /v1/nodes/join-tokens`, `POST /v1/nodes/{name}/join-command` and `POST /v1/projects`.
+- These eligibility and claim requests read the persisted licence state. They do not repeat first-use state setup or
+  contact the licence issuer on each poll; a `licence_limit` incident is cleared only when an open incident exists
+  and the limit condition has recovered.
+- `GET /v1/auth/users` lists console users, the count that the users limit applies to.

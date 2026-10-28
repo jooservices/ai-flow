@@ -1,5 +1,9 @@
 import json
+import os
+import tempfile
+import threading
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from aiflow import events
@@ -31,6 +35,7 @@ class EventTests(unittest.TestCase):
     def test_a_row_carries_the_base_fields_a_timestamp_and_the_event_name(self):
         sink, sender = make()
         sink.emit("ticket.pickup", ticket="JAVM-1", role="developer", rework=False, minutes=1.5)
+        self.assertEqual(sender.calls, [])  # emit never waits for delivery
         self.assertTrue(sink.flush())
         url, rows, auth = sender.calls[0]
         self.assertEqual(url, "http://obs:5080/api/default/aiflow_events/_json")
@@ -56,6 +61,12 @@ class EventTests(unittest.TestCase):
         self.assertEqual(len(row["text"]), 2000)
         self.assertEqual(row["items"], "[1, 2]")
 
+    def test_ai_run_id_is_derived_from_the_log_file(self):
+        sink, sender = make()
+        sink.emit("ai.run", log_file="/runs/JAIF-1-developer-123.jsonl")
+        sink.flush()
+        self.assertEqual(sender.rows()[0]["run_id"], "JAIF-1-developer-123")
+
     def test_batches_are_sent_in_order(self):
         sink, sender = make(batch=2)
         for n in range(5):
@@ -63,6 +74,47 @@ class EventTests(unittest.TestCase):
         sink.flush()
         self.assertEqual([len(rows) for _, rows, _ in sender.calls], [2, 2, 1])
         self.assertEqual([r["n"] for r in sender.rows()], [0, 1, 2, 3, 4])
+
+    def test_emit_remains_responsive_while_the_background_sender_is_blocked(self):
+        started, release = threading.Event(), threading.Event()
+
+        def blocked_sender(*_):
+            started.set()
+            release.wait(2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sink = Events("http://obs", "default", "s", "u", "p", {}, blocked_sender,
+                          flush_seconds=10, thread=True, spool=Path(tmp) / "events.jsonl")
+            try:
+                sink.emit("first")
+                self.assertTrue(started.wait(1))
+                sink.emit("second")
+                self.assertEqual([json.loads(line)["event"] for line in sink.spool.read_text().splitlines()], ["first", "second"])
+                self.assertFalse(release.is_set())
+            finally:
+                release.set()
+                sink.close()
+
+    def test_emit_fsyncs_the_spool_before_returning_without_waiting_for_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spool = Path(tmp) / "events.jsonl"
+            sink, sender = make(spool=spool)
+            with mock.patch("aiflow.events.os.fsync", wraps=os.fsync) as fsync:
+                self.assertTrue(sink.emit("durable", ticket="JAIF-80"))
+            fsync.assert_called_once()
+            self.assertEqual(sender.calls, [])
+            self.assertEqual([json.loads(line)["event"] for line in spool.read_text().splitlines()], ["durable"])
+
+    def test_emit_reports_spool_failure_and_flush_retries_the_queued_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "not-a-directory"
+            parent.write_text("block spool creation")
+            sink, sender = make(spool=parent / "events.jsonl")
+            self.assertFalse(sink.emit("pending"))
+            self.assertEqual(len(sink.queue), 1)
+            parent.unlink()
+            self.assertTrue(sink.flush())
+            self.assertEqual([row["event"] for row in sender.rows()], ["pending"])
 
     def test_a_failure_keeps_the_rows_for_the_next_try(self):
         sink, sender = make(Sender(fail=1))
@@ -73,14 +125,15 @@ class EventTests(unittest.TestCase):
         self.assertTrue(sink.flush())
         self.assertEqual([r["event"] for r in sender.rows()], ["a", "b"])
 
-    def test_a_full_queue_drops_the_oldest_and_counts_them(self):
-        sink, sender = make(Sender(fail=99), capacity=3)
+    def test_the_queue_never_drops_events_when_delivery_is_unavailable(self):
+        sink, sender = make(Sender(fail=1))
         for n in range(5):
             sink.emit("n", n=n)
-        self.assertEqual(sink.dropped, 2)
+        self.assertEqual(len(sink.queue), 5)
+        self.assertFalse(sink.flush())
         sender.fail = 0
         sink.flush()
-        self.assertEqual([r["n"] for r in sender.rows()], [2, 3, 4])
+        self.assertEqual([r["n"] for r in sender.rows()], [0, 1, 2, 3, 4])
 
     def test_without_url_user_or_password_nothing_is_sent(self):
         for args in (("", "u", "p"), ("http://x", "", "p"), ("http://x", "u", "")):
@@ -105,7 +158,8 @@ class EventTests(unittest.TestCase):
             sink = events.configure({"AIFLOW_OBS_URL": "http://obs", "AIFLOW_OBS_USER": "u", "AIFLOW_OBS_PASSWORD": "p", "AIFLOW_OBS_STREAM": "dev"},
                                     "wsl", "control")
             sink.sender = sent
-            events.emit("control.start")
+            self.assertTrue(events.emit("control.start"))
+            sink.flush()
             events.close()
         self.assertEqual(sent.rows()[0]["worker"], "control")
         self.assertTrue(sent.calls[0][0].endswith("/api/default/dev/_json"))
@@ -134,13 +188,15 @@ class WiringTests(unittest.TestCase):
     def test_jira_writes_emit(self):
         from aiflow.jira import Jira
         from pathlib import Path
-        jira = Jira(Path("/tmp"))
-        jira._run = lambda *a: "{}"
-        (Path("/tmp") / ".tmp").mkdir(exist_ok=True)
-        self.assertTrue(jira.transition("JAIF-1", "Done"))
-        jira.comment("JAIF-1", "hello")
-        jira.link("JAIF-1", "JAIF-2")
-        jira.set_agent("JAIF-1", "Claude")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".tmp").mkdir()
+            jira = Jira(root)
+            jira._run = lambda *a: "{}"
+            self.assertTrue(jira.transition("JAIF-1", "Done"))
+            jira.comment("JAIF-1", "hello")
+            jira.link("JAIF-1", "JAIF-2")
+            jira.set_agent("JAIF-1", "Claude")
         self.assertEqual(self.names(), ["jira.transition", "jira.comment", "jira.link", "jira.agent"])
 
     def test_a_failed_transition_is_an_event_too(self):

@@ -158,7 +158,7 @@ class Handler(BaseHTTPRequestHandler):
         except TypeError as error:
             return self.reply(400, {"error": f"bad request: {type(error).__name__}"})
         except Exception as error:
-            self.log(f"memory service: {type(error).__name__}: {str(error)[:200]}")
+            self.log(f"memory service: {type(error).__name__}")
             return self.reply(503, {"error": "the memory database is not available"})
 
     def do_GET(self) -> None:  # noqa: N802
@@ -183,7 +183,7 @@ def fill_vectors(store: Store, stop: threading.Event, wake: threading.Event, log
         try:
             done = store.embed_pending()
         except Exception as error:
-            log(f"memory vectors: {type(error).__name__}: {str(error)[:150]}")
+            log(f"memory vectors: {type(error).__name__}")
             done = 0
         if done:
             pending_before = True
@@ -217,7 +217,7 @@ def main() -> int:
     stop, wake = threading.Event(), threading.Event()
     server = make_server(store, tokens, env.get("AIFLOW_MEMORY_HOST", "127.0.0.1"), int(env.get("AIFLOW_MEMORY_PORT", "8750")), wake=wake.set)
     print(f"memory service on {server.server_address[0]}:{server.server_address[1]} with {len(tokens.entries)} token(s); "
-          f"search by meaning: {embedder.model + ' at ' + embedder.url if embedder else 'off (words only)'}", flush=True)
+          f"search by meaning: {embedder.model if embedder else 'off (words only)'}", flush=True)
     if embedder:
         threading.Thread(target=fill_vectors, args=(store, stop, wake), daemon=True).start()
     try:

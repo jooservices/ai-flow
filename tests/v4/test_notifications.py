@@ -303,4 +303,3 @@ def test_notify_and_deploy_scripts_have_no_legacy_environment_or_local_mail_path
     for path in files:
         contents = path.read_text(encoding="utf-8")
         assert not any(value in contents for value in legacy), path
-

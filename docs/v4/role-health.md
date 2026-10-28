@@ -17,7 +17,7 @@ The role of a run follows its step: `dev` → dev, `verify` → verify, `triage`
 | a legacy dev run without a recorded PR URL whose verification sent it back (`rework`) | half a failure (`sent back`) |
 | clean `no_changes`, or a legacy failed run whose summary starts with `no changes` | success |
 | `failed`; `blocked` (the AI stopped without changing code) | failure |
-| `timeout` or `lost` (stopped by the system) | failure |
+| `timeout` or `lost` (stopped by the time limit or a lost lease) | a quarter of a failure (`stopped`) |
 | a finished dev run not yet judged by verification | not counted yet |
 | `quota`, or an error kind of quota, sign-in, infrastructure, network or tool problems | **excluded** |
 
@@ -32,7 +32,7 @@ Pull requests and clean `no_changes` results are successes even if an older row 
 ## Switching a role off
 
 When at least `window` scored runs exist (default 10), the failure score is
-`(failed + 0.5 × sent back) / runs` over the latest `window` scored runs of that account and role. Above the
+`(failed + 0.5 × sent back + 0.25 × stopped) / runs` over the latest `window` scored runs of that account and role. Above the
 threshold (default 60 %, strictly above), the role may be switched off for that account only, subject to pool capacity:
 
 - the role keeps at least two ready accounts enabled, and no more than half of the ready role pool can be switched
@@ -89,5 +89,10 @@ a failure, but it counts toward the retry backoff so the ticket is not offered a
 ## Thresholds
 
 Defaults: window 10 runs, failure score above 60 %. An owner (permission `console.manage`) edits both on the panel;
-`PUT /v1/role-health/settings` with `{"window_runs": 1-100, "failure_percent": 0-99}` stores them in
-`role_health_settings`, records the change in `write_audit` and re-scores every role at once.
+`PUT /v1/role-health/settings` with `{"window_runs": 1-100, "failure_percent": 0-99}` validates and stores them in
+`role_health_settings`, records the change in `write_audit` and re-scores every role before returning the updated
+summary.
+
+## Timeouts and lost leases
+
+A run stopped by the time limit or by a lost lease counts as a quarter of a failed run in the failure score. The size of the ticket and the load of the machine are often the cause, so ten such runs alone never switch a role off, while real failures still do.

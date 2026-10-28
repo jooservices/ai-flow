@@ -51,7 +51,7 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
                role_health, rollout, runtime_settings, scale_proof, setup_wizard, shared_accounts, support_bundle,
-               system_check, system_check_api, tooling, version_release)
+               system_check, system_check_api, tooling, version_release, work_steps)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -4526,9 +4526,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         projects = [p for p in projects if not system_check.blocking_reasons(node_row.get("readiness"), p, account_id)]
         roles = set(acc.roles or ["dev", "verify"])
         if step_filter is not None:
-            role_for_step = {"dev": "dev", "verify": "verify", "qa": "verify", "triage": "master",
-                             "intake": "intake_refiner", "impact": "intake_refiner",
-                             "post_merge": "release"}.get(step_filter)
+            role_for_step = work_steps.role_for_step(step_filter)
             roles &= {role_for_step} if role_for_step else set()
         if not roles:
             return []

@@ -61,9 +61,9 @@ def test_scenario_drives_100_projects_50_machines_and_200_sessions(proof):
     assert report["environment"]["api_execution"] == "FastAPI TestClient in-process"
     assert report["environment"]["persistence"] == "PostgreSQL and Redis"
     assert report["environment"]["local_embeddings_enabled"] is False
-    assert report["environment"]["max_parallel_worker_requests"] == 32
+    assert report["environment"]["max_parallel_worker_requests"] == 34
     assert report["environment"]["max_parallel_console_views"] == 1
-    assert report["environment"]["max_parallel_requests"] == 38
+    assert report["environment"]["max_parallel_requests"] == 40
     assert ctx.db.one("SELECT count(DISTINCT project) AS n FROM tickets")["n"] == 100
 
 
@@ -87,7 +87,7 @@ def test_the_plan_is_a_pure_function_of_the_configuration():
     sessions = scale_harness.sessions_of(FULL)
     assert len(sessions) == 200 and len({s["id"] for s in sessions}) == 100
     assert set(__import__("collections").Counter(s["id"] for s in sessions).values()) == {2}
-    assert scale_harness.plan(FULL)["scenario"]["claim_concurrency"] == 32
+    assert scale_harness.plan(FULL)["scenario"]["claim_concurrency"] == 34
 
 
 def test_claim_queue_interleaves_worker_polls_across_the_fleet():

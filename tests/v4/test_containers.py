@@ -5,6 +5,7 @@ import os
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +32,18 @@ def _fake_runtime(monkeypatch, tmp_path: Path, *, output: str = "ok") -> list[li
     monkeypatch.setattr(containers, "_active_containers", lambda: [])
     monkeypatch.setattr(containers.Path, "home", lambda: tmp_path)
     return calls
+
+
+def _short_temp_directory(prefix: str):
+    """Create short paths for Unix sockets, preferring the system temp directory."""
+    candidates = dict.fromkeys(("/tmp", tempfile.gettempdir()))
+    errors = []
+    for parent in candidates:
+        try:
+            return tempfile.TemporaryDirectory(prefix=prefix, dir=parent)
+        except OSError as error:
+            errors.append(error)
+    raise errors[-1]
 
 
 def test_broker_builds_and_runs_through_rootless_podman_with_layer_limits(monkeypatch, tmp_path):
@@ -516,14 +529,15 @@ def test_compose_cleanup_is_idempotent_and_orphan_watcher_cleans_up(monkeypatch,
     calls = []
     monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
                         calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""))
-    server = containers._BrokerServer(str(tmp_path / "broker.sock"), tmp_path, tmp_path, "aiflow-run", "token")
-    try:
-        server.compose_used = True
-        server.cleanup()
-        server.cleanup()
-        assert len(calls) == 3
-    finally:
-        server.server_close()
+    with _short_temp_directory("af") as socket_dir:
+        server = containers._BrokerServer(str(Path(socket_dir) / "s"), tmp_path, tmp_path, "aiflow-run", "token")
+        try:
+            server.compose_used = True
+            server.cleanup()
+            server.cleanup()
+            assert len(calls) == 3
+        finally:
+            server.server_close()
 
     class ImmediateEvent:
         def __init__(self, state=False):

@@ -1,3 +1,5 @@
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -63,6 +65,56 @@ class MergedPullRequestCleanupTests(unittest.TestCase):
 
         remove_worktree.assert_called_once_with(worktree)
         run_git.assert_called_once_with(repo.path, "branch", "-D", "JAIF-9-fix")
+
+    def test_squash_merged_branch_is_removed_even_when_its_commits_are_not_ancestors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "JOOservices" / "projects" / "project"
+            path.mkdir(parents=True)
+
+            def run_git(*args):
+                return subprocess.run(
+                    ["git", "-C", str(path), *args], check=True, capture_output=True, text=True
+                ).stdout.strip()
+
+            run_git("init", "-b", "develop")
+            run_git("config", "user.name", "Test")
+            run_git("config", "user.email", "test@example.invalid")
+            (path / "base.txt").write_text("base\n", encoding="utf-8")
+            run_git("add", "base.txt")
+            run_git("commit", "-m", "base")
+            run_git("checkout", "-b", "JAIF-9-fix")
+            (path / "feature.txt").write_text("first\n", encoding="utf-8")
+            run_git("add", "feature.txt")
+            run_git("commit", "-m", "first feature commit")
+            (path / "feature.txt").write_text("first\nsecond\n", encoding="utf-8")
+            run_git("commit", "-am", "second feature commit")
+            feature_head = run_git("rev-parse", "HEAD")
+
+            run_git("checkout", "develop")
+            (path / "feature.txt").write_text("first\nsecond\n", encoding="utf-8")
+            run_git("add", "feature.txt")
+            run_git("commit", "-m", "squash feature")
+            develop = run_git("rev-parse", "develop")
+            ancestry = subprocess.run(
+                ["git", "-C", str(path), "merge-base", "--is-ancestor", feature_head, develop],
+                capture_output=True,
+            )
+            self.assertNotEqual(ancestry.returncode, 0)
+
+            worktree = root / "worktrees" / "JAIF-9"
+            worktree.parent.mkdir()
+            run_git("worktree", "add", str(worktree), "JAIF-9-fix")
+            repo = Repo(root, "project")
+            with patch.object(repo, "remove_worktree", side_effect=lambda target: run_git("worktree", "remove", str(target))):
+                repo.cleanup("JAIF-9", remote=False, merged_pr=True)
+
+            self.assertFalse(worktree.exists())
+            branch = subprocess.run(
+                ["git", "-C", str(path), "show-ref", "--verify", "--quiet", "refs/heads/JAIF-9-fix"],
+                capture_output=True,
+            )
+            self.assertNotEqual(branch.returncode, 0)
 
 
 if __name__ == "__main__":

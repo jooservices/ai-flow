@@ -52,6 +52,7 @@ from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, p
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
                role_health, rollout, runtime_settings, scale_proof, setup_wizard, shared_accounts, support_bundle,
                tooling, version_release)
+from . import run_inbox as run_inbox_control
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -877,6 +878,8 @@ class CheckProbeTokenBody(BaseModel):
 class FenceBody(BaseModel):
     fence: int
     progress: dict[str, Any] = Field(default_factory=dict)
+    inbox_received: list[int] = Field(default_factory=list, max_length=100)
+    inbox_included: list[int] = Field(default_factory=list, max_length=100)
 
 
 class ResultBody(BaseModel):
@@ -5454,17 +5457,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- runs -----------------------------------------------------------------------------------------------
     @app.post("/v1/runs/{run_id}/heartbeat")
     def run_heartbeat(run_id: str, body: FenceBody, node: str = Depends(node_auth)) -> dict:
-        run = run_row(run_id)
-        if run["node"] != node:
-            raise HTTPException(403, "run belongs to another node")
-        ok = int(run["fence"]) == body.fence and ctx.leases.renew(run["ticket_key"], run_id, body.fence, ctx.settings.lease_ms)
-        if not ok:
-            ctx.db.run("UPDATE runs SET status='lost', outcome='lost' WHERE id=%s AND status='running'", (run_id,))
-            ctx.events.emit("run.lost", ticket=run["ticket_key"], run_id=run_id, fence=body.fence,
-                            account=run["account_id"], node=node, reason="lease expired or taken")
-            raise HTTPException(409, "lease lost")
-        ctx.db.run("UPDATE runs SET heartbeat_at=now(), progress=progress || %s WHERE id=%s", (J(body.progress), run_id))
-        return {"ok": True, "lease_ms": ctx.settings.lease_ms}
+        return run_inbox_control.heartbeat(ctx, run_row(run_id), run_id, body, node)
 
     @app.post("/v1/runs/{run_id}/result")
     def run_result(run_id: str, body: ResultBody, node: str = Depends(node_auth)) -> dict:
@@ -5490,12 +5483,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             except Exception as exc:  # noqa: BLE001 - a missing diagnostic log must not lose the run result
                 log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
         outcome = body.outcome
-        ctx.db.run("UPDATE runs SET outcome=%s, error_kind=%s, reset_at=%s, tokens_in=tokens_in+%s, tokens_out=tokens_out+%s,"
-                   " cost_usd=cost_usd+%s, branch=coalesce(nullif(%s,''),branch), pr_url=coalesce(nullif(%s,''),pr_url),"
-                   " head_sha=coalesce(nullif(%s,''),head_sha), summary=%s, details=details || %s, status='finished', ended_at=now()"
-                   " WHERE id=%s",
-                   (body.outcome, body.error_kind, body.reset_at, body.tokens_in, body.tokens_out, body.cost_usd,
-                    body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(details), run_id))
+        run_inbox_control.finish(ctx, run, run_id, body, details, node)
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s, updated_at=now() WHERE id=%s", (J(body.quota), run["account_id"]))
         sample_quota = body.quota or (ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}).get("quota") or {}
@@ -5572,9 +5560,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.post("/v1/runs/{run_id}/release")
     def run_release(run_id: str, body: FenceBody, node: str = Depends(node_auth)) -> dict:
         run = run_row(run_id)
-        released = ctx.leases.release(run["ticket_key"], run_id, body.fence)
-        ctx.db.run("UPDATE runs SET status=CASE WHEN status='running' THEN 'released' ELSE status END,"
-                   " ended_at=coalesce(ended_at, now()) WHERE id=%s", (run_id,))
+        released = run_inbox_control.release(ctx, run, run_id, body, node)
         ctx.db.run("UPDATE accounts SET status='idle', updated_at=now() WHERE id=%s AND status='working'", (run["account_id"],))
         ctx.events.emit("run.released", ticket=run["ticket_key"], run_id=run_id, fence=body.fence,
                         account=run["account_id"], node=node, outcome="released" if released else "not_owner")
@@ -5891,10 +5877,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 refuse_master_action(f"target run has not passed its {hard} minute work-time limit")
             if not ctx.leases.release(target["ticket_key"], str(target["id"]), int(target["fence"])):
                 refuse_master_action("target run lease changed before restart")
-            ctx.db.run("UPDATE runs SET status='lost',outcome='lost',ended_at=now(),"
-                       " details=details || %s WHERE id=%s AND status='running'",
-                       (J({"master_restart": {"master_run_id": body.run_id, "reason": body.why or body.intent}}),
-                        body.target_run_id))
+            run_inbox_control.restart(ctx, target, body.target_run_id, body.run_id, body.why or body.intent)
             ctx.db.run("UPDATE accounts SET status='idle',updated_at=now() WHERE id=%s AND status='working'",
                        (target["account_id"],))
             try:

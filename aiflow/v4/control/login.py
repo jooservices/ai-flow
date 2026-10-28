@@ -488,6 +488,8 @@ def install_login(app: FastAPI, ctx) -> None:
             return "console.manage"
         if path.startswith("/v1/runtime-settings"):
             return "console.manage"
+        if path.startswith("/v1/runs/") and path.endswith("/inbox"):
+            return "review.actions"
         if path.startswith("/v1/knowledge/"):
             return "view.knowledge"
         if path.startswith("/v1/integrations/"):

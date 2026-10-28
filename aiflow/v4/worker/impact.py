@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, with_knowledge_context
+from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
 from .gitops import Git
 from .intake import read_spec
 from .notes import note
@@ -116,7 +116,7 @@ def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         adapter = get_adapter(c.provider)
         base_argv = adapter.argv
         adapter.argv = lambda s: run_as + base_argv(s)
-        res = adapter.run(spec, lambda ev: None, stop=hb.lost)
+        res = run_with_inbox(adapter, spec, hb, lambda ev: None)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       details={"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})

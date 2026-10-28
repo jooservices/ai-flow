@@ -39,11 +39,21 @@ def test_scratch_schema_keeps_pgvector_in_public_for_following_tests():
 def test_scenario_drives_100_projects_50_machines_and_200_sessions(proof):
     report, ctx = proof
     counts = report["counts"]
+    readiness = {}
+    for node in ctx.db.all("SELECT name,readiness FROM nodes ORDER BY name LIMIT 2"):
+        readiness[node["name"]] = {
+            project: [(item.get("id"), item.get("result")) for item in conditions
+                      if item.get("result") != "ready"]
+            for project, conditions in (node["readiness"].get("projects") or {}).items()
+        }
     assert (counts["projects"], counts["machines"], counts["sessions"]) == (100, 50, 200)
     assert counts["accounts"] == 100
     assert counts["traffic_tickets"] == sum(FULL.wave_sizes) and counts["history_tickets"] == 2000
     assert counts["held_tickets"] > 0 and counts["blocked_tickets"] > 0
-    assert counts["pickups"] == counts["traffic_tickets"] - counts["held_tickets"]
+    assert counts["pickups"] == counts["traffic_tickets"] - counts["held_tickets"], json.dumps({
+        "errors": report["errors"], "observed": report["observed"], "counts": counts,
+        "readiness": readiness,
+    }, sort_keys=True)
     assert isinstance(report["observed"]["claim_conflicts"], int)
     assert report["errors"] == [], "\n".join(report["errors"])
     assert ctx.db.one("SELECT count(*) AS n FROM nodes WHERE status='online'")["n"] == 50
@@ -51,7 +61,9 @@ def test_scenario_drives_100_projects_50_machines_and_200_sessions(proof):
     assert report["environment"]["api_execution"] == "FastAPI TestClient in-process"
     assert report["environment"]["persistence"] == "PostgreSQL and Redis"
     assert report["environment"]["local_embeddings_enabled"] is False
-    assert report["environment"]["max_parallel_requests"] == 36
+    assert report["environment"]["max_parallel_worker_requests"] == 20
+    assert report["environment"]["max_parallel_console_views"] == 2
+    assert report["environment"]["max_parallel_requests"] == 32
     assert ctx.db.one("SELECT count(DISTINCT project) AS n FROM tickets")["n"] == 100
 
 
@@ -75,7 +87,7 @@ def test_the_plan_is_a_pure_function_of_the_configuration():
     sessions = scale_harness.sessions_of(FULL)
     assert len(sessions) == 200 and len({s["id"] for s in sessions}) == 100
     assert set(__import__("collections").Counter(s["id"] for s in sessions).values()) == {2}
-    assert scale_harness.plan(FULL)["scenario"]["claim_concurrency"] == 24
+    assert scale_harness.plan(FULL)["scenario"]["claim_concurrency"] == 20
 
 
 def test_claim_queue_interleaves_worker_polls_across_the_fleet():
@@ -192,6 +204,7 @@ def test_full_run_report_is_bound_to_the_declared_plan(proof):
     report, _ = proof
     assert report["scenario"] == scale_harness.plan(FULL)["scenario"]
     assert report["plan_digest"] == scale_harness.plan(FULL)["digest"]
+    assert report["environment"]["simulated_external_integrations"] == ["GitHub App", "Jira"]
 
 
 # --- AC2: the budgets are written down in one place and enforced ----------------------------------------------

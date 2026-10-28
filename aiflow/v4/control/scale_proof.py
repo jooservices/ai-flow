@@ -43,7 +43,7 @@ class Budget:
 
 BUDGETS: tuple[Budget, ...] = (
     Budget("console_page_load", "Console views load", 2.0, "s", "p95 per view, worst view",
-           "All 18 console views are each loaded 3 times while 24 bounded worker claim requests and up to 12 "
+           "All 18 console views are each loaded 3 times while 20 bounded worker claim requests and up to 12 "
            "console API requests (two views, up to six calls each) run concurrently; the 95th percentile of every "
            "view is compared."),
     Budget("project_picker", "Project picker answers", 200.0, "ms", "p95",

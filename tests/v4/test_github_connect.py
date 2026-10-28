@@ -196,7 +196,7 @@ def test_new_app_manifest_round_trip_verifies_installation_and_audits_without_cr
 
 
 def test_github_app_must_have_actions_read_for_ci_job_logs():
-    from aiflow.v4.control.api import validate_github_app_permissions
+    from aiflow.v4.control.system_check_api import validate_github_app_permissions
 
     validate_github_app_permissions({"permissions": REQUIRED_PERMISSIONS})
     missing_actions = dict(REQUIRED_PERMISSIONS)

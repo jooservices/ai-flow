@@ -499,7 +499,11 @@ def test_excess_machines_and_projects_cannot_start_work_but_existing_runs_can_fi
     from aiflow.v4.core.controlrepo import Project
     repo.projects["ZZZ"] = Project(key="ZZZ", repo="jooservices/another-project")
     repo.nodes["cc"].projects.append("ZZZ")
-    ctx.db.run("UPDATE nodes SET projects=%s WHERE name='cc'", (["TESTWP", "ZZZ"],))
+    ctx.db.run("UPDATE nodes SET projects=%s,status='online' WHERE name='cc'", (["TESTWP", "ZZZ"],))
+    ctx.github.repositories.append({"full_name": "jooservices/another-project", "name": "another-project",
+                                    "default_branch": "develop"})
+    from aiflow.v4.control.system_check import refresh_node
+    refresh_node(ctx, "cc", "project_added")
     add_ticket(ctx.db, "TESTWP-201")
     add_ticket(ctx.db, "ZZZ-1")
 

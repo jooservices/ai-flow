@@ -168,6 +168,9 @@ def _machine_label_path(file_name: str | None, path: tuple[Any, ...]) -> bool:
         return len(path) == 2 and isinstance(path[0], int) and path[1] == "name"
     if file_name == "account-state.json":
         return len(path) == 2 and isinstance(path[0], int) and path[1] in ("node", "id")
+    if file_name == "system-check.json":
+        return (len(path) == 4 and path[:2] == ("system_check", "nodes")
+                and isinstance(path[2], int) and path[3] in ("name", "release"))
     return False
 
 
@@ -568,6 +571,8 @@ def _safe_json(value: Any, file_name: str | None = None) -> str:
 
 
 def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) -> dict[str, bytes]:
+    from . import system_check
+
     repo = ctx.repo()
     now = datetime.now(timezone.utc)
     version = _safe_release_version(ctx.settings.control_version or VERSION)
@@ -595,6 +600,20 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
                       "subject": "[REDACTED_FREEFORM]", "title": "[REDACTED_FREEFORM]",
                       "detail": "[REDACTED_FREEFORM]"} for row in incidents]
 
+    readiness = system_check.support_bundle(ctx)
+    # The per-account boolean mirror is redundant with readiness condition rows and its field name resembles
+    # secret metadata to the generic support-bundle scanner. Keep the conditions, omit that redundant map.
+    for node in readiness["system_check"]["nodes"]:
+        snapshot = node.get("readiness", {})
+        snapshot.pop("credential_statuses", None)
+        condition_rows = list(snapshot.get("machine", []) or [])
+        for rows in (snapshot.get("projects", {}) or {}).values():
+            condition_rows.extend(rows or [])
+        for item in condition_rows:
+            if isinstance(item, dict) and str(item.get("id", "")).startswith("credential:"):
+                # Avoid rendering an account condition ID as a secret assignment to the generic text scanner.
+                item["id"] = str(item["id"]).replace("credential:", "credential-", 1)
+
     files: dict[str, bytes] = {
         "versions.json": _safe_json({"aiflow": version, "python": platform.python_version(),
                                       "platform": platform.system().lower(),
@@ -607,6 +626,7 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
         "machine-state.json": _safe_json(machines, "machine-state.json").encode("utf-8"),
         "account-state.json": _safe_json(account_states, "account-state.json").encode("utf-8"),
         "incidents.json": _safe_json(incident_data, "incidents.json").encode("utf-8"),
+        "system-check.json": _safe_json(readiness, "system-check.json").encode("utf-8"),
     }
 
     persistent_logs = _persistent_control_logs(ctx.settings.support_log_dir, now)

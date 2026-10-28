@@ -16,6 +16,7 @@ import aiflow.v4.control.api as api
 from aiflow.v4.control.api import github_gateway
 from aiflow.v4.control.github import GitHubApp, GitHubError
 from aiflow.v4.control.github_connections import GitHubConnections
+from aiflow.v4.control.system_check import blocking_reasons
 from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.node import probes
 
@@ -44,7 +45,8 @@ class PersonalGitHub(FakeGitHub):
 def secrets_dir(ctx, tmp_path, monkeypatch):
     ctx.settings.github_app_dir = str(tmp_path / "github-secrets")
     ctx.github.org = "jooservices"
-    ctx.github.meta = {"id": "901", "name": "AI Flow", "account_login": "jooservices", "account_type": "Organization"}
+    ctx.github.meta = {"id": "901", "name": "AI Flow", "account_login": "jooservices",
+                       "account_type": "Organization", "installation_id": 77}
     ctx.github_registry = GitHubConnections(ctx.settings.github_app_dir, lambda d, o: FakeGitHub(),
                                             lambda token, account, kind: PersonalGitHub(token, account))
     monkeypatch.setattr(api, "verify_token", lambda token, account="": PersonalGitHub(token, account or "person"))
@@ -400,8 +402,15 @@ def test_commands_use_assigned_token_connection_through_repository_transfer_rela
                " VALUES ('TESTWP-50','TESTWP','In Progress','Epic',%s,'Core','',NULL)", ([],))
     add_ticket(ctx.db, "TESTWP-51")
     ctx.db.run("UPDATE tickets SET type='Story',parent_key='TESTWP-50' WHERE key='TESTWP-51'")
-    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-51", "account": "codex-01", "step": "dev"},
-                          headers=headers).json()
+    readiness = ctx.db.one("SELECT readiness FROM nodes WHERE name='node1'")["readiness"]
+    blocked = blocking_reasons(readiness, "TESTWP", "codex-01", ["codex-01"])
+    assert not blocked, json.dumps(blocked)
+    candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=headers)
+    assert "TESTWP-51" in {item["key"] for item in candidates.json()["tickets"]}, candidates.text
+    claim_response = client.post("/v1/work/claim", json={"ticket": "TESTWP-51", "account": "codex-01", "step": "dev"},
+                                 headers=headers)
+    assert claim_response.status_code == 200, claim_response.text
+    claimed = claim_response.json()
     run = {"run_id": claimed["run_id"], "fence": claimed["fence"]}
 
     token = client.post("/v1/github/token", json={**run, "repo": "person/tool"}, headers=headers)
@@ -529,8 +538,15 @@ def test_remote_branch_cleanup_uses_assigned_connection_and_audits_it(client, ct
                " VALUES ('TESTWP-50','TESTWP','In Progress','Epic',%s,'Core','',NULL)", ([],))
     add_ticket(ctx.db, "TESTWP-51")
     ctx.db.run("UPDATE tickets SET type='Story',parent_key='TESTWP-50' WHERE key='TESTWP-51'")
-    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-51", "account": "codex-01", "step": "dev"},
-                          headers=headers).json()
+    readiness = ctx.db.one("SELECT readiness FROM nodes WHERE name='node1'")["readiness"]
+    blocked = blocking_reasons(readiness, "TESTWP", "codex-01", ["codex-01"])
+    assert not blocked, json.dumps(blocked)
+    candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=headers)
+    assert "TESTWP-51" in {item["key"] for item in candidates.json()["tickets"]}, candidates.text
+    claim_response = client.post("/v1/work/claim", json={"ticket": "TESTWP-51", "account": "codex-01", "step": "dev"},
+                                 headers=headers)
+    assert claim_response.status_code == 200, claim_response.text
+    claimed = claim_response.json()
     run = {"run_id": claimed["run_id"], "fence": claimed["fence"]}
     personal = {c.id: c.gateway for c in api.github_connection_list(ctx)}[conn]
     personal.branch_heads[("person/tool", "TESTWP-51-work")] = "abc"

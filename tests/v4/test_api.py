@@ -297,24 +297,30 @@ def test_joined_project_node_is_online_preflight_green_and_can_claim_project_tic
 
 
 def test_node_health_reports_heartbeat_and_preflight_for_the_installer(client, ctx):
-    headers = join(client, "node1")
-    before = client.get("/v1/nodes/node1/health", headers=headers).json()
+    token = client.post("/v1/nodes/join-tokens", json={
+        "provision_key": "join-secret", "name": "node-health", "project": "TESTWP"})
+    assert token.status_code == 200
+    joined = client.post("/v1/nodes/join", json={"join_token": token.json()["token"]})
+    assert joined.status_code == 200
+    headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+    before = client.get("/v1/nodes/node-health/health", headers=headers).json()
     assert before["status"] != "online" and before["preflight_ok"] is False and before["missing_tools"]
-    client.post("/v1/nodes/node1/heartbeat", json={
+    client.post("/v1/nodes/node-health/heartbeat", json={
         "tools": {"git": "git version 2", "uv": "uv 0.1", "codex": "codex 1.0",
                   "codex-code-mode-host": "present /usr/local/bin/codex-code-mode-host"},
         "slots_total": 2}, headers=headers)
-    after = client.get("/v1/nodes/node1/health", headers=headers).json()
+    after = client.get("/v1/nodes/node-health/health", headers=headers).json()
     assert after["status"] == "online" and after["preflight_ok"] is True and after["missing_tools"] == []
     assert 0 <= after["heartbeat_age_seconds"] < 60
-    assert client.get("/v1/nodes/node1/health").status_code == 401
+    assert client.get("/v1/nodes/node-health/health").status_code == 401
     other = join(client, "node2")
-    assert client.get("/v1/nodes/node1/health", headers=other).status_code == 403
+    assert client.get("/v1/nodes/node-health/health", headers=other).status_code == 403
 
 
 def test_node_heartbeat_is_shipped_to_openobserve_only(client, ctx):
     ctx.events.o2_url = "http://o2.test"  # queue only; the shipping thread is not started
     cc = join(client, "cc")
+    ctx.events.q.queue.clear()  # discard the test helper's simulated first agent heartbeat
     response = client.post("/v1/nodes/cc/heartbeat", json={
         "slots_total": 4, "slots_used": 2, "release_version": "4.0.0", "metrics": {"cpu_pct": 12.5}
     }, headers=cc)

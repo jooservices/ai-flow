@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from aiflow.v4.control import support_bundle
+from aiflow.v4.control import support_bundle, system_check
 from aiflow.v4.control.console_auth import issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.worker.loop import attach_support_log
@@ -475,6 +475,31 @@ def test_owner_reviews_inventory_before_download_and_lead_cannot_build(client, c
 
     sign_in_owner(client, ctx, "lead")
     assert client.post("/v1/support/bundles", json={}).status_code == 403
+
+
+def test_reviewed_support_archive_contains_sanitized_system_readiness(client, ctx):
+    from conftest import join_node
+
+    join_node(client, "cc")
+    system_check.refresh_node(ctx, "cc", "manual")
+    files = support_bundle._file_payloads(ctx, None, support_bundle.SupportLogBuffer())
+    findings = {name: support_bundle.file_findings(name, content.decode("utf-8"))
+                for name, content in files.items() if support_bundle.file_findings(name, content.decode("utf-8"))}
+    assert not findings, findings
+    sign_in_owner(client, ctx)
+    created = client.post("/v1/support/bundles", json={})
+    assert created.status_code == 200
+    data = created.json()
+    assert "system-check.json" in {item["name"] for item in data["inventory"]["files"]}
+
+    downloaded = client.get(data["download_url"])
+    assert downloaded.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as bundle:
+        readiness = json.loads(bundle.read("system-check.json"))
+    node = next(item for item in readiness["system_check"]["nodes"]
+                if item["readiness"].get("projects", {}).get("TESTWP"))
+    assert node["readiness"]["projects"]["TESTWP"]
+    assert node["readiness"]["machine"]
 
 
 def test_run_result_keeps_raw_logs_out_of_the_runs_table_and_stores_a_sanitized_copy_with_ttl(client, ctx):

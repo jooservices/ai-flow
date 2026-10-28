@@ -716,7 +716,7 @@ def test_a_ticket_waiting_for_rework_with_an_open_pull_request_holds_no_hot_file
     describe(db, "TESTWP-1", "Card", "Edit " + CONSOLE)
     describe(db, "TESTWP-2", "Card two", "Edit " + CONSOLE)
 
-    flying = hotfiles.in_flight_hot_files(db, lambda ticket: hotfiles.predict(db, ticket, "")) 
+    flying = hotfiles.in_flight_hot_files(db, lambda ticket: hotfiles.predict(db, ticket, ""))
 
     assert "TESTWP-1" not in flying and "TESTWP-2" in flying
     assert hotfiles.reserve(db, "TESTWP-1", "gone", [CONSOLE]) is None

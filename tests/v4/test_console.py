@@ -545,7 +545,7 @@ def test_console_reload_selects_the_view_from_each_existing_address():
     views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
              "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications",
              "settings", "support")
-    page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help"})
+    page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help", "/system-check"})
     for path in page_paths:
         expected_view = ("cc" if path in {"/cc", "/dashboard"} else
                          "work" if path == "/board" else path.removeprefix("/"))

@@ -59,12 +59,8 @@ def test_worker_ahead_of_control_skips_missing_optional_route_and_completes_exis
     old_control = OldControlAPI()
     worker.api.c.close()
     worker.api.c = old_control
-    worker.next_probe = float("inf")
-    worker.probe_ok = True
-
     assert worker.once() is True
 
-    assert worker.probe_ok is True
     assert worker.state["state"] == "idle" and worker.state["last_outcome"] == "done"
     paths = [path for _, path, _ in old_control.requests]
     assert paths == [

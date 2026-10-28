@@ -911,3 +911,9 @@ def test_schema_declarations_belong_to_their_route_contract():
     declared = next(i for i, line in enumerate((ROOT / api).read_text().splitlines(), 1)
                     if line.startswith("class JoinBody("))
     assert any(start <= declared <= end for start, end in join)
+
+
+def test_quota_refresh_asset_import_maps_to_settings_screen():
+    line = '<script src="/console-assets/quota-refresh-settings.js"></script>'
+    assert any(view == "settings" and pattern.search(line)
+               for pattern, view in docsite.SCREEN_LINE_VIEWS)

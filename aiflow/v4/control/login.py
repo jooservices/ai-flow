@@ -364,12 +364,26 @@ def install_login(app: FastAPI, ctx) -> None:
             return True
         return any(param.name == "authorization" for d in flatten(route.dependant) for param in d.header_params)
 
+    def resolved_route(route, scope):
+        """Return the matching leaf route when FastAPI wraps included routers in the app route table."""
+        if isinstance(route, APIRoute):
+            return route
+        matcher = getattr(route, "_match", None)
+        if callable(matcher):
+            result = matcher(scope)
+            if result[0] == Match.FULL and len(result) > 2:
+                return resolved_route(result[2], scope)
+        return None
+
     def checks_token(request: Request) -> bool:
         for route in concrete_routes(app.routes):
             if route.matches(request.scope)[0] == Match.FULL:
-                if id(route) not in token_routes:
-                    token_routes[id(route)] = isinstance(route, APIRoute) and route_checks_token(route)
-                return token_routes[id(route)]
+                matched = resolved_route(route, request.scope)
+                if matched is None:
+                    return False
+                if id(matched) not in token_routes:
+                    token_routes[id(matched)] = route_checks_token(matched)
+                return token_routes[id(matched)]
         return False
 
     def key(*parts: str) -> str:
@@ -656,7 +670,7 @@ def install_login(app: FastAPI, ctx) -> None:
             return "console.manage"
         if path.startswith(("/v1/console/users", "/v1/console/audit", "/v1/console/view-as")):
             return "console.manage"
-        if path.startswith("/v1/runtime-settings"):
+        if path.startswith(("/v1/runtime-settings", "/v1/quota-refresh/")):
             return "console.manage"
         if path.startswith("/v1/runs/") and path.endswith("/inbox"):
             return "review.actions"

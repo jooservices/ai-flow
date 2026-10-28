@@ -51,8 +51,9 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from .audit import record_console_user_change as audit_user, record_console_user_roles_change as audit_user_roles
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               dashboard_timeout_routes, load_policy, load_policy_api, role_health, rollout, runtime_settings, scale_proof, setup_wizard,
-               shared_accounts, support_bundle, system_check, system_check_api, tooling, version_release, work_steps)
+               dashboard_timeout_routes, load_policy, load_policy_api, quota_refresh, role_health, rollout,
+               runtime_settings, scale_proof, setup_wizard, shared_accounts, support_bundle, system_check,
+               system_check_api, tooling, version_release, work_steps)
 from . import run_inbox as run_inbox_control
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
@@ -852,6 +853,7 @@ class ResultBody(BaseModel):
     head_sha: str = ""
     summary: str = ""
     quota: dict[str, Any] = Field(default_factory=dict)
+    quota_observed_at: datetime | None = None
     details: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -876,20 +878,6 @@ class PRBody(BaseModel):
 class RoleHealthSettingsBody(BaseModel):
     window_runs: int
     failure_percent: int
-
-
-class ProbeBody(BaseModel):
-    ok: bool
-    error_kind: str = ""
-    reset_at: datetime | None = None
-    quota: dict[str, Any] = Field(default_factory=dict)
-    summary: str = ""
-    duration_ms: int = 0
-    tokens_in: int = 0
-    tokens_out: int = 0
-    cost_usd: float = 0.0
-    model: str = ""
-    credential_expires_at: datetime | None = None
 
 
 class MergeBody(BaseModel):
@@ -3841,7 +3829,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.post("/v1/accounts/{account_id}/sign-in/status")
     def report_account_sign_in_status(account_id: str, body: ManagedAccountSignInStatusBody,
                                       node: str = Depends(node_auth)) -> dict:
-        row = ctx.db.one("SELECT node,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
+        row = ctx.db.one("SELECT node,provider,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
                          " WHERE id=%s AND removed_at IS NULL", (account_id,))
         if not row or row["node"] != node:
             raise HTTPException(404, "account sign-in request is not assigned to this machine")
@@ -3870,6 +3858,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                  body.error[:300], account_id, node, body.request_id)).fetchone()
             if not updated:
                 raise HTTPException(409, "sign-in request has been replaced")
+            if body.status == "completed":
+                quota_refresh.on_sign_in_completed(connection, account_id, row["provider"])
         return {"account": account_id, "status": body.status}
 
     @app.post("/v1/accounts/{account_id}/sign-in/complete")
@@ -4639,6 +4629,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if current:
                 accounts_by_id[account_id] = current
                 forecasts[account_id] = current.get("quota_forecast") or {}
+        forecasts = capacity.with_active_quota_reservations(ctx.db, forecasts)
         samples = capacity_history()
         eligible_by_key: dict[tuple[str, str], dict[str, dict]] = {}
         for account in ctx.repo().accounts:
@@ -4890,10 +4881,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.step == "dev":
             capacity_samples = capacity_history()
             ticket_estimate = capacity.estimate(t, capacity_samples)
-            account_row = ctx.db.one("SELECT quota_forecast FROM accounts WHERE id=%s", (acc.id,)) or {}
-            fit = capacity.account_fit(acc.id, account_row.get("quota_forecast") or {}, ticket_estimate)
+            account_row = ctx.db.one("SELECT id,quota_forecast FROM accounts WHERE id=%s", (acc.id,)) or {}
+            account_forecasts = ({str(account_row["id"]): account_row.get("quota_forecast") or {}}
+                                 if account_row else {})
+            account_forecasts = capacity.with_active_quota_reservations(ctx.db, account_forecasts)
+            fit = capacity.account_fit(acc.id, account_forecasts.get(acc.id, {}), ticket_estimate)
             expected_tokens = ticket_estimate["tokens"]
             expected_minutes = ticket_estimate["time_minutes"]
+            quota_reservation_tokens = (int(expected_tokens["high"])
+                                        if acc.sessions > 1 and fit.get("left_tokens") is not None else None)
             if fit["known"] and fit["fits"]:
                 senior_work = ("tier-senior" in (t.get("labels") or [])
                                or ticket_estimate["size"] in {"L", "XL"} or t.get("priority") == "Highest")
@@ -4916,9 +4912,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                           "quota history is not reliable enough to compare eligible accounts.")
             run_details["capacity"] = {"estimate": ticket_estimate, "account_fit": fit,
                                        "assignment_reason": reason, "assigned_at": utcnow().isoformat()}
+        else:
+            quota_reservation_tokens = None
         claim_values = (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
                         model, node, c.fence, h(run_token))
-        if not load_policy_api.claim_run(ctx, acc, claim_values, load_capacity):
+        if not load_policy_api.claim_run(ctx, acc, claim_values, load_capacity, run_details=run_details,
+                                         quota_reservation_tokens=quota_reservation_tokens):
             ctx.leases.release(t["key"], run_id, c.fence)
             hotfiles.unreserve(ctx.db, run_id)
             return JSONResponse({"claimed": False, "reason": f"account {acc.id} is at its limit of {acc.sessions}"
@@ -5298,6 +5297,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         still_owner = ctx.leases.valid(run["ticket_key"], run_id, body.fence)
         details = dict(body.details)
         details.pop("pr_url_source", None)  # provenance is set by the control API, never trusted from the worker
+        details.pop("quota_reservation", None)  # quota reservations are set by the control API
         if body.pr_url:
             details["pr_url_source"] = "current"
         if still_owner and run["step"] == "verify" and body.outcome in ("merged", "human"):
@@ -5325,20 +5325,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                 support_bundle.store_run_log(ctx, run_id, run_log)
             except Exception as exc:  # noqa: BLE001 - a missing diagnostic log must not lose the run result
                 log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
-        sample_quota = body.quota or (ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}).get("quota") or {}
-        ctx.db.run("INSERT INTO account_quota_samples (account_id,provider,model,quota,tokens_in,tokens_out,cost_usd,"
-                   "duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                   (run["account_id"], run["provider"], run["model"], J(sample_quota), body.tokens_in,
-                    body.tokens_out, body.cost_usd,
-                    int((utcnow() - run["started_at"]).total_seconds() * 1000)))
-        if account_update_allowed and (body.quota or body.error_kind == "quota"):
-            refresh_quota_forecast(run["account_id"], run["provider"], sample_quota)
-        if account_update_allowed:
-            if body.quota:
-                ctx.db.run("UPDATE accounts SET quota=%s, updated_at=now() WHERE id=%s",
-                           (J(body.quota), run["account_id"]))
-            if body.error_kind == "auth":
-                mark_machine_auth_failure(run["account_id"], node, body.summary)
+        if body.quota:
+            quota_refresh.record_run_result(ctx.db, run, body, update_account=account_update_allowed)
+        elif account_update_allowed and body.error_kind == "quota":
+            current = ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}
+            refresh_quota_forecast(run["account_id"], run["provider"], current.get("quota") or {})
+        if account_update_allowed and body.error_kind == "auth":
+            mark_machine_auth_failure(run["account_id"], node, body.summary)
         if status_update_allowed:
             if body.error_kind == "quota":
                 until = body.reset_at or (utcnow() + timedelta(minutes=30))
@@ -5511,7 +5504,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             " WHERE f.updated_at >= %s" + (" AND t.project=ANY(%s)" if scope is not None else "") +
             " ORDER BY f.updated_at DESC LIMIT 50", (week_start,) + scope_params)
         # Accounts are shared infrastructure, not project data.
-        quota_accounts = ctx.db.all("SELECT id, provider, quota FROM accounts ORDER BY id") if scope is None else []
+        quota_accounts = ctx.db.all("SELECT id,provider,quota,quota_source,quota_observed_at FROM accounts ORDER BY id") \
+            if scope is None else []
         quota_state = quota_reporting.assessments(ctx.db, quota_accounts, now)
         return {"week_start": this_monday.isoformat(),
                 "finished_without_person": current_finished[:50], "needed_person": current_needed[:50],
@@ -6053,6 +6047,74 @@ def create_app(ctx: Ctx) -> FastAPI:
         await run_in_threadpool(merge_flow.merge_ready, ctx)
         return {"reconciled": result["checked"]}
 
+    @app.get("/v1/dashboard/quota")
+    def dashboard_quota(request: Request) -> dict:
+        """Return a dashboard-safe quota summary for accounts serving the caller's visible projects."""
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        scope = set(user.project_keys) if user and user.project_keys is not None else None
+        repo = ctx.repo()
+        nodes = {node["name"]: node for node in ctx.db.all(
+            "SELECT name,projects,dynamic FROM nodes WHERE removed_at IS NULL")}
+        account_rows = ctx.db.all("SELECT id,provider,CASE WHEN quota_source<>'' THEN quota ELSE '{}'::jsonb END AS quota,"
+                                  "quota_source,quota_observed_at,quota_forecast FROM accounts ORDER BY node,provider,id")
+        quota_by_account = {str(row["id"]): row.get("quota_forecast") or {} for row in account_rows}
+        missing = [row for row in account_rows if not quota_by_account[str(row["id"])] and row.get("quota_source")]
+        quota_by_account.update(quota_reporting.assessments(ctx.db, missing) if missing else {})
+
+        labels = {"five_hour": "5 hours", "seven_day": "Weekly", "seven_day_opus": "Weekly Opus",
+                  "seven_day_sonnet": "Weekly Sonnet", "estimated_week": "Estimated weekly"}
+
+        def percent(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            if number != number:
+                return None
+            if 0 <= number <= 1:
+                number *= 100
+            return round(max(0, min(100, number)), 1)
+
+        accounts = []
+        for account in account_rows:
+            configured = repo.account(account["id"])
+            if configured is None:
+                continue
+            if scope is not None and not any(
+                    machine in nodes and scope.intersection(repo.projects_for_node(
+                        machine, nodes[machine].get("projects") or [], bool(nodes[machine].get("dynamic"))))
+                    for machine in configured.machines):
+                continue
+
+            awareness_windows = (quota_by_account.get(account["id"]) or {}).get("windows") or []
+            windows = [{
+                "label": str(window.get("label") or labels.get(str(window.get("name")), "Quota window")),
+                "used_pct": percent(window.get("used_pct")),
+                "reset_at": window.get("reset_at"),
+                "estimated": window.get("source") == "estimate",
+            } for window in awareness_windows if isinstance(window, dict)]
+            if not windows:
+                raw_windows = (account.get("quota") or {}).get("windows") or {}
+                windows = [{
+                    "label": labels.get(name, "Quota window"),
+                    "used_pct": percent(window.get("utilization", window.get("used_percent"))),
+                    "reset_at": window.get("resets_at") or window.get("reset_at"),
+                    "estimated": False,
+                } for name, window in raw_windows.items() if isinstance(window, dict)]
+            accounts.append({"provider": str(account.get("provider") or "unknown"), "windows": windows})
+
+        provider_counts: dict[str, int] = {}
+        rows = []
+        for account in accounts:
+            provider = account["provider"]
+            provider_counts[provider] = provider_counts.get(provider, 0) + 1
+            rows.append({"provider": provider, "label": f"Account {provider_counts[provider]}",
+                         "windows": account["windows"]})
+        return {"rows": rows}
+
     review_queue.mount_human_reviews(app, console_user, optional_console_user)
 
     @app.get("/v1/reviews/export.csv")
@@ -6388,7 +6450,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- shared accounts: enable an account on machines, remove it, report the sign-in prompt ----------------------
     shared_accounts.install(app, ctx, console_user, audit, node_auth)
 
-    # --- account probes: a tiny prompt tells whether an account can work and how much quota is left -------------
+    # --- account specs, no-generation quota refresh and legacy probes -------------------------------------------
     @app.get("/v1/accounts/{account_id}/spec")
     def account_spec(account_id: str, node: str = Depends(node_auth)) -> dict:
         repo = ctx.repo()
@@ -6397,49 +6459,6 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         model, effort = repo.model_for(acc.provider, acc.tier)
         return {"account": acc.id, "provider": acc.provider, "tier": acc.tier, "model": model, "effort": effort}
-
-    @app.post("/v1/accounts/{account_id}/probe")
-    def account_probe(account_id: str, body: ProbeBody, node: str = Depends(node_auth)) -> dict:
-        acc = ctx.repo().account(account_id)
-        if not acc or not acc.runs_on(node):
-            raise HTTPException(403, f"account {account_id} does not run on {node}")
-        if body.quota:
-            ctx.db.run("UPDATE accounts SET quota=%s WHERE id=%s", (J(body.quota), account_id))
-        ctx.db.run("INSERT INTO account_quota_samples (account_id,provider,model,quota,tokens_in,tokens_out,cost_usd,"
-                   "duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                   (account_id, acc.provider, body.model, J(body.quota), body.tokens_in, body.tokens_out,
-                    body.cost_usd, body.duration_ms))
-        latest = ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (account_id,)) or {}
-        refresh_quota_forecast(account_id, acc.provider, body.quota or latest.get("quota") or {})
-        ctx.db.run("UPDATE accounts SET last_probe_at=now(), updated_at=now() WHERE id=%s", (account_id,))
-        if "credential_expires_at" in body.model_fields_set:
-            ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s",
-                       (body.credential_expires_at, account_id))
-        if body.error_kind == "auth":
-            mark_machine_auth_failure(account_id, node, body.summary)
-        elif body.error_kind == "quota":
-            until = body.reset_at or (utcnow() + timedelta(minutes=30))
-            seconds = max(60, int((until - utcnow()).total_seconds()))
-            ctx.leases.cooldown(account_id, seconds, "quota")
-            ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s,"
-                       " cooldown_since=coalesce(cooldown_since,now()), idle_since=NULL WHERE id=%s AND status<>'working'",
-                       ("cooldown", until, body.summary[:300], account_id))
-        elif body.ok:
-            shared_accounts.mark_signed_in(ctx.db, account_id, node)  # the probe ran with this machine's own credentials
-            ctx.leases.uncool(account_id)
-            ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'idle' END,"
-                       " cooldown_until=NULL, last_error='', cooldown_since=NULL,"
-                       " idle_since=CASE WHEN status='working' THEN NULL ELSE coalesce(idle_since,now()) END"
-                       " WHERE id=%s", (account_id,))
-        else:
-            ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'error' END, last_error=%s,"
-                       " cooldown_since=NULL, idle_since=NULL"
-                       " WHERE id=%s", (body.summary[:300] or body.error_kind, account_id))
-        ctx.events.emit("account.probe", account=account_id, provider=acc.provider, node=node,
-                        outcome="ok" if body.ok else (body.error_kind or "error"), reason=body.summary[:200],
-                        duration_ms=body.duration_ms, tokens_in=body.tokens_in, tokens_out=body.tokens_out,
-                        cost_usd=body.cost_usd)
-        return {"ok": True}
 
     @app.post("/v1/events")
     def events_in(body: EventsBody, node: str = Depends(node_auth)) -> dict:
@@ -6804,7 +6823,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 else optional_console_user(request))
         if user and not has_permission(user.effective_roles, "view.machines_ai"):
             raise HTTPException(403, "not available for your role")
-        accounts = ctx.db.all("SELECT id,provider,tier,roles,quota,quota_forecast FROM accounts ORDER BY id")
+        accounts = ctx.db.all("SELECT id,provider,tier,roles,quota,quota_source,quota_observed_at,quota_forecast"
+                              " FROM accounts ORDER BY id")
         forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in accounts}
         # Forecasts normally come from the watchdog. On a fresh install, derive only the
         # accounts that already reported quota; accounts with no quota data cannot improve
@@ -7127,6 +7147,8 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     jira_connect.mount(app, ctx); setup_wizard.install(app, ctx)
     runtime_settings.install(app, ctx, console_user, audit)
+    app.state.control_api_auth = {"node_auth": node_auth, "console_user": console_user, "audit": audit,
+                                  "mark_machine_auth_failure": mark_machine_auth_failure}
     from .login import install_login
     install_login(app, ctx)
     system_check_api.register_routes(app, ctx, console_user, optional_console_user); dashboard_timeout_routes.install(app, ctx, console_user, optional_console_user)

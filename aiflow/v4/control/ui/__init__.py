@@ -71,6 +71,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     scale_proof_script = HERE / "scale-proof.js"
     run_inbox_script = HERE / "run-inbox.js"
     user_form_state_script = HERE / "user-form-state.js"
+    quota_refresh_script = HERE / "quota_refresh_settings.js"
 
     @app.get("/console-assets/licensing-notice.js", include_in_schema=False)
     def licensing_notice() -> FileResponse:
@@ -100,6 +101,10 @@ def mount_ui(app: FastAPI, ctx) -> None:
     def console_page() -> str:
         return build_console_page()
 
+    @app.get("/console-assets/quota-refresh-settings.js", include_in_schema=False)
+    def quota_refresh_settings_asset() -> FileResponse:
+        return FileResponse(quota_refresh_script, media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
         return RedirectResponse("/dashboard")

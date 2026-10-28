@@ -9,17 +9,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import signal
-import subprocess
 import threading
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 from ..control.support_bundle import MAX_LOG_BYTES, cap_log_bytes
 
-from ..adapters import RunSpec, get_adapter
+from .quota_cli import read_quota_isolated
 from .client import Conflict, ControlClient
 from .dev import Claimed, run_dev
 from .triage import run_triage
@@ -34,7 +31,6 @@ from .ba_chat import run_turn as run_ba_chat_turn
 log = logging.getLogger("aiflow4.worker")
 STATE_DIR = Path("/run/aiflow4/workers")
 RUN_AS = ["setpriv", "--reuid=aiflow-worker", "--regid=aiflow-worker", "--init-groups", "--"]
-PROBE_PROMPT = "This is an availability check. Do not use any tools. Reply with the single word OK."
 
 
 def attach_support_log(result: dict, srv_root: str) -> None:
@@ -76,80 +72,57 @@ class Worker:
         self.poll_s = poll_s
         self.run_as = RUN_AS if run_as is None else run_as
         self.stop = threading.Event()
+        self.state_lock = threading.Lock()
         self.state: dict = {"account": self.account, "state": "idle", "since": time.time()}
-        self.probe_every_s = int(os.environ.get("AIFLOW4_PROBE_EVERY_S", "1800"))
-        self.next_probe = 0.0
-        self.probe_ok = False
-        if self.instance != self.account:  # extra sessions rely on the first one's checks and on cooldowns
-            self.next_probe, self.probe_ok = float("inf"), True
 
     def publish(self, **kv) -> None:
-        self.state.update(kv)
-        self.state["pid"] = os.getpid()
-        self.state["updated"] = time.time()
-        try:
-            STATE_DIR.mkdir(parents=True, exist_ok=True)
-            tmp = STATE_DIR / f".{self.instance}.json"
-            tmp.write_text(json.dumps({**self.state, "instance": self.instance}))
-            tmp.replace(STATE_DIR / f"{self.instance}.json")
-        except OSError as e:
-            log.debug("state file: %s", e)
-
-    def probe(self) -> bool:
-        """Tiny prompt through the account's CLI: is it signed in, does it have quota (Claude reports both windows)."""
-        spec_info = self.api.call("GET", f"/v1/accounts/{self.account}/spec")
-        work = Path(self.srv) / "work" / ".probe" / self.instance
-        work.mkdir(parents=True, exist_ok=True)
-        if self.run_as:
+        with self.state_lock:
+            self.state.update(kv)
+            self.state["pid"] = os.getpid()
+            self.state["updated"] = time.time()
             try:
-                shutil.chown(work, "aiflow-worker", "aiflow-worker")
-            except (LookupError, PermissionError):
-                pass
-        if not (work / ".git").exists():  # codex refuses to run outside a git repository
-            subprocess.run(self.run_as + ["git", "init", "-q", str(work)], capture_output=True, timeout=30)
-        spec = RunSpec(prompt=PROBE_PROMPT, cwd=str(work), account_home=str(Path(self.srv) / "accounts" / self.account),
-                       model=spec_info.get("model", ""), effort="", timeout_s=180, idle_s=150, control_url=self.control_url)
-        adapter = get_adapter(spec_info["provider"])
-        base_argv = adapter.argv
-        adapter.argv = lambda sp: self.run_as + base_argv(sp)
-        self.publish(state="probing")
-        res = adapter.run(spec)
-        if not (res.final_text or "").strip() and not res.error_kind:
-            # A clean process exit without an answer is a provider failure, not evidence of sign-out.
-            res.error_kind = "provider"
-            res.error_message = "no answer"
-        ok = not res.error_kind and bool((res.final_text or "").strip())
-        detail = (res.error_message or res.final_text or "").strip()
-        summary = (res.final_text or "").strip()[:300] if ok else f"{res.error_kind or 'no answer'}: {detail[:250]}"
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                tmp = STATE_DIR / f".{self.instance}.json"
+                tmp.write_text(json.dumps({**self.state, "instance": self.instance}))
+                tmp.replace(STATE_DIR / f"{self.instance}.json")
+            except OSError as e:
+                log.debug("state file: %s", e)
+
+    def refresh_quota(self) -> bool:
+        """Run a fixed provider usage command under an account lease; no prompt or model run is started."""
+        response = self.api.call("POST", f"/v1/accounts/{self.account}/quota-refresh/claim", allow_not_found=True)
+        claim = (response or {}).get("job")
+        if not claim:
+            return False
+        self.publish(quota_refresh={"state": "running", "at": claim["claimed_at"]})
+        home = str(Path(self.srv) / "accounts" / self.account)
         try:
-            self.api.call("POST", f"/v1/accounts/{self.account}/probe", {
-                "ok": ok, "error_kind": res.error_kind, "reset_at": res.reset_at.isoformat() if res.reset_at else None,
-                "credential_expires_at": res.credential_expires_at.isoformat() if res.credential_expires_at else None,
-                "quota": res.quota, "summary": summary, "duration_ms": int(res.duration_s * 1000),
-                "tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd,
-                "model": spec.model})
+            quota, error, observed_at = read_quota_isolated(claim["provider"], home, self.run_as)
+            self.api.call("POST", f"/v1/accounts/{self.account}/quota-refresh/result", {
+                "lease_token": claim["lease_token"], "ok": bool(quota), "quota": quota,
+                "error": error, "model": "", "observed_at": observed_at})
         except Exception as e:  # noqa: BLE001
-            log.warning("probe result not recorded: %s", e)
-        now = time.time()
-        if ok:
-            self.next_probe = now + self.probe_every_s
-        else:  # retry at the provider's reset time when known, else in 30 minutes (5 minutes at the earliest)
-            wait = (res.reset_at - datetime.now(timezone.utc)).total_seconds() + 30 if res.reset_at else 1800
-            self.next_probe = now + max(300, min(wait, 6 * 3600))
-        self.probe_ok = ok
-        self.publish(state="idle" if ok else "unavailable", probe={"ok": ok, "error_kind": res.error_kind, "at": now,
-                                                                   "next": self.next_probe,
-                                                                   "credential_expires_at": res.credential_expires_at.isoformat()
-                                                                   if res.credential_expires_at else None})
-        log.info("probe %s: %s", self.account, "ok" if ok else summary)
-        return ok
+            log.warning("quota refresh result not recorded account=%s error=%s", self.account, type(e).__name__)
+            self.publish(quota_refresh={"state": "failed", "ok": False, "at": claim["claimed_at"],
+                                        "error": "refresh result could not be recorded"})
+            return False
+        self.publish(quota_refresh={"state": "complete" if quota else "failed", "ok": bool(quota),
+                                    "at": claim["claimed_at"], "error": error})
+        log.info("quota refresh %s: %s", self.account, "ok" if quota else error)
+        return bool(quota)
+
+    def quota_refresh_loop(self) -> None:
+        """Poll the DB-backed quota schedule independently of task assignment and execution."""
+        while not self.stop.is_set():
+            try:
+                self.refresh_quota()
+            except Exception as e:  # noqa: BLE001 - refresh is advisory and never stops task routing
+                log.warning("quota refresh failed account=%s error=%s", self.account, type(e).__name__)
+            if self.stop.wait(30):
+                return
 
     def once(self) -> bool:
         """One poll: claim the best candidate and run it. True when a run happened."""
-        if time.time() >= self.next_probe:
-            self.probe()
-        if not self.probe_ok:
-            return False
         release_candidates = self.api.call("GET", "/v1/version-releases/candidates",
                                             params={"account": self.account}, allow_not_found=True) or {}
         for release in release_candidates.get("versions", []):
@@ -248,16 +221,6 @@ class Worker:
             except Exception as e:  # noqa: BLE001
                 log.warning("release failed: %s", e)
             log.info("%s finished: %s", c.ticket["key"], res.get("outcome"))
-            if res.get("outcome") == "quota":
-                self.probe_ok = False
-                reset = res.get("reset_at")
-                wait = 1800.0
-                if reset:
-                    try:
-                        wait = (datetime.fromisoformat(reset) - datetime.now(timezone.utc)).total_seconds() + 30
-                    except ValueError:
-                        pass
-                self.next_probe = time.time() + max(300, min(wait, 6 * 3600))
             self.publish(state="idle", ticket=None, run_id=None, last_outcome=res.get("outcome"), since=time.time())
             return True
         return False
@@ -271,6 +234,11 @@ class Worker:
     def run_forever(self) -> None:
         signal.signal(signal.SIGTERM, lambda *_: self.stop.set())
         self.publish(state="idle")
+        quota_thread = None
+        if self.instance == self.account:  # one scheduler per logical account; extra sessions share its DB lease
+            quota_thread = threading.Thread(target=self.quota_refresh_loop, name=f"quota-refresh-{self.instance}",
+                                            daemon=True)
+            quota_thread.start()
         started_on = self.release()
         while not self.stop.is_set():
             if started_on and self.release() != started_on:  # a new release is installed: exit between runs,
@@ -279,11 +247,14 @@ class Worker:
             try:
                 ran = self.once()
                 if self.state.get("state") == "error":
-                    self.publish(state="idle" if self.probe_ok else "unavailable", error=None)
+                    self.publish(state="idle", error=None)
                 if not ran:
                     self.stop.wait(self.poll_s)
             except Exception as e:  # noqa: BLE001
                 log.warning("poll failed: %s", e)
                 self.publish(state="error", error=str(e)[:200])
                 self.stop.wait(max(self.poll_s, 30))
+        self.stop.set()
+        if quota_thread:
+            quota_thread.join(timeout=30)
         self.publish(state="stopped")

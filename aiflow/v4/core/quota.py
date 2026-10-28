@@ -114,12 +114,14 @@ def _period_hours(name: str, value: dict) -> float:
 def _sample_rate(samples: list[dict], name: str) -> float | None:
     points = []
     for sample in samples:
+        if sample.get("source") == "legacy":
+            continue
         quota = sample.get("quota") or {}
         windows = quota.get("windows") or {}
         window = windows.get(name)
         if not isinstance(window, dict):
             continue
-        at = as_utc(sample.get("sampled_at"))
+        at = as_utc(sample.get("observed_at") or sample.get("sampled_at"))
         utilization = _ratio(window.get("utilization", window.get("used_percent")))
         if at and utilization is not None:
             points.append((at, utilization))
@@ -136,12 +138,14 @@ def _learned_reset(name: str, samples: list[dict], runs: list[dict], now: dateti
     resets: list[datetime] = []
     points = []
     for sample in samples:
+        if sample.get("source") == "legacy":
+            continue
         quota = sample.get("quota") or {}
         window = ((quota.get("windows") or {}).get(name) or {})
         reset = as_utc(window.get("resets_at") or window.get("reset_at"))
         if reset:
             resets.append(reset)
-        at = as_utc(sample.get("sampled_at"))
+        at = as_utc(sample.get("observed_at") or sample.get("sampled_at"))
         utilization = _ratio(window.get("utilization", window.get("used_percent")))
         if at and utilization is not None:
             points.append((at, utilization))
@@ -262,7 +266,8 @@ def account_awareness(provider: str, quota: dict | None, runs: list[dict], sampl
     now = as_utc(now) or datetime.now(UTC)
     quota = quota or {}
     runs = sorted((r for r in runs if _run_time(r) and _run_time(r) <= now), key=lambda r: _run_time(r))
-    samples = sorted(samples, key=lambda s: as_utc(s.get("sampled_at")) or datetime.min.replace(tzinfo=UTC))
+    samples = sorted(samples, key=lambda s: as_utc(s.get("observed_at") or s.get("sampled_at"))
+                     or datetime.min.replace(tzinfo=UTC))
     confidence, run_count, spread = _confidence(runs, now)
     daily_start = now - timedelta(hours=24)
     hour_start = now - timedelta(hours=1)

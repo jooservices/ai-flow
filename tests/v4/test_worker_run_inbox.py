@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import threading
 from types import SimpleNamespace
 
@@ -54,6 +55,76 @@ def test_worker_injects_guidance_only_at_a_provider_process_boundary():
     assert result.final_text == "Updated pass"
     assert result.tokens_in == 10 and result.tokens_out == 7
     assert result.duration_s == 5
+
+
+def test_continuation_keeps_the_fenced_run_branch_and_uncommitted_worktree(tmp_path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    def git(*args):
+        result = subprocess.run(["git", *args], cwd=worktree, check=True, capture_output=True, text=True)
+        return result.stdout.strip()
+
+    git("init", "-b", "JAIF-357-inbox-checkpoint")
+    git("config", "user.name", "Inbox test")
+    git("config", "user.email", "inbox-test@example.test")
+    (worktree / "tracked.txt").write_text("baseline\n")
+    git("add", "tracked.txt")
+    git("commit", "-m", "test: Create a checkpoint worktree")
+    original_branch = git("branch", "--show-current")
+    original_commit = git("rev-parse", "HEAD")
+    (worktree / "owner-draft.txt").write_text("preserve this existing uncommitted edit\n")
+
+    message = {"id": 9, "kind": "request", "author": "owner@example.test", "body": "Keep the draft file."}
+
+    class InboxAPI:
+        def __init__(self):
+            self.calls = []
+            self.status = "queued"
+
+        def call(self, method, path, body):
+            self.calls.append((method, path, body.copy()))
+            if message["id"] in body["inbox_included"]:
+                self.status = "included"
+            elif message["id"] in body["inbox_received"]:
+                self.status = "received"
+            inbox = [] if self.status == "included" else [{**message, "status": self.status}]
+            return {"inbox": inbox}
+
+    class WorktreeAdapter:
+        def __init__(self):
+            self.specs = []
+
+        def run(self, spec, on_progress=None, stop=None, on_start=None):
+            self.specs.append(spec)
+            assert git("branch", "--show-current") == original_branch
+            assert (worktree / "owner-draft.txt").read_text() == "preserve this existing uncommitted edit\n"
+            if len(self.specs) == 1:
+                (worktree / "provider-turn.txt").write_text("uncommitted provider work\n")
+                return RunResult(final_text="First pass", duration_s=1)
+            assert (worktree / "provider-turn.txt").read_text() == "uncommitted provider work\n"
+            if on_start:
+                on_start()
+            return RunResult(final_text="Finished with the owner guidance", duration_s=1)
+
+    run = SimpleNamespace(run_id="same-run", fence=7, ticket={"key": "TEST-1"})
+    api = InboxAPI()
+    heartbeat = Heartbeat(api, run, every_s=30)
+    adapter = WorktreeAdapter()
+    spec = RunSpec(prompt="Original task", cwd=str(worktree), account_home=str(tmp_path / "account"))
+
+    result = run_with_inbox(adapter, spec, heartbeat)
+
+    assert len(adapter.specs) == 2 and all(item.cwd == str(worktree) for item in adapter.specs)
+    assert adapter.specs[1].log_append is True
+    assert git("branch", "--show-current") == original_branch
+    assert git("rev-parse", "HEAD") == original_commit  # continuation does not commit or switch work
+    status = git("status", "--porcelain")
+    assert "?? owner-draft.txt" in status and "?? provider-turn.txt" in status
+    assert len({path for _, path, _ in api.calls}) == 1
+    assert {path for _, path, _ in api.calls} == {"/v1/runs/same-run/heartbeat"}
+    assert all(body["fence"] == run.fence for _, _, body in api.calls)
+    assert api.status == "included" and result.final_text == "Finished with the owner guidance"
 
 
 def test_worker_does_not_start_a_continuation_when_no_guidance_arrived():

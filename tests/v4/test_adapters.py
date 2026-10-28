@@ -20,6 +20,8 @@ def test_claude_events_from_spike_s1():
                    "permission_denials": [{"tool_name": "Bash"}],
                    "usage": {"input_tokens": 8, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 900, "output_tokens": 370}}, res)
     assert res.quota["windows"]["seven_day"]["utilization"] == 0.64 and res.error_kind == ""
+    assert res.quota_observed_at is not None
+    assert res.to_dict()["quota_observed_at"] == res.quota_observed_at.isoformat()
     assert res.tokens_in == 1008 and res.tokens_out == 370 and res.permission_denials == 1 and res.cost_usd == 0.0679
     rejected = RunResult()
     a.parse_event({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1792561800}}, rejected)
@@ -148,10 +150,12 @@ def test_codex_and_grok_keep_reported_quota_windows_when_cli_exposes_them():
     }}}, codex)
     assert codex.quota["windows"]["five_hour"]["utilization"] == .64
     assert codex.quota["windows"]["seven_day"]["window_duration_minutes"] == 10080
+    assert codex.quota_observed_at is not None
     grok = RunResult()
     GrokAdapter().parse_event({"type": "usage", "quota": {"windows": {
         "weekly": {"used_percent": 0.3, "resets_at": "2026-10-29T12:00:00Z"}}}}, grok)
     assert grok.quota["windows"]["seven_day"]["utilization"] == 0.3
+    assert grok.quota_observed_at is not None
 
 
 @pytest.mark.parametrize(("field", "normalized_field"), [("limit", "limit_tokens"), ("total", "total_tokens")])

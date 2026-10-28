@@ -4,6 +4,7 @@ import json
 import shlex
 import shutil
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from threading import Barrier
@@ -226,6 +227,45 @@ def test_run_without_quota_does_not_create_a_fresh_sample(client, ctx):
                          " WHERE id='claude-01'")
     assert account["quota"] == old and account["quota_source"] == "" and account["quota_observed_at"] is None
     assert account["quota_forecast"]["source"] == "estimate"
+
+
+@pytest.mark.parametrize("include_observation_time", [True, False])
+def test_delayed_run_quota_cannot_replace_a_newer_provider_snapshot(client, ctx, include_observation_time):
+    headers = node_headers(client)
+    heartbeat = client.post("/v1/nodes/cc/heartbeat", headers=headers,
+                            json={"slots_total": 2, "workers": [{"account": "claude-01", "state": "idle"}]})
+    assert heartbeat.status_code == 200
+    add_ticket(ctx.db, "TESTWP-QREF-DELAYED-RUN")
+    claimed = client.post("/v1/work/claim", headers=headers,
+                          json={"ticket": "TESTWP-QREF-DELAYED-RUN", "account": "claude-01"}).json()
+    assert claimed["claimed"]
+    started_at = ctx.db.one("SELECT started_at FROM runs WHERE id=%s", (claimed["run_id"],))["started_at"]
+    run_observed_at = started_at + timedelta(milliseconds=1)
+    time.sleep(0.02)
+
+    newer_quota = {"provider": "claude", "windows": {"five_hour": {"utilization": .42}}}
+    newer_at = ctx.db.one("SELECT clock_timestamp() AS observed_at")["observed_at"]
+    assert newer_at > run_observed_at
+    ctx.db.run("UPDATE accounts SET quota=%s,quota_source='cli',quota_observed_at=%s WHERE id='claude-01'",
+               (J(newer_quota), newer_at))
+    stale_quota = {"provider": "claude", "windows": {"five_hour": {"utilization": .89}}}
+    payload = {
+        "fence": claimed["fence"], "outcome": "done", "tokens_in": 120, "tokens_out": 30,
+        "quota": stale_quota}
+    if include_observation_time:
+        payload["quota_observed_at"] = run_observed_at.isoformat()
+    else:
+        run_observed_at = started_at
+    response = client.post(f"/v1/runs/{claimed['run_id']}/result", headers=headers, json=payload)
+    assert response.status_code == 200, response.text
+
+    account = ctx.db.one("SELECT quota,quota_source,quota_observed_at FROM accounts WHERE id='claude-01'")
+    assert account["quota"] == newer_quota and account["quota_source"] == "cli"
+    assert account["quota_observed_at"] == newer_at
+    sample = ctx.db.one("SELECT quota,observed_at,source,tokens_in,tokens_out FROM account_quota_samples"
+                        " WHERE account_id='claude-01' AND source='run' ORDER BY observed_at DESC LIMIT 1")
+    assert sample["quota"] == stale_quota and sample["observed_at"] == run_observed_at
+    assert (sample["tokens_in"], sample["tokens_out"]) == (120, 30)
 
 
 def test_settings_api_is_console_managed_and_returns_per_account_status(client, ctx):

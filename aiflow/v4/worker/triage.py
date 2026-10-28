@@ -129,6 +129,7 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
 
         res = run_with_inbox(adapter, spec, hb, on_progress)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
+                      quota_observed_at=res.quota_observed_at.isoformat() if res.quota_observed_at else None,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       head_sha=head)
         if hb.lost.is_set():

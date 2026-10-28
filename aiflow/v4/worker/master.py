@@ -105,16 +105,22 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         responses = [response]
         if hb.lost.is_set():
             raise LeaseLost()
+        quota_response = next((item for item in reversed(responses) if item.quota), None)
+        quota_fields = {"quota": quota_response.quota,
+                        "quota_observed_at": (quota_response.quota_observed_at.isoformat()
+                                               if quota_response.quota_observed_at else None)} if quota_response else {}
         if response.error_kind in ("quota", "auth"):
             result.update(outcome="quota", error_kind=response.error_kind,
                           summary=f"master account {c.account} cannot work now ({response.error_kind})",
                           tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
+                          **quota_fields,
                           details={"model_time_s": math.ceil(time.monotonic() - model_started)})
             return result
         if response.error_kind:
             result.update(outcome="timeout" if response.error_kind == "timeout" else "failed",
                           error_kind=response.error_kind, summary=f"master cycle failed: {response.error_message[:400]}",
                           tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
+                          **quota_fields,
                           details={"model_time_s": math.ceil(time.monotonic() - model_started)})
             return result
         plan = parse_plan(response.final_text or "")
@@ -127,12 +133,16 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                 retry_spec = replace(spec, prompt=spec.prompt + reminder, timeout_s=min(600, retry_budget))
                 response = run_with_inbox(adapter, retry_spec, hb, on_progress)
                 responses.append(response)
+                quota_response = next((item for item in reversed(responses) if item.quota), None)
+                quota_fields = {"quota": quota_response.quota,
+                                "quota_observed_at": (quota_response.quota_observed_at.isoformat()
+                                                       if quota_response.quota_observed_at else None)} if quota_response else {}
                 if hb.lost.is_set():
                     raise LeaseLost()
                 if response.error_kind:
                     result.update(tokens_in=sum(r.tokens_in for r in responses),
                                   tokens_out=sum(r.tokens_out for r in responses),
-                                  cost_usd=sum(r.cost_usd for r in responses), quota=response.quota,
+                                  cost_usd=sum(r.cost_usd for r in responses), **quota_fields,
                                   error_kind=response.error_kind,
                                   reset_at=response.reset_at.isoformat() if response.reset_at else None)
                     if response.error_kind in ("quota", "auth"):
@@ -146,7 +156,7 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                 plan = parse_plan(response.final_text or "")
 
         result.update(tokens_in=sum(r.tokens_in for r in responses), tokens_out=sum(r.tokens_out for r in responses),
-                      cost_usd=sum(r.cost_usd for r in responses), quota=response.quota,
+                      cost_usd=sum(r.cost_usd for r in responses), **quota_fields,
                       error_kind=response.error_kind,
                       reset_at=response.reset_at.isoformat() if response.reset_at else None)
         model_time_s = math.ceil(time.monotonic() - model_started)

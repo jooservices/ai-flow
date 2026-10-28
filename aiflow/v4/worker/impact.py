@@ -118,6 +118,7 @@ def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         adapter.argv = lambda s: run_as + base_argv(s)
         res = run_with_inbox(adapter, spec, hb, lambda ev: None)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
+                      quota_observed_at=res.quota_observed_at.isoformat() if res.quota_observed_at else None,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       details={"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})
         if hb.lost.is_set():

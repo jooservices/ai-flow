@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .capacity import lost_run_reservation_tokens, reported_run_tokens, reservation_tokens
+from .capacity import reported_run_tokens, reservation_tokens, unresolved_run_reservation_tokens
 from ..core.controlrepo import Account, ControlRepo
 from .db import J
 
@@ -250,10 +250,11 @@ def claim_run(db, acc: Account, values: tuple, *, max_node_runs: int | None = No
                                                (acc.id,)):
                         detail = active.get("details") if isinstance(active.get("details"), dict) else {}
                         reserved += reservation_tokens(detail)
-                    for lost in conn.execute(
-                            "SELECT details,started_at,ended_at FROM runs WHERE account_id=%s AND status='lost'",
+                    for unresolved in conn.execute(
+                            "SELECT details,started_at,ended_at FROM runs WHERE account_id=%s"
+                            " AND status IN ('lost','released')",
                             (acc.id,)):
-                        reserved += lost_run_reservation_tokens(lost, observed_at)
+                        reserved += unresolved_run_reservation_tokens(unresolved, observed_at)
                     reported = 0
                     if forecast.get("source") == "reported" and observed_at:
                         for completed in conn.execute(

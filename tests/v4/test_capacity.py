@@ -200,9 +200,10 @@ def test_capacity_reserves_running_estimates_and_unobserved_reported_run_usage(c
     assert reconciled["claude-01"]["windows"][0]["left_tokens"] == 100_000
 
 
-def test_capacity_reserves_lost_run_estimate_until_a_newer_snapshot(ctx):
+@pytest.mark.parametrize("status", ["lost", "released"])
+def test_capacity_reserves_unreported_terminal_run_estimate_until_a_newer_snapshot(ctx, status):
     observed_at = datetime.now(UTC) - timedelta(minutes=3)
-    lost_at = observed_at + timedelta(minutes=1)
+    terminal_at = observed_at + timedelta(minutes=1)
     forecast = {"source": "reported", "confidence": "high", "windows": [
         {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
     ctx.db.run("INSERT INTO accounts (id,provider,node) VALUES ('claude-01','claude','cc')"
@@ -211,14 +212,15 @@ def test_capacity_reserves_lost_run_estimate_until_a_newer_snapshot(ctx):
                (J(forecast), observed_at))
     details = {"quota_reservation": {"tokens": 30_000}}
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,started_at,"
-               "ended_at,details) VALUES (%s,'TESTWP-LOST-RESERVATION','TESTWP','dev','claude-01','claude','cc',"
-               "1,'lost',%s,%s,%s)",
-               (str(uuid.uuid4()), lost_at - timedelta(minutes=5), lost_at, J(details)))
+               "ended_at,details) VALUES (%s,'TESTWP-TERMINAL-RESERVATION','TESTWP','dev','claude-01','claude','cc',"
+               "1,%s,%s,%s,%s)",
+               (str(uuid.uuid4()), status, terminal_at - timedelta(minutes=5), terminal_at, J(details)))
 
     unresolved = capacity.with_active_quota_reservations(ctx.db, {"claude-01": forecast})
     assert unresolved["claude-01"]["windows"][0]["left_tokens"] == 70_000
 
-    ctx.db.run("UPDATE accounts SET quota_observed_at=%s WHERE id='claude-01'", (lost_at + timedelta(seconds=1),))
+    ctx.db.run("UPDATE accounts SET quota_observed_at=%s WHERE id='claude-01'",
+               (terminal_at + timedelta(seconds=1),))
     reconciled = capacity.with_active_quota_reservations(ctx.db, {"claude-01": forecast})
     assert reconciled["claude-01"]["windows"][0]["left_tokens"] == 100_000
 

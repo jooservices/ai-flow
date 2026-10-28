@@ -29,11 +29,11 @@ explicitly labeled quota window and
 percentage; ambiguous output is treated as a failed refresh, and the existing snapshot is retained.
 
 Every accepted snapshot records its source and observation time. Run quota observations use source `run`; scheduled
-CLI reads use source `cli`. A scheduled snapshot is timestamped when the control plane accepts its result, so a refresh
-records the helper's observation time, clamped between the server-side claim and result times. If a task reports a newer
-snapshot while an earlier refresh is still running, that refresh is retained as an older sample but cannot replace the
-task's account snapshot. Forecasting uses provider quota samples when available and continues to estimate burn from
-completed run history; run usage is not added to provider-reported utilization.
+CLI reads use source `cli`. A scheduled read uses the helper's observation time, clamped between the server-side claim
+and result-receipt times; if the helper omits an observation time, the control plane uses the receipt time. If a task
+reports a newer snapshot while an earlier refresh is still running, that refresh is retained as an older sample but
+cannot replace the task's account snapshot. Forecasting uses provider quota samples when available and continues to
+estimate burn from completed run history; run usage is not added to provider-reported utilization.
 
 On upgrade, account quota values without stored provenance are treated as unknown until a new read arrives. Historical
 quota samples without source metadata are retained for audit but excluded from provider sample-rate/reset learning;
@@ -53,9 +53,10 @@ is 1–1440 minutes. These endpoints require `console.manage`.
 Workers call `POST /v1/accounts/{account_id}/quota-refresh/claim` and
 `POST /v1/accounts/{account_id}/quota-refresh/result` with node authentication. A claim returns either `{"job": null}`
 or a job containing its account, provider, lease token, and claim time. A result accepts the lease token, success flag,
-provider quota windows, optional observation time, error, and model. It returns `{"recorded": true}`; an expired or
-superseded lease returns HTTP 409. The server sets the sample source to `cli` and validates successful quota data
-against the account's provider.
+provider quota windows, optional observation time, error, and model. It returns `{"recorded": true}`; a result may be
+accepted after the lease's nominal expiry if no later claim has replaced its token. Once superseded, the old token
+returns HTTP 409. The server sets the sample source to `cli` and validates successful quota data against the account's
+provider.
 
 ## Related control API contracts
 

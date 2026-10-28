@@ -564,7 +564,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   <div class="license-warning" id="license-warning" role="status" hidden></div>
   <div id="firstuse"></div>
   <section class="view" id="view-cc" role="tabpanel" aria-labelledby="tab-cc"><script src="/console-assets/release-readiness.js"></script><script src="/console-assets/scale-proof.js"></script></section>
-  <section class="view" id="view-work" role="tabpanel" aria-labelledby="tab-work" hidden>
+  <section class="view" id="view-work" role="tabpanel" aria-labelledby="tab-work" hidden><script src="/console-assets/run-inbox.js"></script>
     <div class="dhead" id="work-head"></div>
     <div id="work-body" class="view"></div>
   </section>
@@ -574,7 +574,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   </section>
   <section class="view" id="view-sa" role="tabpanel" aria-labelledby="tab-sa" hidden></section>
   <section class="view" id="view-machines" role="tabpanel" aria-labelledby="tab-machines" hidden></section>
-  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden></section>
+  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden><script src="/console-assets/user-form-state.js"></script></section>
   <section class="view" id="view-lead" role="tabpanel" aria-labelledby="tab-lead" hidden></section>
   <section class="view" id="view-business" role="tabpanel" aria-labelledby="tab-business" hidden>
     <div class="dhead" id="bhead"></div>
@@ -2807,7 +2807,7 @@ function epicsPanel(all, act, id) {
   return h + '</div></section>';
 }
 function renderDBody() {
-  var all = projTickets();
+  if (!window.AIFlowConsole) { window.AIFlowConsole = { state: S, data: D, esc: esc, when: when, projectResponseError: projectResponseError, renderDBody: renderDBody, activeBoard: function () { return S.view === 'work' ? $('#work-body') : $('#dbody'); } }; if (typeof window.dispatchEvent === 'function') window.dispatchEvent(new Event('aiflow-console-ready')); } var all = projTickets();
   var byKey = {}; all.forEach(function (t) { byKey[t.key] = t; });
   var work = all.filter(function (t) { return t.type !== 'Epic'; });
   var q = S.search.trim().toLowerCase();
@@ -2871,8 +2871,8 @@ function renderDBody() {
   h += '<section class="panel" data-block="runs" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
   h += analyticsPanel();
   }
-  var target = S.view === 'work' ? $('#work-body') : $('#dbody');
-  if (target) target.innerHTML = h;
+  var target = S.view === 'work' ? $('#work-body') : $('#dbody'); if (window.AIFlowConsole && window.AIFlowConsole.runInboxPanel) h += window.AIFlowConsole.runInboxPanel();
+  if (target && window.AIFlowConsole && window.AIFlowConsole.renderBoardContent) window.AIFlowConsole.renderBoardContent(target, h); else if (target) target.innerHTML = h;
   if (target && S.view === 'delivery') applyLayout('delivery', target);
 }
 

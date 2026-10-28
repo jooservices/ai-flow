@@ -46,6 +46,7 @@ class RunSpec:
     control_url: str = ""
     run_token: str = ""
     log_path: str = ""
+    log_append: bool = False
     extra_env: dict[str, str] = field(default_factory=dict)
     sandbox: str = "workspace-write"
     container_start_hook: Callable[[int], None] | None = None
@@ -214,11 +215,11 @@ class Adapter:
         return env
 
     def run(self, spec: RunSpec, on_progress: Callable[[dict], None] | None = None,
-            stop: "threading.Event | None" = None) -> RunResult:
+            stop: "threading.Event | None" = None, on_start: Callable[[], None] | None = None) -> RunResult:
         self.prepare(spec)
         res = RunResult(log_path=spec.log_path)
         started = time.time()
-        log = open(spec.log_path, "w", encoding="utf-8") if spec.log_path else None
+        log = open(spec.log_path, "a" if spec.log_append else "w", encoding="utf-8") if spec.log_path else None
         run_env = self.base_env(spec)
         self._command_path = run_env.get("PATH", "")
         proc = subprocess.Popen(self.argv(spec), cwd=spec.cwd, env=run_env, stdin=subprocess.DEVNULL,
@@ -240,6 +241,8 @@ class Adapter:
                         pass
                     proc.wait()
                 raise
+        if on_start:
+            on_start()
         sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ)
         last_output = time.time()

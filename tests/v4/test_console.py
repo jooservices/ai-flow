@@ -471,7 +471,7 @@ def test_footer_has_version_environment_control_ref_links_and_copyright():
 def test_no_new_libraries_and_both_themes_still_defined():
     page = html()
     style = css()
-    assert 'src="/console-assets/licensing-notice.js"' in page and "<script type=\"module\"" not in page
+    assert 'src="/console-assets/licensing-notice.js"' in page and 'src="/console-assets/quota-refresh-settings.js"' in page and "<script type=\"module\"" not in page
     assert page.count("<script>") == 1 and page.count("<style>") == 1
     assert ':root[data-theme="light"]' in page and '--bg:#121110' in style and '--bg:#f5f1eb' in style
     assert '.dash-section[hidden]{display:none}' in style
@@ -493,7 +493,7 @@ def test_console_page_and_state_feed_the_footer(ctx):
     client.cookies.set(COOKIE_NAME, issue_session("console@example.test", "owner", 2_000_000_000,
                                                    ctx.settings.console_session_secret))
     page = client.get("/cc")
-    assert page.status_code == 200 and 'id="footer"' in page.text
+    assert page.status_code == 200 and 'id="footer"' in page.text and (asset := client.get("/console-assets/quota-refresh-settings.js")).status_code == 200 and "AIFlowQuotaRefresh" in asset.text
     for path in CONSOLE_PAGE_PATHS:
         response = client.get(path)
         assert response.status_code != 404, f"{path} returned 404"
@@ -1709,7 +1709,7 @@ def test_dashboard_quota_endpoint_is_safe_and_scoped_for_role_without_machines_a
     reset = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
     quota = {"windows": {"five_hour": {"utilization": 0.4, "resets_at": reset}}}
     for account_id in ("claude-01", "codex-01", "opencode-01"):
-        ctx.db.run("UPDATE accounts SET quota=%s WHERE id=%s", (J(quota), account_id))
+        ctx.db.run("UPDATE accounts SET quota=%s,quota_source='run',quota_observed_at=now() WHERE id=%s", (J(quota), account_id))
     # This account is enabled on a machine outside the caller's project scope.
     outside = next(account for account in ctx._configured_repo().accounts if account.id == "opencode-01")
     outside.node = "outside-node"

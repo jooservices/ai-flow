@@ -91,6 +91,28 @@ var localStorage = {getItem:function(){return null;},setItem:function(){}}; var 
     assert "Quota used" not in html and "Limit resets" not in html and "quota-history" not in html
 
 
+def test_managed_sign_in_without_quota_cli_records_auth_check_without_quota_snapshot(client, ctx):
+    owner_session(client, ctx)
+    node_auth = {"Authorization": f"Bearer {join_node(client, 'node-no-quota-cli').json()['node_token']}"}
+    created = client.post("/v1/machines/node-no-quota-cli/accounts", json={
+        "provider": "grok", "sessions": 1, "jobs": ["develop"]})
+    assert created.status_code == 200, created.text
+    account_id = created.json()["account"]
+    request_id = ctx.db.one("SELECT sign_in_request_id FROM managed_ai_accounts WHERE id=%s",
+                            (account_id,))["sign_in_request_id"]
+
+    completed = client.post(f"/v1/accounts/{account_id}/sign-in/status", headers=node_auth, json={
+        "request_id": request_id, "status": "completed"})
+
+    assert completed.status_code == 200, completed.text
+    account = ctx.db.one("SELECT status,last_probe_at,quota,quota_source,quota_observed_at FROM accounts"
+                         " WHERE id=%s", (account_id,))
+    assert account["status"] == "idle" and account["last_probe_at"]
+    assert account["quota_source"] == "" and account["quota_observed_at"] is None
+    assert account["quota"] == {}
+    assert client.post(f"/v1/accounts/{account_id}/sign-in/complete").status_code == 200
+
+
 def test_machine_join_command_waits_for_join_and_expires_after_five_minutes(client, ctx, monkeypatch, tmp_path):
     release_fixture(monkeypatch, tmp_path)
     owner_session(client, ctx)
@@ -160,6 +182,8 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
         "provider": "codex", "sessions": 2, "jobs": ["develop", "verify", "intake", "master"]})
     assert created.status_code == 200, created.text
     account_id = created.json()["account"]
+    ctx.db.run("INSERT INTO quota_refresh_jobs (account_id,next_due_at) VALUES (%s,now()+interval '1 day')",
+               (account_id,))
     assert created.json()["status"] == "queued" and not created.json()["sign_in_url"] and not created.json()["code"]
     assert set(created.json()["jobs"]) == {"develop", "verify", "intake", "master"}
 
@@ -202,10 +226,15 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     assert not_ready.status_code == 409
     desired = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 8}, headers=node_auth)
     assert account_id in desired.json()["desired"]["accounts"]
-    probe = client.post(f"/v1/accounts/{account_id}/probe", json={"ok": True, "quota": {
-        "windows": {"five_hour": {"utilization": 0.4, "resets_at": 1792561800},
-                    "seven_day": {"utilization": 0.75, "resets_at": 1792638000}}}}, headers=node_auth)
+    refresh = client.post(f"/v1/accounts/{account_id}/quota-refresh/claim", headers=node_auth)
+    assert refresh.status_code == 200 and refresh.json()["job"]
+    refresh_job = refresh.json()["job"]
+    probe = client.post(f"/v1/accounts/{account_id}/quota-refresh/result", headers=node_auth, json={
+        "lease_token": refresh_job["lease_token"], "ok": True, "quota": {
+            "provider": "codex", "windows": {"five_hour": {"utilization": 0.4, "resets_at": 1792561800},
+                                                "weekly": {"utilization": 0.75, "resets_at": 1792638000}}}})
     assert probe.status_code == 200
+    assert ctx.db.one("SELECT quota_source FROM accounts WHERE id=%s", (account_id,))["quota_source"] == "cli"
     completed = client.post(f"/v1/accounts/{account_id}/sign-in/complete")
     assert completed.status_code == 200 and completed.json()["signed_in"] is True
 

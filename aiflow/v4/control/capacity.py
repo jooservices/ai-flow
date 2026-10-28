@@ -219,6 +219,70 @@ def account_fit(account_id: str, forecast: dict[str, Any], estimate_value: dict[
             "exhaustion_at": exhaustion_at.isoformat() if exhaustion_at else None, "reason": reason}
 
 
+def reservation_tokens(details: dict[str, Any] | None) -> int:
+    """Read a run's reserved upper bound, falling back to its stored capacity estimate."""
+    details = details or {}
+    reservation = details.get("quota_reservation") or {}
+    estimate = ((details.get("capacity") or {}).get("estimate") or {}).get("tokens") or {}
+    try:
+        return max(0, int(reservation.get("tokens") or estimate.get("high") or 0))
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def reported_run_tokens(run: dict[str, Any]) -> int:
+    """Return measured tokens, or the reserved estimate when a worker reported no usage."""
+    try:
+        tokens = max(0, int(run.get("tokens_in") or 0)) + max(0, int(run.get("tokens_out") or 0))
+    except (TypeError, ValueError):
+        tokens = 0
+    if tokens:
+        return tokens
+    details = run.get("details") if isinstance(run.get("details"), dict) else {}
+    return reservation_tokens(details)
+
+
+def with_active_quota_reservations(db, forecasts: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Reduce assignment balances by live work and reported usage newer than the provider snapshot."""
+    if not forecasts:
+        return forecasts
+    account_ids = list(forecasts)
+    observed_at = {str(row["id"]): row.get("quota_observed_at") for row in db.all(
+        "SELECT id,quota_observed_at FROM accounts WHERE id=ANY(%s)", (account_ids,))}
+    reservations: dict[str, int] = {}
+    for run in db.all("SELECT r.account_id,r.status,r.details,r.tokens_in,r.tokens_out,r.ended_at FROM runs r"
+                      " WHERE r.account_id=ANY(%s) AND (r.status='running' OR (r.status='finished' AND"
+                      " r.ended_at>(SELECT a.quota_observed_at FROM accounts a WHERE a.id=r.account_id)))",
+                      (account_ids,)):
+        account_id = str(run["account_id"])
+        forecast = forecasts.get(account_id) or {}
+        is_active = run["status"] == "running"
+        if not is_active:
+            snapshot_at = observed_at.get(account_id)
+            if (forecast.get("source") != "reported" or not snapshot_at or not run.get("ended_at")
+                    or run["ended_at"] <= snapshot_at):
+                continue
+        details = run.get("details") if isinstance(run.get("details"), dict) else {}
+        if is_active:
+            tokens = reservation_tokens(details)
+        else:
+            tokens = reported_run_tokens(run)
+        reservations[account_id] = reservations.get(account_id, 0) + tokens
+
+    adjusted: dict[str, dict[str, Any]] = {}
+    for account_id, forecast in forecasts.items():
+        reserve = reservations.get(str(account_id), 0)
+        if not reserve:
+            adjusted[str(account_id)] = forecast
+            continue
+        copy = {**forecast}
+        copy["windows"] = [{**window, "left_tokens": max(0, int(window["left_tokens"]) - reserve)
+                            if window.get("left_tokens") is not None else None}
+                           for window in forecast.get("windows") or []]
+        adjusted[str(account_id)] = copy
+    return adjusted
+
+
 def choose_account(candidates: list[dict[str, Any]], ticket: dict[str, Any],
                    estimate_value: dict[str, Any], forecasts: dict[str, dict[str, Any]],
                    now: datetime | None = None) -> tuple[str | None, dict[str, dict[str, Any]]]:

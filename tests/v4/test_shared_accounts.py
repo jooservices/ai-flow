@@ -5,6 +5,7 @@ import sys
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from threading import Barrier, Event
 
 from conftest import add_ticket, join_node
@@ -178,6 +179,10 @@ def test_account_exists_apart_from_machines_and_node_agent_reports_its_provider_
     assert heartbeat_desired["signin"][0]["provider"] == "claude"
     assert prompt_reports == [{"link": "https://claude.example.test/device", "code": "ABCD-2345",
                                "expires_in_s": 900}]
+    auth = ctx.db.one("SELECT status,last_probe_at,quota_source,quota_observed_at FROM accounts"
+                      " WHERE id='shared-01'")
+    assert auth["status"] == "idle" and auth["last_probe_at"]
+    assert auth["quota_source"] == "" and auth["quota_observed_at"] is None
 
     machines = {m["node"]: m for m in next(a for a in client.get("/v1/shared-accounts").json()["accounts"]
                                              if a["id"] == "shared-01")["machines"]}
@@ -269,6 +274,73 @@ def test_simultaneous_claims_from_one_machine_cannot_take_another_online_machine
     assert shared_accounts.claim_run(ctx.db, acc, ("00000000-0000-0000-0000-000000000013", "TESTWP-13", "TESTWP",
                                                    "dev", "shared-01", "claude", "", "node1", 13, "x"))
     assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id='shared-01' AND status='running'")["n"] == 2
+
+
+def test_simultaneous_shared_account_claims_reserve_reported_quota(client, ctx):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.control.db import J
+
+    cc, node1 = two_machines(client, ctx, limit=2)
+    acc = ctx.repo().account("shared-01")
+    forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s WHERE id='shared-01'", (J(forecast),))
+    barrier = Barrier(3)
+
+    def claim_on(index, node):
+        barrier.wait(timeout=5)
+        run_id = f"00000000-0000-0000-0000-{index:012d}"
+        details = {"capacity": {"estimate": {"tokens": {"high": 60_000}}}}
+        return shared_accounts.claim_run(
+            ctx.db, acc,
+            (run_id, f"TESTWP-QUOTA-{index}", "TESTWP", "dev", "shared-01", "claude", "", node, index, "x"),
+            run_details=details, quota_reservation_tokens=60_000)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(claim_on, 31, "cc"), pool.submit(claim_on, 32, "node1")]
+        barrier.wait(timeout=5)
+        results = [future.result(timeout=10) for future in futures]
+
+    assert sorted(results) == [False, True]
+    running = ctx.db.all("SELECT details FROM runs WHERE account_id='shared-01' AND status='running'")
+    assert len(running) == 1
+    assert running[0]["details"]["quota_reservation"] == {"tokens": 60_000}
+
+
+def test_simultaneous_claims_include_reported_usage_after_the_last_quota_snapshot(client, ctx):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.control.db import J
+
+    two_machines(client, ctx, limit=2)
+    acc = ctx.repo().account("shared-01")
+    observed_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+    forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s,quota_observed_at=%s WHERE id='shared-01'",
+               (J(forecast), observed_at))
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,ended_at,"
+               "tokens_in,tokens_out) VALUES (%s,'TESTWP-QUOTA-PRIOR','TESTWP','dev','shared-01','claude','cc',1,"
+               "'finished',now(),30_000,20_000)", ("00000000-0000-0000-0000-000000000099",))
+    barrier = Barrier(3)
+
+    def claim_on(index, node):
+        barrier.wait(timeout=5)
+        run_id = f"00000000-0000-0000-0000-{index:012d}"
+        details = {"capacity": {"estimate": {"tokens": {"high": 30_000}}}}
+        return shared_accounts.claim_run(
+            ctx.db, acc,
+            (run_id, f"TESTWP-QUOTA-UNOBSERVED-{index}", "TESTWP", "dev", "shared-01", "claude", "",
+             node, index, "x"), run_details=details, quota_reservation_tokens=30_000)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(claim_on, 41, "cc"), pool.submit(claim_on, 42, "node1")]
+        barrier.wait(timeout=5)
+        results = [future.result(timeout=10) for future in futures]
+
+    assert sorted(results) == [False, True]
+    running = ctx.db.all("SELECT details FROM runs WHERE account_id='shared-01' AND status='running'")
+    assert len(running) == 1
+    assert running[0]["details"]["quota_reservation"] == {"tokens": 30_000}
 
 
 def test_work_moves_to_the_other_machine_when_one_goes_offline(client, ctx):

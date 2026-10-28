@@ -130,7 +130,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
             "node_offline" if not any(node_status.get(machine, "offline") == "online" for machine in acc.machines)
             and a["status"] not in ("signed_out", "error", "cooldown") else a["status"]))))
         probe = (a["worker_state"] or {}).get("probe") or {}
-        windows = (a["quota"] or {}).get("windows") or {}
+        trusted_quota = (a["quota"] or {}) if a.get("quota_source") else {}
+        windows = trusted_quota.get("windows") or {}
         used_windows = [window for window in windows.values()
                         if isinstance(window, dict) and window.get("utilization") is not None]
         resets = [window.get("resets_at") for window in used_windows if window.get("resets_at")]
@@ -153,7 +154,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
             "cooldown_until": a["cooldown_until"], "cooldown_since": _iso(a["cooldown_since"]),
             "idle_since": _iso(a["idle_since"]), "credential_expires_at": _iso(expiry) or "unknown",
             "credential_expiry_warning": expiry_warning, "check_failed": probe.get("ok") is False or a["status"] == "error",
-            "quota": a["quota"], "quota_awareness": quota_by_account.get(a["id"], {}),
+            "quota": trusted_quota, "quota_awareness": quota_by_account.get(a["id"], {}),
             "quota_used": max((float(w["utilization"]) for w in used_windows), default=None),
             "quota_resets_at": min(resets) if resets else None,
             "tokens_today": int(usage.get("tokens_in", 0)) + int(usage.get("tokens_out", 0)),

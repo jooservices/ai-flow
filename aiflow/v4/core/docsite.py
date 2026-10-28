@@ -225,6 +225,8 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"^\s+(?:release_running|release_failed|scale_proof_(?:missing|failed)): function"), "cc"),
     (re.compile(r"^\s+(?:release_running|release_failed|scale_proof_(?:missing|failed)): function"), "business"),
     (re.compile(r"Scale proof \(/v1/state scale_proof\)|value against every budget"), "cc"),
+    # The quota-refresh settings asset is loaded before the console router and only renders in Settings.
+    (re.compile(r"quota-refresh-settings\.js"), "settings"),
     (re.compile(r"runtimeSettings|data-runtime|runtime-setting"), "settings"),
     (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),

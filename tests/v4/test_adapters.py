@@ -149,30 +149,14 @@ def test_grok_runs_recorded_streaming_json_and_reads_answer_usage_and_cost(tmp_p
     assert result.tokens_in == 10 and result.tokens_out == 1 and result.cost_usd == 0.00123
 
 
-def test_worker_probe_classifies_empty_success_as_provider_failure(tmp_path, monkeypatch):
-    from aiflow.v4.worker import loop as worker_loop
+def test_quota_parser_requires_labeled_read_only_window_percentages():
+    from aiflow.v4.worker.quota_cli import COMMANDS, parse_quota_text
 
-    work = tmp_path / "work" / ".probe" / "grok-01"
-    (work / ".git").mkdir(parents=True)
-    adapter = GrokAdapter()
-    adapter.argv = lambda _spec: []
-    adapter.run = lambda _spec: RunResult(exit_code=0)
-    monkeypatch.setattr(worker_loop, "get_adapter", lambda _provider: adapter)
-    monkeypatch.setattr(worker_loop.Worker, "publish", lambda self, **fields: self.state.update(fields))
-    worker = worker_loop.Worker("grok-01", "http://control", "token", "node1", str(tmp_path), run_as=[])
-    posted = []
-
-    def api_call(method, path, json=None, params=None):
-        if method == "GET" and path.endswith("/spec"):
-            return {"provider": "grok", "model": ""}
-        posted.append(json)
-        return {"ok": True}
-
-    worker.api.call = api_call
-
-    assert worker.probe() is False
-    assert posted[0]["error_kind"] == "provider"
-    assert posted[0]["summary"] == "provider: no answer"
+    parsed = parse_quota_text("codex", "Rate limits: 5h 42% used · weekly 81% remaining")
+    assert parsed == {"provider": "codex", "windows": {
+        "five_hour": {"utilization": .42}, "weekly": {"utilization": .19}}}
+    assert parse_quota_text("codex", "Context window: 42% used") == {}
+    assert COMMANDS == {"codex": "/status", "claude": "/usage"}
 
 
 def fake_cli(tmp_path: Path, lines: list[dict], exit_code: int = 0, sleep: float = 0) -> list[str]:

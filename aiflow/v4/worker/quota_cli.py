@@ -109,10 +109,11 @@ def parse_quota_text(provider: str, text: str, observed_at: datetime | None = No
 def _ready_for_slash_command(provider: str, raw: bytes) -> bool:
     """Do not send slash input unless the TUI has rendered its interactive prompt."""
     text = _clean_terminal(raw)
+    tail = text[-512:]
     if provider == "codex":
-        return "›" in text or "What would you like to do?" in text
+        return bool(re.search(r"(?:^|\n)[^\n]{0,120}(?:›|What would you like to do\?)\s*$", tail))
     if provider == "claude":
-        return "❯" in text
+        return bool(re.search(r"(?:^|\n)[^\n]{0,120}❯\s*$", tail))
     return False
 
 

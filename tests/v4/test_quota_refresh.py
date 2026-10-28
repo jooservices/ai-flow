@@ -13,7 +13,7 @@ import pytest
 from aiflow.v4.control import login, quota_refresh
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.db import J
-from aiflow.v4.worker.quota_cli import parse_quota_text, read_quota
+from aiflow.v4.worker.quota_cli import _ready_for_slash_command, parse_quota_text, read_quota
 from conftest import add_ticket, join_node
 
 
@@ -270,6 +270,14 @@ def test_quota_text_parser_normalizes_relative_and_absolute_reset_times():
     assert parsed["windows"] == {
         "five_hour": {"utilization": .42, "resets_at": "2026-10-27T15:15:00+00:00"},
         "weekly": {"utilization": .19, "resets_at": "2026-10-29T09:30:00+00:00"}}
+
+
+def test_quota_cli_readiness_requires_prompt_at_terminal_tail():
+    diagnostic = "worker.py: failed near › during startup\nCould not initialize terminal"
+    assert not _ready_for_slash_command("codex", diagnostic.encode())
+    assert not _ready_for_slash_command("claude", "worker.py: error ❯\nstartup failed".encode())
+    assert _ready_for_slash_command("codex", "startup complete\n› ".encode())
+    assert _ready_for_slash_command("claude", "startup complete\n❯ ".encode())
 
 
 def test_quota_cli_sends_only_fixed_read_only_command_after_prompt(tmp_path, monkeypatch):

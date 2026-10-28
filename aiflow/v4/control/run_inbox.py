@@ -19,15 +19,16 @@ def _close_messages(ctx, run: dict, run_id: str, fence: int, node: str, reason: 
                     update_sql: str, params: tuple = (), *, require_running: bool = False,
                     allowed_statuses: tuple[str, ...] = (), require_unrecorded: bool = False) -> tuple[list[int], str]:
     with ctx.db.pool.connection() as connection:
-        current = connection.execute("SELECT status,result_received_at FROM runs WHERE id=%s FOR UPDATE",
-                                     (run_id,)).fetchone()
+        current = connection.execute("SELECT status,result_received_at,inbox_pending_count FROM runs"
+                                     " WHERE id=%s FOR UPDATE", (run_id,)).fetchone()
         if require_running and (not current or current["status"] != "running"):
             raise HTTPException(409, "run is no longer active")
         if allowed_statuses and (not current or current["status"] not in allowed_statuses):
             raise HTTPException(409, "run is no longer active")
         if require_unrecorded and current["result_received_at"]:
             raise HTTPException(409, "run result was already recorded")
-        message_ids = run_inbox.mark_undelivered(connection, run_id, reason)
+        message_ids = (run_inbox.mark_undelivered(connection, run_id, reason)
+                       if int(current["inbox_pending_count"] or 0) else [])
         connection.execute(update_sql, params)
     _emit_undelivered(ctx, run, run_id, fence, node, reason, message_ids)
     return message_ids, current["status"]

@@ -1808,9 +1808,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         cooling = ctx.leases.cooling(account_id)
         status = "cooldown" if cooling else "working" if active else "idle" if other_machine_ready else "signed_out"
         ctx.db.run("UPDATE accounts SET status=%s,last_error=%s,updated_at=now(),"
-                   "idle_since=CASE WHEN %s='idle' THEN coalesce(idle_since,now()) ELSE NULL END WHERE id=%s"
-                   " AND (%s='working' OR NOT EXISTS (SELECT 1 FROM runs WHERE account_id=%s AND status='running'))",
-                   (status, summary[:300], status, account_id, status, account_id))
+                   "idle_since=CASE WHEN %s='idle' THEN coalesce(idle_since,now()) ELSE NULL END WHERE id=%s",
+                   (status, summary[:300], status, account_id))
 
     def quota_forecast_at_risk(account_id: str) -> bool:
         """Read the latest watchdog forecast without rebuilding weeks of run and probe history per poll."""

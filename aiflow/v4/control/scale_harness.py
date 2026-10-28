@@ -876,6 +876,10 @@ def scratch(database_url: str, redis_url: str) -> Iterator[tuple[Any, Any]]:
 
     schema = "scaleproof_" + uuid.uuid4().hex
     admin = psycopg.connect(database_url, autocommit=True)
+    # Migration 005 creates pgvector. Keep the extension in `public`, which is shared by later test fixtures;
+    # otherwise the first scratch-schema run installs it in its own schema and dropping that schema leaves the
+    # extension catalog entry behind without its `vector` type.
+    admin.execute("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public")
     admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     db = DB(make_conninfo(database_url, options=f"-c search_path={schema},public"), max_size=40)
     redis_prefix = f"{redis_base}scaleproof:{uuid.uuid4().hex}:"

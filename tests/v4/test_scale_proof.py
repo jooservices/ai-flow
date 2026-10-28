@@ -26,6 +26,13 @@ def proof(tmp_path_factory):
 
 
 # --- AC1: the scenario ---------------------------------------------------------------------------------------
+def test_scratch_schema_keeps_pgvector_in_public_for_following_tests():
+    with scale_harness.scratch(DATABASE_URL, REDIS_URL) as (db, _leases):
+        extension = db.one("SELECT n.nspname AS schema FROM pg_extension e "
+                           "JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='vector'")
+        assert extension == {"schema": "public"}
+
+
 def test_scenario_drives_100_projects_50_machines_and_200_sessions(proof):
     report, ctx = proof
     counts = report["counts"]

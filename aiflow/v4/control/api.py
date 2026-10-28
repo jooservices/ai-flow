@@ -4463,8 +4463,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                           + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
 
     def eligible(account_id: str, node: str, *, capacity_routing: bool = True,
-                 ticket_key: str | None = None, lease_checked: bool = False) -> list[dict]:
-        """Tickets this account may take now; a claim can scope revalidation to its requested ticket."""
+                 ticket_key: str | None = None, lease_checked: bool = False,
+                 step_filter: str | None = None) -> list[dict]:
+        """Tickets this account may take now; claims can scope revalidation to their requested ticket and step."""
         repo = ctx.repo()
         acc = repo.account(account_id)
         if not acc or not acc.runs_on(node):
@@ -4524,6 +4525,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                     if not service_gaps(reported_services, repo.projects[p].required_services)]
         projects = [p for p in projects if not system_check.blocking_reasons(node_row.get("readiness"), p, account_id)]
         roles = set(acc.roles or ["dev", "verify"])
+        if step_filter is not None:
+            role_for_step = {"dev": "dev", "verify": "verify", "qa": "verify", "triage": "master",
+                             "intake": "intake_refiner", "impact": "intake_refiner",
+                             "post_merge": "release"}.get(step_filter)
+            roles &= {role_for_step} if role_for_step else set()
+        if not roles:
+            return []
         scoped_key = " AND key=%s" if ticket_key is not None else ""
         scoped_tickets_key = " AND tickets.key=%s" if ticket_key is not None else ""
         scoped_ticket = (ticket_key,) if ticket_key is not None else ()
@@ -4963,7 +4971,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.step == "master":
             candidates = [master_candidate(body.account, node)]
         else:
-            candidates = eligible(body.account, node, ticket_key=body.ticket, lease_checked=True)
+            candidates = eligible(body.account, node, ticket_key=body.ticket, lease_checked=True,
+                                  step_filter=body.step)
             offered = next((candidate for candidate in candidates
                             if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
             if offered:

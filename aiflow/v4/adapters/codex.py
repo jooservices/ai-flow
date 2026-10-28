@@ -6,7 +6,7 @@ shared by linked worktrees. Network is opened by config for package installs. Ac
 """
 from __future__ import annotations
 
-from .base import Adapter, RunResult, RunSpec, quota_from_event, scratch_root
+from .base import Adapter, RunResult, RunSpec, quota_from_event, record_quota_observation, scratch_root
 
 
 class CodexAdapter(Adapter):
@@ -35,7 +35,7 @@ class CodexAdapter(Adapter):
     def parse_event(self, ev: dict, res: RunResult) -> None:
         quota = quota_from_event(ev, self.provider)
         if quota:
-            res.quota = quota
+            record_quota_observation(res, quota)
         t = ev.get("type")
         if t == "item.completed":
             item = ev.get("item") or {}

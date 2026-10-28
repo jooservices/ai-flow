@@ -68,6 +68,7 @@ class RunResult:
     reset_at: datetime | None = None
     credential_expires_at: datetime | None = None
     quota: dict = field(default_factory=dict)
+    quota_observed_at: datetime | None = None
     duration_s: float = 0.0
     log_path: str = ""
     command_results: list[dict] = field(default_factory=list)
@@ -76,6 +77,7 @@ class RunResult:
         d = self.__dict__.copy()
         d["reset_at"] = self.reset_at.isoformat() if self.reset_at else None
         d["credential_expires_at"] = self.credential_expires_at.isoformat() if self.credential_expires_at else None
+        d["quota_observed_at"] = self.quota_observed_at.isoformat() if self.quota_observed_at else None
         return d
 
 
@@ -155,6 +157,13 @@ def quota_from_event(event: dict, provider: str) -> dict:
             item["window_duration_minutes"] = duration
         normalized[name] = item
     return {"provider": provider, "windows": normalized} if normalized else {}
+
+
+def record_quota_observation(result: RunResult, quota: dict) -> None:
+    """Keep the worker-side arrival time beside the provider snapshot for stale-result protection."""
+    if quota:
+        result.quota = quota
+        result.quota_observed_at = datetime.now(timezone.utc)
 
 
 def _credential_expiry(event: dict, res: RunResult, credential_context: bool = False) -> None:

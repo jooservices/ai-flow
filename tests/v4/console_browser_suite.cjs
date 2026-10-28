@@ -166,7 +166,7 @@ async function signInInPage(page, person, mode) {
   }
   assert.equal(new URL(page.url()).pathname, '/cc', 'Administrator did not reach the dashboard after MFA sign-in');
   await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
-  await page.waitForFunction(() => !document.documentElement.classList.contains('role-loading'));
+  await page.locator('html.role-loading').waitFor({ state: 'detached' });
   const actualScheme = await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches);
   assert.equal(actualScheme, mode === 'dark', `${mode} color scheme was not applied`);
   assert.equal(page.viewportSize().width, dimensions.width);
@@ -197,12 +197,12 @@ async function visitScreens(page, expected) {
   for (const label of expected) {
     const tab = page.getByRole('tab', { name: label, exact: true });
     await tab.click();
-    await tab.waitFor({ state: 'visible' });
-    await page.waitForFunction((name) => {
-      const selected = Array.from(document.querySelectorAll('[aria-label="Console views"] [role="tab"]')).find((item) => item.getAttribute('aria-selected') === 'true');
-      const panel = selected && document.getElementById(selected.getAttribute('aria-controls'));
-      return selected?.innerText.trim() === name && !!panel && !!panel.textContent.trim();
-    }, label, { timeout: 12000 });
+    await page.getByRole('tab', { name: label, exact: true, selected: true })
+      .waitFor({ state: 'visible', timeout: 12000 });
+    const panelId = await tab.getAttribute('aria-controls');
+    assert.ok(panelId, `${label} view has no controlled panel`);
+    await page.locator(`#${panelId}`).filter({ hasText: /\S/ })
+      .waitFor({ state: 'visible', timeout: 12000 });
     if (label === 'Security') {
       await page.locator('#view-security button, #view-security input, #view-security select').first()
         .waitFor({ state: 'visible', timeout: 12000 });
@@ -281,10 +281,8 @@ async function exerciseRunInbox(page, mode) {
   await workInbox.getByRole('heading', { name: 'Guide a live run', exact: true }).waitFor({ state: 'visible' });
   await workInbox.getByLabel('Active run').selectOption(config.inboxRunId);
   const kindSelector = workInbox.getByLabel('Message type');
-  await page.waitForFunction(() => {
-    const selector = document.querySelector('#view-work #run-inbox-kind');
-    return selector && !selector.disabled;
-  }, null, { timeout: 15000 });
+  await workInbox.locator('#run-inbox-kind:not([disabled])')
+    .waitFor({ state: 'visible', timeout: 15000 });
   await kindSelector.selectOption('request');
   await workInbox.getByLabel('Message for the worker').fill(message);
   const send = page.waitForResponse((response) => response.request().method() === 'POST' &&
@@ -567,7 +565,8 @@ async function exerciseMode(browser, mode) {
     await exerciseReviews(page, mode);
     await exerciseMachineAndUserAdministration(page, mode);
     await page.getByRole('tab', { name: 'Dashboard', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('[aria-label="Console views"] [role="tab"][aria-selected="true"]')?.innerText.trim() === 'Dashboard');
+    await page.getByRole('tab', { name: 'Dashboard', exact: true, selected: true })
+      .waitFor({ state: 'visible' });
     if (mode === 'phone') await exerciseRunInboxLifecycle(page);
   });
   await context.close();
@@ -591,7 +590,7 @@ async function exerciseRoleMenus(browser) {
         await page.getByLabel('Password').fill(person.password);
         await page.getByRole('button', { name: 'Sign in', exact: true }).click();
         await page.waitForURL(`**${landingPath[person.role]}`);
-        await page.waitForFunction(() => !document.documentElement.classList.contains('role-loading'));
+        await page.locator('html.role-loading').waitFor({ state: 'detached' });
         const actualScheme = await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches);
         assert.equal(actualScheme, mode === 'dark', `${person.role} ${mode} color scheme was not applied`);
         assert.equal(page.viewportSize().width, dimensions.width, `${person.role} ${mode} viewport was not applied`);

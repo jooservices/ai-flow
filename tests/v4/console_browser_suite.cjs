@@ -202,6 +202,40 @@ async function exerciseWorkAndSearch(page) {
   await page.getByRole('button', { name: 'Close details', exact: true }).click();
 }
 
+async function exerciseRunInbox(page, mode) {
+  const message = `Please preserve the existing work and add a regression test (${mode}).`;
+  await page.getByRole('tab', { name: 'Work board', exact: true }).click();
+  const workInbox = page.getByRole('tabpanel', { name: 'Work board' }).locator('#run-inbox');
+  await workInbox.waitFor({ state: 'visible' });
+  await workInbox.getByRole('heading', { name: 'Guide a live run', exact: true }).waitFor({ state: 'visible' });
+  await workInbox.getByLabel('Active run').selectOption(config.inboxRunId);
+  await workInbox.getByLabel('Message type').selectOption('request');
+  await workInbox.getByLabel('Message for the worker').fill(message);
+  const send = page.waitForResponse((response) => response.request().method() === 'POST' &&
+    new URL(response.url()).pathname === `/v1/runs/${config.inboxRunId}/inbox`);
+  await workInbox.getByRole('button', { name: 'Send to worker', exact: true }).click();
+  const response = await send;
+  assert.equal(response.status(), 201, 'The active-run composer did not queue the request');
+  const sentEntry = workInbox.locator('article.alert').filter({ hasText: message });
+  await sentEntry.getByText(message, { exact: true }).waitFor({ state: 'visible' });
+  await sentEntry.getByText(/request · Waiting for checkpoint/).waitFor({ state: 'visible' });
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.getByRole('tab', { name: 'Work board', exact: true }).waitFor({ state: 'visible' });
+  await page.getByRole('tab', { name: 'Work board', exact: true }).click();
+  const refreshedInbox = page.getByRole('tabpanel', { name: 'Work board' }).locator('#run-inbox');
+  const refreshedEntry = refreshedInbox.locator('article.alert').filter({ hasText: message });
+  await refreshedEntry.getByText(message, { exact: true }).waitFor({ state: 'visible' });
+  await refreshedEntry.getByText(/request · Waiting for checkpoint/).waitFor({ state: 'visible' });
+
+  await page.getByRole('tab', { name: 'Delivery', exact: true }).click();
+  const deliveryInbox = page.getByRole('tabpanel', { name: 'Delivery' }).locator('#run-inbox');
+  await deliveryInbox.waitFor({ state: 'visible' });
+  const deliveryEntry = deliveryInbox.locator('article.alert').filter({ hasText: message });
+  await deliveryEntry.getByText(message, { exact: true }).waitFor({ state: 'visible' });
+  await deliveryEntry.getByText(/request · Waiting for checkpoint/).waitFor({ state: 'visible' });
+}
+
 async function exerciseReviews(page, mode) {
   await page.getByRole('tab', { name: 'Human review', exact: true }).click();
   await page.getByRole('heading', { name: 'Human review queue', exact: true }).waitFor({ state: 'visible' });
@@ -381,6 +415,7 @@ async function exerciseMode(browser, mode) {
     await visitScreens(page, administrator.views);
     await exerciseConflictLossDashboard(page);
     await exerciseWorkAndSearch(page);
+    await exerciseRunInbox(page, mode);
     await exerciseReviews(page, mode);
     await exerciseMachineAndUserAdministration(page, mode);
     await page.getByRole('tab', { name: 'Dashboard', exact: true }).click();

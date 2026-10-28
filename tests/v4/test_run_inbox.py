@@ -94,15 +94,15 @@ def test_lost_run_accepts_late_usage_once_without_reopening_or_resetting_account
     watchdog(ctx)
     assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run["run_id"],))["status"] == "lost"
     assert ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account"],))["status"] == "idle"
-    _, replacement = _claim(client, ctx, "TESTWP-INBOX-REPLACEMENT")
+    replacement_node, replacement = _claim(client, ctx, "TESTWP-INBOX-REPLACEMENT")
     assert replacement["account"] == run["account"]
 
     result_body = {"fence": run["fence"], "outcome": "done", "tokens_in": 17,
                    "tokens_out": 9, "cost_usd": 0.42, "summary": "The worker finished after losing its lease."}
     stale_fence = {**result_body, "fence": run["fence"] + 1}
-    assert client.post(f"/v1/runs/{run['run_id']}/result", json=stale_fence, headers=node).status_code == 409
+    assert client.post(f"/v1/runs/{run['run_id']}/result", json=stale_fence, headers=replacement_node).status_code == 409
     account_status_before = ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account"],))["status"]
-    late = client.post(f"/v1/runs/{run['run_id']}/result", json=result_body, headers=node)
+    late = client.post(f"/v1/runs/{run['run_id']}/result", json=result_body, headers=replacement_node)
 
     assert late.status_code == 200 and not late.json()["still_owner"]
     saved = ctx.db.one("SELECT status,outcome,tokens_in,tokens_out,cost_usd,result_received_at FROM runs WHERE id=%s",
@@ -113,7 +113,7 @@ def test_lost_run_accepts_late_usage_once_without_reopening_or_resetting_account
     assert ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account"],))["status"] == account_status_before
     assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (replacement["run_id"],))["status"] == "running"
     assert client.get(f"/v1/runs/{run['run_id']}/inbox").json()["messages"][0]["status"] == "undelivered"
-    assert client.post(f"/v1/runs/{run['run_id']}/result", json=result_body, headers=node).status_code == 409
+    assert client.post(f"/v1/runs/{run['run_id']}/result", json=result_body, headers=replacement_node).status_code == 409
     after_duplicate = ctx.db.one("SELECT tokens_in,tokens_out,cost_usd FROM runs WHERE id=%s", (run["run_id"],))
     assert after_duplicate["tokens_in"] == 17 and after_duplicate["tokens_out"] == 9
     assert float(after_duplicate["cost_usd"]) == 0.42

@@ -27,6 +27,7 @@ import math
 import os
 import platform
 import random
+import threading
 import time
 import uuid
 from collections import deque
@@ -78,6 +79,9 @@ PAGES: dict[str, tuple[str, ...]] = {
     "/licensing": ("/v1/licensing", "/v1/licensing/usage"),
     "/notifications": ("/v1/notifications",),
     "/settings": ("/v1/runtime-settings",),
+    "/system-check": ("/v1/system-check",),
+    "/security": ("/v1/security/mfa", "/v1/security/settings", "/v1/security/users",
+                  "/v1/security/sessions", "/v1/security/audit?limit=100"),
     "/support": (),
 }
 JOIN_KEY = "scale-proof-join"
@@ -347,9 +351,10 @@ def _insert_wave(db, wave: list[dict[str, Any]], offset: int) -> None:
 
 
 # --- the run ----------------------------------------------------------------------------------------------------
-def _timed(client, path: str) -> tuple[float, int, str]:
+def _timed(client, path: str, forwarded_ip: str = "") -> tuple[float, int, str]:
     start = time.perf_counter()
-    r = client.get(path)
+    headers = {"X-Forwarded-For": forwarded_ip} if forwarded_ip else None
+    r = client.get(path, headers=headers)
     detail = ""
     if r.status_code != 200:
         try:
@@ -516,7 +521,7 @@ class _RunLeaseKeeper:
 
 
 def _sample_page(client, page: str, data: tuple[str, ...], samples: int,
-                 gate: Barrier | None = None, request_pool=None) -> dict[str, Any]:
+                 gate: Barrier | None = None, request_pool=None, forwarded_ip: str = "") -> dict[str, Any]:
     if gate is not None:
         gate.wait(timeout=30)
     latencies: list[float] = []
@@ -527,9 +532,9 @@ def _sample_page(client, page: str, data: tuple[str, ...], samples: int,
         started = time.perf_counter()
         paths = (page, *COMMON_CALLS, *data)
         if request_pool is None:
-            results = [_timed(client, path) for path in paths]
+            results = [_timed(client, path, forwarded_ip) for path in paths]
         else:
-            futures = [request_pool.submit(_timed, client, path) for path in paths]
+            futures = [request_pool.submit(_timed, client, path, forwarded_ip) for path in paths]
             results = [future.result() for future in futures]
         for path, (took, status, detail) in zip(paths, results):
             calls.setdefault(path, []).append(took)
@@ -544,7 +549,8 @@ def _sample_page(client, page: str, data: tuple[str, ...], samples: int,
             "calls": {path: round(percentile(values, 95), 3) for path, values in calls.items()}}
 
 
-def _sample_picker(client, samples: int, gate: Barrier | None = None, request_pool=None) -> dict[str, Any]:
+def _sample_picker(client, samples: int, gate: Barrier | None = None, request_pool=None,
+                   forwarded_ip: str = "") -> dict[str, Any]:
     if gate is not None:
         gate.wait(timeout=30)
     latencies: list[float] = []
@@ -553,9 +559,9 @@ def _sample_picker(client, samples: int, gate: Barrier | None = None, request_po
     for _ in range(samples):
         started = time.perf_counter()
         if request_pool is None:
-            took, status, detail = _timed(client, PICKER)
+            took, status, detail = _timed(client, PICKER, forwarded_ip)
         else:
-            took, status, detail = request_pool.submit(_timed, client, PICKER).result()
+            took, status, detail = request_pool.submit(_timed, client, PICKER, forwarded_ip).result()
         ended = time.perf_counter()
         latencies.append(took * 1000)
         intervals.append((started, ended))
@@ -592,10 +598,11 @@ def _claim_round(client, sessions: list[dict[str, str]], headers: dict[str, dict
                                     thread_name_prefix="scale-console-http") as request_pool:
                 with ThreadPoolExecutor(max_workers=measure_workers, thread_name_prefix="scale-console") as views_pool:
                     page_futures = [views_pool.submit(_sample_page, measurement_client, page, data, sc.page_samples,
-                                                      gate if i < measure_workers else None, request_pool)
+                                                      gate if i < measure_workers else None, request_pool,
+                                                      f"198.51.100.{i + 1}")
                                     for i, (page, data) in enumerate(measure_jobs)]
                     picker_future = views_pool.submit(_sample_picker, measurement_client, sc.picker_samples,
-                                                      request_pool=request_pool)
+                                                      request_pool=request_pool, forwarded_ip="198.51.100.254")
                     gate.wait(timeout=30)
                     claim_results = [future.result() for future in claim_futures]
                     page_results = [future.result() for future in page_futures]
@@ -625,7 +632,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
     """Run the scenario once. Returns (report, ctx); `report` is finalized against `budgets`."""
     from fastapi.testclient import TestClient
     from .api import create_app
-    from .console_auth import COOKIE_NAME, issue_session
+    from .console_auth import COOKIE_NAME, csrf_token, issue_session
     from .ui import mount_ui
     started = time.perf_counter()
     ctx = build_context(db, leases, workdir, sc, jira)
@@ -666,13 +673,23 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                 if console_request:
                     request_activity["active_console"] -= 1
 
-    client = TestClient(app)  # in-process: the same routes, auth and database as a node or a browser reaches
-    heartbeat_client = TestClient(app)
-    measurement_client = TestClient(app)
+    # Keep the production per-IP rate limit active while representing distinct nodes and browser clients.
+    # TestClient otherwise puts the entire simulated 200-session fleet behind one synthetic IP.
+    ctx.settings.trusted_proxies = ["127.0.0.1/32"]
+    client = TestClient(app, client=("127.0.0.1", 50001))
+    heartbeat_client = TestClient(app, client=("127.0.0.1", 50002))
+    measurement_client = TestClient(app, client=("127.0.0.1", 50003))
     ctx.settings.console_login = True
     ctx.settings.console_session_secret = "scale-proof-console-session-secret-at-least-32-bytes"
+    ctx.settings.owner_token = "scale-proof-owner-token"
+    db.run("INSERT INTO console_users (email, display_name, role, roles, password_hash, totp_enabled)"
+           " VALUES (%s,%s,%s,%s,%s,true) ON CONFLICT (email) DO NOTHING",
+           ("scale-proof@example.test", "Scale proof", "administrator", ["administrator"],
+            "scale-proof-password-hash"))
     console_session = issue_session("scale-proof@example.test", "administrator", 2_000_000_000,
                                     ctx.settings.console_session_secret)
+    console_headers = {"X-CSRF-Token": csrf_token(console_session, ctx.settings.console_session_secret),
+                       "X-Forwarded-For": "198.51.100.200"}
     for api_client in (client, heartbeat_client, measurement_client):
         api_client.cookies.set(COOKIE_NAME, console_session)
     _activate_business_license(ctx)
@@ -683,15 +700,22 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
     errors: list[str] = []
 
     headers: dict[str, dict[str, str]] = {}
-    for name in node_names(sc):
+    for node_index, name in enumerate(node_names(sc), start=1):
         project = next(p for p, nodes in hosts.items() if name in nodes)
         issued = client.post("/v1/nodes/join-tokens", json={"provision_key": JOIN_KEY, "name": name,
-                                                             "role": "worker", "project": project})
-        joined = client.post("/v1/nodes/join", json={"join_token": issued.json().get("token", "")})
+                                                             "role": "worker", "project": project},
+                             headers=console_headers)
+        if issued.status_code != 200:
+            detail = issued.json().get("detail", "") if issued.headers.get("content-type", "").startswith("application/json") else ""
+            errors.append(f"node {name} join token answered HTTP {issued.status_code}: {detail}")
+            continue
+        joined = client.post("/v1/nodes/join", json={"join_token": issued.json().get("token", "")},
+                             headers=console_headers)
         if joined.status_code != 200:
             errors.append(f"node {name} could not join: HTTP {joined.status_code}")
             continue
-        headers[name] = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+        headers[name] = {"Authorization": f"Bearer {joined.json()['node_token']}",
+                         "X-Forwarded-For": f"192.0.2.{node_index}"}
         accounts = ctx.repo().accounts_on(name)
         heartbeat = client.post(f"/v1/nodes/{name}/heartbeat", json={
             "slots_total": max(1, sc.sessions // sc.machines),
@@ -705,11 +729,31 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
         if heartbeat.status_code != 200:
             errors.append(f"node {name} heartbeat answered HTTP {heartbeat.status_code}")
 
+    # Join and heartbeat checks run in background threads. Let them finish before the controlled readiness
+    # snapshot below so a late join result cannot replace the simulated node's reported machine conditions.
+    readiness_threads = {f"aiflow4-join-readiness-{name}" for name in headers}
+    readiness_threads.update(f"aiflow4-heartbeat-readiness-{name}" for name in headers)
+    readiness_deadline = time.monotonic() + 30
+    while time.monotonic() < readiness_deadline:
+        if not any(thread.name in readiness_threads for thread in threading.enumerate()):
+            break
+        time.sleep(0.01)
+    else:
+        errors.append("node readiness checks did not settle before the scale scenario")
+
     # The scenario begins load traffic only after every simulated node has completed its normal readiness gate.
     # This keeps the measurement about project/session scale rather than a race with asynchronous join probes.
+    simulated_machine_conditions = [{"id": item, "result": "ready"} for item in (
+        "disk-space", "workspace-permissions", "control-network", "repository-network")]
     with ThreadPoolExecutor(max_workers=min(sc.claim_concurrency, max(1, len(headers))),
                             thread_name_prefix="scale-readiness") as pool:
-        refreshes = {pool.submit(system_check.refresh_node, ctx, name, "manual"): name for name in headers}
+        refreshes = {
+            pool.submit(system_check.refresh_node, ctx, name, "manual",
+                        machine_conditions=simulated_machine_conditions,
+                        credential_checks={account.id: {"present": True, "valid": True}
+                                           for account in ctx.repo().accounts_on(name)}): name
+            for name in headers
+        }
         for future, name in ((future, refreshes[future]) for future in refreshes):
             try:
                 readiness = future.result()
@@ -722,13 +766,14 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                                                         accounts)
                 if blockers:
                     errors.append(f"node {name} is not ready for {project}: "
-                                  + ", ".join(str(item.get("id")) for item in blockers))
+                                  + ", ".join(f"{item.get('id')}={item.get('result')}" for item in blockers))
     last_node_heartbeat = time.perf_counter()
     _load_history(db, sc, pl, sessions)
     log(f"fleet ready: {len(headers)} machines, {len(sessions)} sessions, {len(pl['history'])} earlier tickets")
 
     per_node = max(1, sc.sessions // sc.machines)
     ready_at: dict[str, float] = {}
+    ready_at_lock = Lock()
     pickup: dict[str, float] = {}
     dependents: dict[str, list[str]] = {}
     taken: set[str] = set()
@@ -775,6 +820,11 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
             keeper.complete(run_id)
         if not issues:
             db.run("UPDATE tickets SET status='Done' WHERE key=%s", (key,))  # what Jira sync mirrors back
+            # The next poll pass can run while completions are still draining. Publish a dependent ticket's
+            # ready time as soon as its blocker is done so that early claim is measured from the real transition.
+            with ready_at_lock:
+                for dep in dependents.get(key, []):
+                    ready_at[dep] = time.perf_counter()
         return key, issues
 
     for wave_no, wave in enumerate(pl["waves"]):
@@ -798,16 +848,19 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     on_claim=keeper.add, measurement_client=measurement_client)
                 conflicts += round_conflicts
                 live: list[tuple[dict, dict]] = []
+                idle_sessions: list[dict[str, str]] = []
                 for result in claim_results:
                     if result.get("error"):
                         errors.append(result["error"])
                         continue
                     if not result.get("claim"):
+                        idle_sessions.append(result["session"])
                         continue
                     session, claim = result["session"], result["claim"]
                     key = claim["ticket"]["key"]
-                    if key in ready_at and key not in pickup:
-                        pickup[key] = result["claimed_at"] - ready_at[key]
+                    with ready_at_lock:
+                        if key in ready_at and key not in pickup:
+                            pickup[key] = result["claimed_at"] - ready_at[key]
                     live.append((session, claim))
                 if not live:
                     break
@@ -819,19 +872,42 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     measured, peak_checks = _measure_peak(client, ctx, sc, live, errors, page_results, picker_result,
                                                           claim_intervals, observed_activity)
                     log(f"peak: {peak_active} sessions working")
-                # run_result may embed captured work locally. Keep the completion burst small so its inference
-                # work cannot occupy every worker request slot while the independent lease heartbeats run.
+                # Keep the existing completion bound; the first burst also lets idle workers poll again while
+                # runs finish, instead of making ready tickets wait for the whole burst to drain.
                 with ThreadPoolExecutor(max_workers=min(8, len(live)),
                                         thread_name_prefix="scale-complete") as pool:
                     completed = [pool.submit(finish_one, session, claim, keeper) for session, claim in live]
+                    if first_burst and idle_sessions:
+                        followup_results, followup_conflicts, _, _, _ = _claim_round(
+                            client, sessions, headers, sc, worker_request=keeper.request,
+                            on_claim=keeper.add, measurement_client=measurement_client)
+                        conflicts += followup_conflicts
+                        followup_live = []
+                        for result in followup_results:
+                            if result.get("error"):
+                                errors.append(result["error"])
+                                continue
+                            if not result.get("claim"):
+                                continue
+                            session, claim = result["session"], result["claim"]
+                            key = claim["ticket"]["key"]
+                            with ready_at_lock:
+                                if key in ready_at and key not in pickup:
+                                    pickup[key] = result["claimed_at"] - ready_at[key]
+                            followup_live.append((session, claim))
+                        if followup_live:
+                            rounds_total += 1
+                            completed.extend(pool.submit(finish_one, session, claim, keeper)
+                                             for session, claim in followup_live)
                     for future in completed:
                         key, finish_errors = future.result()
                         errors.extend(finish_errors)
                         if finish_errors:
                             continue
                         taken.add(key)
-                        for dep in dependents.get(key, []):
-                            ready_at[dep] = time.perf_counter()  # ready once the blocker is Done
+                        with ready_at_lock:
+                            for dep in dependents.get(key, []):
+                                ready_at.setdefault(dep, time.perf_counter())
             finally:
                 keeper.close()
             if pickable <= taken:
@@ -901,9 +977,14 @@ def _measure_peak(client, ctx, sc: Scenario, live: list, errors: list[str],
         "project_picker": {"value": round(percentile(picker, 95), 3), "unit": "ms", "statistic": "p95",
                            "samples": len(picker), "p50": round(percentile(picker, 50), 3),
                            "max": round(max(picker, default=0.0), 3)}}
-    state = client.get("/v1/state").json()
-    checks = {"active_runs_visible": (len(state["active_runs"]) == len(live),
-                                      f"state lists {len(state['active_runs'])} active runs for {len(live)} working sessions")}
+    state_response = client.get("/v1/state", headers={"Authorization": f"Bearer {ctx.settings.owner_token}"})
+    state = state_response.json()
+    active_runs = state.get("active_runs") if isinstance(state, dict) else None
+    checks = {"active_runs_visible": (isinstance(active_runs, list) and len(active_runs) == len(live),
+                                      f"state answered HTTP {state_response.status_code}: "
+                                      f"{len(active_runs)} active runs for {len(live)} working sessions"
+                                      if isinstance(active_runs, list) else
+                                      f"state answered HTTP {state_response.status_code}: {state}")}
     checks["measurement_overlap"] = (overlap,
                                       f"console and picker requests {'overlapped' if overlap else 'did not overlap'} "
                                       f"worker requests inside the app (peak {request_activity.get('peak_inflight', 0)} in flight)")
@@ -950,19 +1031,27 @@ def _checks(client, ctx, sc, pl, sessions, hosts, headers, peak_checks, pickup) 
     check("claims_on_serving_machines", not wrong, f"{len(wrong)} claims ran on a machine that does not serve the project")
     fences = [r["ticket_key"] for r in runs if r["fence"] != 1]
     check("one_fence_per_fresh_ticket", not fences, f"{len(fences)} fresh tickets did not start at fence 1")
-    state = client.get("/v1/state").json()
-    check("no_run_left_working", not state["active_runs"] and not any(r["status"] == "running" for r in runs),
-          f"{len(state['active_runs'])} runs still working at the end")
-    sizes = (len(state["projects"]), len([n for n in state["nodes"] if n["status"] == "online"]),
-             len(state["accounts"]))
-    visible_sessions = sum(int(account.get("session_limit") or 1) for account in state["accounts"])
+    state_response = client.get("/v1/state", headers={"Authorization": f"Bearer {ctx.settings.owner_token}"})
+    state = state_response.json()
+    active_runs = state.get("active_runs") if isinstance(state, dict) else None
+    if isinstance(active_runs, list):
+        check("no_run_left_working", not active_runs and not any(r["status"] == "running" for r in runs),
+              f"{len(active_runs)} runs still working at the end")
+    else:
+        check("no_run_left_working", False,
+              f"state answered HTTP {state_response.status_code}: {state}")
+        active_runs = []
+    sizes = (len(state.get("projects", [])), len([n for n in state.get("nodes", []) if n["status"] == "online"]),
+             len(state.get("accounts", [])))
+    visible_sessions = sum(int(account.get("session_limit") or 1) for account in state.get("accounts", []))
     expected_accounts = len({s["id"] for s in sessions})
     check("fleet_fully_visible", sizes == (sc.projects, sc.machines, expected_accounts)
           and visible_sessions == len(sessions),
           f"state shows {sizes[0]} projects, {sizes[1]} online machines, {sizes[2]} licensed accounts and "
           f"{visible_sessions} concurrent sessions (expected {sc.projects}, {sc.machines}, "
           f"{expected_accounts} accounts, {len(sessions)} sessions)")
-    picker = client.get(PICKER).json().get("projects", [])
+    picker_response = client.get(PICKER)
+    picker = picker_response.json().get("projects", []) if picker_response.status_code == 200 else []
     check("picker_lists_every_project", len(picker) == sc.projects, f"the picker lists {len(picker)} of {sc.projects} projects")
     return out
 

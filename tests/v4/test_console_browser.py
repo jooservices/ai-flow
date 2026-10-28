@@ -62,13 +62,14 @@ VIEW_LABELS = {
     "backup": "Backup & Restore",
     "notifications": "Notifications",
     "settings": "Settings",
+    "security": "Security",
     "support": "Support",
 }
 
 
 # Written out by hand on purpose: it is the expected policy, so it must not be derived from the production
 # permission tables the console is being tested against.
-_EVERYONE = {"Dashboard", "Work board"}
+_EVERYONE = {"Dashboard", "Work board", "Security"}
 EXPECTED_ROLE_VIEWS = {
     "administrator": set(VIEW_LABELS.values()),
     "product_owner": _EVERYONE | {"Delivery", "Business", "Team Lead", "Stakeholder", "Human review", "Knowledge"},
@@ -207,6 +208,9 @@ def test_console_journeys_for_roles_screens_themes_and_phone(ctx, tmp_path, monk
     import uvicorn
 
     ctx.settings.console_login = True
+    # Each browser persona and color/viewport mode receives a simulated source IP so the real per-IP
+    # rate limiter does not combine independent users behind TestClient's one loopback address.
+    ctx.settings.trusted_proxies = ["127.0.0.1/32"]
     ctx.settings.console_session_secret = "jaif-252-browser-session-secret-for-test-only"
     ctx.settings.reviewer_token = "jaif-252-reviewer-token-for-test-only"
     ctx.settings.public_url = ""

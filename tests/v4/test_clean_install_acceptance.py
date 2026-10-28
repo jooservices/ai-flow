@@ -43,12 +43,14 @@ from aiflow.v4 import cli
 from aiflow.v4.control.github import GitHubApp
 from aiflow.v4.control.jira_connect import JiraAuth, SecretStore
 from aiflow.v4.control import api as control_api
-from aiflow.v4.control import login
+from aiflow.v4.control import login, mfa
+from aiflow.v4.control import system_check
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control.loops import jira_sync
 from aiflow.v4.control.ui import mount_ui
 from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.system_check import condition
+from aiflow.v4.core import secretbox
 from aiflow.v4.install import backup
 from aiflow.v4.install import secrets as sec
 from aiflow.v4.install.control import Layout
@@ -76,6 +78,8 @@ class Fresh:
 
     def __init__(self, machine, ctx, control_repo):
         self.machine, self.ctx, self.control_repo = machine, ctx, control_repo
+        self.mfa_secret = None
+        self.recovery_codes = []
 
     def install_control(self, version="v4.1.0", **opts):
         out: list[str] = []
@@ -108,8 +112,26 @@ class Fresh:
         return self.client
 
     def sign_in(self):
-        r = self.client.post("/v1/auth/login", json={"email": ADMIN, "password": self.password})
+        credentials = {"email": ADMIN, "password": self.password}
+        auth_time = None
+        if self.mfa_secret:
+            # Use the next unused TOTP step; setup consumed the preceding step.
+            auth_time = max(time.time(), (self.mfa_last_step + 1) * 30)
+            credentials["code"] = mfa.totp_code(self.mfa_secret, auth_time)
+        r = self.client.post("/v1/auth/login", json=credentials)
         assert r.status_code == 200, r.text
+        if auth_time is not None:
+            self.mfa_last_step = mfa.match_step(self.mfa_secret, credentials["code"], now=auth_time)
+        if r.json().get("mfa_setup_required"):
+            secret = self.client.post("/v1/security/mfa/setup").json()["secret"]
+            enrolled_at = time.time() - 30
+            code = mfa.totp_code(secret, enrolled_at)
+            enabled = self.client.post("/v1/security/mfa/enable", json={"code": code})
+            assert enabled.status_code == 200, enabled.text
+            self.mfa_secret = secret
+            self.mfa_last_step = mfa.match_step(secret, code)
+            self.recovery_codes = enabled.json()["recovery_codes"]
+            assert len(self.recovery_codes) == 10
         user = self.client.get("/v1/auth/me").json()
         assert user["role"] == "administrator" and user["role_label"] == "Administrator"
 
@@ -147,7 +169,29 @@ class Fresh:
             ],
             "credential_checks": {account.id: {"present": True, "valid": True} for account in accounts},
         }
-        return self.client.post(f"/v1/nodes/{name}/heartbeat", json=body, headers=headers)
+        response = self.client.post(f"/v1/nodes/{name}/heartbeat", json=body, headers=headers)
+        if response.status_code != 200:
+            return response
+
+        # Join and heartbeat readiness checks run asynchronously. Wait for the provider-backed join check to
+        # finish before installing this deterministic simulated-agent snapshot, so it cannot overwrite the
+        # heartbeat report or leave a newly added project without a readiness result.
+        thread_names = {f"aiflow4-join-readiness-{name}", f"aiflow4-heartbeat-readiness-{name}"}
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            threads = [thread for thread in threading.enumerate() if thread.name in thread_names]
+            if not threads:
+                break
+            for thread in threads:
+                thread.join(timeout=min(0.1, max(0, deadline - time.monotonic())))
+        else:
+            raise AssertionError(f"readiness checks for {name} did not settle")
+
+        readiness = system_check.refresh_node(
+            self.ctx, name, "manual",
+            machine_conditions=body["system_conditions"], credential_checks=body["credential_checks"])
+        assert readiness["checked_at"], f"simulated node {name} has no readiness snapshot"
+        return response
 
     def machine_client(self):
         """A client without the console cookie: what a machine's own call looks like."""
@@ -167,6 +211,8 @@ def fresh(machine, ctx, control_repo, tmp_path, monkeypatch):  # noqa: F811
     (release / "SHA256SUMS").write_text(f"{digest}  {filename}\n", encoding="utf-8")
     (releases / "CURRENT").write_text("v4.1.0\n", encoding="utf-8")
     monkeypatch.setattr(control_api, "RELEASES", releases)
+    # The fake control process receives the same external key required by production secret stores.
+    monkeypatch.setenv("AIFLOW4_SECRET_KEY", secretbox.generate_key())
     ctx.settings.join_control_url = "https://control.example.test"
     f = Fresh(machine, ctx, control_repo)
     f.install_control()
@@ -212,7 +258,8 @@ def test_clean_control_machine_asks_for_sign_in_and_first_run_setup_needs_only_t
 def test_every_setup_step_the_test_takes_is_in_the_document():
     text = DOC.read_text()
     for step in ("aiflow4-control-install", "browser setup", "Administrator", "/setup", "Projects",
-                 "join command", "/review", "signed candidate", "clean-install-acceptance.sh"):
+                 "two-factor", "recovery codes", "join command", "/review", "signed candidate",
+                 "clean-install-acceptance.sh"):
         assert step in text, step
 
 
@@ -495,6 +542,7 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     secrets_before = {p: p.read_bytes() for p in secret_files}
 
     archive = tmp_path / "aiflow-backup.tar.gz"  # invoked only by deploy/v4/ci/acceptance-backup.py
+    source_audit_count = ctx.db.one("SELECT count(*) AS n FROM audit_log")["n"]
     made = backup.create(test_database_url, archive, lay)
     assert archive.stat().st_mode & 0o777 == 0o600
     assert made["release"] == "v4.1.0" and {"console_users", "nodes", "tickets"} <= set(made["tables"])
@@ -511,10 +559,14 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     ctx.db.migrate()
     shutil.rmtree(lay.p("/etc/aiflow/secrets"))
     assert ctx.db.one("SELECT count(*) AS n FROM console_users")["n"] == 0
+    ctx.db.run("INSERT INTO audit_log (actor, category, action, target, ip, detail) "
+               "VALUES ('restore-target', 'security', 'fresh_install', 'control', '', '{}')")
     assert fresh.client.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password}).status_code == 401
 
     restored = backup.restore(test_database_url, archive, lay)
     assert restored["release"] == "v4.1.0"
+    assert ctx.db.one("SELECT 1 FROM audit_log WHERE action='fresh_install'")
+    assert ctx.db.one("SELECT count(*) AS n FROM audit_log")["n"] >= source_audit_count + 1
     assert {p: p.read_bytes() for p in secret_files} == secrets_before
     assert all(p.stat().st_mode & 0o777 == 0o600 for p in secret_files)
     assert fresh.machine.p("/etc/aiflow/secrets/control").stat().st_mode & 0o777 == 0o700
@@ -526,7 +578,9 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     )
     assert inserted["id"] > 1  # restored id 1 was not reused by the fresh sequence
     again = TestClient(fresh.app, follow_redirects=False, client=("127.0.0.1", 50002))
-    assert again.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password}).status_code == 200
+    signed_in = again.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password,
+                                                   "code": mfa.totp_code(fresh.mfa_secret)})
+    assert signed_in.status_code == 200
     # the machine resumes with the node token it already had
     assert fresh.machine_client().post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=cc).status_code == 200
 

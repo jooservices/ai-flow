@@ -46,7 +46,8 @@ def test_scenario_drives_100_projects_50_machines_and_200_sessions(proof):
                       if item.get("result") != "ready"]
             for project, conditions in (node["readiness"].get("projects") or {}).items()
         }
-    assert (counts["projects"], counts["machines"], counts["sessions"]) == (100, 50, 200)
+    assert (counts["projects"], counts["machines"], counts["sessions"]) == (100, 50, 200), json.dumps(
+        {"counts": counts, "errors": report["errors"]}, sort_keys=True)
     assert counts["accounts"] == 100
     assert counts["traffic_tickets"] == sum(FULL.wave_sizes) and counts["history_tickets"] == 2000
     assert counts["held_tickets"] > 0 and counts["blocked_tickets"] > 0
@@ -193,11 +194,13 @@ def test_console_view_endpoints_work_with_a_small_local_fleet(tmp_path):
 def test_every_top_level_console_tab_has_a_scale_measurement():
     import re
 
-    html = (ROOT / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
+    from aiflow.v4.control.ui import build_console_page
+
+    html = build_console_page()
     tabs = set(re.findall(r'<button class="tab"[^>]*data-view="([^"]+)"', html))
     measured = {path.lstrip("/") for path in scale_harness.PAGES}
     assert tabs == measured
-    assert len(tabs) == 18
+    assert len(tabs) == 20
 
 
 def test_full_run_report_is_bound_to_the_declared_plan(proof):
@@ -545,7 +548,7 @@ def test_the_release_workflow_runs_the_scale_proof_before_publishing():
     assert "aiflow4 scale-proof --release" in workflow
     assert "--submit \"$AIFLOW4_CONTROL_URL\"" in workflow
     assert "AIFLOW4_CONTROL_URL is required" in workflow and "AIFLOW4_OWNER_TOKEN is required" in workflow
-    assert workflow.index("aiflow4 scale-proof") < workflow.index("Build and push control-api image")
+    assert workflow.index("aiflow4 scale-proof") < workflow.index("Build control-api image locally")
     assert "scale-proof-$VERSION.json" in workflow
 
 

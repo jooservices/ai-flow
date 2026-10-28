@@ -73,6 +73,9 @@ class Settings:
     license_service_url: str = ""
     license_public_key: str = ""
     trusted_proxies: list[str] = field(default_factory=list)  # CIDRs allowed to supply forwarding headers
+    console_require_mfa: bool = True  # AIFLOW4_CONSOLE_REQUIRE_MFA=0 explicitly disables the default requirement
+    rate_limit_per_min: int = 600  # requests per client IP per minute on every endpoint (0 turns limits off)
+    rate_limit_public_per_min: int = 60  # requests per client IP per minute on each public (no sign-in) endpoint
     reviewer_token: str = ""
     owner_token: str = ""
     setup_ownership_capability: str = ""
@@ -134,6 +137,9 @@ class Settings:
         s.license_service_url = _env("LICENSE_SERVICE_URL", s.license_service_url)
         s.license_public_key = _env("LICENSE_PUBLIC_KEY", s.license_public_key)
         s.trusted_proxies = [value.strip() for value in _env("TRUSTED_PROXIES", "").split(",") if value.strip()]
+        s.console_require_mfa = _env("CONSOLE_REQUIRE_MFA", "1").strip().lower() in ("1", "true", "yes", "on")
+        s.rate_limit_per_min = max(0, int(_env("RATE_LIMIT_PER_MIN", str(s.rate_limit_per_min))))
+        s.rate_limit_public_per_min = max(0, int(_env("RATE_LIMIT_PUBLIC_PER_MIN", str(s.rate_limit_public_per_min))))
         s.o2_url = _env("O2_URL", s.o2_url)
         s.public_url = _env("PUBLIC_URL", s.public_url)
         s.join_control_url = _env("JOIN_CONTROL_URL", s.join_control_url)

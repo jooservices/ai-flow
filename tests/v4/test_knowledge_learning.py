@@ -426,6 +426,7 @@ def test_knowledge_learning_screen_is_verified_in_a_browser(ctx, monkeypatch):
 
         ctx.settings.console_login = True
         ctx.settings.console_session_secret = "browser-test-session-secret-at-least-32-bytes"
+        ctx.settings.console_require_mfa = False  # this browser test covers the rest of the console login flow
         ctx.settings.public_url = ""
         password = login.seed_user(ctx.db, "knowledge-browser@example.test", "super_admin", "Knowledge Browser")
         assert password

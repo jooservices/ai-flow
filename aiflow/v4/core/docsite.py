@@ -38,7 +38,7 @@ SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto"})
 SCREEN_PAGE = "screens/{view}.md"
 # JAIF-249's required feature document also serves as the System check screen guide, keeping the change in
 # `docs/v4/` while preserving the Console Help target and the documentation-site screen coverage.
-SCREEN_DOC_OVERRIDES = {"system-check": "docs/v4/system-check.md"}
+SCREEN_DOC_OVERRIDES = {"system-check": "docs/v4/system-check.md", "security": "docs/v4/security.md"}
 
 # Layout controls are a cross-screen feature documented as one topic under docs/v4. Those pages may satisfy the
 # screen documentation gate for the complete set they explicitly cover; unrelated screens still need their page.
@@ -135,6 +135,13 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "importGitHubApp": ("integrations",),
     "connectImportedGitHubApp": ("integrations",),
     "renderUsers": ("users",),
+    "renderSecurity": ("security",),
+    "secApi": ("security",),
+    "secFail": ("security",),
+    "secDo": ("security",),
+    "loadSecurity": ("security",),
+    "loadAuditLog": ("security",),
+    "safeHref": ("security",),  # output-escaping helper shared by every screen; documented in docs/v4/security.md
     "renderLicensing": ("licensing",),
     "renderLicenseNotice": ("licensing",),
     "accountAssignedTo": ("cc", "machines"),
@@ -1013,6 +1020,30 @@ def _literal_route_contract_spans(source: str) -> dict[str, list[tuple[int, int]
     return found
 
 
+_ESCAPE_TOKENS = re.compile(r"\b(?:esc|safeHref|safeUrl|String)\(|[()]")
+
+
+def _escape_only_lines(diff: str) -> set[int]:
+    """New-file line numbers whose only change is wrapping text in an escaping helper (`esc(...)`, `safeHref(...)`).
+
+    Output escaping is one cross-cutting hardening (docs/v4/security.md), not a change to what a screen shows, so
+    such a line is documented once on the Security page instead of on every screen it appears on."""
+    found: set[int] = set()
+    for hunk in re.split(r"^(?=@@ )", diff, flags=re.M):
+        head = re.match(r"@@ -\S+ \+(\d+)", hunk)
+        if not head:
+            continue
+        old = [line[1:] for line in hunk.splitlines()[1:] if line.startswith("-")]
+        new = [line[1:] for line in hunk.splitlines()[1:] if line.startswith("+")]
+        if old and len(new) >= len(old):  # a line added after the last entry of a list only gains a comma
+            for index, (before, after) in enumerate(zip(old, new)):
+                wrapped = "safeHref(" in after and "safeHref(" not in before
+                plain = _ESCAPE_TOKENS.sub("", before).rstrip(",") == _ESCAPE_TOKENS.sub("", after).rstrip(",")
+                if before != after and (wrapped or plain):
+                    found.add(int(head.group(1)) + index)
+    return found
+
+
 def _diff_hunks(diff: str) -> list[tuple[int, int, int, int]]:
     """Return (old start, old count, new start, new count) line ranges from a unified diff."""
     return [(int(m.group(1)), int(m.group(2) or 1), int(m.group(3)), int(m.group(4) or 1))
@@ -1191,6 +1222,17 @@ def changed_views(base: str) -> set[str]:
                        if line.startswith("/* ---------- interactions")), None)
     help_start = next((i for i, line in enumerate(lines) if line.startswith("/* Help: every screen")), None)
     help_end = functions.get("renderHelp", (0, 0))[1] - 1
+    # The security hardening spans the whole console: the cross-site request token wrapper, the Security screen's
+    # script block (up to the boot section) and escaping of user text. All of it is documented in docs/v4/security.md.
+    security_lines: set[int] = _escape_only_lines(diff)
+    csrf_start = next((i for i, line in enumerate(lines) if line.startswith("/* Cross-site request protection")), None)
+    if csrf_start is not None:
+        csrf_end = next((j for j in range(csrf_start, len(lines)) if lines[j] == "})();"), csrf_start)
+        security_lines |= set(range(csrf_start + 1, csrf_end + 2))
+    sec_start = next((i for i, line in enumerate(lines) if line.startswith("/* ---------- security:")), None)
+    if sec_start is not None:
+        sec_end = next((j for j in range(sec_start + 1, len(lines)) if lines[j].startswith("/* ---------- ")), len(lines))
+        security_lines |= set(range(sec_start + 1, sec_end + 1))
     touched: set[str] = set()
     unmapped: set[int] = set()
     for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, re.M):
@@ -1290,6 +1332,10 @@ def changed_views(base: str) -> set[str]:
                 continue
             if not unmapped_renderer:
                 line_views |= specific_views
+            # Registering the Security screen in the shared menu maps edits those lines; they belong to its own page.
+            if line_no in security_lines or "security" in changed_line.lower():
+                # A shared line that also adds another named screen (for example Support) belongs to that screen.
+                line_views = (specific_views - {"security"}) or {"security"}
             if line_views:
                 touched |= line_views
                 hunk_touched |= line_views

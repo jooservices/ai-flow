@@ -318,7 +318,7 @@ def test_shared_release_account_is_a_candidate_on_its_secondary_machine(client, 
     candidates = client.get("/v1/version-releases/candidates", params={"account": "claude-01"},
                             headers=secondary).json()
 
-    assert [item["version_id"] for item in candidates["versions"]] == ["101"]
+    assert [item["version_id"] for item in candidates["versions"]] == ["101"], candidates
 
 
 def test_version_release_claim_is_refused_when_shared_account_is_at_capacity(client, ctx):

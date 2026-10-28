@@ -19,6 +19,8 @@ from urllib.parse import quote
 import httpx
 import jwt
 
+from ..core import secretbox
+
 API = "https://api.github.com"
 GITHUB_APP_REQUIRED_PERMISSIONS = {
     "contents": "write",
@@ -84,14 +86,20 @@ class GitHubApp:
             import fcntl
 
             lock_path = self.dir / ".connection.lock"
-            lock_fd = os.open(lock_path, os.O_RDONLY) if lock_path.exists() else None
+            lock_fd = os.open(lock_path, os.O_RDWR) if lock_path.exists() else None
             try:
                 if lock_fd is not None:
-                    fcntl.flock(lock_fd, fcntl.LOCK_SH)
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
                 stamp = ((self.dir / "app.json").stat().st_mtime_ns,
                          (self.dir / "app.pem").stat().st_mtime_ns)
                 meta = json.loads((self.dir / "app.json").read_text(encoding="utf-8"))
-                key = (self.dir / "app.pem").read_text(encoding="utf-8")
+                key_path = self.dir / "app.pem"
+                raw_key = key_path.read_text(encoding="utf-8")
+                key = secretbox.decrypt(raw_key, context="app.pem")
+                if not secretbox.is_encrypted(raw_key):
+                    from .github_connect import GitHubSecretStore
+                    GitHubSecretStore(self.dir)._write_file(key_path, key)
+                    stamp = ((self.dir / "app.json").stat().st_mtime_ns, key_path.stat().st_mtime_ns)
             except OSError:
                 self._revoke_config()
                 if force:

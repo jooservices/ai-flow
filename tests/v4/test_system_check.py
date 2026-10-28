@@ -20,6 +20,7 @@ from aiflow.v4.control.ui import build_console_page
 from aiflow.v4.core.system_check import condition
 from aiflow.v4.node import agent
 from conftest import add_ticket, join_node
+from console_test_utils import console_script
 
 
 def _direct_join(client, name="cc"):
@@ -258,6 +259,23 @@ def test_projects_screen_batches_node_readiness_query(client, ctx, monkeypatch):
     projects = response.json()["projects"]
     testwp = next(project for project in projects if project["key"] == "TESTWP")
     assert [node["name"] for node in testwp["node_readiness"]] == ["cc", "node1"]
+
+
+def test_projects_picker_reuses_runtime_repo_snapshot_for_probe_report(client, ctx, monkeypatch):
+    original_one = ctx.db.one
+    runtime_repo_reads = []
+
+    def recording_one(sql, params=None):
+        if "SELECT EXISTS(SELECT 1 FROM nodes WHERE removed_at IS NOT NULL)" in sql:
+            runtime_repo_reads.append(sql)
+        return original_one(sql, params)
+
+    monkeypatch.setattr(ctx.db, "one", recording_one)
+
+    response = client.get("/v1/projects")
+
+    assert response.status_code == 200
+    assert len(runtime_repo_reads) == 1
 
 
 def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition(client, ctx, monkeypatch):
@@ -588,8 +606,7 @@ def test_projects_readiness_escapes_node_condition_names_and_actions():
     if not node:
         pytest.skip("Node.js is needed to render the Projects readiness panel")
     root = Path(__file__).resolve().parents[2]
-    page = (root / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
-    script = page.split("<script>\n", 1)[1].split("</script>", 1)[0].split("/* ---------- boot ---------- */", 1)[0]
+    script = console_script(root / "aiflow/v4/control/ui/console.html")
     extension = (root / "aiflow/v4/control/ui/system-check.js").read_text(encoding="utf-8")
     prelude = """
 var projectsView = {innerHTML: '', insertAdjacentHTML: function (_position, html) { this.innerHTML += html; }};

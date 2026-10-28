@@ -251,15 +251,19 @@ _ACTIVE_ACCOUNTS = ("SELECT id FROM accounts WHERE id NOT IN (SELECT id FROM man
 
 
 def resource_counts(ctx, *, connection=None) -> dict[str, int]:
-    query_all = (lambda sql, params=None: list(connection.execute(sql, params).fetchall())) if connection else ctx.db.all
     query_one = (lambda sql, params=None: connection.execute(sql, params).fetchone()) if connection else ctx.db.one
-    registered_account_ids = {str(row["id"]) for row in query_all(_ACTIVE_ACCOUNTS)}
-    configured_account_ids = {str(account.id) for account in ctx.repo().accounts}
+    configured_account_ids = sorted({str(account.id) for account in ctx.repo().accounts})
+    counts = query_one(
+        "SELECT (SELECT count(*) FROM (" + _ACTIVE_ACCOUNTS +
+        " UNION SELECT unnest(%s::text[])) AS active_accounts) AS ai_accounts,"
+        " (SELECT count(*) FROM nodes WHERE removed_at IS NULL) AS machines,"
+        " (SELECT count(*) FROM console_users WHERE disabled=false) AS users",
+        (configured_account_ids,))
     return {
-        "machines": int(query_one("SELECT count(*) AS count FROM nodes WHERE removed_at IS NULL")["count"]),
-        "ai_accounts": len(registered_account_ids | configured_account_ids),
+        "machines": int(counts["machines"]),
+        "ai_accounts": int(counts["ai_accounts"]),
         "projects": len(ctx.repo().projects),
-        "users": int(query_one("SELECT count(*) AS count FROM console_users WHERE disabled=false")["count"]),
+        "users": int(counts["users"]),
     }
 
 

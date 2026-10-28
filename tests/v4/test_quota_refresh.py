@@ -274,7 +274,10 @@ def test_quota_text_parser_normalizes_relative_and_absolute_reset_times():
 
 def test_quota_cli_readiness_requires_prompt_at_terminal_tail():
     diagnostic = "worker.py: failed near › during startup\nCould not initialize terminal"
+    trust_dialog = ("› Ask Codex to do anything\nFolder access\nTrust this folder?\n"
+                    "› 1. Trust and continue\n2. Quit")
     assert not _ready_for_slash_command("codex", diagnostic.encode())
+    assert not _ready_for_slash_command("codex", trust_dialog.encode())
     assert not _ready_for_slash_command("claude", "worker.py: error ❯\nstartup failed".encode())
     assert _ready_for_slash_command("codex", "startup complete\n› ".encode())
     assert _ready_for_slash_command("codex", "\x1b[21;1H› Ask Codex to do anything\n? for shortcuts".encode())

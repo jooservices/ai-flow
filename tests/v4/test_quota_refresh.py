@@ -277,6 +277,7 @@ def test_quota_cli_readiness_requires_prompt_at_terminal_tail():
     assert not _ready_for_slash_command("codex", diagnostic.encode())
     assert not _ready_for_slash_command("claude", "worker.py: error ❯\nstartup failed".encode())
     assert _ready_for_slash_command("codex", "startup complete\n› ".encode())
+    assert _ready_for_slash_command("codex", "\x1b[21;1H› Ask Codex to do anything\n? for shortcuts".encode())
     assert _ready_for_slash_command("claude", "startup complete\n❯ ".encode())
 
 

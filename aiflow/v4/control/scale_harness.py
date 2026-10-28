@@ -689,7 +689,10 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
         key = claim["ticket"]["key"]
         issues = []
         try:
-            # The keeper renews during measured work and drains any in-flight heartbeat before completion.
+            heartbeat = keeper.request("post", f"/v1/runs/{run_id}/heartbeat",
+                                       json={"fence": fence, "progress": {"phase": "ai"}}, headers=h)
+            if heartbeat.status_code != 200:
+                issues.append(f"/v1/runs/{run_id}/heartbeat answered HTTP {heartbeat.status_code}")
             keeper.complete(run_id)
             for path, body in ((f"/v1/runs/{run_id}/result", {"fence": fence, "outcome": "done",
                                                                "summary": "simulated session"}),

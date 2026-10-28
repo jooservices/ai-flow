@@ -425,7 +425,7 @@ def test_command_center_events_survive_many_heartbeats(client, ctx):
     assert "policy.denied" in types and "node.joined" in types
 
 
-def test_full_claim_flow_with_fencing(client, ctx):
+def test_full_claim_flow_with_fencing(client, ctx, monkeypatch):
     cc = join(client, "cc")
     assert client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "workers": [{"account": "claude-01", "state": "idle"}]},
                        headers=cc).json()["desired"]["accounts"] == ["claude-01", "opencode-01"]
@@ -446,7 +446,11 @@ def test_full_claim_flow_with_fencing(client, ctx):
     assert r["project"]["repo"] == "jooservices/test-aiflow-wp" and r["identity"][0].endswith("[bot]")
     run_id, fence = r["run_id"], r["fence"]
     # second claim of the same ticket is refused (held), candidate list no longer shows it
-    assert client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).status_code == 409
+    with monkeypatch.context() as patch:
+        patch.setattr(ctx.leases, "held_keys", lambda: (_ for _ in ()).throw(
+            AssertionError("an already-held claim should not scan every Redis lease")))
+        duplicate = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc)
+        assert duplicate.status_code == 409 and duplicate.json()["reason"] == "ticket is already claimed"
     assert [t["key"] for t in client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"]] == ["TESTWP-2"]
 
     assert client.post(f"/v1/runs/{run_id}/heartbeat", json={"fence": fence, "progress": {"phase": "ai"}}, headers=cc).status_code == 200

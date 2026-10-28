@@ -4912,6 +4912,11 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
+        # Candidate lists can be stale when several workers poll together. A live lease proves this ticket
+        # cannot be granted, so refuse it before rebuilding licence and eligibility state. New claims still
+        # pass every gate below, and the atomic lease acquisition handles the race after this check.
+        if body.step != "master" and ctx.leases.holder(body.ticket):
+            return JSONResponse({"claimed": False, "reason": "ticket is already claimed"}, status_code=409)
         try:
             state = licensing.enforce_work_entitlement(ctx, body.account, node,
                                                         public_key=ctx.settings.license_public_key)

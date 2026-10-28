@@ -111,7 +111,11 @@ jobs:
           AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
           AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
           AIFLOW4_PLAYWRIGHT_TRACE_DIR: ${{ runner.temp }}/aiflow-playwright-traces
-        run: uv run pytest tests/v4 -p no:warnings
+        run: |
+          # The 100/50/200 benchmark runs first against a fresh PostgreSQL service, before the
+          # rest of the suite repeatedly drops and recreates schemas and triggers slow CI checkpoints.
+          uv run pytest tests/v4/test_scale_proof.py -p no:warnings
+          uv run pytest tests/v4 --ignore=tests/v4/test_scale_proof.py -p no:warnings
 
       - name: Upload sanitized Playwright traces
         if: failure()

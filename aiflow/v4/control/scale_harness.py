@@ -572,6 +572,8 @@ def _claim_round(client, sessions: list[dict[str, str]], headers: dict[str, dict
     claim_workers = min(sc.claim_concurrency, len(sessions))
     if claim_workers < 1:
         return [], 0, [], [], None
+    # A session that repeatedly loses the candidate race yields so the round can drain; the next round polls again.
+    candidate_polls_per_round = min(4, claim_workers)
     measure_workers = min(sc.measurement_concurrency, len(PAGES) + 1) if measure else 0
     gate = Barrier(claim_workers + measure_workers + 1) if measure_workers else None
     page_results: list[dict[str, Any]] = []
@@ -582,7 +584,7 @@ def _claim_round(client, sessions: list[dict[str, str]], headers: dict[str, dict
         # first in-flight burst represents the fleet rather than six machines repeated four times each.
         claim_futures = [claims_pool.submit(_claim_session, client, session, headers,
                                             gate if gate is not None and i < claim_workers else None,
-                                            worker_request, on_claim, max(4, sc.claim_concurrency))
+                                            worker_request, on_claim, candidate_polls_per_round)
                          for i, session in enumerate(fleet_poll_order(sessions))]
         if measure_workers:
             measure_jobs = [(page, data) for page, data in PAGES.items()]

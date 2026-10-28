@@ -4916,7 +4916,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         # cannot be granted, so refuse it before rebuilding licence and eligibility state. New claims still
         # pass every gate below, and the atomic lease acquisition handles the race after this check.
         if body.step != "master" and ctx.leases.holder(body.ticket):
-            return JSONResponse({"claimed": False, "reason": "ticket is already claimed"}, status_code=409)
+            account = ctx.repo().account(body.account)
+            if account and not account.runs_on(node):
+                raise HTTPException(403, f"account {body.account} does not run on {node}")
+            if account:
+                return JSONResponse({"claimed": False, "reason": "ticket is already claimed"}, status_code=409)
         try:
             state = licensing.enforce_work_entitlement(ctx, body.account, node,
                                                         public_key=ctx.settings.license_public_key)

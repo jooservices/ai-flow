@@ -147,11 +147,15 @@ def may_take(db, acc: Account, node: str, *, as_peer: bool = False) -> tuple[boo
         return False, "this machine has not signed in to the account yet"
     if not acc.runs_on(node):
         return False, "this account is not enabled on this machine"
+    # Ordinary control-repo accounts have no shared session_limit; their node agent enforces `parallel`.
+    # Capacity aggregation only changes admission for shared accounts and quota-routing peers.
+    bounded = bool(acc.session_limit or as_peer)
+    if not bounded:
+        return True, ""
     candidates = [n for n in acc.machines if n not in pending]
     capacities = machine_capacities(db, candidates, acc.id)
     # A configured account without a shared limit is bounded by its `sessions` and machine slots only when it is
     # judged as a quota-routing peer; its own claims keep the worker-level limits they always had.
-    bounded = bool(acc.session_limit or as_peer)
     if bounded and capacities.get(node, {}).get("free", 0) <= 0:
         return False, "this machine has no free worker slots; its capacity is full"
     running = running_by_node(db, acc.id)

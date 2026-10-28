@@ -773,6 +773,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
 
     per_node = max(1, sc.sessions // sc.machines)
     ready_at: dict[str, float] = {}
+    ready_at_lock = Lock()
     pickup: dict[str, float] = {}
     dependents: dict[str, list[str]] = {}
     taken: set[str] = set()
@@ -819,6 +820,11 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
             keeper.complete(run_id)
         if not issues:
             db.run("UPDATE tickets SET status='Done' WHERE key=%s", (key,))  # what Jira sync mirrors back
+            # The next poll pass can run while completions are still draining. Publish a dependent ticket's
+            # ready time as soon as its blocker is done so that early claim is measured from the real transition.
+            with ready_at_lock:
+                for dep in dependents.get(key, []):
+                    ready_at[dep] = time.perf_counter()
         return key, issues
 
     for wave_no, wave in enumerate(pl["waves"]):
@@ -842,16 +848,19 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     on_claim=keeper.add, measurement_client=measurement_client)
                 conflicts += round_conflicts
                 live: list[tuple[dict, dict]] = []
+                idle_sessions: list[dict[str, str]] = []
                 for result in claim_results:
                     if result.get("error"):
                         errors.append(result["error"])
                         continue
                     if not result.get("claim"):
+                        idle_sessions.append(result["session"])
                         continue
                     session, claim = result["session"], result["claim"]
                     key = claim["ticket"]["key"]
-                    if key in ready_at and key not in pickup:
-                        pickup[key] = result["claimed_at"] - ready_at[key]
+                    with ready_at_lock:
+                        if key in ready_at and key not in pickup:
+                            pickup[key] = result["claimed_at"] - ready_at[key]
                     live.append((session, claim))
                 if not live:
                     break
@@ -863,19 +872,42 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     measured, peak_checks = _measure_peak(client, ctx, sc, live, errors, page_results, picker_result,
                                                           claim_intervals, observed_activity)
                     log(f"peak: {peak_active} sessions working")
-                # Keep room for lease renewals and avoid overwhelming shared knowledge writes while still
-                # completing faster than sequentially draining a large batch.
-                with ThreadPoolExecutor(max_workers=min(12, len(live)),
+                # Keep the existing completion bound; the first burst also lets idle workers poll again while
+                # runs finish, instead of making ready tickets wait for the whole burst to drain.
+                with ThreadPoolExecutor(max_workers=min(8, len(live)),
                                         thread_name_prefix="scale-complete") as pool:
                     completed = [pool.submit(finish_one, session, claim, keeper) for session, claim in live]
+                    if first_burst and idle_sessions:
+                        followup_results, followup_conflicts, _, _, _ = _claim_round(
+                            client, sessions, headers, sc, worker_request=keeper.request,
+                            on_claim=keeper.add, measurement_client=measurement_client)
+                        conflicts += followup_conflicts
+                        followup_live = []
+                        for result in followup_results:
+                            if result.get("error"):
+                                errors.append(result["error"])
+                                continue
+                            if not result.get("claim"):
+                                continue
+                            session, claim = result["session"], result["claim"]
+                            key = claim["ticket"]["key"]
+                            with ready_at_lock:
+                                if key in ready_at and key not in pickup:
+                                    pickup[key] = result["claimed_at"] - ready_at[key]
+                            followup_live.append((session, claim))
+                        if followup_live:
+                            rounds_total += 1
+                            completed.extend(pool.submit(finish_one, session, claim, keeper)
+                                             for session, claim in followup_live)
                     for future in completed:
                         key, finish_errors = future.result()
                         errors.extend(finish_errors)
                         if finish_errors:
                             continue
                         taken.add(key)
-                        for dep in dependents.get(key, []):
-                            ready_at[dep] = time.perf_counter()  # ready once the blocker is Done
+                        with ready_at_lock:
+                            for dep in dependents.get(key, []):
+                                ready_at.setdefault(dep, time.perf_counter())
             finally:
                 keeper.close()
             if pickable <= taken:

@@ -39,7 +39,7 @@ STEP_ROLE = {"dev": "dev", "verify": "verify", "triage": "master", "master": "ma
              "intake": "intake_refiner", "impact": "intake_refiner", "post_merge": "release"}
 # error kinds that mean the account or its machine could not work, not that the AI did bad work
 UNSCORED_KINDS = {"quota", "auth", "infra", "network", "machine", "node", "tool", "tools", "missing_tool",
-                  "missing-tool", "offline", "toolchain", "services"}
+                  "missing-tool", "offline", "toolchain", "services", "machine_load"}
 SUCCESS_OUTCOMES = {"merged", "human", "refined", "questions", "assessed", "answered", "escalated"}
 STOPPED_OUTCOMES = {"timeout", "lost"}
 STOPPED_KINDS = {"timeout", "lost"}  # a timed-out run is stored as outcome failed with this error kind

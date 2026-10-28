@@ -568,7 +568,9 @@ def test_policy_hook_uses_the_run_token(client, ctx):
 def test_state_snapshot_and_watchdog(client, ctx):
     from aiflow.v4.control.loops import watchdog
     cc = join(client, "cc")
-    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "metrics": {"cpu_pct": 10}}, headers=cc)
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "metrics": {
+        "cpu_pct": 10, "load1": 0.1, "cpus": 4, "mem_total": 100, "mem_used": 20,
+        "disk_total": 100 * 1024 ** 3, "disk_free": 20 * 1024 ** 3}}, headers=cc)
     add_ticket(ctx.db, "TESTWP-9")
     r = client.post("/v1/work/claim", json={"ticket": "TESTWP-9", "account": "claude-01"}, headers=cc).json()
     ctx.jira.status_of["TESTWP-9"] = "In Progress"
@@ -707,8 +709,9 @@ def test_quota_exhaustion_routes_ticket_to_peer_and_returns_it_after_reset(clien
                        headers=headers).json()["released"] is True
 
     assert client.get("/v1/work/candidates?account=claude-01", headers=headers).json()["tickets"] == []
-    peer_tickets = client.get("/v1/work/candidates?account=claude-02", headers=headers).json()["tickets"]
-    assert [ticket["key"] for ticket in peer_tickets] == ["TESTWP-QUOTA-RESET"]
+    peer_response = client.get("/v1/work/candidates?account=claude-02", headers=headers).json()
+    peer_tickets = peer_response["tickets"]
+    assert [ticket["key"] for ticket in peer_tickets] == ["TESTWP-QUOTA-RESET"], peer_response
     peer_claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-QUOTA-RESET", "account": "claude-02"},
                              headers=headers).json()
     assert ctx.db.one("SELECT account_id FROM runs WHERE id=%s", (peer_claim["run_id"],))["account_id"] == "claude-02"

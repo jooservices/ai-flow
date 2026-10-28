@@ -49,10 +49,11 @@ from ..core.services import normalize_services, service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
+from .audit import record_console_user_change as audit_user, record_console_user_roles_change as audit_user_roles
 from . import (ba_chat, business, escalations, flow_doctor, flow_doctor_api, jira_connect, knowledge, layouts,
-               licensing, log_viewer, memory, role_health, rollout, runtime_settings, scale_proof, setup_wizard,
-               shared_accounts, state_schema, support_bundle, system_check, system_check_api, tooling,
-               version_release, work_steps)
+               licensing, load_policy, load_policy_api, log_viewer, memory, role_health, rollout, runtime_settings,
+               scale_proof, setup_wizard, shared_accounts, state_schema, support_bundle, system_check,
+               system_check_api, tooling, version_release, work_steps)
 from . import run_inbox as run_inbox_control
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
@@ -1054,11 +1055,11 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.middleware("http")
     async def isolate_runtime_repo_snapshot(request: Request, call_next):
-        """Reuse the live view only in worker routes that never change account/project configuration."""
+        """Reuse the live view only in routes that never change account/project configuration."""
         enabled = request.url.path in {
             "/v1/work/candidates", "/v1/work/claim",
-            "/v1/version-releases/candidates", "/v1/version-releases/claim",
-        }
+            "/v1/version-releases/candidates", "/v1/version-releases/claim", "/v1/state",
+        } or (request.method == "GET" and request.url.path == "/v1/projects")
         cache_token = runtime_repo_cache.set(None)
         enabled_token = runtime_repo_cache_enabled.set(enabled)
         try:
@@ -1230,7 +1231,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None, *, human: bool = False) -> None:
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload, human=human)
 
     def audit_in(connection, target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str,
@@ -1833,6 +1834,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         except Exception as exc:
             log.exception("console user could not be added")
             raise HTTPException(500, "person could not be added") from exc
+        audit_user(request, user.subject, "person_added", email, {"roles": list(roles), "project_keys": project_keys})
         return {"email": email, "temporary_password": password}
 
     @app.put("/v1/console/users/{email}")
@@ -1851,8 +1853,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                                          (email,)).fetchone()
             if not current:
                 raise HTTPException(404, "console user not found")
-            current_roles = normalize_roles(current["roles"])
-            if not current["disabled"] and "administrator" in current_roles and "administrator" not in roles:
+            roles_before = normalize_roles(current["roles"])
+            if not current["disabled"] and "administrator" in roles_before and "administrator" not in roles:
                 others = connection.execute("SELECT count(*) AS n FROM console_users WHERE email<>%s AND disabled=false"
                                             " AND 'administrator'=ANY(roles)", (email,)).fetchone()["n"]
                 if int(others) == 0:
@@ -1861,6 +1863,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                                (roles[0], list(roles), project_keys, email))
             audit_in(connection, "console", "user_update", "", "", None, user.subject, True, "Person updated",
                      {"email": email, "roles": list(roles), "project_keys": project_keys})
+        audit_user_roles(request, user.subject, email, roles_before, roles, project_keys)
         return {"updated": True}
 
     @app.patch("/v1/console/users/{email}/disabled")
@@ -1889,6 +1892,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             action = "user_disable" if body.disabled else "user_enable"
             audit_in(connection, "console", action, "", "", None, user.subject, True,
                      "Person disabled" if body.disabled else "Person enabled", {"email": email})
+        audit_user(request, user.subject, "person_disabled" if body.disabled else "person_enabled", email, {"disabled": body.disabled})
         return {"disabled": body.disabled}
 
     @app.post("/v1/console/view-as")
@@ -1900,13 +1904,11 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         from .login import SESSION_TTL_S
         token = issue_session(user.subject, user.assigned_roles, int(utcnow().timestamp()) + SESSION_TTL_S,
-                              ctx.settings.console_session_secret, view_as=role)
+                              ctx.settings.console_session_secret, view_as=role, sid=user.sid)
         audit("console", "view_as", "", "", None, user.subject, True, "Administrator viewing as role",
               {"role": role})
         response = JSONResponse({"viewing_as": role, "role_label": ROLE_LABELS[role]})
-        response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_S, httponly=True,
-                            secure=str(ctx.settings.public_url or "").lower().startswith("https://"),
-                            samesite="strict", path="/")
+        app.state.set_session_cookies(response, token, SESSION_TTL_S)  # keeps the session id and the CSRF token in step
         return response
 
     @app.post("/v1/console/view-as/stop")
@@ -1917,13 +1919,11 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "not available for your role")
         from .login import SESSION_TTL_S
         token = issue_session(user.subject, user.assigned_roles, int(utcnow().timestamp()) + SESSION_TTL_S,
-                              ctx.settings.console_session_secret)
+                              ctx.settings.console_session_secret, sid=user.sid)
         audit("console", "view_as_stop", "", "", None, user.subject, True, "Administrator returned to own role",
               {"previous_role": user.view_as or ""})
         response = JSONResponse({"viewing_as": None})
-        response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_S, httponly=True,
-                            secure=str(ctx.settings.public_url or "").lower().startswith("https://"),
-                            samesite="strict", path="/")
+        app.state.set_session_cookies(response, token, SESSION_TTL_S)
         return response
 
     @app.post("/v1/support/bundles")
@@ -3357,6 +3357,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                     J({**reported_metrics, "services": reported_services}),
                     J(inventory), body.runtime_settings_public_key,
                     body.release_protocol, body.slots_used, node))
+        load_policy.record_heartbeat(ctx, node)
         repo = ctx.repo()
         node_state = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
         environment_reports.confirm_node_environment(ctx, node, body.environment_items)
@@ -3830,6 +3831,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                         outcome="removed", reason="removed from Machines and AI screen")
         return {"account": account_id, "removed": True}
 
+    load_policy_api.register_machine_load_limits(app, ctx, console_user, audit)
+
     @app.put("/v1/nodes/{name}/work-acceptance")
     def set_node_work_acceptance(name: str, body: ConfirmBody, accepting_work: bool, request: Request) -> dict:
         action = "resume_work" if accepting_work else "stop_taking_work"
@@ -3895,7 +3898,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise
         operation_id = str(uuid.uuid4())
         components = [str(t["name"]) for t in payload["tools"]]
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             connection.execute("INSERT INTO node_operations (id,node,action,actor,payload) VALUES (%s,%s,%s,%s,%s)",
                                (operation_id, name, body.action, user.subject, J(payload)))
             audit_in(connection, "node", body.action, name, operation_id, None, user.subject, True, "queued",
@@ -4640,10 +4643,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "description": "Review incidents and follow up on blocked or slow work.",
                 "jira_created": None, "step": "master"}
 
-    def entitled_candidates(account: str, node: str, worker_id: str = "") -> tuple[list[dict], str]:
+    def entitled_candidates(account: str, node: str, worker_id: str, state: dict) -> tuple[list[dict], str]:
         """Filter offers by account, machine, and project plan limits without affecting active runs."""
-        state = licensing.enforce_work_entitlement(ctx, account, node,
-                                                    public_key=ctx.settings.license_public_key)
         candidates = eligible(account, node)
         project_priorities = {key: int(getattr(project, "priority", 5) or 5)
                               for key, project in ctx.repo().projects.items()}
@@ -4662,28 +4663,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         reason = refused[0] if candidates and not allowed and refused else ""
         return allowed, reason
 
-    @app.get("/v1/work/candidates")
-    def candidates(account: str, node: str = Depends(node_auth), worker_id: str = Query("", max_length=128)) -> dict:
-        try:
-            tickets, reason = entitled_candidates(account, node, worker_id)
-        except licensing.LicenseError as exc:
-            return {"tickets": [], "reason": str(exc)}
-        policy = rollout.node_compatible(ctx, node, RELEASES)
-        if not policy["compatible"]:
-            return {"tickets": [], "reason": f"version skew: {policy['reason']}"}
-        result = {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"],
-                                "labels": t["labels"], "step": t["step"]} for t in tickets[:20]]}
-        if reason:
-            result["reason"] = reason
-        return result
-
-    @app.get("/v1/master/candidate")
-    def master_cycle_candidate(account: str, node: str = Depends(node_auth)) -> dict:
-        try:
-            licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
-        except licensing.LicenseError as exc:
-            return {"candidate": None, "reason": str(exc)}
-        return {"candidate": master_candidate(account, node)}
+    load_policy_api.register_worker_candidate_routes(app, ctx, node_auth, RELEASES, entitled_candidates,
+                                                     master_candidate)
 
     @app.get("/v1/ba-chat/candidate")
     def ba_chat_candidate(account: str, node: str = Depends(node_auth)) -> dict:
@@ -4727,6 +4708,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                 raise HTTPException(403, f"account {body.account} does not run on {node}")
             if account:
                 return JSONResponse({"claimed": False, "reason": "ticket is already claimed"}, status_code=409)
+        load_capacity, blocked = load_policy_api.work_claim_capacity(ctx, node)
+        if blocked:
+            return blocked
         try:
             state = licensing.enforce_work_entitlement(ctx, body.account, node,
                                                         public_key=ctx.settings.license_public_key)
@@ -4850,12 +4834,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                           "quota history is not reliable enough to compare eligible accounts.")
             run_details["capacity"] = {"estimate": ticket_estimate, "account_fit": fit,
                                        "assignment_reason": reason, "assigned_at": utcnow().isoformat()}
-        if not shared_accounts.claim_run(ctx.db, acc, (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
-                                                       model, node, c.fence, h(run_token))):
+        claim_values = (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
+                        model, node, c.fence, h(run_token))
+        if not load_policy_api.claim_run(ctx, acc, claim_values, load_capacity):
             ctx.leases.release(t["key"], run_id, c.fence)
             hotfiles.unreserve(ctx.db, run_id)
             return JSONResponse({"claimed": False, "reason": f"account {acc.id} is at its limit of {acc.sessions}"
-                                 " concurrent sessions"}, status_code=409)
+                                 " concurrent sessions or machine load capacity is full"}, status_code=409)
         if run_details:
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
         if body.step == "dev" and prior_dev and prior_dev.get("pr_url") and prior_dev.get("branch"):
@@ -4959,6 +4944,8 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- configured Jira version releases ------------------------------------------------------------------
     @app.get("/v1/version-releases/candidates")
     def version_release_candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        if blocked := load_policy_api.blocked_offer(ctx, node, "versions"):
+            return blocked
         try:
             state = licensing.enforce_work_entitlement(ctx, account, node,
                                                         public_key=ctx.settings.license_public_key)
@@ -5006,6 +4993,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
+        load_capacity = load_policy_api.version_claim_capacity(ctx, node)
         try:
             state = licensing.enforce_work_entitlement(ctx, body.account, node,
                                                         public_key=ctx.settings.license_public_key)
@@ -5101,9 +5089,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             selected_settings = {"repo": project.repo, "base": project.base,
                                  "checks": version_release.check_commands(project), "stack": project.stack,
                                  "containers": bool(project.settings_for_repo(project.repo).get("containers"))}
-            if not shared_accounts.claim_run(
-                    ctx.db, acc,
-                    (run_id, key, project.key, "version_release", acc.id, acc.provider, "", node, lease.fence, "")):
+            claim_values = (run_id, key, project.key, "version_release", acc.id, acc.provider, "", node, lease.fence, "")
+            if not load_policy_api.claim_run(ctx, acc, claim_values, load_capacity):
                 raise HTTPException(409, f"account {acc.id} has no shared session capacity on {node}")
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s",
                        (J({"repository": project.repo, "repository_settings": selected_settings,
@@ -5251,7 +5238,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                 raise HTTPException(422, str(exc)) from exc
         run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
         details.pop("support_log_truncated", None)
-        outcome = body.outcome
+        outcome, error_kind = body.outcome, body.error_kind
+        if still_owner:
+            outcome, error_kind, details = load_policy.result_after_load_failure(
+                ctx, node, body, details, utcnow().isoformat())
+            body.outcome = outcome
+            body.error_kind = error_kind
         late_result = run_inbox_control.finish(ctx, run, run_id, body, details, node)
         account_update_allowed = not late_result and still_owner
         status_update_allowed = account_update_allowed and run_inbox_control.account_update_allowed(
@@ -5330,7 +5322,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 log.warning("worklog for %s failed: %s", run["ticket_key"], e)
         ctx.events.emit("run.finished", ticket=run["ticket_key"], project=run["project"], step=run["step"], run_id=run_id,
                         fence=body.fence, account=run["account_id"], provider=run["provider"], model=run["model"],
-                        node=node, duration_ms=dur, outcome=outcome, reason=body.error_kind or body.summary[:200],
+                        node=node, duration_ms=dur, outcome=outcome, reason=error_kind or body.summary[:200],
                         tokens_in=body.tokens_in, tokens_out=body.tokens_out, cost_usd=body.cost_usd,
                         still_owner=still_owner, pr_url=body.pr_url)
         try:  # quality by role: this result may switch the role off or settle a probation ticket

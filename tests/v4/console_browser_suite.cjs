@@ -1,5 +1,6 @@
 /* Browser journeys for JAIF-252. The Python harness starts an isolated v4 control plane and supplies sample data. */
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require(process.env.AIFLOW4_CONSOLE_BROWSER_MODULE);
@@ -7,16 +8,22 @@ const { chromium } = require(process.env.AIFLOW4_CONSOLE_BROWSER_MODULE);
 const config = JSON.parse(fs.readFileSync(process.env.AIFLOW4_CONSOLE_BROWSER_CONFIG, 'utf8'));
 const runInboxMessages = Object.create(null);
 const traceDir = process.env.AIFLOW4_PLAYWRIGHT_TRACE_DIR;
+
+function forwardedIp(person, mode) {
+  const personIndex = config.roles.findIndex((item) => item.role === person.role);
+  const modeIndex = ['light', 'dark', 'phone'].indexOf(mode);
+  return `198.51.100.${personIndex * 3 + modeIndex + 1}`;
+}
 const screens = [
   'Dashboard', 'Work board', 'Delivery', 'SA', 'Team Lead', 'Business', 'Human review', 'Stakeholder',
-  'Machines and AI', 'Users and roles', 'Knowledge', 'Backup & Restore', 'Integrations', 'Projects', 'Licence',
+  'Machines and AI', 'Users and roles', 'Knowledge', 'Backup & Restore', 'Integrations', 'Projects', 'Licence', 'Security',
   'Notifications', 'Support'
 ];
 const viewPath = {
   Dashboard: '/cc', 'Work board': '/work', Delivery: '/delivery', SA: '/sa', 'Team Lead': '/lead',
   Business: '/business', 'Human review': '/review', Stakeholder: '/stakeholder', 'Machines and AI': '/machines',
   'Users and roles': '/users', Knowledge: '/knowledge', 'Backup & Restore': '/backup', Integrations: '/integrations',
-  Projects: '/projects', Licence: '/licensing', Notifications: '/notifications', Support: '/support'
+  Projects: '/projects', Licence: '/licensing', Security: '/security', Notifications: '/notifications', Support: '/support'
 };
 const landingPath = {
   product_owner: '/cc', delivery: '/delivery', team_lead: '/lead', sa: '/sa', ba: '/business',
@@ -72,7 +79,12 @@ async function auditScreen(page, label) {
     if (!keyboardTargets.length) issues.push('no screen control is reachable by keyboard');
     return issues;
   });
-  assert.deepEqual(problems, [], `${label} accessibility audit: ${problems.join('; ')}`);
+  const panelText = await page.evaluate(() => {
+    const selected = document.querySelector('[aria-label="Console views"] [role="tab"][aria-selected="true"]');
+    const panel = selected && document.getElementById(selected.getAttribute('aria-controls'));
+    return panel ? panel.innerText : '';
+  });
+  assert.deepEqual(problems, [], `${label} accessibility audit: ${problems.join('; ')}\n${panelText}`);
 
   // Start at the active tab and use only Tab presses until focus enters this screen's panel.
   const tab = page.getByRole('tab', { name: label, exact: true });
@@ -90,17 +102,71 @@ async function auditScreen(page, label) {
   assert.ok(enteredPanel, `${label} cannot be reached by keyboard tab order`);
 }
 
+function totpCode(secret) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0, value = 0;
+  const bytes = [];
+  for (const character of secret.replace(/=+$/, '').toUpperCase()) {
+    const digit = alphabet.indexOf(character);
+    assert.notEqual(digit, -1, 'MFA setup returned an invalid base32 secret');
+    value = (value << 5) | digit;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000)));
+  const digest = crypto.createHmac('sha1', Buffer.from(bytes)).update(counter).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1000000).padStart(6, '0');
+}
+
+let adminRecoveryCodes = [];
+
+async function submitLogin(page, person, code = '') {
+  await page.getByLabel('Email').fill(person.email);
+  await page.getByLabel('Password').fill(person.password);
+  if (code) await page.getByLabel(/Authentication code or recovery code/).fill(code);
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await page.waitForURL((url) => url.pathname === '/cc' || url.pathname === '/security');
+}
+
 async function signInInPage(page, person, mode) {
   const dimensions = mode === 'phone' ? { width: 390, height: 844 } : { width: 1365, height: 900 };
   await page.goto(`${config.baseUrl}/login?next=%2Fcc`, { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: 'AI Flow Command Center' }).waitFor({ state: 'visible' });
   await auditLogin(page);
-  await page.getByLabel('Email').fill(person.email);
-  await page.getByLabel('Password').fill(person.password);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.waitForURL('**/cc');
+  await submitLogin(page, person, person.role === 'administrator' ? adminRecoveryCodes.shift() || '' : '');
+  if (new URL(page.url()).pathname === '/security') {
+    await page.getByRole('heading', { name: 'Security', exact: true }).waitFor({ state: 'visible' });
+    const setup = page.getByRole('button', { name: 'Set up two-factor sign-in', exact: true });
+    await setup.waitFor({ state: 'visible' });
+    await setup.click();
+    const secret = (await page.locator('[data-sec-secret]').textContent()).trim();
+    await page.getByLabel('Code', { exact: true }).fill(totpCode(secret));
+    await page.getByRole('button', { name: 'Turn on two-factor', exact: true }).click();
+    const codeBlock = page.locator('[data-sec-codes]');
+    await codeBlock.waitFor({ state: 'visible' });
+    adminRecoveryCodes = (await codeBlock.textContent()).trim().split(/\s+/);
+    assert.equal(adminRecoveryCodes.length, 10, 'MFA enrollment did not show the ten one-time recovery codes');
+
+    const loggedOut = await page.evaluate(async () => {
+      const csrf = document.cookie.split(';').map((item) => item.trim())
+        .find((item) => item.startsWith('aiflow4_csrf='))?.slice('aiflow4_csrf='.length) || '';
+      const response = await fetch('/v1/auth/logout', { method: 'POST', credentials: 'same-origin',
+        headers: { 'X-CSRF-Token': decodeURIComponent(csrf) } });
+      return response.ok;
+    });
+    assert.equal(loggedOut, true, 'MFA enrollment session did not sign out cleanly');
+    await page.goto(`${config.baseUrl}/login?next=%2Fcc`, { waitUntil: 'domcontentloaded' });
+    await page.getByRole('heading', { name: 'AI Flow Command Center' }).waitFor({ state: 'visible' });
+    await submitLogin(page, person, adminRecoveryCodes.shift());
+  }
+  assert.equal(new URL(page.url()).pathname, '/cc', 'Administrator did not reach the dashboard after MFA sign-in');
   await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
-  await page.waitForFunction(() => !document.documentElement.classList.contains('role-loading'));
+  await page.locator('html.role-loading').waitFor({ state: 'detached' });
   const actualScheme = await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches);
   assert.equal(actualScheme, mode === 'dark', `${mode} color scheme was not applied`);
   assert.equal(page.viewportSize().width, dimensions.width);
@@ -131,12 +197,16 @@ async function visitScreens(page, expected) {
   for (const label of expected) {
     const tab = page.getByRole('tab', { name: label, exact: true });
     await tab.click();
-    await tab.waitFor({ state: 'visible' });
-    await page.waitForFunction((name) => {
-      const selected = Array.from(document.querySelectorAll('[aria-label="Console views"] [role="tab"]')).find((item) => item.getAttribute('aria-selected') === 'true');
-      const panel = selected && document.getElementById(selected.getAttribute('aria-controls'));
-      return selected?.innerText.trim() === name && !!panel && !!panel.textContent.trim();
-    }, label, { timeout: 12000 });
+    await page.getByRole('tab', { name: label, exact: true, selected: true })
+      .waitFor({ state: 'visible', timeout: 12000 });
+    const panelId = await tab.getAttribute('aria-controls');
+    assert.ok(panelId, `${label} view has no controlled panel`);
+    await page.locator(`#${panelId}`).filter({ hasText: /\S/ })
+      .waitFor({ state: 'visible', timeout: 12000 });
+    if (label === 'Security') {
+      await page.locator('#view-security button, #view-security input, #view-security select').first()
+        .waitFor({ state: 'visible', timeout: 12000 });
+    }
     await auditScreen(page, label);
   }
 }
@@ -210,7 +280,10 @@ async function exerciseRunInbox(page, mode) {
   await workInbox.waitFor({ state: 'visible' });
   await workInbox.getByRole('heading', { name: 'Guide a live run', exact: true }).waitFor({ state: 'visible' });
   await workInbox.getByLabel('Active run').selectOption(config.inboxRunId);
-  await workInbox.getByLabel('Message type').selectOption('request');
+  const kindSelector = workInbox.getByLabel('Message type');
+  await workInbox.locator('#run-inbox-kind:not([disabled])')
+    .waitFor({ state: 'visible', timeout: 15000 });
+  await kindSelector.selectOption('request');
   await workInbox.getByLabel('Message for the worker').fill(message);
   const send = page.waitForResponse((response) => response.request().method() === 'POST' &&
     new URL(response.url()).pathname === `/v1/runs/${config.inboxRunId}/inbox`);
@@ -219,6 +292,7 @@ async function exerciseRunInbox(page, mode) {
   assert.equal(response.status(), 201, 'The active-run composer did not queue the request');
   const created = await response.json();
   assert.equal(created.message.status, 'queued', 'A new inbox message did not start in the queued state');
+  assert.equal(created.message.kind, 'request', 'The selected inbox message kind was not preserved');
   runInboxMessages[mode] = { id: created.message.id, body: message };
   const sentEntry = workInbox.locator('article.alert').filter({ hasText: message });
   await sentEntry.getByText(message, { exact: true }).waitFor({ state: 'visible' });
@@ -480,7 +554,7 @@ async function exerciseMode(browser, mode) {
   const administrator = config.roles.find((person) => person.role === 'administrator');
   const dimensions = mode === 'phone' ? { width: 390, height: 844 } : { width: 1365, height: 900 };
   const context = await browser.newContext({ viewport: dimensions, colorScheme: mode === 'dark' ? 'dark' : 'light',
-    hasTouch: mode === 'phone' });
+    hasTouch: mode === 'phone', extraHTTPHeaders: { 'X-Forwarded-For': forwardedIp(administrator, mode) } });
   const page = await context.newPage();
   await traceOnFailure(context, `administrator-${mode}`, async () => {
     await signInInPage(page, administrator, mode);
@@ -491,7 +565,8 @@ async function exerciseMode(browser, mode) {
     await exerciseReviews(page, mode);
     await exerciseMachineAndUserAdministration(page, mode);
     await page.getByRole('tab', { name: 'Dashboard', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('[aria-label="Console views"] [role="tab"][aria-selected="true"]')?.innerText.trim() === 'Dashboard');
+    await page.getByRole('tab', { name: 'Dashboard', exact: true, selected: true })
+      .waitFor({ state: 'visible' });
     if (mode === 'phone') await exerciseRunInboxLifecycle(page);
   });
   await context.close();
@@ -504,7 +579,8 @@ async function exerciseRoleMenus(browser) {
     for (const person of people) {
       const context = await browser.newContext({
         viewport: dimensions,
-        colorScheme: mode === 'dark' ? 'dark' : 'light'
+        colorScheme: mode === 'dark' ? 'dark' : 'light',
+        extraHTTPHeaders: { 'X-Forwarded-For': forwardedIp(person, mode) }
       });
       const page = await context.newPage();
       await traceOnFailure(context, `role-${person.role}-${mode}`, async () => {
@@ -514,7 +590,7 @@ async function exerciseRoleMenus(browser) {
         await page.getByLabel('Password').fill(person.password);
         await page.getByRole('button', { name: 'Sign in', exact: true }).click();
         await page.waitForURL(`**${landingPath[person.role]}`);
-        await page.waitForFunction(() => !document.documentElement.classList.contains('role-loading'));
+        await page.locator('html.role-loading').waitFor({ state: 'detached' });
         const actualScheme = await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches);
         assert.equal(actualScheme, mode === 'dark', `${person.role} ${mode} color scheme was not applied`);
         assert.equal(page.viewportSize().width, dimensions.width, `${person.role} ${mode} viewport was not applied`);

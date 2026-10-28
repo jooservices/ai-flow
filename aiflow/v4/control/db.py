@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import psycopg
 from psycopg.rows import dict_row
@@ -18,19 +20,46 @@ class DB:
         self.url = url
         self.pool = ConnectionPool(url, min_size=min_size, max_size=max_size,
                                    kwargs={"row_factory": dict_row, "application_name": "aiflow4-control"}, open=True)
+        self._active_connection: ContextVar[psycopg.Connection | None] = ContextVar(
+            f"aiflow4_db_connection_{id(self)}", default=None)
 
     def close(self) -> None:
         self.pool.close()
 
+    @contextmanager
+    def transaction(self) -> Iterator[psycopg.Connection]:
+        """Share one transaction across DB helpers in this context, using a savepoint when nested."""
+        active = self._active_connection.get()
+        if active is not None:
+            with active.transaction():
+                yield active
+            return
+        with self.pool.connection() as c:
+            token = self._active_connection.set(c)
+            try:
+                with c.transaction():
+                    yield c
+            finally:
+                self._active_connection.reset(token)
+
     def all(self, sql: str, params: Any = None) -> list[dict]:
+        active = self._active_connection.get()
+        if active is not None:
+            return list(active.execute(sql, params).fetchall())
         with self.pool.connection() as c:
             return list(c.execute(sql, params).fetchall())
 
     def one(self, sql: str, params: Any = None) -> dict | None:
+        active = self._active_connection.get()
+        if active is not None:
+            return active.execute(sql, params).fetchone()
         with self.pool.connection() as c:
             return c.execute(sql, params).fetchone()
 
     def run(self, sql: str, params: Any = None) -> int:
+        active = self._active_connection.get()
+        if active is not None:
+            return active.execute(sql, params).rowcount
         with self.pool.connection() as c:
             cur = c.execute(sql, params)
             return cur.rowcount

@@ -8,6 +8,7 @@ from aiflow.v4.control import ba_chat, notify
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.ui import mount_ui
 from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.core import secretbox
 
 
 BOT_TOKEN = "fake-telegram-bot-token"
@@ -218,7 +219,8 @@ def test_cli_configures_the_same_channel_without_printing_the_token(ctx, monkeyp
                      "--project", "TESTWP", "--token-stdin"]) == 0
     assert BOT_TOKEN not in capsys.readouterr().out
     configured = ctx.db.one("SELECT config FROM notification_channels WHERE name='CLI brainstorm'")
-    assert configured["config"]["bot_token"] == BOT_TOKEN
+    assert secretbox.is_encrypted(configured["config"]["bot_token"])
+    assert notify._reveal_config("telegram", configured["config"])["bot_token"] == BOT_TOKEN
     assert configured["config"]["ba_chat_enabled"] is True
 
 

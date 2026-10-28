@@ -21,6 +21,7 @@ from aiflow.v4.control import licensing
 from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.fencing import Leases
 from aiflow.v4.core.settings import Settings
+from aiflow.v4.core import secretbox
 
 REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "")
 DATABASE_URL = os.environ.get("AIFLOW4_TEST_DATABASE_URL", "")
@@ -31,6 +32,40 @@ REDIS_PREFIX = os.environ.get("AIFLOW4_TEST_REDIS_PREFIX", os.environ.get("REDIS
 def runtime_operation_key_in_test_workspace(tmp_path, monkeypatch):
     """Keep per-node runtime-setting private keys inside the test's temporary workspace."""
     monkeypatch.setenv("AIFLOW4_NODE_OPERATION_KEY_FILE", str(tmp_path / "runtime-settings.key"))
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "raw_csrf: do not add the CSRF header to console requests (tests of the protection)")
+    # The CI unit-test job does not provision a production secret key. Give its isolated process test-only key material
+    # so app contexts can initialize; security tests explicitly remove or replace it when exercising fail-closed paths.
+    os.environ["AIFLOW4_SECRET_KEY"] = secretbox.generate_key()
+
+
+@pytest.fixture(autouse=True)
+def console_csrf_header(request, monkeypatch):
+    """A console session cookie needs the session's X-CSRF-Token on every state-changing request (AC4 of JAIF-231).
+    Tests of other features sign in with a forged cookie, so this adds the matching token for them. Tests of the
+    protection itself opt out with `@pytest.mark.raw_csrf` and send exactly what they mean to."""
+    raw_csrf = request.node.get_closest_marker("raw_csrf") is not None
+    from starlette.testclient import TestClient
+    from aiflow.v4.control.console_auth import COOKIE_NAME, csrf_token
+    original = TestClient.request
+
+    def request_with_token(self, method, url, **kwargs):
+        headers = kwargs.get("headers") or {}
+        if (method.upper() == "POST" and str(url).split("?", 1)[0].endswith("/v1/auth/login")
+                and not any(k.lower() in {"origin", "referer"} for k in headers)):
+            headers = {**headers, "Origin": str(self.base_url).rstrip("/")}
+            kwargs["headers"] = headers
+        cookie = ([c.value for c in self.cookies.jar if c.name == COOKIE_NAME] or [None])[-1]
+        if (not raw_csrf and cookie and method.upper() not in ("GET", "HEAD", "OPTIONS")
+                and not any(k.lower() == "x-csrf-token" for k in headers)):
+            ctx = getattr(self.app, "state", None) and getattr(self.app.state, "ctx", None)
+            if ctx is not None:
+                kwargs["headers"] = {**headers, "X-CSRF-Token": csrf_token(cookie, ctx.settings.console_session_secret)}
+        return original(self, method, url, **kwargs)
+
+    monkeypatch.setattr(TestClient, "request", request_with_token)
 
 
 @pytest.fixture
@@ -502,7 +537,12 @@ def join_node(client, name: str, ip: str = "", role: str = "worker", project: st
         from aiflow.v4.control.db import J
         from aiflow.v4.control.system_check import refresh_node
 
-        metrics = {"disk_free": 20 * 1024 ** 3, "services": services}
+        # This helper models a connected agent that has already reported a healthy baseline.
+        # Keep every scheduler-required measurement present so feature tests that omit a later
+        # heartbeat's metrics are exercising the behavior under test, not missing telemetry.
+        metrics = {"hostname": name, "load1": 0.1, "cpus": 4, "mem_total": 100, "mem_used": 20,
+                   "disk_free": 20 * 1024 ** 3, "disk_total": 100 * 1024 ** 3,
+                   "services": services}
         ctx.db.run("UPDATE nodes SET tools=%s,metrics=%s WHERE name=%s", (J(tools), J(metrics), name))
         readiness = refresh_node(
             ctx, name, "heartbeat",

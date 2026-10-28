@@ -5,6 +5,7 @@ name: aiflow4-app
 x-app: &app
   image: ${AIFLOW4_IMAGE_REPOSITORY:-aiflow4/control}:${AIFLOW4_IMAGE_TAG:-latest}
   restart: unless-stopped
+  user: "${AIFLOW4_CONTAINER_UID:-10001}:${AIFLOW4_CONTAINER_GID:-10001}"  # not root; must own the mounted directories
   env_file: [/etc/aiflow/secrets/control/aiflow4.env]
   environment: &app-environment
     AIFLOW4_ENV: lab

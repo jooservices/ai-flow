@@ -49,6 +49,7 @@
       var canSend = !S.consoleUser || permissions.indexOf('*') >= 0 || permissions.indexOf('review.actions') >= 0;
       if (!canSend) return '';
       load(state.runId, false);
+      var loadingDisabled = state.loading ? ' disabled' : '';
       var esc = app.esc;
       var options = active.map(function (run) {
         var label = run.ticket + ' · ' + run.step + ' · ' + run.node;
@@ -68,10 +69,10 @@
       if (state.error) html += '<div class="alert"><span class="a-detail">' + esc(state.error) + '</span></div>';
       if (state.notice) html += '<div class="alert"><span class="a-detail">' + esc(state.notice) + '</span></div>';
       if (canSend && selected) {
-        html += '<label class="field"><span>Message type</span><select id="run-inbox-kind"><option value="context"' + (state.kind === 'context' ? ' selected' : '') + '>Context</option>' +
+        html += '<label class="field"><span>Message type</span><select id="run-inbox-kind"' + loadingDisabled + '><option value="context"' + (state.kind === 'context' ? ' selected' : '') + '>Context</option>' +
           '<option value="request"' + (state.kind === 'request' ? ' selected' : '') + '>Request</option><option value="idea"' + (state.kind === 'idea' ? ' selected' : '') + '>Idea</option></select></label>';
-        html += '<label class="field"><span>Message for the worker</span><textarea id="run-inbox-draft" maxlength="8000" rows="3" placeholder="Add context or a request for the current run…">' + esc(state.draft) + '</textarea></label>';
-        html += '<button class="btn primary" type="button" data-act="run-inbox-send"' + (state.sending || !state.draft.trim() ? ' disabled' : '') + '>Send to worker</button>';
+        html += '<label class="field"><span>Message for the worker</span><textarea id="run-inbox-draft" maxlength="8000" rows="3"' + loadingDisabled + ' placeholder="Add context or a request for the current run…">' + esc(state.draft) + '</textarea></label>';
+        html += '<button class="btn primary" type="button" data-act="run-inbox-send"' + (state.loading || state.sending || !state.draft.trim() ? ' disabled' : '') + '>Send to worker</button>';
       } else if (!selected) html += '<div class="muted">This run has ended. Any message not included at the next checkpoint is marked undelivered.</div>';
       return html + '</div></section>';
     }
@@ -93,10 +94,17 @@
       var focused = target && typeof target.contains === 'function' && target.contains(document.activeElement) ? document.activeElement : null;
       var focusedId = focused && /^(run-inbox-draft|run-inbox-kind|run-inbox-run)$/.test(focused.id) ? focused.id : '';
       var selection = focusedId === 'run-inbox-draft' ? [focused.selectionStart, focused.selectionEnd] : null;
+      var focusedValue = focusedId === 'run-inbox-kind' ? focused.value : null;
       if (target) target.innerHTML = html;
       if (focusedId) {
         var restore = target && target.querySelector('#' + focusedId);
-        if (restore) { restore.focus(); if (selection) restore.setSelectionRange(selection[0], selection[1]); }
+        if (restore) {
+          restore.focus();
+          if (focusedId === 'run-inbox-kind' && focusedValue) {
+            restore.value = focusedValue; S.runInbox.kind = focusedValue;
+          }
+          if (selection) restore.setSelectionRange(selection[0], selection[1]);
+        }
       }
     };
     document.addEventListener('click', function (event) {

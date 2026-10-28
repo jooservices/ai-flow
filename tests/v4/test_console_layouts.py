@@ -107,10 +107,10 @@ console.log(JSON.stringify({{
 
 
 def test_dashboard_has_one_page_wide_layout_grid_for_both_sections():
-    html = PAGE.read_text()
-    assert "data-layout-section=" not in html
+    html = (PAGE.parent / "layout.js").read_text()
+    assert "data-layout-section=" not in PAGE.read_text()
     assert "root.querySelectorAll('[data-block]')" in html
-    assert "Arrange all Dashboard blocks together" in html
+    assert "Arrange all Dashboard blocks together" in PAGE.read_text()
 
 
 # --- resolve: stale and new blocks -----------------------------------------------------------------------------
@@ -230,6 +230,8 @@ def run_js(driver: str) -> object:
         pytest.skip("Node.js is needed to run the console script")
     script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
     script = script[:script.index(BOOT)]
+    assets = PAGE.parent
+    script += (assets / "layout.js").read_text() + (assets / "security.js").read_text()
     result = subprocess.run([node, "-"], input=STUBS + script + driver + "\n})();\n", text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -331,7 +333,7 @@ def test_layout_mode_in_a_browser_drag_resize_hide_keyboard_reset_and_phone(ctx)
     import time
     import uvicorn
 
-    from aiflow.v4.control import login
+    from aiflow.v4.control import login, mfa
     from aiflow.v4.control.api import create_app
     from aiflow.v4.control.ui import mount_ui
 
@@ -353,6 +355,16 @@ def test_layout_mode_in_a_browser_drag_resize_hide_keyboard_reset_and_phone(ctx)
         person = "layout-browser@example.test"
         password = login.seed_user(ctx.db, person, "owner", "Layout Browser")
         assert password
+        # This administrator signs in through the same MFA gate as a real operator. Recovery codes keep the browser
+        # exercise independent of the 30-second TOTP window and can be consumed once per fresh browser context.
+        secret = mfa.new_secret()
+        mfa.store_pending_secret(ctx.db, person, secret, ctx.settings.console_session_secret)
+        ctx.db.run("UPDATE console_users SET totp_enabled=true WHERE email=%s", (person,))
+        recovery_codes = mfa.new_recovery_codes(5)
+        recovery_key = mfa.key_for(ctx.settings.console_session_secret)
+        for code in recovery_codes:
+            ctx.db.run("INSERT INTO console_recovery_codes (email, code_hash) VALUES (%s,%s)",
+                       (person, mfa.recovery_hash(code, recovery_key)))
         app = create_app(ctx)
         mount_ui(app, ctx)
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -382,6 +394,7 @@ def test_layout_mode_in_a_browser_drag_resize_hide_keyboard_reset_and_phone(ctx)
                     "AIFLOW4_LAYOUT_BASE_URL": base_url,
                     "AIFLOW4_LAYOUT_EMAIL": person,
                     "AIFLOW4_LAYOUT_PASSWORD": password,
+                    "AIFLOW4_LAYOUT_CODE": recovery_codes[0],
                     "AIFLOW4_LAYOUT_PLAYWRIGHT_MODULE": str(Path(cli).resolve().parent),
                 })
                 script = r"""
@@ -395,12 +408,13 @@ const { chromium } = require(process.env.AIFLOW4_LAYOUT_PLAYWRIGHT_MODULE);
     await page.goto(base + '/login?next=%2Fcc', { waitUntil: 'domcontentloaded' });
     await page.getByLabel('Email').fill(process.env.AIFLOW4_LAYOUT_EMAIL);
     await page.getByLabel('Password').fill(process.env.AIFLOW4_LAYOUT_PASSWORD);
+    await page.getByLabel(/Authentication code or recovery code/).fill(process.env.AIFLOW4_LAYOUT_CODE);
     await page.getByRole('button', { name: 'Sign in' }).click();
     await page.waitForURL(base + '/cc');
     await page.goto(base + '/dashboard', { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Customize layout' }).waitFor({ state: 'visible', timeout: 10000 });
     const grid = page.locator('#view-cc .blocks');
-    await page.waitForFunction(() => document.querySelectorAll('#view-cc .blocks .block-cell').length >= 8);
+    await grid.locator('.block-cell').nth(7).waitFor({ state: 'attached' });
     let order = await grid.locator('.block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId));
     assert.deepEqual(order.slice(0, 3), ['tokens', 'quota', 'usage']);
     await page.getByRole('button', { name: 'Customize layout' }).click();
@@ -430,6 +444,7 @@ const { chromium } = require(process.env.AIFLOW4_LAYOUT_PLAYWRIGHT_MODULE);
                 page.goto(base_url + "/login?next=%2Fcc", wait_until="domcontentloaded")
                 page.get_by_label("Email").fill(person)
                 page.get_by_label("Password").fill(password)
+                page.get_by_label("Authentication code or recovery code").fill(recovery_codes.pop(0))
                 page.get_by_role("button", name="Sign in").click()
                 page.wait_for_url(base_url + "/cc")
                 page.goto(base_url + "/users", wait_until="domcontentloaded")

@@ -162,6 +162,8 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "role": _STATE_STRING, "status": _STATE_STRING, "accepting_work": _STATE_BOOLEAN,
         "sessions_busy": _STATE_INTEGER, "slots_total": _STATE_INTEGER, "slots_used": _STATE_INTEGER,
         "release": _STATE_STRING, "metrics": _STATE_ANY_OBJECT, "tools": _STATE_ANY_OBJECT,
+        "load_limits": _STATE_ANY_OBJECT, "load_state": _STATE_ANY_OBJECT,
+        "host_load_limits": _STATE_ANY_OBJECT, "host_load_state": _STATE_ANY_OBJECT,
         "has_agent": _STATE_BOOLEAN, "required_tools": _STATE_STRING_ARRAY,
         "desired_services": _state_array(_state_object({"name": _STATE_STRING, "unit": _STATE_STRING,
             "healthcheck_configured": _STATE_BOOLEAN}, ("name", "unit", "healthcheck_configured"))),

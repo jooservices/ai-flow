@@ -559,6 +559,8 @@ def _link_playwright(env: dict[str, str], link_dir: Path = Path("/usr/local/bin"
     if not (source.exists() or source.is_symlink()):
         raise OperationError(f"Playwright was installed but its command is missing from {prefix / 'bin'}")
     link = link_dir / "playwright"
+    if os.path.abspath(source) == os.path.abspath(link):
+        return
     temp_link = link.with_name(".playwright.aiflow4")
     try:
         temp_link.unlink(missing_ok=True)

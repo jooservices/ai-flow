@@ -5541,8 +5541,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not late_result:
             try:
                 knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
-                knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
-            except Exception as exc:  # noqa: BLE001 - capture cannot undo a completed worker run
+            except Exception as exc:  # noqa: BLE001 - per-run capture cannot undo a completed worker run
                 log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
         dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
         if ctx.jira and run["step"] == "dev" and not late_result and body.outcome not in ("lost",):

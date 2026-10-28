@@ -47,6 +47,18 @@ class HeartbeatBody(BaseModel):
     environment_items: dict[str, list[str]] = Field(default_factory=dict)
 
 
+def reported_heartbeat(body: HeartbeatBody, previous: dict | None) -> tuple[dict, str, dict, dict]:
+    """Keep stored heartbeat inventory when older agents omit fields from their request."""
+    prior = previous or {}
+    prior_metrics = prior.get("metrics") or {}
+    return (
+        body.tools if "tools" in body.model_fields_set else prior.get("tools") or {},
+        body.release_version if "release_version" in body.model_fields_set else prior.get("release_version") or "",
+        body.metrics if "metrics" in body.model_fields_set else prior_metrics,
+        body.services if "services" in body.model_fields_set else prior_metrics.get("services", {}),
+    )
+
+
 def _refresh_join(ctx, node: str) -> None:
     try:
         system_check.refresh_node(ctx, node, "machine_joined")

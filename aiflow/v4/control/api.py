@@ -3576,12 +3576,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if name != node:
             raise HTTPException(403, "token belongs to another node")
         prev = ctx.db.one("SELECT status,accepting_work,release_version,tools,metrics FROM nodes WHERE name=%s", (node,))
-        reported_tools = body.tools if "tools" in body.model_fields_set else (prev or {}).get("tools") or {}
-        reported_release = body.release_version if "release_version" in body.model_fields_set \
-            else (prev or {}).get("release_version") or ""
-        previous_metrics = (prev or {}).get("metrics") or {}
-        reported_metrics = body.metrics if "metrics" in body.model_fields_set else previous_metrics
-        reported_services = body.services if "services" in body.model_fields_set else previous_metrics.get("services", {})
+        reported_tools, reported_release, reported_metrics, reported_services = system_check_api.reported_heartbeat(body, prev)
         inventory = runtime_settings.sanitize_inventory(body.runtime_settings)
         ctx.db.run("UPDATE nodes SET status=CASE WHEN accepting_work THEN 'online' ELSE 'draining' END,"
                    " slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
@@ -4462,9 +4457,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         return ctx.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
                           + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
 
-    def eligible(account_id: str, node: str, *, capacity_routing: bool = True,
-                 ticket_key: str | None = None, lease_checked: bool = False,
-                 step_filter: str | None = None) -> list[dict]:
+    def eligible(account_id: str, node: str, *, capacity_routing: bool = True, ticket_key: str | None = None,
+                 lease_checked: bool = False, step_filter: str | None = None) -> list[dict]:
         """Tickets this account may take now; claims can scope revalidation to their requested ticket and step."""
         repo = ctx.repo()
         acc = repo.account(account_id)
@@ -4524,10 +4518,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         projects = [p for p in projects
                     if not service_gaps(reported_services, repo.projects[p].required_services)]
         projects = [p for p in projects if not system_check.blocking_reasons(node_row.get("readiness"), p, account_id)]
-        roles = set(acc.roles or ["dev", "verify"])
-        if step_filter is not None:
-            role_for_step = work_steps.role_for_step(step_filter)
-            roles &= {role_for_step} if role_for_step else set()
+        roles = work_steps.roles_for_step(acc.roles or ["dev", "verify"], step_filter)
         if not roles:
             return []
         scoped_key = " AND key=%s" if ticket_key is not None else ""
@@ -4969,8 +4960,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.step == "master":
             candidates = [master_candidate(body.account, node)]
         else:
-            candidates = eligible(body.account, node, ticket_key=body.ticket, lease_checked=True,
-                                  step_filter=body.step)
+            candidates = eligible(body.account, node, ticket_key=body.ticket, lease_checked=True, step_filter=body.step)
             offered = next((candidate for candidate in candidates
                             if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
             if offered:

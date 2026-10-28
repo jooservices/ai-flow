@@ -1,4 +1,4 @@
-function flowDoctorPanel(d) {
+function flowDoctorPanel(d, esc, when) {
   var doctor = d.flow_doctor || {}, coverage = doctor.role_coverage || [], findings = doctor.findings || [];
   var actions = doctor.actions || [], interventions = d.operator_interventions || {};
   var h = '<section class="dash-section" aria-labelledby="dashboard-doctor-title"><h2 class="dash-section-title" id="dashboard-doctor-title">Flow health</h2>';

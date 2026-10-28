@@ -30,4 +30,4 @@ def test_console_loads_flow_doctor_panel_from_its_ui_asset():
     assert page.status_code == 200
     assert 'src="/console-assets/flow-doctor.js"' in page.text
     assert script.status_code == 200
-    assert "function flowDoctorPanel(d)" in script.text
+    assert "function flowDoctorPanel(d, esc, when)" in script.text

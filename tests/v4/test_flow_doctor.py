@@ -776,7 +776,9 @@ def test_dashboard_exposes_findings_actions_role_reason_and_intervention_totals(
     assert "role_coverage" in data["flow_doctor"] and data["flow_doctor"]["findings"]
     assert data["operator_interventions"]["last_24h"] == 1
     html = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
-    assert "Flow doctor" in html and "Operator interventions" in html and "Last 7 days" in html
+    panel = (ROOT / "aiflow/v4/control/ui/flow-doctor.js").read_text()
+    assert 'src="/console-assets/flow-doctor.js"' in html
+    assert "Flow doctor" in panel and "Operator interventions" in panel and "Last 7 days" in panel
 
 
 def test_control_waits_for_database_and_redis_before_migration_and_workers_follow_agent(monkeypatch):

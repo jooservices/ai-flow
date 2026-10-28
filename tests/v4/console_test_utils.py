@@ -11,4 +11,4 @@ def console_script(page: Path) -> str:
     script = script[:script.index(BOOT)]
     assets = page.parent
     return "".join((assets / name).read_text(encoding="utf-8") for name in
-                   ("release-readiness.js", "scale-proof.js")) + script
+                   ("release-readiness.js", "scale-proof.js", "flow-doctor.js")) + script

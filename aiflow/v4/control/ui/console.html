@@ -2260,7 +2260,7 @@ function renderDashboard() {
   }
   h += '</section>';
   if (canSeeMachines) h += toolWaitsPanel(d);
-  if (canSeeMachines) h += flowDoctorPanel(d);
+  if (canSeeMachines) h += flowDoctorPanel(d, esc, when);
   if (consoleCan('view.machines_ai')) h += masterAutonomyPanel();
   h += '</section></div>';
   root.innerHTML = h;

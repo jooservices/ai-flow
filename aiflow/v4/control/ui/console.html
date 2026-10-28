@@ -2807,7 +2807,7 @@ function epicsPanel(all, act, id) {
   return h + '</div></section>';
 }
 function renderDBody() {
-  if (!window.AIFlowConsole) { window.AIFlowConsole = { state: S, data: D, esc: esc, when: when, projectResponseError: projectResponseError, renderDBody: renderDBody, activeBoard: function () { return S.view === 'work' ? $('#work-body') : $('#dbody'); } }; window.dispatchEvent(new Event('aiflow-console-ready')); } var all = projTickets();
+  if (!window.AIFlowConsole) { window.AIFlowConsole = { state: S, data: D, esc: esc, when: when, projectResponseError: projectResponseError, renderDBody: renderDBody, activeBoard: function () { return S.view === 'work' ? $('#work-body') : $('#dbody'); } }; if (typeof window.dispatchEvent === 'function') window.dispatchEvent(new Event('aiflow-console-ready')); } var all = projTickets();
   var byKey = {}; all.forEach(function (t) { byKey[t.key] = t; });
   var work = all.filter(function (t) { return t.type !== 'Epic'; });
   var q = S.search.trim().toLowerCase();

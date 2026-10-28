@@ -192,7 +192,8 @@ def run_with_inbox(adapter, spec: RunSpec, heartbeat: Heartbeat, on_progress=Non
             aggregate.tokens_out += response.tokens_out
             aggregate.cost_usd += response.cost_usd
             aggregate.permission_denials += response.permission_denials
-            aggregate.duration_s += response.duration_s
+            aggregate.duration_s = (float(getattr(aggregate, "duration_s", 0.0) or 0.0)
+                                     + float(getattr(response, "duration_s", 0.0) or 0.0))
             aggregate.command_results.extend(response.command_results)
             aggregate.quota = response.quota or aggregate.quota
             aggregate.error_kind = response.error_kind
@@ -201,7 +202,7 @@ def run_with_inbox(adapter, spec: RunSpec, heartbeat: Heartbeat, on_progress=Non
             aggregate.final_text = response.final_text or aggregate.final_text
             aggregate.verdict = response.verdict or aggregate.verdict
             aggregate.verdict_reason = response.verdict_reason or aggregate.verdict_reason
-        remaining = int(spec.timeout_s - aggregate.duration_s)
+        remaining = int(spec.timeout_s - float(getattr(aggregate, "duration_s", 0.0) or 0.0))
         if response.error_kind or heartbeat.lost.is_set() or continuations >= max_continuations or remaining <= 0:
             return aggregate
         messages = heartbeat.checkpoint()

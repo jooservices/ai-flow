@@ -76,7 +76,7 @@ def test_lost_run_accepts_late_usage_once_without_reopening_or_resetting_account
 
     watchdog(ctx)
     assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run["run_id"],))["status"] == "lost"
-    assert ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account_id"],))["status"] == "idle"
+    assert ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account"],))["status"] == "idle"
     _, replacement = _claim(client, ctx, "TESTWP-INBOX-REPLACEMENT")
     assert replacement["account"] == run["account"]
 
@@ -84,7 +84,7 @@ def test_lost_run_accepts_late_usage_once_without_reopening_or_resetting_account
                    "tokens_out": 9, "cost_usd": 0.42, "summary": "The worker finished after losing its lease."}
     stale_fence = {**result_body, "fence": run["fence"] + 1}
     assert client.post(f"/v1/runs/{run['run_id']}/result", json=stale_fence, headers=node).status_code == 409
-    account_status_before = ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account_id"],))["status"]
+    account_status_before = ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account"],))["status"]
     late = client.post(f"/v1/runs/{run['run_id']}/result", json=result_body, headers=node)
 
     assert late.status_code == 200 and not late.json()["still_owner"]
@@ -93,7 +93,7 @@ def test_lost_run_accepts_late_usage_once_without_reopening_or_resetting_account
     assert saved["status"] == "lost" and saved["outcome"] == "lost"
     assert saved["tokens_in"] == 17 and saved["tokens_out"] == 9 and float(saved["cost_usd"]) == 0.42
     assert saved["result_received_at"] is not None
-    assert ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account_id"],))["status"] == account_status_before
+    assert ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account"],))["status"] == account_status_before
     assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (replacement["run_id"],))["status"] == "running"
     assert client.get(f"/v1/runs/{run['run_id']}/inbox").json()["messages"][0]["status"] == "undelivered"
     assert client.post(f"/v1/runs/{run['run_id']}/result", json=result_body, headers=node).status_code == 409

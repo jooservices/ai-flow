@@ -53,6 +53,7 @@ COMMON_CALLS = (
     "/v1/licensing/status", "/v1/master/autonomy",
 )
 PICKER = "/v1/projects"
+CONSOLE_REQUESTS_PER_VIEW = 6
 PAGES: dict[str, tuple[str, ...]] = {
     "/cc": ("/v1/dashboard/waiting", "/v1/dashboard/disagreements", "/v1/dashboard/quota", "/v1/capacity",
             "/v1/escalations"),
@@ -90,7 +91,7 @@ class Scenario:
     page_samples: int = 3
     picker_samples: int = 5
     claim_concurrency: int = 24
-    measurement_concurrency: int = 8
+    measurement_concurrency: int = 2
     measurement_min_active: int = 150
     max_rounds: int = 20
 
@@ -502,7 +503,10 @@ def _claim_round(client, sessions: list[dict[str, str]], headers: dict[str, dict
                          for i, session in enumerate(sessions)]
         if measure_workers:
             measure_jobs = [(page, data) for page, data in PAGES.items()]
-            with ThreadPoolExecutor(max_workers=measure_workers, thread_name_prefix="scale-console-http") as request_pool:
+            # Model a small group of browser clients, each fanning out up to six API calls. A shared
+            # pool sized only to the number of views serializes each page behind unrelated clients.
+            with ThreadPoolExecutor(max_workers=measure_workers * CONSOLE_REQUESTS_PER_VIEW,
+                                    thread_name_prefix="scale-console-http") as request_pool:
                 with ThreadPoolExecutor(max_workers=measure_workers, thread_name_prefix="scale-console") as views_pool:
                     page_futures = [views_pool.submit(_sample_page, measurement_client, page, data, sc.page_samples,
                                                       gate if i < measure_workers else None, request_pool)
@@ -733,8 +737,9 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                         "external_ai_providers_called": False,
                         "local_embeddings_enabled": False,
                         "max_parallel_worker_requests": sc.claim_concurrency,
-                        "max_parallel_console_views": sc.measurement_concurrency,
-                        "max_parallel_requests": sc.claim_concurrency + sc.measurement_concurrency},
+                        "max_parallel_console_views": min(sc.measurement_concurrency, len(PAGES) + 1),
+                        "max_parallel_requests": sc.claim_concurrency +
+                        min(sc.measurement_concurrency, len(PAGES) + 1) * CONSOLE_REQUESTS_PER_VIEW},
         "counts": {"projects": len(project_keys(sc)), "machines": len(headers),
                    "accounts": len({s["id"] for s in sessions}),
                    "sessions": len(sessions), "history_tickets": len(pl["history"]),

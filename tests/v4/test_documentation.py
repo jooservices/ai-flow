@@ -533,7 +533,8 @@ def test_escalation_console_changes_map_to_command_center_screens(monkeypatch):
 def test_scale_proof_panel_injection_maps_only_to_command_center(monkeypatch):
     ui = "aiflow/v4/control/ui/console.html"
     source_lines = (ROOT / ui).read_text().splitlines()
-    line = next(i for i, value in enumerate(source_lines, 1) if "scaleProofPanel(d.scale_proof)" in value)
+    line = next(i for i, value in enumerate(source_lines, 1)
+                if "scaleProofPanel(d.scale_proof, (S.biz || {}).jira_site)" in value)
 
     class Result:
         returncode = 0

@@ -41,7 +41,7 @@ def test_scenario_drives_100_projects_50_machines_and_200_sessions(proof):
     assert report["environment"]["api_execution"] == "FastAPI TestClient in-process"
     assert report["environment"]["persistence"] == "PostgreSQL and Redis"
     assert report["environment"]["local_embeddings_enabled"] is False
-    assert report["environment"]["max_parallel_requests"] == 32
+    assert report["environment"]["max_parallel_requests"] == 36
     assert ctx.db.one("SELECT count(DISTINCT project) AS n FROM tickets")["n"] == 100
 
 

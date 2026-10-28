@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .. import shared_accounts
+from .. import quota as quota_reporting, shared_accounts
 from ..db import J
 
 router = APIRouter()
@@ -48,6 +48,11 @@ def account_probe(account_id: str, body: ProbeBody, request: Request,
                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'legacy_probe',%s,%s)",
                    (account_id, acc.provider, body.model, J(body.quota), body.tokens_in, body.tokens_out,
                     body.cost_usd, body.duration_ms, observed_at, observed_at))
+    latest = ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (account_id,)) or {}
+    forecast = quota_reporting.account_assessment(
+        ctx.db, account_id, acc.provider, body.quota or latest.get("quota") or {})
+    ctx.db.run("UPDATE accounts SET quota_at_risk=%s,quota_forecast=%s WHERE id=%s",
+               (bool(forecast.get("at_risk")), J(forecast), account_id))
     ctx.db.run("UPDATE accounts SET last_probe_at=now(),updated_at=now() WHERE id=%s", (account_id,))
     if "credential_expires_at" in body.model_fields_set:
         ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s",

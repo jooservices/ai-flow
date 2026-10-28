@@ -11,6 +11,7 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 import termios
 import time
 from datetime import UTC, datetime, timedelta
@@ -175,10 +176,25 @@ def _stop_process_group(pid: int, grace_s: float = 0.5) -> None:
         except (ProcessLookupError, PermissionError):
             pass
     if not reaped:
-        try:
-            os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
+        # Never let an uninterruptible or misbehaving CLI stall the worker loop after SIGKILL.
+        reap_deadline = time.monotonic() + max(0.1, grace_s)
+        while time.monotonic() < reap_deadline:
+            try:
+                reaped = os.waitpid(pid, os.WNOHANG)[0] == pid
+            except ChildProcessError:
+                reaped = True
+            if reaped:
+                break
+            time.sleep(0.02)
+        if not reaped:
+            # Reap it asynchronously if the kernel has not reported exit before our deadline.
+            def reap_child() -> None:
+                try:
+                    os.waitpid(pid, 0)
+                except ChildProcessError:
+                    pass
+
+            threading.Thread(target=reap_child, name="quota-cli-reaper", daemon=True).start()
 
 
 def read_quota(provider: str, account_home: str, run_as: list[str] | None = None,

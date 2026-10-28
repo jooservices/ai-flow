@@ -110,6 +110,8 @@ def _ready_for_slash_command(provider: str, raw: bytes) -> bool:
     """Do not send slash input unless the TUI has rendered its interactive prompt."""
     text = _clean_terminal(raw)
     tail = text[-512:]
+    if "trust this folder?" in text.casefold() or "folder access" in text.casefold():
+        return False
     if provider == "codex":
         return ("› ask codex to do anything" in tail.casefold()
                 or "what would you like to do?" in tail.casefold()

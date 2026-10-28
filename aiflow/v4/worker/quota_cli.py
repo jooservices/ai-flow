@@ -111,7 +111,9 @@ def _ready_for_slash_command(provider: str, raw: bytes) -> bool:
     text = _clean_terminal(raw)
     tail = text[-512:]
     if provider == "codex":
-        return bool(re.search(r"(?:^|\n)[^\n]{0,120}(?:›|What would you like to do\?)\s*$", tail))
+        return ("› ask codex to do anything" in tail.casefold()
+                or "what would you like to do?" in tail.casefold()
+                or bool(re.search(r"(?:^|\n)[^\n]{0,120}›\s*$", tail)))
     if provider == "claude":
         return bool(re.search(r"(?:^|\n)[^\n]{0,120}❯\s*$", tail))
     return False

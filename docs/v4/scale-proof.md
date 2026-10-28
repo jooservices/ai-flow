@@ -99,7 +99,7 @@ Every failed budget and every failed correctness check is a finding with a stabl
 
 - the same finding in a later run adds a comment and counts up (`scale_proof_findings.occurrences`), no second ticket;
 - when its ticket is Done and the finding comes back, a new ticket is created;
-- when Jira is unavailable the finding is kept with its error and the ticket is created by the next run.
+- when Jira is unavailable the finding is kept with its error and retried on the next proof submission, even if that run passes; the ticket links back to the original finding run.
 
 ## Console
 

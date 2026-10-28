@@ -367,16 +367,34 @@ def test_a_finding_that_returns_after_its_ticket_is_done_gets_a_new_ticket(clien
     assert second["created"] and second["ticket"] != first and len(ctx.jira.created) == 2
 
 
-def test_a_jira_outage_keeps_the_finding_and_the_next_run_creates_the_ticket(ctx, monkeypatch):
-    run_id = scale_proof.record(ctx, synthetic(pickup=33.0), "v4.7.0", "ci")
+def test_a_jira_outage_retries_the_persisted_finding_on_a_later_passing_submission(client, ctx, monkeypatch):
+    create_issue = ctx.jira.create_issue
     monkeypatch.setattr(ctx.jira, "create_issue", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("jira down")))
-    assert scale_proof.file_tickets(ctx, run_id) == [{"signature": "budget:ticket_pickup", "ticket": "", "created": False}]
-    row = ctx.db.one("SELECT ticket, last_error FROM scale_proof_findings WHERE signature='budget:ticket_pickup'")
-    assert (row["ticket"], row["last_error"]) == ("", "jira down")
-    monkeypatch.undo()
-    [made] = scale_proof.file_tickets(ctx, run_id)
-    assert made["created"] and made["ticket"].startswith("TESTFLOW-")
-    assert ctx.db.one("SELECT last_error FROM scale_proof_findings WHERE signature='budget:ticket_pickup'")["last_error"] == ""
+    failed = client.post("/v1/scale-proof/results",
+                         json={"release": "v4.7.0", "report": synthetic(pickup=33.0)}, headers=OWNER).json()
+    assert failed["passed"] is False
+    assert failed["tickets"] == [{"signature": "budget:ticket_pickup", "ticket": "", "created": False}]
+    pending = ctx.db.one("SELECT ticket,last_error,first_run_id,last_run_id,occurrences"
+                         " FROM scale_proof_findings WHERE signature='budget:ticket_pickup'")
+    assert (pending["ticket"], pending["last_error"], pending["first_run_id"], pending["last_run_id"],
+            pending["occurrences"]) == ("", "jira down", failed["run_id"], failed["run_id"], 1)
+
+    monkeypatch.setattr(ctx.jira, "create_issue", create_issue)
+    passed = client.post("/v1/scale-proof/results",
+                         json={"release": "v4.7.1", "report": synthetic()}, headers=OWNER).json()
+    assert passed["passed"] is True
+    [made] = passed["tickets"]
+    assert made["signature"] == "budget:ticket_pickup" and made["created"]
+    assert made["ticket"].startswith("TESTFLOW-") and len(ctx.jira.created) == 1
+    pending = ctx.db.one("SELECT ticket,last_error,first_run_id,last_run_id,occurrences"
+                         " FROM scale_proof_findings WHERE signature='budget:ticket_pickup'")
+    assert (pending["ticket"], pending["last_error"], pending["first_run_id"], pending["last_run_id"],
+            pending["occurrences"]) == (made["ticket"], "", failed["run_id"], failed["run_id"], 1)
+    description = ctx.jira.created[0]["description"]
+    assert f"run #{failed['run_id']} of release v4.7.0" in description
+
+    assert scale_proof.file_tickets(ctx, passed["run_id"]) == []
+    assert len(ctx.jira.created) == 1
 
 
 def test_the_real_run_has_nothing_to_report(proof, ctx):

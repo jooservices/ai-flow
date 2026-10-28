@@ -158,14 +158,72 @@ def _description(finding: dict, run_id: int, report: dict) -> str:
             "The run is listed in Command Center under Scale proof (docs/v4/scale-proof.md).")
 
 
+def _file_finding(ctx, finding: dict[str, Any], run_id: int, report: dict[str, Any], ticket: str = "") -> dict[str, Any]:
+    signature = finding["signature"]
+    if ticket:
+        status = (ctx.db.one("SELECT status FROM tickets WHERE key=%s", (ticket,)) or {}).get("status")
+        if status != "Done":
+            if ctx.jira:
+                try:
+                    ctx.jira.comment(ticket, f"Seen again in scale proof run #{run_id} "
+                                             f"(release {report.get('release') or 'none'}): {finding['detail']}")
+                except Exception as exc:  # noqa: BLE001 - the count is already kept
+                    log.warning("comment on %s failed: %s", ticket, type(exc).__name__)
+            return {"signature": signature, "ticket": ticket, "created": False}
+    if not ctx.jira:
+        ctx.db.run("UPDATE scale_proof_findings SET last_error='Jira is not configured' WHERE signature=%s",
+                   (signature,))
+        return {"signature": signature, "ticket": "", "created": False}
+    project = ctx.settings.canary_bug_project
+    labels = ["flow-bug", LABEL, signature.replace(":", "-")]
+    try:
+        description = _description(finding, run_id, report)
+        key = ctx.jira.create_issue(project, finding["title"][:240], description, issuetype="Bug", labels=labels)
+    except Exception as exc:  # noqa: BLE001 - retried by the next submission or file_pending
+        ctx.db.run("UPDATE scale_proof_findings SET last_error=%s WHERE signature=%s",
+                   (str(exc)[:300] or type(exc).__name__, signature))
+        return {"signature": signature, "ticket": "", "created": False}
+    ctx.db.run("UPDATE scale_proof_findings SET ticket=%s, last_error='' WHERE signature=%s", (key, signature))
+    try:
+        status = ctx.jira.status(key)
+    except Exception:  # noqa: BLE001
+        status = "Created"
+    ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created,"
+               " jira_updated) VALUES (%s,%s,%s,'Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
+               (key, project, status, labels, finding["title"][:240], description))
+    ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
+               " VALUES ('jira','scale_proof_create',%s,'scale-proof',true,%s,%s)",
+               (key, status, J({"project": project, "labels": labels, "signature": signature, "run_id": run_id})))
+    ctx.events.emit("scale_proof.ticket", ticket=key, project=project, outcome="created",
+                    reason=finding["title"][:300], data={"signature": signature, "run_id": run_id})
+    return {"signature": signature, "ticket": key, "created": True}
+
+
+def file_pending(ctx, exclude: set[str] | None = None) -> list[dict[str, Any]]:
+    """Retry stored findings after later submissions, even when those runs have no findings of their own."""
+    rows = ctx.db.all(
+        "SELECT f.signature,f.kind,f.title,f.detail,f.ticket,f.last_run_id,r.release,r.report"
+        " FROM scale_proof_findings f JOIN scale_proof_runs r ON r.id=f.last_run_id"
+        " LEFT JOIN tickets t ON t.key=f.ticket"
+        " WHERE NOT (f.signature=ANY(%s))"
+        " AND (COALESCE(f.ticket,'')='' OR (f.last_error<>'' AND t.status='Done'))"
+        " ORDER BY f.updated_at,f.signature LIMIT %s", (sorted(exclude or set()), 50))
+    out = []
+    for row in rows:
+        finding = {key: row[key] for key in ("signature", "kind", "title", "detail")}
+        report = {**(row["report"] or {}), "release": row["release"]}
+        out.append(_file_finding(ctx, finding, int(row["last_run_id"]), report, str(row["ticket"] or "")))
+    return out
+
+
 def file_tickets(ctx, run_id: int) -> list[dict[str, Any]]:
-    """Create (or count up) one ticket per finding of a stored run. Jira errors are kept for the next call."""
+    """File current findings and retry older un-ticketed findings on every submission."""
     run = ctx.db.one("SELECT report FROM scale_proof_runs WHERE id=%s", (run_id,))
     if not run:
         return []
     report = run["report"]
-    project = ctx.settings.canary_bug_project
     out = []
+    attempted: set[str] = set()
     for finding in report.get("findings") or []:
         row = ctx.db.one(
             "INSERT INTO scale_proof_findings (signature, kind, title, detail, first_run_id, last_run_id)"
@@ -173,49 +231,9 @@ def file_tickets(ctx, run_id: int) -> list[dict[str, Any]]:
             " occurrences=scale_proof_findings.occurrences+1, detail=EXCLUDED.detail, title=EXCLUDED.title,"
             " updated_at=now() RETURNING ticket", (finding["signature"], finding["kind"], finding["title"][:240],
                                                   finding["detail"], run_id, run_id))
-        ticket = str(row["ticket"] or "")
-        if ticket:
-            status = (ctx.db.one("SELECT status FROM tickets WHERE key=%s", (ticket,)) or {}).get("status")
-            if status != "Done":
-                if ctx.jira:
-                    try:
-                        ctx.jira.comment(ticket, f"Seen again in scale proof run #{run_id} "
-                                                 f"(release {report.get('release') or 'none'}): {finding['detail']}")
-                    except Exception as exc:  # noqa: BLE001 - the count is already kept
-                        log.warning("comment on %s failed: %s", ticket, type(exc).__name__)
-                out.append({"signature": finding["signature"], "ticket": ticket, "created": False})
-                continue
-            ticket = ""  # the earlier ticket is Done and the finding is back: a new ticket
-        if not ctx.jira:
-            ctx.db.run("UPDATE scale_proof_findings SET last_error='Jira is not configured' WHERE signature=%s",
-                       (finding["signature"],))
-            out.append({"signature": finding["signature"], "ticket": "", "created": False})
-            continue
-        labels = ["flow-bug", LABEL, finding["signature"].replace(":", "-")]
-        try:
-            description = _description(finding, run_id, report)
-            key = ctx.jira.create_issue(project, finding["title"][:240], description, issuetype="Bug", labels=labels)
-        except Exception as exc:  # noqa: BLE001 - retried by the next run or file_pending
-            ctx.db.run("UPDATE scale_proof_findings SET last_error=%s WHERE signature=%s",
-                       (str(exc)[:300] or type(exc).__name__, finding["signature"]))
-            out.append({"signature": finding["signature"], "ticket": "", "created": False})
-            continue
-        ctx.db.run("UPDATE scale_proof_findings SET ticket=%s, last_error='' WHERE signature=%s",
-                   (key, finding["signature"]))
-        try:
-            status = ctx.jira.status(key)
-        except Exception:  # noqa: BLE001
-            status = "Created"
-        ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created,"
-                   " jira_updated) VALUES (%s,%s,%s,'Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
-                   (key, project, status, labels, finding["title"][:240], description))
-        ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
-                   " VALUES ('jira','scale_proof_create',%s,'scale-proof',true,%s,%s)",
-                   (key, status, J({"project": project, "labels": labels, "signature": finding["signature"],
-                                    "run_id": run_id})))
-        ctx.events.emit("scale_proof.ticket", ticket=key, project=project, outcome="created",
-                        reason=finding["title"][:300], data={"signature": finding["signature"], "run_id": run_id})
-        out.append({"signature": finding["signature"], "ticket": key, "created": True})
+        attempted.add(finding["signature"])
+        out.append(_file_finding(ctx, finding, run_id, report, str(row["ticket"] or "")))
+    out.extend(file_pending(ctx, attempted))
     return out
 
 

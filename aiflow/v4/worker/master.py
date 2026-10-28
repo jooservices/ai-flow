@@ -107,8 +107,8 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             raise LeaseLost()
         quota_response = next((item for item in reversed(responses) if item.quota), None)
         quota_fields = {"quota": quota_response.quota,
-                        "quota_observed_at": (quota_response.quota_observed_at.isoformat()
-                                               if quota_response.quota_observed_at else None)} if quota_response else {}
+                        "quota_observed_at": (getattr(quota_response, "quota_observed_at", None).isoformat()
+                                               if getattr(quota_response, "quota_observed_at", None) else None)} if quota_response else {}
         if response.error_kind in ("quota", "auth"):
             result.update(outcome="quota", error_kind=response.error_kind,
                           summary=f"master account {c.account} cannot work now ({response.error_kind})",
@@ -135,8 +135,8 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                 responses.append(response)
                 quota_response = next((item for item in reversed(responses) if item.quota), None)
                 quota_fields = {"quota": quota_response.quota,
-                                "quota_observed_at": (quota_response.quota_observed_at.isoformat()
-                                                       if quota_response.quota_observed_at else None)} if quota_response else {}
+                                "quota_observed_at": (getattr(quota_response, "quota_observed_at", None).isoformat()
+                                                       if getattr(quota_response, "quota_observed_at", None) else None)} if quota_response else {}
                 if hb.lost.is_set():
                     raise LeaseLost()
                 if response.error_kind:

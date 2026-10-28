@@ -5327,7 +5327,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
         if body.quota:
             quota_refresh.record_run_result(ctx.db, run, body, update_account=account_update_allowed)
-        elif account_update_allowed and body.error_kind == "quota":
+        elif account_update_allowed:
             current = ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}
             refresh_quota_forecast(run["account_id"], run["provider"], current.get("quota") or {})
         if account_update_allowed and body.error_kind == "auth":

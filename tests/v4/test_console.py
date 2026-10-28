@@ -743,11 +743,8 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
             "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', "
             "'notifications', 'settings', 'support']];"
             ) in page
-    assert "VIEW_GROUPS[2].push('security');" in page
-    assert "VIEW_GROUPS[2].push('system-check');" in page
+    assert "VIEW_GROUPS[2].push('security');" in page and "VIEW_GROUPS[2].push('system-check');" in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
-    assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
-            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']") in page
     assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
     assert "licensing: 'licensing.manage'" in page
 

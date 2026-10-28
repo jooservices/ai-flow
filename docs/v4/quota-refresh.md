@@ -67,6 +67,8 @@ provider observations; task usage remains separate from provider-reported utiliz
 - `GET /v1/master/autonomy`, `GET /v1/master/report`, `GET /v1/state`, and `GET /v1/deploy/state` retain their
   existing response contracts; quota fields without trusted provenance are shown as unknown.
 - `POST /v1/work/claim` atomically records an estimated upper-bound reservation for concurrent development runs.
+- `POST /v1/runs/{run_id}/heartbeat` records when a worker loses its run lease; its estimated token reservation
+  remains in capacity accounting until a newer provider quota snapshot reconciles it.
 - `POST /v1/runs/{run_id}/result` records the task's token and cost totals independently. It updates provider quota
   only when the worker reports a fresh quota observation; it never copies an older account snapshot into a new sample.
 - `POST /v1/accounts/{account_id}/probe` remains available for legacy worker checks with its existing request shape.

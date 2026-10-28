@@ -210,7 +210,12 @@ async function exerciseRunInbox(page, mode) {
   await workInbox.waitFor({ state: 'visible' });
   await workInbox.getByRole('heading', { name: 'Guide a live run', exact: true }).waitFor({ state: 'visible' });
   await workInbox.getByLabel('Active run').selectOption(config.inboxRunId);
-  await workInbox.getByLabel('Message type').selectOption('request');
+  const kindSelector = workInbox.getByLabel('Message type');
+  await page.waitForFunction(() => {
+    const selector = document.querySelector('#view-work #run-inbox-kind');
+    return selector && !selector.disabled;
+  }, null, { timeout: 15000 });
+  await kindSelector.selectOption('request');
   await workInbox.getByLabel('Message for the worker').fill(message);
   const send = page.waitForResponse((response) => response.request().method() === 'POST' &&
     new URL(response.url()).pathname === `/v1/runs/${config.inboxRunId}/inbox`);
@@ -219,6 +224,7 @@ async function exerciseRunInbox(page, mode) {
   assert.equal(response.status(), 201, 'The active-run composer did not queue the request');
   const created = await response.json();
   assert.equal(created.message.status, 'queued', 'A new inbox message did not start in the queued state');
+  assert.equal(created.message.kind, 'request', 'The selected inbox message kind was not preserved');
   runInboxMessages[mode] = { id: created.message.id, body: message };
   const sentEntry = workInbox.locator('article.alert').filter({ hasText: message });
   await sentEntry.getByText(message, { exact: true }).waitFor({ state: 'visible' });

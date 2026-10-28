@@ -10,5 +10,6 @@ def console_script(page: Path) -> str:
     script = re.search(r"<script>\n(.*?)</script>", source, re.S).group(1)
     script = script[:script.index(BOOT)]
     assets = page.parent
-    return "".join((assets / name).read_text(encoding="utf-8") for name in
-                   ("release-readiness.js", "scale-proof.js")) + script
+    shared = "".join((assets / name).read_text(encoding="utf-8") for name in
+                     ("release-readiness.js", "scale-proof.js"))
+    return shared + script + (assets / "load-policy.js").read_text(encoding="utf-8")

@@ -151,7 +151,10 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     machine = next(row for row in state["nodes"] if row["name"] == "node1")
     assert account["status"] == "signed_out" and account["parallel"] == 2 and account["jobs"]
     assert account["sign_in_pending"] is True
-    assert machine["sessions_busy"] == 0 and set(machine["metrics"]) <= {"disk_free", "services"}
+    assert machine["sessions_busy"] == 0
+    assert machine["metrics"]["disk_free"] == 20 * 1024 ** 3
+    assert machine["metrics"]["load1"] == 0.1 and machine["metrics"]["cpus"] == 4
+    assert machine["metrics"]["mem_total"] == 100 and machine["metrics"]["mem_used"] == 20
 
     # The machine starts the provider's own device flow and relays the provider-issued code to the console.
     again = client.post(f"/v1/accounts/{account_id}/sign-in")
@@ -199,7 +202,9 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
                 (active_run,))
     heartbeat = client.post("/v1/nodes/node1/heartbeat", json={
         "slots_total": 8, "slots_used": 2,
-        "metrics": {"mem_total": 8589934592, "mem_used": 2147483648, "cpus": 8}}, headers=node_auth)
+        "metrics": {"load1": 0.1, "cpus": 8, "mem_total": 8589934592,
+                    "mem_used": 2147483648, "disk_total": 100 * 1024 ** 3,
+                    "disk_free": 20 * 1024 ** 3}}, headers=node_auth)
     assert heartbeat.status_code == 200
     state = client.get("/v1/state").json()
     account = next(row for row in state["accounts"] if row["id"] == account_id)

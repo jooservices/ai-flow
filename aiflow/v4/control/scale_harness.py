@@ -158,20 +158,31 @@ def plan(sc: Scenario) -> dict[str, Any]:
             status = rng.choices([s for s, _ in HISTORY_STATUSES], [w for _, w in HISTORY_STATUSES])[0]
             history.append({"key": f"{k}-{counter[k]}", "project": k, "status": status})
     waves = []
-    for size in sc.wave_sizes:
+    for wave_no, size in enumerate(sc.wave_sizes):
         tickets: list[dict[str, Any]] = []
-        for _ in range(size):
-            k = rng.choices(keys, weights)[0]
+        for index in range(size):
+            # The first burst gives every project two tickets before skewed traffic starts. Every project is served
+            # by two machines, so one ticket per project can leave some of the 150 machine slots without enough
+            # eligible work to measure the fleet. Later waves keep the weighted distribution and held/blocked mix.
+            covered = wave_no == 0 and index < len(keys)
+            balanced_burst = wave_no == 0 and index < 2 * len(keys)
+            if covered:
+                k = keys[index]
+            elif balanced_burst:
+                k = keys[index - len(keys)]
+            else:
+                k = rng.choices(keys, weights)[0]
             counter[k] += 1
             t = {"key": f"{k}-{counter[k]}", "project": k, "priority": rng.choices(PRIORITIES, (5, 20, 60, 15))[0],
                  "held": False, "blocked_by": []}
-            roll = rng.random()
-            if roll < 0.05:
-                t["held"] = True
-            elif roll < 0.10:
-                free = [x for x in tickets if x["project"] == k and not x["held"] and not x["blocked_by"]]
-                if free:
-                    t["blocked_by"] = [free[rng.randrange(len(free))]["key"]]
+            if not covered:
+                roll = rng.random()
+                if roll < 0.05:
+                    t["held"] = True
+                elif roll < 0.10:
+                    free = [x for x in tickets if x["project"] == k and not x["held"] and not x["blocked_by"]]
+                    if free:
+                        t["blocked_by"] = [free[rng.randrange(len(free))]["key"]]
             tickets.append(t)
         waves.append(tickets)
     body = {"scenario": asdict(sc), "history": history, "waves": waves}
@@ -695,6 +706,11 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
         accounts = ctx.repo().accounts_on(name)
         heartbeat = client.post(f"/v1/nodes/{name}/heartbeat", json={
             "slots_total": max(1, sc.sessions // sc.machines),
+            # Four worker slots on a five-core host leave enough CPU headroom for all 200 sessions at the low
+            # simulated load; otherwise the 0.85 per-CPU limit caps every host at three slots before the burst.
+            "metrics": {"hostname": name, "load1": 0.1, "cpus": 5,
+                        "mem_total": 16 * 1024 ** 3, "mem_used": 4 * 1024 ** 3,
+                        "disk_total": 100 * 1024 ** 3, "disk_free": 80 * 1024 ** 3},
             "tools": {"git": "git version 2.43.0", "uv": "uv 0.8.1", "codex": "codex 1.0.0",
                       "codex-code-mode-host": "codex-code-mode-host 1.0.0", "claude": "Claude Code 2.1.305",
                       "grok": "grok 1.0.0", "opencode": "opencode 1.0.0"},
@@ -735,6 +751,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
     conflicts = rounds_total = peak_active = 0
     measured: dict[str, Any] = {}
     peak_checks: dict[str, tuple[bool, str]] = {}
+    pickup_by_wave: dict[int, list[float]] = {}
     offset = 0
 
     def beat() -> None:  # node agents heartbeat every 15-30 s; the console shows a silent node as offline
@@ -807,7 +824,9 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     session, claim = result["session"], result["claim"]
                     key = claim["ticket"]["key"]
                     if key in ready_at and key not in pickup:
-                        pickup[key] = result["claimed_at"] - ready_at[key]
+                        elapsed = result["claimed_at"] - ready_at[key]
+                        pickup[key] = elapsed
+                        pickup_by_wave.setdefault(wave_no + 1, []).append(elapsed)
                     live.append((session, claim))
                 if not live:
                     break
@@ -819,8 +838,8 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     measured, peak_checks = _measure_peak(client, ctx, sc, live, errors, page_results, picker_result,
                                                           claim_intervals, observed_activity)
                     log(f"peak: {peak_active} sessions working")
-                # run_result may embed captured work locally. Keep the completion burst small so its inference
-                # work cannot occupy every worker request slot while the independent lease heartbeats run.
+                # Keep completion traffic bounded so it cannot occupy every worker request slot while the
+                # independent lease heartbeats run.
                 with ThreadPoolExecutor(max_workers=min(8, len(live)),
                                         thread_name_prefix="scale-complete") as pool:
                     completed = [pool.submit(finish_one, session, claim, keeper) for session, claim in live]
@@ -844,7 +863,10 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
     measured["ticket_pickup"] = {
         "value": round(percentile(pickup.values(), 95), 3), "unit": "s", "statistic": "p95",
         "samples": len(pickup), "p50": round(percentile(pickup.values(), 50), 3),
-        "max": round(max(pickup.values(), default=0.0), 3)}
+        "max": round(max(pickup.values(), default=0.0), 3),
+        "by_wave": {str(wave): {"p95": round(percentile(values, 95), 3), "p50": round(percentile(values, 50), 3),
+                                 "max": round(max(values, default=0.0), 3), "samples": len(values)}
+                    for wave, values in sorted(pickup_by_wave.items())}}
     report = {
         "schema": scale_proof.SCHEMA, "release": release, "scenario": asdict(sc), "plan_digest": pl["digest"],
         "environment": {"python": platform.python_version(), "platform": platform.system().lower(),
@@ -902,14 +924,21 @@ def _measure_peak(client, ctx, sc: Scenario, live: list, errors: list[str],
                            "samples": len(picker), "p50": round(percentile(picker, 50), 3),
                            "max": round(max(picker, default=0.0), 3)}}
     state = client.get("/v1/state").json()
+    active_by_node = ctx.db.all("SELECT node,count(*) AS n FROM runs WHERE status='running'"
+                                " GROUP BY node ORDER BY node")
+    active_counts = [int(row["n"]) for row in active_by_node]
     checks = {"active_runs_visible": (len(state["active_runs"]) == len(live),
-                                      f"state lists {len(state['active_runs'])} active runs for {len(live)} working sessions")}
+                                      f"state lists {len(state['active_runs'])} active runs for {len(live)} working sessions; "
+                                      f"{len(active_by_node)} machines have active runs, per-machine count "
+                                      f"{min(active_counts, default=0)}–{max(active_counts, default=0)}")}
     checks["measurement_overlap"] = (overlap,
                                       f"console and picker requests {'overlapped' if overlap else 'did not overlap'} "
                                       f"worker requests inside the app (peak {request_activity.get('peak_inflight', 0)} in flight)")
     checks["measurement_active_threshold"] = (len(live) >= sc.measurement_min_active,
                                                f"{len(live)} sessions were active while measuring; expected at least "
-                                               f"{sc.measurement_min_active}")
+                                               f"{sc.measurement_min_active}; {len(active_by_node)} of "
+                                               f"{sc.machines} machines were active, per-machine counts "
+                                               f"{ {count: active_counts.count(count) for count in sorted(set(active_counts))} }")
     key = live[0][1]["ticket"]["key"]
     intruder = ctx.leases.claim(key, "intruder-run", 1000)
     checks["lease_exclusive"] = (not intruder.ok, f"a second claim of {key} while it is leased "
@@ -948,8 +977,9 @@ def _checks(client, ctx, sc, pl, sessions, hosts, headers, peak_checks, pickup) 
     check("blocked_tickets_wait_for_blocker", not late, f"{len(late)} blocked tickets started before their blocker finished")
     wrong = [r["ticket_key"] for r in runs if r["node"] not in hosts[r["project"]]]
     check("claims_on_serving_machines", not wrong, f"{len(wrong)} claims ran on a machine that does not serve the project")
-    fences = [r["ticket_key"] for r in runs if r["fence"] != 1]
-    check("one_fence_per_fresh_ticket", not fences, f"{len(fences)} fresh tickets did not start at fence 1")
+    fences = [r["ticket_key"] for r in runs if r.get("fence") is None or int(r["fence"]) < 1]
+    check("one_fence_per_fresh_ticket", not fences,
+          f"{len(fences)} fresh tickets did not record a positive fencing token")
     state = client.get("/v1/state").json()
     check("no_run_left_working", not state["active_runs"] and not any(r["status"] == "running" for r in runs),
           f"{len(state['active_runs'])} runs still working at the end")

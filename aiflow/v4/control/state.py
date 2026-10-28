@@ -10,6 +10,7 @@ from ..core.services import SERVICES, endpoint, service_gaps
 from ..core.toolchains import missing_tools, toolchain_gaps
 from . import role_health
 from . import tooling
+from . import load_policy
 from .sa import dashboard_data, thresholds
 from .shared_accounts import machines_views
 
@@ -37,6 +38,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
             assigned[machine] = assigned.get(machine, 0) + 1
     active_by_node = {row["node"]: int(row["busy"]) for row in db.all(
         "SELECT node,count(*) AS busy FROM runs WHERE status='running' GROUP BY node")}
+    host_load = {row["hostname"]: row for row in db.all(
+        "SELECT hostname,cpu_load_per_cpu,state FROM machine_host_load_limits")}
     for n in db.all("SELECT * FROM nodes WHERE removed_at IS NULL ORDER BY role DESC, name"):
         age = _age(n["last_heartbeat"])
         status = n["status"]
@@ -51,6 +54,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                           require_pins=bool(repo.projects[project].stacks))}
         desired_services = [s for s in (configured.services or []) if isinstance(s, dict)] if configured else []
         reported_services = (n["metrics"] or {}).get("services") or {}
+        hostname = load_policy.host_name(n.get("metrics"))
+        host_policy = host_load.get(hostname, {})
         declared: dict[str, list[str]] = {}
         for project in projects:
             for service in repo.projects[project].required_services if project in repo.projects else []:
@@ -68,6 +73,11 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                       "sessions_busy": active_by_node.get(n["name"], int(n["slots_used"] or 0)),
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
                       "metrics": n["metrics"], "tools": n["tools"],
+                      "load_limits": load_policy.machine_limits(n.get("load_limits")),
+                      "load_state": n.get("load_state") or {"mode": "normal", "reason": ""},
+                      "host_load_limits": load_policy.host_limits(
+                          {"cpu_load_per_cpu": host_policy["cpu_load_per_cpu"]} if host_policy else None),
+                      "host_load_state": (host_policy.get("state") or {"mode": "normal", "reason": ""}),
                       "has_agent": bool(n["token_hash"]), "required_tools": required,
                       "desired_services": [{"name": str(s.get("name") or s.get("unit") or "service"),
                                             "unit": str(s.get("unit") or ""),

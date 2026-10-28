@@ -135,7 +135,9 @@ class Fresh:
         body = {
             "tools": TOOLS,
             "slots_total": 2,
-            "metrics": {"disk_free": 20 * 1024 ** 3},
+            "metrics": {"hostname": name, "load1": 0.1, "cpus": 4,
+                        "mem_total": 16 * 1024 ** 3, "mem_used": 4 * 1024 ** 3,
+                        "disk_total": 100 * 1024 ** 3, "disk_free": 20 * 1024 ** 3},
             "system_conditions": [
                 condition("disk-space", "Free disk space", "ready", "20 GiB is available."),
                 condition("workspace-permissions", "Work directory permissions", "ready",
@@ -350,7 +352,12 @@ def test_machines_policy_calls_and_heartbeats_work_with_sign_in_on(fresh):
     hook["tool_input"]["command"] = "composer install"
     assert machine_client.post("/v1/policy/decide", json=hook, headers=token).json()[
         "hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert machine_client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=cc).status_code == 200
+    assert machine_client.post("/v1/nodes/cc/heartbeat", json={
+        "slots_total": 2,
+        "metrics": {"hostname": "cc", "load1": 0.1, "cpus": 4,
+                    "mem_total": 16 * 1024 ** 3, "mem_used": 4 * 1024 ** 3,
+                    "disk_total": 100 * 1024 ** 3, "disk_free": 20 * 1024 ** 3},
+    }, headers=cc).status_code == 200
     assert machine_client.post("/v1/policy/decide", json=hook).status_code == 401  # no credential at all: refused
 
 

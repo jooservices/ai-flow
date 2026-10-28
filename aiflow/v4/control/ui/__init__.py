@@ -36,16 +36,19 @@ def build_console_page() -> str:
     tab_marker = '      <button class="tab" role="tab" id="tab-licensing"'
     view_marker = '  <section class="view" id="view-licensing"'
     script_marker = "})();\n</script>"
+    boot_marker = "/* ---------- boot ---------- */"
     tab = ('      <button class="tab" role="tab" id="tab-system-check" aria-controls="view-system-check" '
            'aria-selected="false" data-act="view" data-menu-view data-view="system-check">System check</button>')
     panel = ('  <section class="view" id="view-system-check" role="tabpanel" '
              'aria-labelledby="tab-system-check" hidden></section>')
-    for marker in (tab_marker, view_marker, script_marker):
+    for marker in (tab_marker, view_marker, script_marker, boot_marker):
         if marker not in html:
             raise RuntimeError("console template is missing a System check insertion point")
     html = html.replace(tab_marker, tab + "\n" + tab_marker, 1)
     html = html.replace(view_marker, panel + "\n" + view_marker, 1)
+    policy = (HERE / "load-policy.js").read_text(encoding="utf-8")
     extension = (HERE / "system-check.js").read_text(encoding="utf-8")
+    html = html.replace(boot_marker, policy + "\n" + boot_marker, 1)
     return html.replace(script_marker, extension + "\n" + script_marker, 1)
 
 

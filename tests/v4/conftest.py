@@ -490,7 +490,12 @@ def join_node(client, name: str, ip: str = "", role: str = "worker", project: st
         from aiflow.v4.control.db import J
         from aiflow.v4.control.system_check import refresh_node
 
-        metrics = {"disk_free": 20 * 1024 ** 3, "services": services}
+        # This helper models a connected agent that has already reported a healthy baseline.
+        # Keep every scheduler-required measurement present so feature tests that omit a later
+        # heartbeat's metrics are exercising the behavior under test, not missing telemetry.
+        metrics = {"hostname": name, "load1": 0.1, "cpus": 4, "mem_total": 100, "mem_used": 20,
+                   "disk_free": 20 * 1024 ** 3, "disk_total": 100 * 1024 ** 3,
+                   "services": services}
         ctx.db.run("UPDATE nodes SET tools=%s,metrics=%s WHERE name=%s", (J(tools), J(metrics), name))
         readiness = refresh_node(
             ctx, name, "heartbeat",

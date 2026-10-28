@@ -24,6 +24,8 @@ def ready(client, node, account):
     headers = join(client, node)
     response = client.post(f"/v1/nodes/{node}/heartbeat", json={
         "workers": [{"account": account, "state": "idle"}], "slots_total": 2,
+        "metrics": {"hostname": node, "load1": 0.1, "cpus": 4, "mem_total": 100, "mem_used": 20,
+                    "disk_total": 100 * 1024 ** 3, "disk_free": 20 * 1024 ** 3, "disk_free_pct": 20},
     }, headers=headers)
     assert response.status_code == 200
     return headers

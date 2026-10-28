@@ -50,7 +50,8 @@ def _week_start(value: datetime) -> datetime:
 
 
 def calculate_review_metrics(tickets: list[dict], events: list[dict], runs: list[dict], audits: list[dict],
-                             now: datetime | None = None) -> dict:
+                             now: datetime | None = None,
+                             blocker_statuses: dict[str, str] | None = None) -> dict:
     """Return a stable set of counts and percentages; all periods use UTC calendar weeks."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     this_week = _week_start(now)
@@ -63,11 +64,13 @@ def calculate_review_metrics(tickets: list[dict], events: list[dict], runs: list
         values.sort(key=lambda row: _dt(row.get("started_at")) or datetime.min.replace(tzinfo=timezone.utc))
 
     ticket_by_key = {str(ticket.get("key")): dict(ticket) for ticket in tickets}
+    blocker_statuses = blocker_statuses or {}
     for ticket in ticket_by_key.values():
         blockers = ticket.get("blocked_by") or []
         ticket["_has_open_blocker"] = any(
-            str(blocker) not in ticket_by_key
-            or str(ticket_by_key[str(blocker)].get("status") or "") not in {"Done", "Closed"}
+            str(blocker) not in ticket_by_key and blocker_statuses.get(str(blocker)) not in {"Done", "Closed"}
+            or str(blocker) in ticket_by_key
+            and str(ticket_by_key[str(blocker)].get("status") or "") not in {"Done", "Closed"}
             for blocker in blockers
         )
     transitions: dict[str, list[tuple[datetime, str]]] = defaultdict(list)

@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from conftest import add_ticket
+from console_test_utils import console_script
 from aiflow.v4 import VERSION
 from aiflow.v4.control.console_auth import COOKIE_NAME, ROLE_PERMISSIONS, issue_session
 from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS
@@ -44,8 +45,7 @@ def run_script(driver: str, prelude: str = STUBS) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to run the console script")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     result = subprocess.run([node_js, "-"], input=prelude + script + driver + "\n})();\n",
                             text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
@@ -62,8 +62,7 @@ def render_drawer(node: dict, console_user: dict | None = None, operations: list
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console drawer")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     if console_user and "permissions" not in console_user:
         console_user = {**console_user, "permissions": LEAD_PERMISSIONS if console_user.get("role") == "lead"
                         else OWNER_PERMISSIONS}
@@ -86,8 +85,7 @@ def render_sa(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the SA dashboard")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = f"""
 var saView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-sa' ? saView : null; }};
@@ -105,8 +103,7 @@ def render_knowledge(data: dict, history: dict | None = None, user: dict | None 
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Knowledge view")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = f"""
 var knowledgeView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-knowledge' ? knowledgeView : null; }};
@@ -129,8 +126,7 @@ def render_projects(projects: list[dict], catalog: dict, preflight: dict | None 
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Projects screen")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = f"""
 var projectsView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-projects' ? projectsView : null; }};
@@ -173,8 +169,7 @@ def render_dashboard(state: dict, analytics: list[dict] | None = None,
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console Dashboard")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     project_key = (state.get("projects") or [{}])[0].get("key")
     report = weekly_report or {"week_start": "2026-10-19", "trend": [], "finished_without_person": [],
                                "needed_person": [], "repeated_failures": []}
@@ -206,8 +201,7 @@ def render_machine_overview(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Command Center")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = f"""
 var machineOverview = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-machines' ? machineOverview : null; }};
@@ -229,8 +223,7 @@ def render_machines(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Machines and AI view")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = f"""
 var machines = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-machines' ? machines : null; }};
@@ -1340,8 +1333,7 @@ def test_ticket_cards_business_change_requests_and_drawer_show_selected_reposito
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = r"""
 var ticket = {key: 'JOOWP-4', project: 'JOOWP', summary: 'MCP change', status: 'To Do', type: 'Story',
   priority: 'Medium', labels: [], blocked_by: [], repository: 'jooservices/wordpress-mcp', parent_key: 'JOOWP-306'};
@@ -1363,8 +1355,7 @@ def test_board_card_shows_already_done_reason_and_clickable_pull_request():
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = r"""
 var ticket = {key: 'TESTWP-9', project: 'TESTWP', summary: 'Already implemented', status: 'In Verify', type: 'Bug',
   priority: 'Medium', labels: [], blocked_by: [], last_run: {outcome: 'done', account: 'claude-01', duration_s: 12,
@@ -1735,7 +1726,7 @@ def test_dashboard_quota_endpoint_is_safe_and_scoped_for_role_without_machines_a
     assert all("opencode-01" not in json.dumps(row) and "node1" not in json.dumps(row) for row in rows)
     for row in rows:
         assert row["label"] == "Account 1"
-        assert row["windows"] == [{"label": "Five Hour", "used_pct": 40.0, "reset_at": reset,
+        assert row["windows"] == [{"label": "5 hours", "used_pct": 40.0, "reset_at": reset,
                                    "estimated": False}]
 
     ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", ([], email))
@@ -1876,8 +1867,7 @@ def test_work_board_filters_epic_ai_state_and_ticket_text():
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Work board")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = r"""
 var body = {innerHTML: ''};
 document.querySelector = function (selector) { return selector === '#work-body' ? body : null; };

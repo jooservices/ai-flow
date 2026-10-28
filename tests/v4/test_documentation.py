@@ -59,6 +59,13 @@ def test_every_console_screen_has_help_link_hint_and_target_page(site):
         assert (site / "screens" / f"{view}.html").is_file()
 
 
+def test_scale_proof_topic_is_linked_from_console_help(site):
+    assert (site / "topics" / "scale-proof.html").is_file()
+    for view in ("business", "cc"):
+        page = (site / "screens" / f"{view}.html").read_text()
+        assert '../topics/scale-proof.html' in page
+
+
 def test_users_and_sa_screen_guides_match_permissions_and_rendered_controls():
     users = (GUIDE / "screens" / "users.md").read_text()
     sa = (GUIDE / "screens" / "sa.md").read_text()
@@ -521,6 +528,26 @@ def test_escalation_console_changes_map_to_command_center_screens(monkeypatch):
 
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
     assert docsite.changed_views("origin/develop") == {"cc", "machines"}
+
+
+def test_scale_proof_panel_injection_maps_only_to_command_center(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    line = next(i for i, value in enumerate(source_lines, 1) if "scaleProofPanel(d.scale_proof)" in value)
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result("\n".join(source_lines) + "\n")
+        return Result(f"@@ -{line},1 +{line},1 @@\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == {"cc"}
 
 
 def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):

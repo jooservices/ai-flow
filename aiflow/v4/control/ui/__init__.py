@@ -34,10 +34,22 @@ def mount_ui(app: FastAPI, ctx) -> None:
     page = HERE / "console.html"
     logs_page = HERE / "logs.html"
     licensing_notice_script = HERE / "licensing_notice.js"
+    release_readiness_script = HERE / "release-readiness.js"
+    scale_proof_script = HERE / "scale-proof.js"
 
     @app.get("/console-assets/licensing-notice.js", include_in_schema=False)
     def licensing_notice() -> FileResponse:
         return FileResponse(licensing_notice_script, media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/console-assets/release-readiness.js", include_in_schema=False)
+    def release_readiness_asset() -> FileResponse:
+        return FileResponse(release_readiness_script, media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/console-assets/scale-proof.js", include_in_schema=False)
+    def scale_proof_asset() -> FileResponse:
+        return FileResponse(scale_proof_script, media_type="application/javascript",
                             headers={"Cache-Control": "no-cache"})
 
     @app.get("/", include_in_schema=False)

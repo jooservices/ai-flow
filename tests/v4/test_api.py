@@ -84,6 +84,34 @@ def test_developer_pr_lookup_is_fenced_and_scoped_to_the_run_repository(client, 
     assert wrong_repo.status_code == 403
 
 
+def test_worker_poll_counts_running_project_tickets_only_when_a_limit_is_configured(client, ctx):
+    node = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-PARALLEL-LIMIT")
+    original_all = ctx.db.all
+    project_count_queries = []
+
+    def recording_all(sql, params=()):
+        if "SELECT project,count(*) AS count FROM runs" in sql:
+            project_count_queries.append((sql, params))
+        return original_all(sql, params)
+
+    ctx.db.all = recording_all
+    response = client.get("/v1/work/candidates?account=claude-01", headers=node)
+    assert response.status_code == 200
+    assert "TESTWP-PARALLEL-LIMIT" in {ticket["key"] for ticket in response.json()["tickets"]}
+    assert project_count_queries == []  # the fixture project's limit is zero (unlimited)
+
+    ctx.repo().projects["TESTWP"].limits["parallel"] = 1
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status)"
+               " VALUES (%s,'TESTWP-ACTIVE','TESTWP','dev','codex-01','codex','node1',1,'running')",
+               (str(uuid.uuid4()),))
+    response = client.get("/v1/work/candidates?account=claude-01", headers=node)
+    assert response.status_code == 200
+    assert response.json()["tickets"] == []
+    assert len(project_count_queries) == 1
+    assert "project=ANY(%s)" in project_count_queries[0][0]
+
+
 def test_board_snapshot_marks_already_done_runs_and_keeps_the_pull_request_link(client, ctx):
     add_ticket(ctx.db, "TESTWP-8", status="In Verify")
     url = "https://github.com/jooservices/test-aiflow-wp/pull/43"

@@ -4489,11 +4489,14 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
         projects = [key for key in projects if not repo.projects[key].paused]
-        running_by_project = {row["project"]: int(row["count"]) for row in
-                              ctx.db.all("SELECT project,count(*) AS count FROM runs"
-                                         " WHERE status='running' GROUP BY project")}
-        projects = [key for key in projects if not repo.projects[key].parallel_limit or
-                    running_by_project.get(key, 0) < repo.projects[key].parallel_limit]
+        limited_projects = [key for key in projects if repo.projects[key].parallel_limit]
+        if limited_projects:
+            running_by_project = {row["project"]: int(row["count"]) for row in
+                                  ctx.db.all("SELECT project,count(*) AS count FROM runs"
+                                             " WHERE status='running' AND project=ANY(%s) GROUP BY project",
+                                             (limited_projects,))}
+            projects = [key for key in projects if key not in limited_projects or
+                        running_by_project.get(key, 0) < repo.projects[key].parallel_limit]
         node_tools = node_row.get("tools") or {}
         missing_container_runtime = bool(toolchain_gaps(node_tools, [CONTAINER_RUNTIME_TOOL], repo.versions))
 

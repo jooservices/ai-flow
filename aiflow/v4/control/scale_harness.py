@@ -29,6 +29,7 @@ import platform
 import random
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from threading import Barrier, Condition, Event, Lock, Thread
@@ -127,6 +128,20 @@ def sessions_of(sc: Scenario) -> list[dict[str, str]]:
         out.append({"id": f"scale-{provider}-{account + 1:03d}", "provider": provider, "node": node,
                     "session": f"scale-session-{index + 1:03d}"})
     return out
+
+
+def fleet_poll_order(sessions: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Interleave queued worker polls across machines instead of draining the first machine group first."""
+    by_node: dict[str, deque[dict[str, str]]] = {}
+    for session in sessions:
+        by_node.setdefault(session["node"], deque()).append(session)
+    nodes = sorted(by_node)
+    ordered: list[dict[str, str]] = []
+    while any(by_node.values()):
+        for node in nodes:
+            if by_node[node]:
+                ordered.append(by_node[node].popleft())
+    return ordered
 
 
 def plan(sc: Scenario) -> dict[str, Any]:
@@ -521,10 +536,12 @@ def _claim_round(client, sessions: list[dict[str, str]], headers: dict[str, dict
     picker_result = None
     measurement_client = measurement_client or client
     with ThreadPoolExecutor(max_workers=claim_workers, thread_name_prefix="scale-worker") as claims_pool:
+        # The bounded pool queues 200 sessions behind 24 request slots. Interleave that queue by node so the
+        # first in-flight burst represents the fleet rather than six machines repeated four times each.
         claim_futures = [claims_pool.submit(_claim_session, client, session, headers,
                                             gate if gate is not None and i < claim_workers else None,
                                             worker_request, on_claim, max(4, sc.claim_concurrency))
-                         for i, session in enumerate(sessions)]
+                         for i, session in enumerate(fleet_poll_order(sessions))]
         if measure_workers:
             measure_jobs = [(page, data) for page, data in PAGES.items()]
             # Model a small group of browser clients, each fanning out up to six API calls. A shared

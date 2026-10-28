@@ -78,6 +78,17 @@ def test_the_plan_is_a_pure_function_of_the_configuration():
     assert scale_harness.plan(FULL)["scenario"]["claim_concurrency"] == 24
 
 
+def test_claim_queue_interleaves_worker_polls_across_the_fleet():
+    sessions = scale_harness.sessions_of(FULL)
+
+    ordered = scale_harness.fleet_poll_order(sessions)
+
+    assert len(ordered) == len(sessions)
+    assert {session["session"] for session in ordered} == {session["session"] for session in sessions}
+    assert len({session["node"] for session in ordered[:FULL.machines]}) == FULL.machines
+    assert ordered == scale_harness.fleet_poll_order(sessions)
+
+
 def test_active_simulated_runs_are_renewed_by_the_worker_heartbeat_loop():
     from threading import Event
 

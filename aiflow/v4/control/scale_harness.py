@@ -93,7 +93,7 @@ class Scenario:
     seed: int = 236
     page_samples: int = 3
     picker_samples: int = 5
-    claim_concurrency: int = 20
+    claim_concurrency: int = 14
     measurement_concurrency: int = 2
     measurement_min_active: int = 150
     max_rounds: int = 20

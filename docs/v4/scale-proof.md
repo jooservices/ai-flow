@@ -31,7 +31,7 @@ The report records comparable counts and the host timings.
 This is an application scale proof, not a full deployment or network benchmark. FastAPI routes execute through
 `TestClient` in the test process; data reads and writes use the dedicated PostgreSQL database and Redis namespace.
 It creates no physical machines, does not start 200 operating-system processes, and calls no AI provider. At most
-20 worker requests and 12 console API requests run at once (32 total): two console views, each with up to six
+14 worker requests and 12 console API requests run at once (26 total): two console views, each with up to six
 concurrent API calls. The database pool is capped at 40
 connections. The report records these limits so each run's resource demand is explicit.
 The Jira and GitHub App calls used by the readiness gate are local in-process stand-ins, not requests to those
@@ -54,7 +54,7 @@ here and in the code:
 
 | Budget key | Budget | Limit | Statistic | How it is measured |
 |---|---|---|---|---|
-| `console_page_load` | Console views load | 2 s | p95 per view, worst view | All 18 console views are each loaded 3 times during the worker burst; each sample includes the view route, common bootstrap calls and view-specific data calls. Up to two views are measured concurrently, with at most six API calls per view, alongside 20 worker requests. The slowest view counts. |
+| `console_page_load` | Console views load | 2 s | p95 per view, worst view | All 18 console views are each loaded 3 times during the worker burst; each sample includes the view route, common bootstrap calls and view-specific data calls. Up to two views are measured concurrently, with at most six API calls per view, alongside 14 worker requests. The slowest view counts. |
 | `project_picker` | Project picker answers | 200 ms | p95 | `GET /v1/projects`, the list behind the project picker, 5 times during the same worker burst. |
 | `ticket_pickup` | Ticket is picked up | 30 s | p95 | For every ticket of the traffic, the time from the ticket being ready to its claim being granted. All 200 sessions sweep for work in turn, so this is the time the control plane needs to serve the whole fleet. Blocked tickets count from the moment their blocker is Done. |
 

@@ -463,16 +463,27 @@ def role_coverage(ctx, *, persist: bool = True) -> list[dict[str, Any]]:
     online = _routing_ready_nodes(ctx)
     disabled = role_health.disabled_roles(ctx.db)
     accounts = {row["id"]: row for row in ctx.db.all("SELECT id,status,provider FROM accounts")}
+    holders_by_role = {
+        role: [account for account in repo.accounts
+               if role in (account.roles or []) and not account.paused and not account.explicit_only]
+        for role in ROLE_COVERAGE_ROLES
+    }
+    holders = {account.id: account for role_accounts in holders_by_role.values() for account in role_accounts}
+    cooldowns = ctx.leases.cooling_many(sorted(holders))
+    routes_by_account = shared_accounts.routable_machines_many(ctx.db, holders.values(), online)
+    route_ready = {account_id: bool(nodes) for account_id, nodes in routes_by_account.items()}
+    account_ready = {
+        account_id: (accounts.get(account_id, {}).get("status") in ("idle", "working", "probing")
+                     and account_id not in cooldowns and route_ready[account_id])
+        for account_id in holders
+    }
     results = []
     for role in ROLE_COVERAGE_ROLES:
-        holders = [acc for acc in repo.accounts if role in (acc.roles or []) and not acc.paused and not acc.explicit_only]
         ready = []
         expedited = []
-        for account in holders:
-            state = accounts.get(account.id, {})
-            healthy = (state.get("status") in ("idle", "working", "probing")
-                       and not ctx.leases.cooling(account.id) and routable_machines(ctx, account, online))
-            if not healthy:
+        role_holders = holders_by_role[role]
+        for account in role_holders:
+            if not account_ready[account.id]:
                 continue
             if (account.id, role) in disabled:
                 if persist and role_health.expedite_probation(ctx.db, account.id, role):
@@ -511,7 +522,7 @@ def role_coverage(ctx, *, persist: bool = True) -> list[dict[str, Any]]:
                               outcome="available", detail="machine and account are healthy; daily wait removed")
                 ctx.events.emit("role.probation_expedited", account=account.id, step=role, outcome="available",
                                 reason="the role is healthy enough for another easy probation ticket")
-            if any((account.id, role) in disabled for account in holders):
+            if any((account.id, role) in disabled for account in role_holders):
                 _finding(ctx, f"role:{role}", "role_switched_off",
                          f"{role} has a switched-off account; healthy accounts were returned to probation where possible",
                          next_step)

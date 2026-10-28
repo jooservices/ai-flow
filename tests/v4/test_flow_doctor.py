@@ -13,8 +13,9 @@ import psycopg
 import pytest
 
 from aiflow.v4 import cli
-from aiflow.v4.control import escalations, flow_doctor, role_health, tooling
+from aiflow.v4.control import escalations, flow_doctor, role_health, shared_accounts, tooling
 from aiflow.v4.control.db import DB, J
+from aiflow.v4.core.controlrepo import Account
 from tests.v4.conftest import add_ticket, join_node
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -440,6 +441,32 @@ def test_role_coverage_uses_routing_readiness_for_shared_accounts_pending_sign_i
     assert dev()["ready_accounts"] == ["claude-01"] and not dev()["healthy"]  # online machine, but not signed in
     ctx.db.run("UPDATE account_machines SET status='signed_in' WHERE account_id='codex-01'")
     assert sorted(dev()["ready_accounts"]) == ["claude-01", "codex-01"] and dev()["healthy"]
+
+
+def test_batched_routing_readiness_matches_per_account_checks_with_constant_db_reads(ctx, monkeypatch):
+    online_node(ctx, "cc")
+    online_node(ctx, "node1")
+    accounts = [
+        Account(id="shared-test", provider="claude", node="cc", session_limit=2,
+                extra_machines=["node1"]),
+        Account(id="plain-test", provider="codex", node="cc", extra_machines=["node1"]),
+    ]
+    ctx.db.run("INSERT INTO account_machines (account_id,node,status) VALUES ('shared-test','node1','pending')")
+    online = {"cc", "node1"}
+    expected = {account.id: flow_doctor.routable_machines(ctx, account, online) for account in accounts}
+
+    calls = []
+    original_all = ctx.db.all
+
+    def counted_all(sql, params=None):
+        calls.append(sql)
+        return original_all(sql, params)
+
+    monkeypatch.setattr(ctx.db, "all", counted_all)
+    actual = shared_accounts.routable_machines_many(ctx.db, accounts, online)
+
+    assert actual == expected == {"shared-test": ["cc"], "plain-test": ["cc", "node1"]}
+    assert len(calls) == 3  # pending assignments, shared-machine capacity, and account running counts
 
 
 @pytest.mark.parametrize("full_capacity", ["account_sessions", "machine_slots"])

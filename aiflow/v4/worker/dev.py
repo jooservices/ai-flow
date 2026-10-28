@@ -200,8 +200,11 @@ def run_with_inbox(adapter, spec: RunSpec, heartbeat: Heartbeat, on_progress=Non
             aggregate.error_message = response.error_message
             aggregate.exit_code = response.exit_code
             aggregate.final_text = response.final_text or aggregate.final_text
-            aggregate.verdict = response.verdict or aggregate.verdict
-            aggregate.verdict_reason = response.verdict_reason or aggregate.verdict_reason
+            if response.final_text:
+                aggregate.verdict = response.verdict
+                aggregate.verdict_reason = response.verdict_reason
+            aggregate.reset_at = response.reset_at
+            aggregate.credential_expires_at = response.credential_expires_at
         remaining = int(spec.timeout_s - float(getattr(aggregate, "duration_s", 0.0) or 0.0))
         if response.error_kind or heartbeat.lost.is_set() or continuations >= max_continuations or remaining <= 0:
             return aggregate

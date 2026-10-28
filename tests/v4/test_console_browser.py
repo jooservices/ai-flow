@@ -279,6 +279,8 @@ def test_console_journeys_for_roles_screens_themes_and_phone(ctx, tmp_path, monk
                                    headers={"Authorization": f"Bearer {joined.json()['node_token']}"})
         assert heartbeat.status_code == 200
         inbox_node = join_node(bootstrap, "cc", ip="127.0.0.3")
+        # The run stays live while the three browser modes execute before its checkpoint lifecycle is driven.
+        ctx.settings.lease_ms = max(ctx.settings.lease_ms, 900_000)
         inbox_claim = bootstrap.post("/v1/work/claim", json={"ticket": "TESTWP-983", "account": "claude-01"},
                                      headers={"Authorization": f"Bearer {inbox_node.json()['node_token']}"})
         assert inbox_claim.status_code == 200 and inbox_claim.json()["claimed"]

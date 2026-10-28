@@ -2872,10 +2872,7 @@ function renderDBody() {
   h += analyticsPanel();
   }
   var target = S.view === 'work' ? $('#work-body') : $('#dbody'); if (window.AIFlowConsole && window.AIFlowConsole.runInboxPanel) h += window.AIFlowConsole.runInboxPanel();
-  var focused = target && typeof target.contains === 'function' && target.contains(document.activeElement) ? document.activeElement : null;
-  var focusedId = focused && /^(run-inbox-draft|run-inbox-kind|run-inbox-run)$/.test(focused.id) ? focused.id : '';
-  var selection = focusedId === 'run-inbox-draft' ? [focused.selectionStart, focused.selectionEnd] : null;
-  if (target) target.innerHTML = h; if (focusedId) { var restore = target && target.querySelector('#' + focusedId); if (restore) { restore.focus(); if (selection) restore.setSelectionRange(selection[0], selection[1]); } }
+  if (target && window.AIFlowConsole && window.AIFlowConsole.renderBoardContent) window.AIFlowConsole.renderBoardContent(target, h); else if (target) target.innerHTML = h;
   if (target && S.view === 'delivery') applyLayout('delivery', target);
 }
 

@@ -89,6 +89,16 @@
     }
 
     app.runInboxPanel = panel;
+    app.renderBoardContent = function (target, html) {
+      var focused = target && typeof target.contains === 'function' && target.contains(document.activeElement) ? document.activeElement : null;
+      var focusedId = focused && /^(run-inbox-draft|run-inbox-kind|run-inbox-run)$/.test(focused.id) ? focused.id : '';
+      var selection = focusedId === 'run-inbox-draft' ? [focused.selectionStart, focused.selectionEnd] : null;
+      if (target) target.innerHTML = html;
+      if (focusedId) {
+        var restore = target && target.querySelector('#' + focusedId);
+        if (restore) { restore.focus(); if (selection) restore.setSelectionRange(selection[0], selection[1]); }
+      }
+    };
     document.addEventListener('click', function (event) {
       var button = event.target.closest && event.target.closest('[data-act="run-inbox-send"]');
       if (button) send();

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from aiflow.v4.adapters import RunResult, RunSpec
@@ -56,6 +57,27 @@ def test_worker_injects_guidance_only_at_a_provider_process_boundary():
     assert result.final_text == "Updated pass"
     assert result.tokens_in == 10 and result.tokens_out == 7
     assert result.duration_s == 5
+
+
+def test_continuation_uses_latest_text_verdict_and_provider_expiry_metadata():
+    first_reset = datetime(2026, 10, 28, 12, tzinfo=timezone.utc)
+    latest_reset = datetime(2026, 10, 28, 13, tzinfo=timezone.utc)
+    first_expiry = datetime(2026, 10, 29, 12, tzinfo=timezone.utc)
+    latest_expiry = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
+    adapter = FakeAdapter([
+        RunResult(final_text="RESULT: BLOCKED: Waiting for owner input", verdict="BLOCKED",
+                  verdict_reason="Waiting for owner input", reset_at=first_reset,
+                  credential_expires_at=first_expiry),
+        RunResult(final_text="The owner guidance resolved the question.", reset_at=latest_reset,
+                  credential_expires_at=latest_expiry),
+    ])
+    heartbeat = FakeHeartbeat([{"id": 7, "kind": "context", "author": "owner", "body": "Proceed."}])
+
+    result = run_with_inbox(adapter, RunSpec(prompt="Original", cwd="/tmp", account_home="/tmp"), heartbeat)
+
+    assert result.final_text == "The owner guidance resolved the question."
+    assert result.verdict == "" and result.verdict_reason == ""
+    assert result.reset_at == latest_reset and result.credential_expires_at == latest_expiry
 
 
 def test_conflicting_guidance_keeps_policy_precedence_and_is_reported_to_the_owner(monkeypatch, tmp_path):

@@ -12,17 +12,17 @@ One run drives the real FastAPI control application in process and uses real Pos
 
 - **100 projects** (`SCP001`…`SCP100`), each with 20 earlier tickets (2000 in total, 70 % Done) and a finished run
   for every Done one.
-- **50 machines**, each joined with a join token and heartbeating like a node agent; every machine serves 4
-  projects and every project is served by 2 machines.
+- **50 machines**, each joined with a join token and heartbeating like a node agent; each has 4 worker slots and
+  reports 5 CPUs at light load. Every machine serves 4 projects and every project is served by 2 machines.
 - **100 licensed AI accounts and 200 simulated sessions** (two concurrent sessions per Business-plan account).
   Sessions are spread across the 50 simulated machines and four provider types. Each sends a stable `worker_id` to
   `GET /v1/work/candidates`, claims with `POST /v1/work/claim`, heartbeats, reports `done` and releases the lease.
   This matches production's per-worker identity and tests concurrent sessions sharing one account. No AI provider or
   real machine is used.
-- **Ticket traffic** in three waves (200, 80 and 80 tickets that become ready together): a morning burst that keeps
-  about 170 sessions working at once, then trickles. About 5 % of the tickets are held (`aiflow-hold`) and about 5 %
-  are blocked by an earlier ticket and become ready when it is Done. Priorities and projects are skewed like real
-  traffic (some projects are far busier).
+- **Ticket traffic** in three waves (200, 80 and 80 tickets that become ready together): the first burst gives every
+  project two tickets so each machine has enough eligible work for its four slots; later waves use seeded skew so
+  some projects are far busier. About 5 % of tickets are held (`aiflow-hold`) and about 5 % are blocked by an earlier
+  ticket and become ready when it is Done.
 
 The traffic plan is a pure function of the configuration (`Scenario`, default seed 236): equal configurations have
 the same tickets and `plan_digest`. Claims run concurrently, so which session wins a particular ticket can vary.
@@ -61,7 +61,8 @@ here and in the code:
 The report uses the nearest-rank percentile and keeps the median and maximum for context. Each console view has 3
 samples and the picker has 5, so p95 equals the maximum for those measurements; treat them as a short, conservative
 signal rather than a stable percentile estimate. Ticket pickup has hundreds of samples, so its p95 describes the
-tail of the traffic. The slowest view decides the view budget, so one slow view cannot hide behind fast ones.
+tail of the traffic; the report also breaks pickup p95 down by wave. The slowest view decides the view budget, so one
+slow view cannot hide behind fast ones.
 
 "Busiest moment" is the first worker burst: at least 150 of the 200 simulated sessions must be active while the
 console and picker samples run. The report records the actual active-run count and verifies that measured view
@@ -75,9 +76,12 @@ names the budget and the measured value, for example
 
 The run also fails when behaviour is wrong at 100/50/200: every ready ticket picked exactly once, held tickets never
 picked, blocked tickets not started before their blocker finished, claims only on machines that serve the project,
-fence 1 for every fresh ticket, a second claim of a leased ticket refused, no run left working, all 100 projects, 50
-online machines, 100 licensed accounts and their 200 concurrent sessions visible in `/v1/state`, all projects in the
-picker, and every working session visible as an active run.
+one positive fencing token for every successful run, a second claim of a leased ticket refused, no run left working,
+all 100 projects, 50 online machines, 100 licensed accounts and their 200 concurrent sessions visible in `/v1/state`,
+all projects in the picker, and every working session visible as an active run. Every successful run must store a
+positive fencing token;
+failed concurrent claims may consume a token before a later attempt succeeds, so the first successful run need not
+have token `1`.
 
 ## Release attachment and gate
 

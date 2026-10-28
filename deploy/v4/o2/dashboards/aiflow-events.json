@@ -139,6 +139,35 @@
             }
           ],
           "layout": {"x": 0, "y": 36, "w": 192, "h": 18, "i": 4}
+        },
+        {
+          "id": "load-throttling-throughput",
+          "type": "line",
+          "title": "Throughput and load throttling",
+          "description": "Finished runs beside machine and host load-throttling transitions and the load per CPU that caused them.",
+          "config": {"show_legends": true},
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT histogram(_timestamp, '1 minute') AS minute, type, count(*) AS events, max(cpu_load_per_cpu) AS load_per_cpu FROM \"aiflow4_events\" WHERE type IN ('run.finished','machine.load_throttled','host.load_throttled') GROUP BY minute, type ORDER BY minute",
+              "vrlFunctionQuery": "",
+              "customQuery": true,
+              "fields": {
+                "stream": "aiflow4_events",
+                "stream_type": "logs",
+                "x": [{"label": "Minute", "alias": "minute", "column": "minute"}],
+                "y": [
+                  {"label": "Events / runs", "alias": "events", "column": "events"},
+                  {"label": "Load per CPU", "alias": "load_per_cpu", "column": "load_per_cpu"}
+                ],
+                "z": [],
+                "breakdown": [{"label": "Event", "alias": "type", "column": "type"}],
+                "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}
+              },
+              "config": {}
+            }
+          ],
+          "layout": {"x": 0, "y": 54, "w": 192, "h": 18, "i": 5}
         }
       ]
     }

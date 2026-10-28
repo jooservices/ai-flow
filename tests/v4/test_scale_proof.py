@@ -89,6 +89,9 @@ def test_the_plan_is_a_pure_function_of_the_configuration():
     assert len(sessions) == 200 and len({s["id"] for s in sessions}) == 100
     assert set(__import__("collections").Counter(s["id"] for s in sessions).values()) == {2}
     assert scale_harness.plan(FULL)["scenario"]["claim_concurrency"] == 20
+    opening_burst = scale_harness.plan(FULL)["waves"][0]
+    assert all(sum(ticket["project"] == key for ticket in opening_burst) == 2
+               for key in scale_harness.project_keys(FULL))
 
 
 def test_claim_queue_interleaves_worker_polls_across_the_fleet():

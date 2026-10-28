@@ -10,6 +10,7 @@ provision_module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(provision_module)
 EXPECTED_PANELS = {
     "Runs per hour by outcome": "run.finished",
+    "Throughput and load throttling": "run.finished",
     "AI time per account": "run.finished",
     "Policy denials": "policy.decision",
     "Incidents opened": "incident.opened",
@@ -32,7 +33,11 @@ def test_dashboard_json_defines_the_expected_panels():
         assert panel["queryType"] == "sql"
         assert query["fields"]["stream"] == "aiflow4_events"
         assert '"aiflow4_events"' in query["query"]
-        assert f"type = '{event_type}'" in query["query"]
+        if title == "Throughput and load throttling":
+            assert "type IN ('run.finished','machine.load_throttled','host.load_throttled')" in query["query"]
+            assert "cpu_load_per_cpu" in query["query"]
+        else:
+            assert f"type = '{event_type}'" in query["query"]
         assert query["fields"]["x"] and query["fields"]["y"]
         # OpenObserve reads the snake_case key; a camelCase one is silently ignored
         assert isinstance(panel["config"]["show_legends"], bool)

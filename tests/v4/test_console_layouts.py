@@ -413,7 +413,7 @@ const { chromium } = require(process.env.AIFLOW4_LAYOUT_PLAYWRIGHT_MODULE);
     await page.goto(base + '/dashboard', { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Customize layout' }).waitFor({ state: 'visible', timeout: 10000 });
     const grid = page.locator('#view-cc .blocks');
-    await page.waitForFunction(() => document.querySelectorAll('#view-cc .blocks .block-cell').length >= 8);
+    await grid.locator('.block-cell').nth(7).waitFor({ state: 'attached' });
     let order = await grid.locator('.block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId));
     assert.deepEqual(order.slice(0, 3), ['tokens', 'quota', 'usage']);
     await page.getByRole('button', { name: 'Customize layout' }).click();

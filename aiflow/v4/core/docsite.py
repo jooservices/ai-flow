@@ -49,7 +49,10 @@ CROSS_SCREEN_DOCS = {"docs/v4/console-layouts.md": LAYOUT_SCREEN_VIEWS}
 # docs/guide/screens.
 SCREEN_TOPIC_DOCS = {"settings": "docs/v4/runtime-settings.md"}
 # Feature topics linked from screen guides are copied into the Help site so those links work after packaging.
-TOPIC_DOCS = {"scale-proof": "docs/v4/scale-proof.md"}
+TOPIC_DOCS = {"scale-proof": "docs/v4/scale-proof.md",
+              "load-aware-scheduling": "docs/v4/load-aware-scheduling.md"}
+UI_EXTENSION_VIEWS = {"system-check.js": {"system-check", "projects"},
+                      "load-policy.js": {"cc", "machines"}}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
@@ -107,6 +110,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderStakeholderBody": ("stakeholder",),
     "renderStakeholder": ("stakeholder",),
     "renderDrawer": None,
+    "drawerNode": ("machines",),
+    "saveMachineLoadLimits": ("machines",),
     "drawerInc": ("cc", "machines"),
     "renderFooter": None,
     "renderBackup": ("backup",),
@@ -282,6 +287,7 @@ SCREEN_VIEW_PATTERNS = (
     (re.compile(r"\bact\s*===\s*[\"'](?:project-(?:environment|repository|services)|environment-scan)[\w-]*[\"']"),
      ("projects",)),
     (re.compile(r"\bact\s*===\s*[\"']capacity-refresh[\"']"), ("cc",)),
+    (re.compile(r"\bact\s*===\s*[\"']node-load-save[\"']"), ("machines",)),
 )
 
 # Styles for the V2 dashboard and its Work board destination are outside the static view sections.
@@ -1187,14 +1193,17 @@ def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str])
 def changed_views(base: str) -> set[str]:
     """Screens whose section or JavaScript renderer changed; fail when a UI hunk cannot be mapped."""
     rel = UI.relative_to(ROOT).as_posix()
-    extension_rel = UI.with_name("system-check.js").relative_to(ROOT).as_posix()
     diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", rel], cwd=ROOT, text=True,
                           capture_output=True, check=True).stdout
-    extension_diff = subprocess.run(["git", "diff", "--quiet", f"{base}...HEAD", "--", extension_rel],
-                                    cwd=ROOT, check=False)
-    extension_views = {"system-check", "projects"} if extension_diff.returncode == 1 else set()
-    if extension_diff.returncode not in {0, 1}:
-        raise subprocess.CalledProcessError(extension_diff.returncode, extension_diff.args)
+    extension_views = set()
+    for name, views in UI_EXTENSION_VIEWS.items():
+        extension_rel = UI.with_name(name).relative_to(ROOT).as_posix()
+        extension_diff = subprocess.run(["git", "diff", "--quiet", f"{base}...HEAD", "--", extension_rel],
+                                        cwd=ROOT, check=False)
+        if extension_diff.returncode == 1:
+            extension_views |= views
+        elif extension_diff.returncode != 0:
+            raise subprocess.CalledProcessError(extension_diff.returncode, extension_diff.args)
     # Diff coordinates refer to HEAD. During a merge, the worktree/index can already contain upstream edits that
     # shift those coordinates, so map against the exact file version used by the diff.
     source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True, capture_output=True, check=True).stdout

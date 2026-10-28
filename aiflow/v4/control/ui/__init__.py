@@ -38,6 +38,7 @@ def build_console_page() -> str:
     security_tab_marker = '      <button class="tab" role="tab" id="tab-notifications"'
     security_script_marker = "/* ---------- boot ---------- */"
     script_marker = "})();\n</script>"
+    boot_marker = "/* ---------- boot ---------- */"
     tab = ('      <button class="tab" role="tab" id="tab-system-check" aria-controls="view-system-check" '
            'aria-selected="false" data-act="view" data-menu-view data-view="system-check">System check</button>')
     panel = ('  <section class="view" id="view-system-check" role="tabpanel" '
@@ -56,7 +57,9 @@ def build_console_page() -> str:
         (HERE / "security.js").read_text(encoding="utf-8"),
     ))
     html = html.replace(security_script_marker, security_extension + "\n" + security_script_marker, 1)
+    policy = (HERE / "load-policy.js").read_text(encoding="utf-8")
     extension = (HERE / "system-check.js").read_text(encoding="utf-8")
+    html = html.replace(boot_marker, policy + "\n" + boot_marker, 1)
     return html.replace(script_marker, extension + "\n" + script_marker, 1)
 
 

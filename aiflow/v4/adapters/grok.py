@@ -11,6 +11,13 @@ def _token_count(value: object) -> int:
         return 0
 
 
+def _has_token_count(value: object) -> bool:
+    try:
+        return value is not None and int(value) >= 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _usage_counts(usage: dict) -> tuple[int, int]:
     # Grok reports uncached prompt tokens separately from cache reads/writes. The cache buckets are
     # part of the prompt total; reasoning_tokens is already included in output_tokens/total_tokens.
@@ -24,6 +31,13 @@ def _record_usage(event: dict, res: RunResult, *, replace: bool = False) -> None
     if not isinstance(usage, dict):
         return
     tokens_in, tokens_out = _usage_counts(usage)
+    input_keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    has_input = any(_has_token_count(usage.get(key)) for key in input_keys)
+    complete_usage = has_input and _has_token_count(usage.get("output_tokens"))
+    if complete_usage:
+        res.token_usage_reported = True
+    elif replace:
+        return
     if replace:
         # The terminal end event contains the aggregate for the complete run; it supersedes the
         # per-response usage events above it.

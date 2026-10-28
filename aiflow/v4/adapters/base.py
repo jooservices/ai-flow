@@ -60,6 +60,7 @@ class RunResult:
     verdict_reason: str = ""
     tokens_in: int = 0
     tokens_out: int = 0
+    token_usage_reported: bool = False
     cost_usd: float = 0.0
     permission_denials: int = 0
     error_kind: str = ""       # "" | quota | auth | network | provider | timeout | idle | other

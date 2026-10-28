@@ -432,6 +432,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       details={"verdict": res.verdict, "permission_denials": res.permission_denials,
+                               "token_usage_reported": res.token_usage_reported,
                                "verdict_reason": (res.verdict_reason or "")[:2000],
                                "exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})
         if hb.lost.is_set():

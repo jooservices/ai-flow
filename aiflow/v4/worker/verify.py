@@ -158,7 +158,8 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
                     node=api_node(api)))
             res = run_with_inbox(adapter, spec, hb, on_progress)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
-                      quota_observed_at=res.quota_observed_at.isoformat() if res.quota_observed_at else None,
+                      quota_observed_at=(getattr(res, "quota_observed_at", None).isoformat()
+                                         if getattr(res, "quota_observed_at", None) else None),
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       head_sha=head)
         if hb.lost.is_set():

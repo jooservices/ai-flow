@@ -431,10 +431,11 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                     node=api_node(api)))
             res = run_with_inbox(adapter, spec, hb, on_progress)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
-                      quota_observed_at=res.quota_observed_at.isoformat() if res.quota_observed_at else None,
+                      quota_observed_at=(getattr(res, "quota_observed_at", None).isoformat()
+                                         if getattr(res, "quota_observed_at", None) else None),
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       details={"verdict": res.verdict, "permission_denials": res.permission_denials,
-                               "token_usage_reported": res.token_usage_reported,
+                               "token_usage_reported": bool(getattr(res, "token_usage_reported", False)),
                                "verdict_reason": (res.verdict_reason or "")[:2000],
                                "exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})
         if hb.lost.is_set():

@@ -35,15 +35,14 @@ def set_settings(db, interval_minutes: int, by: str) -> dict[str, Any]:
     return get_settings(db)
 
 
-def on_sign_in_completed(connection, account_id: str, provider: str) -> None:
-    """Queue a fresh quota read; record auth health for providers without a read-only quota command."""
+def on_sign_in_completed(connection, account_id: str) -> None:
+    """Queue a fresh quota read and record auth health independently of quota command support."""
     connection.execute("INSERT INTO quota_refresh_jobs (account_id,next_due_at) VALUES (%s,now())"
                        " ON CONFLICT (account_id) DO UPDATE SET next_due_at=now()", (account_id,))
-    if provider not in {"codex", "claude"}:
-        connection.execute(
-            "UPDATE accounts SET last_probe_at=now(),status=CASE WHEN status='signed_out' THEN 'idle'"
-            " ELSE status END,last_error=CASE WHEN status='signed_out' THEN '' ELSE last_error END,"
-            "updated_at=now() WHERE id=%s", (account_id,))
+    connection.execute(
+        "UPDATE accounts SET last_probe_at=now(),status=CASE WHEN status='signed_out' THEN 'idle'"
+        " ELSE status END,last_error=CASE WHEN status='signed_out' THEN '' ELSE last_error END,"
+        "updated_at=now() WHERE id=%s", (account_id,))
 
 
 def claim(db, account_id: str, node: str) -> dict | None:

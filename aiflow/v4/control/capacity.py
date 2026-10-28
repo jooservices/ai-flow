@@ -242,6 +242,15 @@ def reported_run_tokens(run: dict[str, Any]) -> int:
     return reservation_tokens(details)
 
 
+def lost_run_reservation_tokens(run: dict[str, Any], quota_observed_at: datetime | None) -> int:
+    """Keep a lost run's estimate until a provider snapshot taken after the loss reconciles it."""
+    lost_at = run.get("ended_at")
+    if lost_at and quota_observed_at and quota_observed_at > lost_at:
+        return 0
+    details = run.get("details") if isinstance(run.get("details"), dict) else {}
+    return reservation_tokens(details)
+
+
 def with_active_quota_reservations(db, forecasts: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Reduce assignment balances by live work and reported usage newer than the provider snapshot."""
     if not forecasts:
@@ -250,15 +259,22 @@ def with_active_quota_reservations(db, forecasts: dict[str, dict[str, Any]]) -> 
     observed_at = {str(row["id"]): row.get("quota_observed_at") for row in db.all(
         "SELECT id,quota_observed_at FROM accounts WHERE id=ANY(%s)", (account_ids,))}
     reservations: dict[str, int] = {}
-    for run in db.all("SELECT r.account_id,r.status,r.details,r.tokens_in,r.tokens_out,r.ended_at FROM runs r"
-                      " WHERE r.account_id=ANY(%s) AND (r.status='running' OR (r.status='finished' AND"
-                      " r.ended_at>(SELECT a.quota_observed_at FROM accounts a WHERE a.id=r.account_id)))",
-                      (account_ids,)):
+    for run in db.all("SELECT r.account_id,r.status,r.details,r.tokens_in,r.tokens_out,r.ended_at,r.started_at"
+                      " FROM runs r WHERE r.account_id=ANY(%s) AND (r.status IN ('running','lost') OR"
+                      " (r.status='finished' AND r.ended_at>(SELECT a.quota_observed_at FROM accounts a"
+                      " WHERE a.id=r.account_id)))", (account_ids,)):
         account_id = str(run["account_id"])
         forecast = forecasts.get(account_id) or {}
         is_active = run["status"] == "running"
+        is_lost = run["status"] == "lost"
+        snapshot_at = observed_at.get(account_id)
+        if is_lost:
+            tokens = lost_run_reservation_tokens(run, snapshot_at)
+            if not tokens:
+                continue
+            reservations[account_id] = reservations.get(account_id, 0) + tokens
+            continue
         if not is_active:
-            snapshot_at = observed_at.get(account_id)
             if (forecast.get("source") != "reported" or not snapshot_at or not run.get("ended_at")
                     or run["ended_at"] <= snapshot_at):
                 continue

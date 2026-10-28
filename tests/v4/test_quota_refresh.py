@@ -256,6 +256,12 @@ def test_quota_text_parser_uses_only_explicitly_labeled_windows():
     assert claude["windows"] == {"five_hour": {"utilization": .55}, "weekly": {"utilization": .73}}
 
 
+def test_codex_session_context_percentage_does_not_mask_five_hour_limit():
+    parsed = parse_quota_text("codex", "Session: abc Context window: 95% left 5h limit: 42% used")
+
+    assert parsed == {"provider": "codex", "windows": {"five_hour": {"utilization": .42}}}
+
+
 def test_quota_text_parser_normalizes_relative_and_absolute_reset_times():
     observed_at = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
     parsed = parse_quota_text(

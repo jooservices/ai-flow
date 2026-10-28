@@ -10,6 +10,9 @@ ALTER TABLE account_quota_samples ADD COLUMN IF NOT EXISTS observed_at timestamp
 UPDATE accounts SET quota_at_risk=false,quota_forecast='{}'::jsonb WHERE quota_source='';
 UPDATE incidents i SET closed_at=now() FROM accounts a
  WHERE i.kind='quota_high' AND i.closed_at IS NULL AND a.id=split_part(i.subject,':',1) AND a.quota_source='';
+-- Older lease-loss paths did not always record an end time. Anchor those unresolved estimates at upgrade time so
+-- only a later provider snapshot can reconcile them.
+UPDATE runs SET ended_at=now() WHERE status='lost' AND ended_at IS NULL;
 CREATE INDEX IF NOT EXISTS runs_account_started ON runs (account_id,started_at DESC);
 CREATE INDEX IF NOT EXISTS runs_account_ended_finished ON runs (account_id,ended_at DESC) WHERE status='finished';
 CREATE INDEX IF NOT EXISTS runs_account_running ON runs (account_id) WHERE status='running';

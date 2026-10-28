@@ -1,7 +1,10 @@
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from aiflow.gitops import GitError
+from aiflow.supervisor import Supervisor
 from aiflow.worktree_sweep import cleanup_done_worktree, resolve_merged_pull_request
 
 
@@ -125,6 +128,57 @@ class CleanupStateTests(unittest.TestCase):
         repo.cleanup.assert_called_once_with("JAIF-9", merged_pr=False)
         self.assertEqual(len(messages), 1)
         self.assertIn("permission denied", messages[0])
+
+
+class SupervisorSweepIntegrationTests(unittest.TestCase):
+    def test_declined_ticket_sweep_deletes_only_this_machines_cleanup_marker(self):
+        class MemoryRedis:
+            def __init__(self):
+                self.values = {}
+
+            def acquire(self, key, owner, ttl):
+                if key in self.values:
+                    return False
+                self.values[key] = owner
+                return True
+
+            def get(self, key):
+                return self.values.get(key)
+
+            def delete(self, key):
+                self.values.pop(key, None)
+
+        class SweepRepo:
+            name = "ai-flow"
+
+            def exists(self):
+                return True
+
+            def worktrees(self):
+                return [(Path("/worktrees/JAIF-9"), "JAIF-9-fix")]
+
+            def remove_worktree(self, path):
+                self.removed = path
+
+        redis = MemoryRedis()
+        local_marker = "sweep-cleanup:test:JAIF-9:JAIF-9-fix"
+        other_marker = "sweep-cleanup:other:JAIF-9:JAIF-9-fix"
+        redis.values.update({local_marker: "stopped", other_marker: "stopped"})
+        sup = Supervisor.__new__(Supervisor)
+        sup.cfg = SimpleNamespace(
+            machine="test", owner="owner", root=Path("/workspaces"),
+            registry=SimpleNamespace(projects={"ai-flow": SimpleNamespace(repo="ai-flow", company="JOOservices")}),
+        )
+        sup.redis = redis
+        sup.jira = SimpleNamespace(search=lambda *args, **kwargs: [{"key": "JAIF-9", "status": "Declined"}])
+        sup.sweep_ticket_databases = lambda: None
+        repo = SweepRepo()
+        with mock.patch("aiflow.supervisor.Repo", return_value=repo):
+            sup.sweep_worktrees()
+
+        self.assertEqual(repo.removed, Path("/worktrees/JAIF-9"))
+        self.assertNotIn(local_marker, redis.values)
+        self.assertEqual(redis.get(other_marker), "stopped")
 
 
 if __name__ == "__main__":

@@ -251,6 +251,26 @@ def test_resource_counts_uses_one_database_aggregate_for_entitlement_totals(ctx)
     assert counts["machines"] == 0 and counts["users"] == 0
 
 
+def test_worker_polls_share_a_fresh_licence_resource_count_snapshot(client, ctx):
+    sign_in(client, ctx)
+    joined = join_node(client, "cc")
+    headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+    aggregate_queries = []
+    original_one = ctx.db.one
+
+    def recording_one(sql, params=None):
+        if " AS ai_accounts," in sql:
+            aggregate_queries.append(sql)
+        return original_one(sql, params)
+
+    ctx.db.one = recording_one
+    for _ in range(2):
+        response = client.get("/v1/work/candidates?account=claude-01", headers=headers)
+        assert response.status_code == 200
+
+    assert len(aggregate_queries) == 1
+
+
 def test_startup_sync_skips_configured_accounts_and_machines_over_their_limits(client, ctx):
     sign_in(client, ctx)
     limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}

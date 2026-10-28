@@ -11,7 +11,7 @@ import io
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import httpx
@@ -301,7 +301,8 @@ def require_count_capacity(db, resource: str, current: int, *, public_key: str, 
     return state
 
 
-def over_limit_grace(ctx, state: dict[str, Any], now: datetime | None = None) -> bool:
+def over_limit_grace(ctx, state: dict[str, Any], now: datetime | None = None,
+                     resource_counts_reader: Callable[[], dict[str, int]] | None = None) -> bool:
     """True while usage above a newly applied or lowered limit is inside the grace period.
 
     The clock starts the first time usage is found above a limit and is cleared when usage is back within every
@@ -313,7 +314,7 @@ def over_limit_grace(ctx, state: dict[str, Any], now: datetime | None = None) ->
     if not state.get("limits_enforced", True):
         state["over_limit_grace"] = False
         return False
-    usage = resource_counts(ctx)
+    usage = resource_counts_reader() if resource_counts_reader else resource_counts(ctx)
     # All entitlement checks for this request share the same fleet-size snapshot. A candidate
     # response can check many projects; recomputing these counts for every offered ticket scans
     # the same accounts and machines repeatedly.
@@ -417,10 +418,11 @@ def enforce_project_entitlement(ctx, project: str, *, public_key: str,
                    limit, len(project_keys))
 
 
-def enforce_work_entitlement(ctx, account_id: str, node: str, *, public_key: str) -> dict[str, Any]:
+def enforce_work_entitlement(ctx, account_id: str, node: str, *, public_key: str,
+                             resource_counts_reader: Callable[[], dict[str, int]] | None = None) -> dict[str, Any]:
     """Return the active plan state after checking the machine and account that would start new work."""
     state = require_writable(ctx.db, public_key)
-    over_limit_grace(ctx, state)
+    over_limit_grace(ctx, state, resource_counts_reader=resource_counts_reader)
     enforce_account_entitlement(ctx, account_id, public_key=public_key, state=state)
     enforce_machine_entitlement(ctx, node, public_key=public_key, state=state)
     return state

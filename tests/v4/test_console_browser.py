@@ -283,6 +283,8 @@ def test_console_journeys_for_roles_screens_themes_and_phone(ctx, tmp_path, monk
                                      headers={"Authorization": f"Bearer {inbox_node.json()['node_token']}"})
         assert inbox_claim.status_code == 200 and inbox_claim.json()["claimed"]
         config["inboxRunId"] = inbox_claim.json()["run_id"]
+        config["inboxNodeToken"] = inbox_node.json()["node_token"]
+        config["inboxFence"] = inbox_claim.json()["fence"]
     mount_ui(app, ctx)
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

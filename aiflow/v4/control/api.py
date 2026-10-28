@@ -1320,9 +1320,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.middleware("http")
     async def isolate_runtime_repo_snapshot(request: Request, call_next):
         """Reuse the live view only in routes that never change account/project configuration."""
-        enabled = request.url.path in {
+        enabled = request.method == "GET" and request.url.path in {
             "/v1/work/candidates", "/v1/work/claim",
-            "/v1/version-releases/candidates", "/v1/version-releases/claim", "/v1/state",
+            "/v1/version-releases/candidates", "/v1/version-releases/claim", "/v1/state", "/v1/projects",
         }
         cache_token = runtime_repo_cache.set(None)
         enabled_token = runtime_repo_cache_enabled.set(enabled)

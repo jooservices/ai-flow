@@ -261,6 +261,23 @@ def test_projects_screen_batches_node_readiness_query(client, ctx, monkeypatch):
     assert [node["name"] for node in testwp["node_readiness"]] == ["cc", "node1"]
 
 
+def test_projects_picker_reuses_runtime_repo_snapshot_for_probe_report(client, ctx, monkeypatch):
+    original_one = ctx.db.one
+    runtime_repo_reads = []
+
+    def recording_one(sql, params=None):
+        if "SELECT EXISTS(SELECT 1 FROM nodes WHERE removed_at IS NOT NULL)" in sql:
+            runtime_repo_reads.append(sql)
+        return original_one(sql, params)
+
+    monkeypatch.setattr(ctx.db, "one", recording_one)
+
+    response = client.get("/v1/projects")
+
+    assert response.status_code == 200
+    assert len(runtime_repo_reads) == 1
+
+
 def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition(client, ctx, monkeypatch):
     deliveries = []
 

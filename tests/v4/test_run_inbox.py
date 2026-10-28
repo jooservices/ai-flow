@@ -22,12 +22,14 @@ def test_run_inbox_is_ordered_idempotent_and_delivered_by_worker_heartbeat(clien
     assert first.status_code == 201
     message = first.json()["message"]
     assert message["status"] == "queued" and message["author"] == "Console"
+    assert ctx.db.one("SELECT inbox_pending_count FROM runs WHERE id=%s", (run["run_id"],))["inbox_pending_count"] == 1
 
     duplicate = client.post(f"/v1/runs/{run['run_id']}/inbox",
                             json={"client_id": client_id, "kind": "idea", "body": "different retry payload"})
     assert duplicate.status_code == 201
     assert duplicate.json()["message"]["id"] == message["id"]
     assert duplicate.json()["message"]["body"] == "Please add a regression test."
+    assert ctx.db.one("SELECT inbox_pending_count FROM runs WHERE id=%s", (run["run_id"],))["inbox_pending_count"] == 1
     second = client.post(f"/v1/runs/{run['run_id']}/inbox",
                          json={"kind": "context", "body": "The old worktree must be preserved."}).json()["message"]
 
@@ -46,6 +48,7 @@ def test_run_inbox_is_ordered_idempotent_and_delivered_by_worker_heartbeat(clien
     assert history.status_code == 200
     assert [row["status"] for row in history.json()["messages"]] == ["included", "included"]
     assert history.json()["messages"][0]["body"] == "Please add a regression test."
+    assert ctx.db.one("SELECT inbox_pending_count FROM runs WHERE id=%s", (run["run_id"],))["inbox_pending_count"] == 0
 
 
 def test_run_closure_marks_unconsumed_guidance_undelivered_and_rejects_late_messages(client, ctx):
@@ -56,6 +59,7 @@ def test_run_closure_marks_unconsumed_guidance_undelivered_and_rejects_late_mess
     result = client.post(f"/v1/runs/{run['run_id']}/result", json={"fence": run["fence"], "outcome": "done"},
                          headers=node)
     assert result.status_code == 200
+    assert ctx.db.one("SELECT inbox_pending_count FROM runs WHERE id=%s", (run["run_id"],))["inbox_pending_count"] == 0
     history = client.get(f"/v1/runs/{run['run_id']}/inbox")
     assert history.json()["messages"][0]["status"] == "undelivered"
     late = client.post(f"/v1/runs/{run['run_id']}/inbox", json={"kind": "request", "body": "Too late"})

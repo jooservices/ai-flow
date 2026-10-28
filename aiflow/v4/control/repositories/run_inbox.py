@@ -27,6 +27,7 @@ def create(connection, run: dict, client_id: UUID, author: str, kind: str, body:
         " created_at,received_at,included_at,terminal_reason",
         (run["id"], client_id, run["ticket_key"], run["project"], author, kind, body),
     ).fetchone()
+    connection.execute("UPDATE runs SET inbox_pending_count=inbox_pending_count+1 WHERE id=%s", (run["id"],))
     return row, True
 
 
@@ -59,7 +60,11 @@ def mark_included(connection, run_id: str, message_ids: list[int]) -> list[int]:
             "UPDATE run_inbox_messages SET status='included',included_at=coalesce(included_at,now())"
             " WHERE run_id=%s AND id=ANY(%s) AND status IN ('queued','received') RETURNING id",
             (run_id, message_ids)).fetchall()
-        return [int(row["id"]) for row in rows]
+        included = [int(row["id"]) for row in rows]
+        if included:
+            connection.execute("UPDATE runs SET inbox_pending_count=greatest(0,inbox_pending_count-%s) WHERE id=%s",
+                               (len(included), run_id))
+        return included
     return []
 
 
@@ -67,4 +72,8 @@ def mark_undelivered(connection, run_id: str, reason: str) -> list[int]:
     result = connection.execute(
         "UPDATE run_inbox_messages SET status='undelivered',terminal_reason=%s"
         " WHERE run_id=%s AND status IN ('queued','received') RETURNING id", (reason[:300], run_id))
-    return [int(row["id"]) for row in result.fetchall()]
+    undelivered = [int(row["id"]) for row in result.fetchall()]
+    if undelivered:
+        connection.execute("UPDATE runs SET inbox_pending_count=greatest(0,inbox_pending_count-%s) WHERE id=%s",
+                           (len(undelivered), run_id))
+    return undelivered

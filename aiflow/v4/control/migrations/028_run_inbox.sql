@@ -1,5 +1,6 @@
 -- Owner messages queued for a live worker and applied after the current provider invocation finishes.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS result_received_at timestamptz;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS inbox_pending_count integer NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS run_inbox_messages (
     id              bigserial PRIMARY KEY,

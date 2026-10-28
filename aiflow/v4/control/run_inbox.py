@@ -56,7 +56,7 @@ def heartbeat(ctx, run: dict, run_id: str, body, node: str) -> dict:
             raise HTTPException(409, "run is no longer active")
         received = run_inbox.mark_received(connection, run_id, body.inbox_received) if body.inbox_received else []
         included = run_inbox.mark_included(connection, run_id, body.inbox_included) if body.inbox_included else []
-        messages = run_inbox.queued(connection, run_id)
+        messages = run_inbox.queued(connection, run_id) if int(run.get("inbox_pending_count") or 0) else []
     if received:
         ctx.events.emit("run.inbox.received", ticket=run["ticket_key"], project=run["project"],
                         run_id=run_id, fence=body.fence, node=node, outcome="received",

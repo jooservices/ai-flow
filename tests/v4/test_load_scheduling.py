@@ -304,7 +304,7 @@ def test_machine_screen_and_openobserve_dashboard_surface_load_policy_and_teleme
     assert "hostLoadState.reason" in page
     import json
     dashboards = ROOT / "deploy" / "v4" / "o2" / "dashboards"
-    dashboard = json.loads(next(dashboards.glob("*.json")).read_text())
+    dashboard = json.loads((dashboards / "aiflow-events.json").read_text())
     panels = [panel for tab in dashboard["tabs"] for panel in tab["panels"]]
     panel = next(panel for panel in panels if panel["title"] == "Throughput and load throttling")
     query = panel["queries"][0]

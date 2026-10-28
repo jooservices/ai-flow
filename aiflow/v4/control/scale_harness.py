@@ -819,9 +819,9 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     measured, peak_checks = _measure_peak(client, ctx, sc, live, errors, page_results, picker_result,
                                                           claim_intervals, observed_activity)
                     log(f"peak: {peak_active} sessions working")
-                # run_result may embed captured work locally. Keep the completion burst small so its inference
-                # work cannot occupy every worker request slot while the independent lease heartbeats run.
-                with ThreadPoolExecutor(max_workers=min(8, len(live)),
+                # Provider work is simulated, so completion requests can use the declared worker-request budget.
+                # The request gate gives queued lease heartbeats priority within that same limit.
+                with ThreadPoolExecutor(max_workers=min(sc.claim_concurrency, len(live)),
                                         thread_name_prefix="scale-complete") as pool:
                     completed = [pool.submit(finish_one, session, claim, keeper) for session, claim in live]
                     for future in completed:

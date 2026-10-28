@@ -199,6 +199,20 @@ def test_run_loop_reads_events_and_verdict(tmp_path):
     assert (tmp_path / "run.jsonl").read_text().count("\n") == 2
 
 
+def test_run_loop_can_append_continuation_events_and_signal_provider_start(tmp_path):
+    a = CodexAdapter()
+    log_path = tmp_path / "run.jsonl"
+    a.argv = lambda spec: fake_cli(tmp_path, [{"type": "turn.completed"}])
+    started = []
+    first = RunSpec(prompt="first", cwd=str(tmp_path), account_home=str(tmp_path), log_path=str(log_path))
+    a.run(first)
+    continuation = RunSpec(prompt="follow up", cwd=str(tmp_path), account_home=str(tmp_path),
+                           log_path=str(log_path), log_append=True)
+    result = a.run(continuation, on_start=lambda: started.append(True))
+    assert result.exit_code == 0 and started == [True]
+    assert log_path.read_text().count("\n") == 2
+
+
 def test_run_loop_captures_cli_credential_expiry_and_network_errors(tmp_path):
     a = CodexAdapter()
     expiry = "2026-10-25T10:00:00Z"

@@ -13,7 +13,7 @@ from typing import Any
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, with_knowledge_context
+from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, run_with_inbox, with_knowledge_context
 
 log = logging.getLogger("aiflow4.master")
 
@@ -101,7 +101,7 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                            "last": str(event.get("type", ""))[:40], "elapsed_s": int(time.time() - t0)}
 
         model_started = time.monotonic()
-        response = adapter.run(spec, on_progress, stop=hb.lost)
+        response = run_with_inbox(adapter, spec, hb, on_progress)
         responses = [response]
         if hb.lost.is_set():
             raise LeaseLost()
@@ -125,7 +125,7 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                             "the required summary and actions fields. Every action must be an object with action and intent. "
                             "Use an empty actions array if no safe action is needed. Do not include markdown or prose.")
                 retry_spec = replace(spec, prompt=spec.prompt + reminder, timeout_s=min(600, retry_budget))
-                response = adapter.run(retry_spec, on_progress, stop=hb.lost)
+                response = run_with_inbox(adapter, retry_spec, hb, on_progress)
                 responses.append(response)
                 if hb.lost.is_set():
                     raise LeaseLost()

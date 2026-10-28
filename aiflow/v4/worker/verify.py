@@ -20,7 +20,7 @@ from pathlib import Path
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, pr_title
-from .dev import api_node, related_block, with_knowledge_context
+from .dev import api_node, related_block, run_with_inbox, with_knowledge_context
 from .gitops import Git
 from .notes import environment_notes, note, project_env
 from .wordpress import declares_wordpress, start_site as start_wordpress_site
@@ -156,7 +156,7 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
                     result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
                     next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
                     node=api_node(api)))
-            res = adapter.run(spec, on_progress, stop=hb.lost)
+            res = run_with_inbox(adapter, spec, hb, on_progress)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       head_sha=head)

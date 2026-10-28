@@ -233,6 +233,8 @@ def test_console_journeys_for_roles_screens_themes_and_phone(ctx, tmp_path, monk
                " WHERE key='TESTWP-981'")
     add_ticket(ctx.db, "TESTWP-982", status="To Do", labels=())
     ctx.db.run("UPDATE tickets SET type='Task', summary='Not ready sample' WHERE key='TESTWP-982'")
+    add_ticket(ctx.db, "TESTWP-983", status="To Do", labels=("aiflow-ready",))
+    ctx.db.run("UPDATE tickets SET type='Story', summary='Active run inbox browser sample' WHERE key='TESTWP-983'")
     action_keys = {}
     pr_data = {}
     next_pr = 25200
@@ -276,6 +278,15 @@ def test_console_journeys_for_roles_screens_themes_and_phone(ctx, tmp_path, monk
         heartbeat = bootstrap.post("/v1/nodes/jaif252-existing-machine/heartbeat", json={"slots_total": 2},
                                    headers={"Authorization": f"Bearer {joined.json()['node_token']}"})
         assert heartbeat.status_code == 200
+        inbox_node = join_node(bootstrap, "cc", ip="127.0.0.3")
+        # The run stays live while the three browser modes execute before its checkpoint lifecycle is driven.
+        ctx.settings.lease_ms = max(ctx.settings.lease_ms, 900_000)
+        inbox_claim = bootstrap.post("/v1/work/claim", json={"ticket": "TESTWP-983", "account": "claude-01"},
+                                     headers={"Authorization": f"Bearer {inbox_node.json()['node_token']}"})
+        assert inbox_claim.status_code == 200 and inbox_claim.json()["claimed"]
+        config["inboxRunId"] = inbox_claim.json()["run_id"]
+        config["inboxNodeToken"] = inbox_node.json()["node_token"]
+        config["inboxFence"] = inbox_claim.json()["fence"]
     mount_ui(app, ctx)
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

@@ -28,6 +28,7 @@ from urllib.parse import quote
 from . import environment as environment_reports
 from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
 from . import flow_doctor
+from . import run_inbox as run_inbox_lifecycle
 from . import system_check
 from . import projects as project_lifecycle
 from . import rollout
@@ -374,8 +375,12 @@ def watchdog(ctx: Ctx) -> None:
     for r in ctx.db.all("SELECT * FROM runs WHERE status='running'"):
         holder = ctx.leases.holder(r["ticket_key"])
         if holder != f"{r['id']}:{r['fence']}":
-            ctx.db.run("UPDATE runs SET status='lost', outcome='lost', ended_at=now() WHERE id=%s", (r["id"],))
-            ctx.db.run("UPDATE accounts SET status='idle', updated_at=now() WHERE id=%s AND status='working'", (r["account_id"],))
+            lost, _undelivered = run_inbox_lifecycle.watchdog_lost(ctx, r)
+            if not lost:
+                continue
+            ctx.db.run("UPDATE accounts SET status='idle', updated_at=now() WHERE id=%s AND status='working'"
+                       " AND NOT EXISTS (SELECT 1 FROM runs WHERE account_id=%s AND status='running' AND id<>%s)",
+                       (r["account_id"], r["account_id"], r["id"]))
             ctx.events.emit("run.lost", ticket=r["ticket_key"], run_id=str(r["id"]), fence=r["fence"], account=r["account_id"],
                             node=r["node"], reason="lease expired")
             if ctx.jira and not holder:

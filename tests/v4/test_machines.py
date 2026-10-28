@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shlex
 import shutil
@@ -20,6 +21,24 @@ def owner_session(client, ctx, role="owner"):
     secret = "test-console-session-secret-at-least-32-bytes"
     ctx.settings.console_session_secret = secret
     client.cookies.set(COOKIE_NAME, issue_session("owner@example.test", role, int(time.time()) + 3600, secret))
+
+
+def settle_heartbeat_readiness(ctx, node):
+    """Wait for the provider-backed readiness check before asserting worker eligibility."""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        pending = [thread for thread in threading.enumerate()
+                   if thread.name == f"aiflow4-heartbeat-readiness-{node}"]
+        if not pending:
+            break
+        for thread in pending:
+            thread.join(timeout=min(0.1, max(0, deadline - time.monotonic())))
+    else:
+        raise AssertionError(f"heartbeat readiness check for {node} did not settle")
+    from aiflow.v4.control.system_check import refresh_node
+    readiness = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,)) or {}
+    refresh_node(ctx, node, "manual", credential_checks=(readiness.get("readiness") or {}).get(
+        "credential_statuses", {}))
 
 
 def release_fixture(monkeypatch, tmp_path):
@@ -243,8 +262,15 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     assert candidates.status_code == 200 and candidates.json()["tickets"] == []
     resumed_node = client.put("/v1/nodes/node1/work-acceptance?accepting_work=true", json={"confirm": False})
     assert resumed_node.status_code == 200
+    settle_heartbeat_readiness(ctx, "node1")
     candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=node_auth)
-    assert any(ticket["key"] == "TESTWP-999" for ticket in candidates.json()["tickets"])
+    assert any(ticket["key"] == "TESTWP-999" for ticket in candidates.json()["tickets"]), json.dumps({
+        "candidates": candidates.json(),
+        "node": ctx.db.one("SELECT status,accepting_work,projects,dynamic,readiness FROM nodes WHERE name=%s",
+                            ("node1",)),
+        "account": ctx.repo().account("codex-01"),
+        "ticket": ctx.db.one("SELECT key,project,status,labels FROM tickets WHERE key=%s", ("TESTWP-999",)),
+    }, default=str, sort_keys=True)
     ctx.db.run("UPDATE runs SET status='finished',outcome='done',ended_at=now() WHERE id=%s", (active_run,))
     denied_machine_remove = client.request("DELETE", "/v1/nodes/node3", json={"confirm": False})
     assert denied_machine_remove.status_code == 400

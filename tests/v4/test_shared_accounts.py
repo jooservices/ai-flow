@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 
@@ -36,9 +37,26 @@ def beat(client, node, headers):
         if machine:
             signed_in = machine.get("status") == "signed_in"
             credential_checks[account.id] = {"present": signed_in, "valid": signed_in}
+    # Accounts created in Command Center are overlaid at runtime and may not be in the configured repo snapshot.
+    # Their per-machine sign-in state is still part of the node's heartbeat readiness report.
+    for machine in ctx.db.all("SELECT account_id,status FROM account_machines WHERE node=%s", (node,)):
+        signed_in = machine["status"] == "signed_in"
+        credential_checks[machine["account_id"]] = {"present": signed_in, "valid": signed_in}
     r = client.post(f"/v1/nodes/{node}/heartbeat",
                     json={"slots_total": 4, "credential_checks": credential_checks}, headers=headers)
     assert r.status_code == 200
+    thread_name = f"aiflow4-heartbeat-readiness-{node}"
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        threads = [thread for thread in threading.enumerate() if thread.name == thread_name]
+        if not threads:
+            break
+        for thread in threads:
+            thread.join(timeout=min(0.1, max(0, deadline - time.monotonic())))
+    else:
+        raise AssertionError(f"heartbeat readiness check for {node} did not settle")
+    from aiflow.v4.control.system_check import refresh_node
+    refresh_node(ctx, node, "manual", credential_checks=credential_checks)
     return r.json()["desired"]
 
 
@@ -184,7 +202,7 @@ def test_two_machines_share_one_session_limit_and_work_is_spread(client, ctx):
         "shared-01", "shared-01.2"]  # each machine can carry the whole limit
 
     first = claim(client, cc, "TESTWP-1")
-    assert first.status_code == 200 and first.json()["claimed"]
+    assert first.status_code == 200 and first.json()["claimed"], first.text
     # cc has its fair share (1 of 2): the other machine takes the next ticket
     assert candidates(client, cc) == []
     assert claim(client, cc, "TESTWP-2").status_code == 409

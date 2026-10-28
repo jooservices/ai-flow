@@ -781,6 +781,13 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
               "auto_fixed_tools": sorted(auto_fixed),
               "auto_fixed_conditions": sorted(auto_fixed_condition_ids)}
 
+    # A newer heartbeat or an online/offline transition can arrive while provider checks are running. Do not
+    # let this older snapshot replace readiness built from the newer node state.
+    current = ctx.db.one("SELECT status,last_heartbeat,readiness FROM nodes WHERE name=%s", (node,))
+    if current and (current.get("status") != row.get("status")
+                    or current.get("last_heartbeat") != row.get("last_heartbeat")):
+        return current.get("readiness") or result
+
     previous = _condition_map(stored)
     current = _condition_map(result)
     for key, item in current.items():

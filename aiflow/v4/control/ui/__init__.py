@@ -26,25 +26,36 @@ HERE = Path(__file__).parent
 CONSOLE_PAGE_PATHS = (
     "/", "/dashboard", "/work", "/board", "/delivery", "/sa", "/business", "/review", "/stakeholder",
     "/machines", "/users", "/knowledge", "/backup", "/integrations", "/help", "/licensing", "/settings",
-    "/notifications", "/lead", "/projects", "/system-check", "/support", "/cc",
+    "/notifications", "/lead", "/projects", "/system-check", "/support", "/cc", "/security",
 )
 
 
 def build_console_page() -> str:
-    """Compose the console with the independently maintained System check view."""
+    """Compose the console with its independently maintained Security and System check views."""
     html = (HERE / "console.html").read_text(encoding="utf-8")
     tab_marker = '      <button class="tab" role="tab" id="tab-licensing"'
     view_marker = '  <section class="view" id="view-licensing"'
+    security_tab_marker = '      <button class="tab" role="tab" id="tab-notifications"'
+    security_script_marker = "/* ---------- boot ---------- */"
     script_marker = "})();\n</script>"
     tab = ('      <button class="tab" role="tab" id="tab-system-check" aria-controls="view-system-check" '
            'aria-selected="false" data-act="view" data-menu-view data-view="system-check">System check</button>')
     panel = ('  <section class="view" id="view-system-check" role="tabpanel" '
              'aria-labelledby="tab-system-check" hidden></section>')
-    for marker in (tab_marker, view_marker, script_marker):
+    security_tab = ('      <button class="tab" role="tab" id="tab-security" aria-controls="view-security" '
+                    'aria-selected="false" data-act="view" data-menu-view data-view="security">Security</button>')
+    for marker in (tab_marker, view_marker, security_tab_marker, security_script_marker, script_marker):
         if marker not in html:
-            raise RuntimeError("console template is missing a System check insertion point")
+            raise RuntimeError("console template is missing a view insertion point")
     html = html.replace(tab_marker, tab + "\n" + tab_marker, 1)
     html = html.replace(view_marker, panel + "\n" + view_marker, 1)
+    html = html.replace(security_tab_marker, security_tab + "\n" + security_tab_marker, 1)
+    security_extension = "\n".join((
+        (HERE / "csrf.js").read_text(encoding="utf-8"),
+        (HERE / "layout.js").read_text(encoding="utf-8"),
+        (HERE / "security.js").read_text(encoding="utf-8"),
+    ))
+    html = html.replace(security_script_marker, security_extension + "\n" + security_script_marker, 1)
     extension = (HERE / "system-check.js").read_text(encoding="utf-8")
     return html.replace(script_marker, extension + "\n" + script_marker, 1)
 

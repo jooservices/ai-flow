@@ -16,7 +16,7 @@ from conftest import add_ticket
 from console_test_utils import console_script
 from aiflow.v4 import VERSION
 from aiflow.v4.control.console_auth import COOKIE_NAME, ROLE_PERMISSIONS, issue_session
-from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS
+from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS, build_console_page
 from aiflow.v4.core.settings import Settings
 
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
@@ -345,7 +345,7 @@ console.log(integrationsView.innerHTML);
 
 
 def html() -> str:
-    return PAGE.read_text()
+    return build_console_page()
 
 
 def css() -> str:
@@ -543,8 +543,8 @@ def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring
 
 def test_console_reload_selects_the_view_from_each_existing_address():
     views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
-             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications",
-             "settings", "support")
+             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "security",
+             "notifications", "settings", "support")
     page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help", "/system-check"})
     for path in page_paths:
         expected_view = ("cc" if path in {"/cc", "/dashboard"} else
@@ -740,11 +740,12 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
     assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
-            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']];"
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'security', "
+            "'notifications', 'settings', 'support']];"
             ) in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
     assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
-            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']") in page
+            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'security', 'notifications', 'settings', 'support']") in page
     assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
     assert "licensing: 'licensing.manage'" in page
 
@@ -860,7 +861,7 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
             pytest.skip(f"Playwright Chromium cannot launch on this node: {exc}")
 
         ctx.settings.console_login = True
-        ctx.settings.console_session_secret = "browser-test-session-secret-at-least-32-bytes"
+        ctx.settings.console_session_secret, ctx.settings.console_require_mfa = "browser-test-session-secret-at-least-32-bytes", False
         ctx.repo().projects["TESTWP"].paused = True
         password = login.seed_user(ctx.db, "browser-admin@example.test", "super_admin", "Browser Admin")
         assert password
@@ -1383,14 +1384,14 @@ def test_projects_screen_is_mounted_and_uses_owner_protected_project_endpoints()
 def test_command_center_menu_order_and_role_visibility():
     page = html()
     tabs = re.findall(r'<button class="tab"[^>]*data-view="([^"]+)">([^<]+)</button>', page)
+    tabs = [item for item in tabs if item[0] != "system-check"]  # its extension owns a separate permission map
     assert tabs == [
         ("cc", "Dashboard"), ("work", "Work board"), ("delivery", "Delivery"), ("sa", "SA"),
         ("lead", "Team Lead"), ("business", "Business"), ("review", "Human review"),
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
         ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
-        ("projects", "Projects"), ("licensing", "Licence"), ("notifications", "Notifications"),
-        ("settings", "Settings"),
-        ("support", "Support"),
+        ("projects", "Projects"), ("licensing", "Licence"), ("security", "Security"),
+        ("notifications", "Notifications"), ("settings", "Settings"), ("support", "Support"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.
@@ -1400,8 +1401,7 @@ def test_command_center_menu_order_and_role_visibility():
         "stakeholder": "view.stakeholder", "machines": "view.machines_ai", "users": "console.manage",
         "knowledge": "view.knowledge", "integrations": "view.integrations", "projects": "projects.manage",
         "backup": "backup.read", "licensing": "licensing.manage", "notifications": "notifications.manage",
-        "settings": "console.manage",
-        "support": "console.manage",
+        "security": "console.read", "settings": "console.manage", "support": "console.manage",
     }
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,

@@ -49,6 +49,7 @@ from ..core.services import normalize_services, service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
+from .audit import record_console_user_change as audit_user, record_console_user_roles_change as audit_user_roles
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
                role_health, rollout, runtime_settings, scale_proof, setup_wizard, shared_accounts, support_bundle,
                system_check, system_check_api, tooling, version_release, work_steps)
@@ -1491,7 +1492,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload)
 
     def audit_in(connection, target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str,
@@ -2081,6 +2082,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         except Exception as exc:
             log.exception("console user could not be added")
             raise HTTPException(500, "person could not be added") from exc
+        audit_user(request, user.subject, "person_added", email, {"roles": list(roles), "project_keys": project_keys})
         return {"email": email, "temporary_password": password}
 
     @app.put("/v1/console/users/{email}")
@@ -2099,7 +2101,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                                          (email,)).fetchone()
             if not current:
                 raise HTTPException(404, "console user not found")
-            current_roles = normalize_roles(current["roles"])
+            roles_before = normalize_roles(current["roles"])
             if not current["disabled"] and "administrator" in current_roles and "administrator" not in roles:
                 others = connection.execute("SELECT count(*) AS n FROM console_users WHERE email<>%s AND disabled=false"
                                             " AND 'administrator'=ANY(roles)", (email,)).fetchone()["n"]
@@ -2109,6 +2111,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                                (roles[0], list(roles), project_keys, email))
             audit_in(connection, "console", "user_update", "", "", None, user.subject, True, "Person updated",
                      {"email": email, "roles": list(roles), "project_keys": project_keys})
+        audit_user_roles(request, user.subject, email, roles_before, roles, project_keys)
         return {"updated": True}
 
     @app.patch("/v1/console/users/{email}/disabled")
@@ -2137,6 +2140,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             action = "user_disable" if body.disabled else "user_enable"
             audit_in(connection, "console", action, "", "", None, user.subject, True,
                      "Person disabled" if body.disabled else "Person enabled", {"email": email})
+        audit_user(request, user.subject, "person_disabled" if body.disabled else "person_enabled", email, {"disabled": body.disabled})
         return {"disabled": body.disabled}
 
     @app.post("/v1/console/view-as")
@@ -2148,13 +2152,11 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         from .login import SESSION_TTL_S
         token = issue_session(user.subject, user.assigned_roles, int(utcnow().timestamp()) + SESSION_TTL_S,
-                              ctx.settings.console_session_secret, view_as=role)
+                              ctx.settings.console_session_secret, view_as=role, sid=user.sid)
         audit("console", "view_as", "", "", None, user.subject, True, "Administrator viewing as role",
               {"role": role})
         response = JSONResponse({"viewing_as": role, "role_label": ROLE_LABELS[role]})
-        response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_S, httponly=True,
-                            secure=str(ctx.settings.public_url or "").lower().startswith("https://"),
-                            samesite="strict", path="/")
+        app.state.set_session_cookies(response, token, SESSION_TTL_S)  # keeps the session id and the CSRF token in step
         return response
 
     @app.post("/v1/console/view-as/stop")
@@ -2165,13 +2167,11 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "not available for your role")
         from .login import SESSION_TTL_S
         token = issue_session(user.subject, user.assigned_roles, int(utcnow().timestamp()) + SESSION_TTL_S,
-                              ctx.settings.console_session_secret)
+                              ctx.settings.console_session_secret, sid=user.sid)
         audit("console", "view_as_stop", "", "", None, user.subject, True, "Administrator returned to own role",
               {"previous_role": user.view_as or ""})
         response = JSONResponse({"viewing_as": None})
-        response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_S, httponly=True,
-                            secure=str(ctx.settings.public_url or "").lower().startswith("https://"),
-                            samesite="strict", path="/")
+        app.state.set_session_cookies(response, token, SESSION_TTL_S)
         return response
 
     @app.post("/v1/support/bundles")
@@ -4123,7 +4123,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise
         operation_id = str(uuid.uuid4())
         components = [str(t["name"]) for t in payload["tools"]]
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             connection.execute("INSERT INTO node_operations (id,node,action,actor,payload) VALUES (%s,%s,%s,%s,%s)",
                                (operation_id, name, body.action, user.subject, J(payload)))
             audit_in(connection, "node", body.action, name, operation_id, None, user.subject, True, "queued",

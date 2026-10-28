@@ -10,5 +10,7 @@ def console_script(page: Path) -> str:
     script = re.search(r"<script>\n(.*?)</script>", source, re.S).group(1)
     script = script[:script.index(BOOT)]
     assets = page.parent
-    return "".join((assets / name).read_text(encoding="utf-8") for name in
-                   ("release-readiness.js", "scale-proof.js")) + script
+    before_console = "".join((assets / name).read_text(encoding="utf-8") for name in
+                             ("release-readiness.js", "scale-proof.js"))
+    extensions = "".join((assets / name).read_text(encoding="utf-8") for name in ("layout.js", "security.js"))
+    return before_console + script + extensions

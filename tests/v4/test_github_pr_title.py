@@ -4,10 +4,17 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from aiflow.v4.control.github import GitHubApp
+from aiflow.v4.core import secretbox
+
+
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch):
+    monkeypatch.setenv("AIFLOW4_SECRET_KEY", secretbox.generate_key())
 
 
 def github_with_open_pr(tmp_path, title: str):

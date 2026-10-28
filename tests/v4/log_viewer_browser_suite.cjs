@@ -9,7 +9,10 @@ const config = JSON.parse(fs.readFileSync(process.env.AIFLOW4_LOG_BROWSER_CONFIG
   const browser = await chromium.launch({ headless: true });
   try {
     const context = await browser.newContext();
-    await context.addCookies([{ name: config.cookieName, value: config.cookie, url: config.baseUrl }]);
+    await context.addCookies([
+      { name: config.cookieName, value: config.cookie, url: config.baseUrl },
+      { name: config.csrfCookieName, value: config.csrf, url: config.baseUrl },
+    ]);
     const page = await context.newPage();
     await page.goto(config.baseUrl + '/logs');
     const row = () => page.locator('.source', { hasText: config.firstSource }).first();

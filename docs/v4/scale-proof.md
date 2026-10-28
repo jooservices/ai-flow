@@ -135,6 +135,7 @@ it does not mean every possible request or user action on that screen is load-te
 | `GET /v1/dashboard/quota` | Yes | Command Center quota summary. |
 | `GET /v1/dashboard/waiting` | Yes | Waiting-ticket data for the Command Center, Work and Delivery views. |
 | `GET /v1/reviews` | Yes | Review queue data. |
+| `GET /v1/system-check` | Yes | Read readiness conditions for the System check screen. |
 | `GET /v1/reviews/export.csv` | No | Export review metrics. |
 | `POST /v1/accounts/{account_id}/probe` | No | Record an account probe, including a newly reported quota forecast. Workers do not probe accounts on each poll. |
 | `POST /v1/reviews/{key}/answer` | No | Record an owner’s answer in the review queue. |

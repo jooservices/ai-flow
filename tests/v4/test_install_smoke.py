@@ -11,18 +11,24 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_release_publication_waits_for_documented_install_and_fleet_smokes():
+def test_release_publication_waits_for_install_smokes_and_security_scan():
     workflow = yaml.load((ROOT / ".github/workflows/release-v4.yml").read_text(), Loader=yaml.BaseLoader)
     release = workflow["jobs"]["release"]
     assert release["needs"] == ["v4-tests", "acceptance"]
     names = [step.get("name", "") for step in release["steps"]]
     clean_install = names.index("Clean-install signed candidate on Ubuntu control and two nodes")
     rollout_smoke = names.index("Fleet rollout and rollback smoke using signed candidate artifacts")
-    image = names.index("Build and push control-api image to GHCR")
+    build = names.index("Build control-api image locally")
+    scan = names.index("Security scan and release security report")
+    publish_image = names.index("Publish control-api image to GHCR")
+    sign_image = names.index("Sign control-api image with GitHub OIDC")
     publish = names.index("Create GitHub Release and upload assets")
-    assert clean_install < rollout_smoke < image < publish
+    assert clean_install < rollout_smoke < build < scan < publish_image < sign_image < publish
     assert "clean-install-containers.sh" in release["steps"][clean_install]["run"]
     assert "install-smoke.sh" in release["steps"][rollout_smoke]["run"]
+    assert "security-scan.sh" in release["steps"][scan]["run"]
+    assert "SECURITY_SEVERITY_THRESHOLD" in release["steps"][scan]["env"]
+    assert "dist/SECURITY-REPORT.md" in release["steps"][publish]["run"]
     validate = next(step for step in release["steps"] if step.get("name") == "Validate tag and master ancestry")
     assert "gh release list" in validate["run"]
     assert "git merge-base --is-ancestor" in validate["run"]

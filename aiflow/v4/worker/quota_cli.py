@@ -110,11 +110,12 @@ def _ready_for_slash_command(provider: str, raw: bytes) -> bool:
     """Do not send slash input unless the TUI has rendered its interactive prompt."""
     text = _clean_terminal(raw)
     tail = text[-512:]
-    if "trust this folder?" in text.casefold() or "folder access" in text.casefold():
+    normalized = " ".join(text.casefold().split())
+    if "trust this folder?" in normalized or "folder access" in normalized:
         return False
     if provider == "codex":
-        return ("› ask codex to do anything" in tail.casefold()
-                or "what would you like to do?" in tail.casefold()
+        return ("› ask codex to do anything" in normalized
+                or "what would you like to do?" in normalized
                 or bool(re.search(r"(?:^|\n)[^\n]{0,120}›\s*$", tail)))
     if provider == "claude":
         return bool(re.search(r"(?:^|\n)[^\n]{0,120}❯\s*$", tail))
@@ -208,6 +209,7 @@ def read_quota(provider: str, account_home: str, run_as: list[str] | None = None
         started = time.monotonic()
         command_sent = False
         prompt_seen = False
+        prompt_candidate_at = None
         sent_at = 0.0
         while time.monotonic() - started < timeout_s and len(output) < MAX_OUTPUT:
             readable, _, _ = select.select([master], [], [], 0.2)
@@ -219,11 +221,16 @@ def read_quota(provider: str, account_home: str, run_as: list[str] | None = None
             elapsed = time.monotonic() - started
             if not command_sent and elapsed >= start_delay_s and _ready_for_slash_command(provider, output):
                 prompt_seen = True
-                try:
-                    os.write(master, (command + "\r").encode())
-                except OSError:
-                    break
-                command_sent, sent_at = True, time.monotonic()
+                if prompt_candidate_at is None:
+                    prompt_candidate_at = time.monotonic()
+                elif time.monotonic() - prompt_candidate_at >= 0.25:
+                    try:
+                        os.write(master, (command + "\r").encode())
+                    except OSError:
+                        break
+                    command_sent, sent_at = True, time.monotonic()
+            elif not command_sent:
+                prompt_candidate_at = None
             elif command_sent and time.monotonic() - sent_at >= response_wait_s:
                 break
         observed_at = datetime.now(UTC) if command_sent else None

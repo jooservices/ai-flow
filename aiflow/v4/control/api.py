@@ -4442,8 +4442,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         return ctx.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
                           + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
 
-    def eligible(account_id: str, node: str, *, capacity_routing: bool = True) -> list[dict]:
-        """Tickets this account may take now: verify and triage before new development."""
+    def eligible(account_id: str, node: str, *, capacity_routing: bool = True,
+                 ticket_key: str | None = None) -> list[dict]:
+        """Tickets this account may take now; a claim can scope revalidation to its requested ticket."""
         repo = ctx.repo()
         acc = repo.account(account_id)
         if not acc or not acc.runs_on(node):
@@ -4499,6 +4500,27 @@ def create_app(ctx: Ctx) -> FastAPI:
         projects = [p for p in projects
                     if not service_gaps(reported_services, repo.projects[p].required_services)]
         roles = set(acc.roles or ["dev", "verify"])
+        scoped_key = " AND key=%s" if ticket_key is not None else ""
+        scoped_tickets_key = " AND tickets.key=%s" if ticket_key is not None else ""
+        scoped_ticket = (ticket_key,) if ticket_key is not None else ()
+
+        def backoff_rows(step: str) -> list[dict]:
+            query = BACKOFF_SQL
+            params = {"step": step}
+            if ticket_key is not None:
+                marker = "AND outcome IN ('failed', 'timeout', 'lost', 'no_changes')"
+                query = query.replace(marker, marker + "\n    AND ticket_key = %(ticket_key)s", 1)
+                params["ticket_key"] = ticket_key
+            return ctx.db.all(query, params)
+
+        def intake_backoff_rows(step: str) -> list[dict]:
+            query = INTAKE_BACKOFF_SQL
+            params = {"step": step}
+            if ticket_key is not None:
+                marker = "ORDER BY ticket_key, started_at DESC"
+                query = query.replace(marker, "AND ticket_key = %(ticket_key)s\n" + marker, 1)
+                params["ticket_key"] = ticket_key
+            return ctx.db.all(query, params)
         # a role switched off for this account (docs/v4/role-health.md) takes one unresolved probation ticket
         modes = role_health.modes(ctx.db, acc.id, sorted(roles))
 
@@ -4514,9 +4536,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         prio = {k: int(getattr(p, "priority", 5) or 5) for k, p in repo.projects.items()}
         if "verify" in roles:
-            verify_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "verify"})}
+            verify_cooling = {r["ticket_key"] for r in backoff_rows("verify")}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
-                                " AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
+                                " AND NOT ('aiflow-hold' = ANY(labels))" + scoped_key,
+                                (projects, *scoped_ticket)):
                 if ticket_needs_missing_container_runtime(t, "verify"):
                     continue
                 if t["key"] in held or t["key"] in verify_cooling:
@@ -4532,9 +4555,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 out.append({**t, "step": "verify", "probation": probation("verify")})
         if "release" in roles:
-            post_merge_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "post_merge"})}
-            pending = [item for project_key in projects
-                       for item in environment_reports.pending_post_merge(ctx, project_key)]
+            post_merge_cooling = {r["ticket_key"] for r in backoff_rows("post_merge")}
+            post_merge_projects = projects
+            if ticket_key is not None:
+                ticket_project = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket_key,))
+                project_key = str((ticket_project or {}).get("project") or "")
+                post_merge_projects = [project_key] if project_key in projects else []
+            pending = [item for project_key in post_merge_projects
+                       for item in environment_reports.pending_post_merge(
+                           ctx, project_key, [ticket_key] if ticket_key is not None else None)]
             for waiting in pending:
                 t = ctx.db.one("SELECT * FROM tickets WHERE key=%s", (waiting["ticket"],))
                 if not t or t["key"] in held or t["key"] in post_merge_cooling:
@@ -4545,13 +4574,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 out.append({**t, "step": "post_merge", "probation": probation("release")})
         if "master" in roles:
-            triage_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "triage"})}
+            triage_cooling = {r["ticket_key"] for r in backoff_rows("triage")}
             # Triage decides a raised escalation; a ticket in Needs owner without an open one has nothing to decide
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
                                 " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))"
                                 " AND EXISTS (SELECT 1 FROM escalations e WHERE e.ticket_key = tickets.key"
-                                " AND e.resolution = 'open')",
-                                (projects,)):
+                                " AND e.resolution = 'open')" + scoped_tickets_key,
+                                (projects, *scoped_ticket)):
                 if ticket_needs_missing_container_runtime(t, "triage"):
                     continue
                 if t["key"] in held or t["key"] in triage_cooling:
@@ -4566,13 +4595,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                 out.append({**t, "step": "triage", "probation": probation("master")})
         if "intake_refiner" in roles:
             def backoff(step: str) -> set[str]:
-                return {r["ticket_key"] for r in ctx.db.all(INTAKE_BACKOFF_SQL, {"step": step})
+                return {r["ticket_key"] for r in intake_backoff_rows(step)
                         if r["outcome"] in ("failed", "timeout", "lost") and r["ended_at"]
                         and r["ended_at"] > utcnow() - timedelta(minutes=10)}
             waiting = backoff("intake")
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'"
-                                " AND NOT ('aiflow-hold' = ANY(labels))"
-                                " ORDER BY jira_created NULLS LAST, key", (projects,)):
+                                " AND NOT ('aiflow-hold' = ANY(labels))" + scoped_key
+                                + " ORDER BY jira_created NULLS LAST, key", (projects, *scoped_ticket)):
                 if ticket_needs_missing_container_runtime(t, "intake"):
                     continue
                 if t["key"] in held or t["key"] in waiting:
@@ -4587,8 +4616,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Backlog'"
                                 " AND 'change-request' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))"
                                 " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
-                                " AND r.step = 'impact' AND r.outcome = 'assessed')"
-                                " ORDER BY jira_created NULLS LAST, key", (projects,)):
+                                " AND r.step = 'impact' AND r.outcome = 'assessed')" + scoped_tickets_key
+                                + " ORDER BY jira_created NULLS LAST, key", (projects, *scoped_ticket)):
                 if ticket_needs_missing_container_runtime(t, "impact"):
                     continue
                 if t["key"] in held or t["key"] in waiting:
@@ -4600,16 +4629,17 @@ def create_app(ctx: Ctx) -> FastAPI:
                 out.append({**t, "step": "impact", "probation": probation("intake_refiner")})
         out.sort(key=lambda t: (prio.get(t["project"], 5), t["jira_created"] or utcnow()))
         if "dev" in roles:
-            cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "dev"})}
+            cooling = {r["ticket_key"] for r in backoff_rows("dev")}
             dev_rows = []
-            parked = tooling.parked_tickets(ctx, node_row)  # waiting for a tool this machine lacks
-            parked |= environment_reports.parked_tickets(ctx)  # waiting for an environment item
+            scope = [ticket_key] if ticket_key is not None else None
+            parked = tooling.parked_tickets(ctx, node_row, scope)  # waiting for a tool this machine lacks
+            parked |= environment_reports.parked_tickets(ctx, scope)  # waiting for an environment item
             footprints: dict[str, dict] = {}
             footprint_history: dict[str, bool] = {}
             epics: dict[str, str] = {}
             dev_tickets = ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
-                                     " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))",
-                                     (projects,))
+                                     " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))"
+                                     + scoped_key, (projects, *scoped_ticket))
             blocker_keys = sorted({str(blocker) for ticket in dev_tickets
                                    for blocker in ticket.get("blocked_by") or []})
             done = ({row["key"] for row in ctx.db.all(
@@ -4688,13 +4718,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                         continue
                     available_elsewhere.update((ticket["key"], ticket["step"])
                                                for ticket in eligible(peer["id"], peer_node,
-                                                                      capacity_routing=False))
+                                                                      capacity_routing=False,
+                                                                      ticket_key=ticket_key))
             out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
         if capacity_routing and out:
-            out = route_capacity(account_id, node, out)
+            out = route_capacity(account_id, node, out, ticket_key=ticket_key)
         return out
 
-    def route_capacity(account_id: str, node: str, offered: list[dict]) -> list[dict]:
+    def route_capacity(account_id: str, node: str, offered: list[dict],
+                       ticket_key: str | None = None) -> list[dict]:
         """Prefer an eligible account whose quota can cover the ticket's estimated upper bound.
 
         Candidate polling keeps its legacy behavior when no reliable quota forecast exists. If at least one eligible
@@ -4731,7 +4763,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 try:
                     peer_offers = offered if account.id == account_id and machine == node else eligible(
-                        account.id, machine, capacity_routing=False)
+                        account.id, machine, capacity_routing=False, ticket_key=ticket_key)
                 except HTTPException:
                     continue
                 for item in peer_offers:
@@ -4892,7 +4924,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.step == "master":
             candidates = [master_candidate(body.account, node)]
         else:
-            candidates = eligible(body.account, node)
+            candidates = eligible(body.account, node, ticket_key=body.ticket)
             offered = next((candidate for candidate in candidates
                             if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
             if offered:

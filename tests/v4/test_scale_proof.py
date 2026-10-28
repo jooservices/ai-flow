@@ -3,7 +3,10 @@ traffic, the performance budgets and their enforcement, the release proof gate a
 Machines and sessions are simulated; no AI provider is called."""
 import json
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -357,6 +360,48 @@ def test_a_repeated_finding_does_not_create_a_second_ticket(client, ctx):
     assert len(ctx.jira.created) == 1
     assert ctx.db.one("SELECT occurrences FROM scale_proof_findings WHERE signature='budget:project_picker'")["occurrences"] == 2
     assert ctx.jira.comments and "project_picker" in ctx.jira.comments[-1][1]
+
+
+def test_concurrent_filing_creates_only_one_ticket_for_a_finding(ctx, monkeypatch):
+    run_id = scale_proof.record(ctx, synthetic(pickup=33.0), "v4.7.0", "ci")
+    create_issue = ctx.jira.create_issue
+    calls = 0
+    calls_lock = threading.Lock()
+    start = threading.Barrier(2)
+
+    def slow_create(*args, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.2)
+        return create_issue(*args, **kwargs)
+
+    def submit():
+        start.wait(timeout=5)
+        return scale_proof.file_tickets(ctx, run_id)
+
+    monkeypatch.setattr(ctx.jira, "create_issue", slow_create)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: submit(), range(2)))
+
+    created = [ticket for result in results for ticket in result if ticket["created"]]
+    assert calls == 1 and len(ctx.jira.created) == 1
+    assert len(created) == 1
+    ticket = ctx.db.one("SELECT ticket FROM scale_proof_findings WHERE signature='budget:ticket_pickup'")
+    assert ticket["ticket"] == created[0]["ticket"]
+
+
+def test_out_of_order_filing_keeps_the_latest_run_evidence(ctx):
+    older = scale_proof.record(ctx, synthetic(pickup=33.0), "v4.7.0", "ci")
+    newer = scale_proof.record(ctx, synthetic(pickup=35.0), "v4.7.1", "ci")
+
+    [created] = scale_proof.file_tickets(ctx, newer)
+    [late] = scale_proof.file_tickets(ctx, older)
+
+    assert created["created"] and late["ticket"] == created["ticket"] and not late["created"]
+    finding = ctx.db.one("SELECT last_run_id,occurrences FROM scale_proof_findings WHERE signature='budget:ticket_pickup'")
+    assert finding == {"last_run_id": newer, "occurrences": 2}
+    assert f"run #{newer} of release v4.7.1" in ctx.jira.created[0]["description"]
 
 
 def test_a_finding_that_returns_after_its_ticket_is_done_gets_a_new_ticket(client, ctx):

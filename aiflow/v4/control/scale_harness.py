@@ -733,7 +733,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     log(f"peak: {peak_active} sessions working")
                 # run_result may embed captured work locally. Keep the completion burst small so its inference
                 # work cannot occupy every worker request slot while the independent lease heartbeats run.
-                with ThreadPoolExecutor(max_workers=min(4, len(live)),
+                with ThreadPoolExecutor(max_workers=min(8, len(live)),
                                         thread_name_prefix="scale-complete") as pool:
                     completed = [pool.submit(finish_one, session, claim, keeper) for session, claim in live]
                     for future in completed:

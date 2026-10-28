@@ -95,7 +95,8 @@ picker, and every working session visible as an active run.
 
 Every failed budget and every failed correctness check is a finding with a stable signature (`budget:<key>`,
 `correctness:<check>`). `file_tickets` creates one Bug in the flow-bug project (`TESTFLOW`, labels `flow-bug`,
-`scale-proof`) per signature, with the budget, limit, measured value, release, run and scenario. No manual step:
+`scale-proof`) per signature, with the budget, limit, measured value, release, run and scenario. Concurrent submissions
+serialize filing by signature so only one Jira issue is created. No manual step:
 
 - the same finding in a later run adds a comment and counts up (`scale_proof_findings.occurrences`), no second ticket;
 - when its ticket is Done and the finding comes back, a new ticket is created;

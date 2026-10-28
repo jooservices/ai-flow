@@ -158,12 +158,13 @@ def _description(finding: dict, run_id: int, report: dict) -> str:
             "The run is listed in Command Center under Scale proof (docs/v4/scale-proof.md).")
 
 
-def _file_finding(ctx, finding: dict[str, Any], run_id: int, report: dict[str, Any], ticket: str = "") -> dict[str, Any]:
+def _file_finding_locked(ctx, finding: dict[str, Any], run_id: int, report: dict[str, Any], ticket: str,
+                         comment_existing: bool) -> dict[str, Any]:
     signature = finding["signature"]
     if ticket:
         status = (ctx.db.one("SELECT status FROM tickets WHERE key=%s", (ticket,)) or {}).get("status")
         if status != "Done":
-            if ctx.jira:
+            if comment_existing and ctx.jira:
                 try:
                     ctx.jira.comment(ticket, f"Seen again in scale proof run #{run_id} "
                                              f"(release {report.get('release') or 'none'}): {finding['detail']}")
@@ -199,21 +200,49 @@ def _file_finding(ctx, finding: dict[str, Any], run_id: int, report: dict[str, A
     return {"signature": signature, "ticket": key, "created": True}
 
 
+def _file_finding(ctx, signature: str,
+                  current: tuple[dict[str, Any], int] | None = None) -> dict[str, Any]:
+    """Serialize filing by signature across replicas and reload the latest finding under the lock."""
+    lock_key = f"aiflow4-scale-proof-finding:{signature}"
+    with ctx.db.pool.connection() as connection:
+        connection.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock_key,)).fetchone()
+        try:
+            if current:
+                finding, run_id = current
+                ctx.db.run(
+                    "INSERT INTO scale_proof_findings (signature, kind, title, detail, first_run_id, last_run_id)"
+                    " VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (signature) DO UPDATE SET"
+                    " last_run_id=GREATEST(scale_proof_findings.last_run_id,EXCLUDED.last_run_id),"
+                    " occurrences=scale_proof_findings.occurrences+1,"
+                    " detail=CASE WHEN EXCLUDED.last_run_id>=scale_proof_findings.last_run_id"
+                    " THEN EXCLUDED.detail ELSE scale_proof_findings.detail END,"
+                    " title=CASE WHEN EXCLUDED.last_run_id>=scale_proof_findings.last_run_id"
+                    " THEN EXCLUDED.title ELSE scale_proof_findings.title END,updated_at=now()",
+                    (signature, finding["kind"], finding["title"][:240], finding["detail"], run_id, run_id))
+            row = ctx.db.one(
+                "SELECT f.signature,f.kind,f.title,f.detail,f.ticket,f.last_run_id,r.release,r.report"
+                " FROM scale_proof_findings f JOIN scale_proof_runs r ON r.id=f.last_run_id"
+                " WHERE f.signature=%s", (signature,))
+            if not row:
+                return {"signature": signature, "ticket": "", "created": False}
+            finding = {key: row[key] for key in ("signature", "kind", "title", "detail")}
+            report = {**(row["report"] or {}), "release": row["release"]}
+            return _file_finding_locked(ctx, finding, int(row["last_run_id"]), report,
+                                        str(row["ticket"] or ""), comment_existing=current is not None)
+        finally:
+            connection.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock_key,)).fetchone()
+
+
 def file_pending(ctx, exclude: set[str] | None = None) -> list[dict[str, Any]]:
     """Retry stored findings after later submissions, even when those runs have no findings of their own."""
     rows = ctx.db.all(
-        "SELECT f.signature,f.kind,f.title,f.detail,f.ticket,f.last_run_id,r.release,r.report"
+        "SELECT f.signature"
         " FROM scale_proof_findings f JOIN scale_proof_runs r ON r.id=f.last_run_id"
         " LEFT JOIN tickets t ON t.key=f.ticket"
         " WHERE NOT (f.signature=ANY(%s))"
         " AND (COALESCE(f.ticket,'')='' OR (f.last_error<>'' AND t.status='Done'))"
         " ORDER BY f.updated_at,f.signature LIMIT %s", (sorted(exclude or set()), 50))
-    out = []
-    for row in rows:
-        finding = {key: row[key] for key in ("signature", "kind", "title", "detail")}
-        report = {**(row["report"] or {}), "release": row["release"]}
-        out.append(_file_finding(ctx, finding, int(row["last_run_id"]), report, str(row["ticket"] or "")))
-    return out
+    return [_file_finding(ctx, str(row["signature"])) for row in rows]
 
 
 def file_tickets(ctx, run_id: int) -> list[dict[str, Any]]:
@@ -225,14 +254,8 @@ def file_tickets(ctx, run_id: int) -> list[dict[str, Any]]:
     out = []
     attempted: set[str] = set()
     for finding in report.get("findings") or []:
-        row = ctx.db.one(
-            "INSERT INTO scale_proof_findings (signature, kind, title, detail, first_run_id, last_run_id)"
-            " VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (signature) DO UPDATE SET last_run_id=EXCLUDED.last_run_id,"
-            " occurrences=scale_proof_findings.occurrences+1, detail=EXCLUDED.detail, title=EXCLUDED.title,"
-            " updated_at=now() RETURNING ticket", (finding["signature"], finding["kind"], finding["title"][:240],
-                                                  finding["detail"], run_id, run_id))
         attempted.add(finding["signature"])
-        out.append(_file_finding(ctx, finding, run_id, report, str(row["ticket"] or "")))
+        out.append(_file_finding(ctx, finding["signature"], (finding, run_id)))
     out.extend(file_pending(ctx, attempted))
     return out
 

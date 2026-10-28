@@ -574,7 +574,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   </section>
   <section class="view" id="view-sa" role="tabpanel" aria-labelledby="tab-sa" hidden></section>
   <section class="view" id="view-machines" role="tabpanel" aria-labelledby="tab-machines" hidden></section>
-  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden></section>
+  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden><script src="/console-assets/user-form-state.js"></script></section>
   <section class="view" id="view-lead" role="tabpanel" aria-labelledby="tab-lead" hidden></section>
   <section class="view" id="view-business" role="tabpanel" aria-labelledby="tab-business" hidden>
     <div class="dhead" id="bhead"></div>
@@ -1274,7 +1274,7 @@ function projectChoices(selected, all) {
 function renderUsers() {
   var root = $('#view-users'); if (!root) return;
   if (!consoleCan('console.manage')) { root.innerHTML = '<section class="panel"><h2>View unavailable</h2><p>This view is not available for your role.</p></section>'; return; }
-  var u = S.userAdmin, active = root.contains(document.activeElement) ? document.activeElement : null, focusedField = active && active.matches('[data-user-email]') ? 'email' : active && active.matches('[data-user-name]') ? 'name' : '', selection = focusedField === 'name' ? [active.selectionStart, active.selectionEnd] : null; if (focusedField) u.addForm[focusedField] = active.value; var h = '<section class="panel" data-block="users"><div class="panel-h"><h2>People and roles</h2><span class="hint">Role changes, project access and account status take effect immediately.</span><span class="spacer"></span><button class="btn sm" data-user-refresh>Refresh</button></div>';
+  var u = S.userAdmin, h = '<section class="panel" data-block="users"><div class="panel-h"><h2>People and roles</h2><span class="hint">Role changes, project access and account status take effect immediately.</span><span class="spacer"></span><button class="btn sm" data-user-refresh>Refresh</button></div>';
   if (u.error) h += '<div class="stakeholder-error">' + esc(u.error) + '</div>';
   if (u.temporaryPassword) h += '<div class="project-checks"><strong>One-time password for ' + esc(u.temporaryPassword.email) + '</strong><p>Copy this password and share it with the person. It will not be shown again.</p><code>' + esc(u.temporaryPassword.value) + '</code><button class="btn sm" data-user-password-dismiss>Dismiss</button></div>';
   if (u.loading && !u.users) h += '<div class="muted">Loading people…</div>';
@@ -1320,7 +1320,7 @@ function renderUsers() {
       esc(JSON.stringify(item.payload || {})) + '</div></td></tr>'; }).join('') +
     '</tbody></table></div></section></div>';
   root.innerHTML = h;
-  applyLayout('users', root); if (focusedField) { var replacement = root.querySelector(focusedField === 'email' ? '[data-user-email]' : '[data-user-name]'); if (replacement) { replacement.focus(); if (selection) replacement.setSelectionRange(selection[0], selection[1]); } }
+  applyLayout('users', root);
   $$('[data-user-refresh]', root).forEach(function (b) { b.onclick = function () { loadUsers(true); }; });
   $$('[data-user-password-dismiss]', root).forEach(function (b) { b.onclick = function () { u.temporaryPassword = ''; renderUsers(); }; });
   $$('[data-user-edit]', root).forEach(function (b) { b.onclick = function () { u.editing = b.dataset.userEdit; renderUsers(); }; });

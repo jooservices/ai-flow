@@ -37,6 +37,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     release_readiness_script = HERE / "release-readiness.js"
     scale_proof_script = HERE / "scale-proof.js"
     run_inbox_script = HERE / "run-inbox.js"
+    user_form_state_script = HERE / "user-form-state.js"
 
     @app.get("/console-assets/licensing-notice.js", include_in_schema=False)
     def licensing_notice() -> FileResponse:
@@ -56,6 +57,11 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/console-assets/run-inbox.js", include_in_schema=False)
     def run_inbox_asset() -> FileResponse:
         return FileResponse(run_inbox_script, media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/console-assets/user-form-state.js", include_in_schema=False)
+    def user_form_state_asset() -> FileResponse:
+        return FileResponse(user_form_state_script, media_type="application/javascript",
                             headers={"Cache-Control": "no-cache"})
 
     @app.get("/", include_in_schema=False)

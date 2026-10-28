@@ -54,17 +54,21 @@ def _now(value: datetime | None = None) -> datetime:
 
 
 def _row(db) -> dict[str, Any]:
-    initialize(db)
     row = db.one("SELECT * FROM licensing_state WHERE id=1")
+    if not row:  # initialize only on first use; steady-state worker polls must not issue a no-op INSERT
+        initialize(db)
+        row = db.one("SELECT * FROM licensing_state WHERE id=1")
     if not row:  # defensive against a concurrent schema restore
         raise LicenseError("Licence state is unavailable. Please retry.")
     return row
 
 
 def _row_in_connection(connection) -> dict[str, Any]:
-    connection.execute("INSERT INTO licensing_state (id, installation_id) VALUES (1,%s) ON CONFLICT (id) DO NOTHING",
-                       (str(uuid.uuid4()),))
     row = connection.execute("SELECT * FROM licensing_state WHERE id=1").fetchone()
+    if not row:
+        connection.execute("INSERT INTO licensing_state (id, installation_id) VALUES (1,%s)"
+                           " ON CONFLICT (id) DO NOTHING", (str(uuid.uuid4()),))
+        row = connection.execute("SELECT * FROM licensing_state WHERE id=1").fetchone()
     if not row:
         raise LicenseError("Licence state is unavailable. Please retry.")
     return row
@@ -318,8 +322,11 @@ def over_limit_grace(ctx, state: dict[str, Any], now: datetime | None = None) ->
     deadline = _now(datetime.fromisoformat(since)) + GRACE_PERIOD if over and since else None
     in_grace = bool(deadline and now < deadline)
     state.update(over_limit_since=since, over_limit_until=_iso(deadline), over_limit_grace=in_grace)
-    # Work flows again for every resource that is within its limit or still inside the grace period.
-    for key in LIMIT_LABELS:
+    # Only close incidents that actually exist. Worker polls pass through this check twice (candidate and claim);
+    # issuing four no-op UPDATEs for every request creates needless database work at fleet scale.
+    open_resources = {str(row["subject"]) for row in ctx.db.all(
+        "SELECT subject FROM incidents WHERE kind=%s AND closed_at IS NULL", (LIMIT_INCIDENT_KIND,))}
+    for key in open_resources.intersection(LIMIT_LABELS):
         if in_grace or key not in over:
             _close_limit_incident(ctx, key)
     return in_grace

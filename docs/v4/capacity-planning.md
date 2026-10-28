@@ -62,9 +62,9 @@ The latest quota forecast is retained on the account. If forecasts are missing o
 out, the existing eligible route remains available so a ticket is not starved; the reason records that fallback.
 
 Workers include their instance name as `worker_id` when calling `GET /v1/work/candidates`. Within a development
-priority group, it changes the order only for tickets created in the same minute; older creation-minute and
-higher-priority groups stay ahead. This spreads a burst across worker sessions without changing the order for older
-workers that omit `worker_id`.
+priority group, it interleaves projects only for tickets created in the same minute; each project's ticket order,
+older creation-minute groups, and higher-priority groups stay intact. This spreads a burst across worker sessions
+without changing the order for older workers that omit `worker_id`.
 
 ## Weekly capacity
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import re
+from collections import deque
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -37,16 +39,31 @@ def _rank(item: Mapping[str, Any], project_priorities: Mapping[str, int],
     )
 
 
+def _project_offset(account_id: str, worker_id: str, rank: tuple[Any, ...], size: int) -> int:
+    """Give stable worker identities different starting projects within a tied queue."""
+    match = re.fullmatch(r"(.*?)(\d+)(?:\.(\d+))?", worker_id)
+    if match:
+        prefix, number, instance = match.groups()
+        # Account-N.2 is the second session of account-N, so start it halfway around the project ring.
+        ordinal = int(number) + (size // 2 if instance else 0)
+        seed = f"{prefix}:{rank}".encode("utf-8")
+    else:
+        ordinal = 0
+        seed = f"{account_id}:{worker_id}:{rank}".encode("utf-8")
+    start = int.from_bytes(hashlib.blake2s(seed, digest_size=8).digest(), "big") % size
+    return (start + ordinal) % size
+
+
 def diversify_dev_candidates(candidates: list[dict[str, Any]], account_id: str, worker_id: str,
                              project_priorities: Mapping[str, int],
                              ticket_priorities: Mapping[str, int]) -> list[dict[str, Any]]:
     """Spread same-minute development offers across worker sessions.
 
     The API already orders candidates by workflow stage, project priority, rework status, ticket priority, and
-    creation time. Rotate only contiguous development groups with the same ranking and creation minute. This keeps
-    older minute buckets and all higher-priority groups ahead while giving concurrent workers different tickets
-    from a burst created in the same minute. Stable hashing makes each worker's order repeatable. An empty worker
-    id preserves the original ordering for older clients.
+    creation time. Rotate only contiguous development groups with the same ranking and creation minute. Within each
+    group, projects are interleaved per worker while each project's ticket order stays unchanged. Older minute
+    buckets and higher-priority groups stay ahead. Stable hashing makes each worker's order repeatable. An empty
+    worker id preserves the original ordering for older clients.
     """
     ordered = list(candidates)
     if not worker_id:
@@ -63,12 +80,17 @@ def diversify_dev_candidates(candidates: list[dict[str, Any]], account_id: str, 
             end += 1
         group = ordered[offset:end]
         if len(group) > 1:
-            stable_key = f"{account_id}:{worker_id}:{rank}".encode("utf-8")
-            ordered[offset:end] = sorted(
-                group,
-                key=lambda item: hashlib.blake2s(
-                    stable_key + b":" + str(item.get("key") or "").encode("utf-8"), digest_size=8
-                ).digest(),
-            )
+            queues: dict[str, deque[dict[str, Any]]] = {}
+            for item in group:
+                queues.setdefault(str(item.get("project") or ""), deque()).append(item)
+            projects = sorted(queues)
+            start = _project_offset(account_id, worker_id, rank, len(projects))
+            projects = projects[start:] + projects[:start]
+            diversified = []
+            while any(queues.values()):
+                for project in projects:
+                    if queues[project]:
+                        diversified.append(queues[project].popleft())
+            ordered[offset:end] = diversified
         offset = end
     return ordered

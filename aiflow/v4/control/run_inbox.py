@@ -49,10 +49,10 @@ def heartbeat(ctx, run: dict, run_id: str, body, node: str) -> dict:
         raise HTTPException(409, "lease lost")
 
     with ctx.db.pool.connection() as connection:
-        current = connection.execute("UPDATE runs SET heartbeat_at=now(), progress=progress || %s"
-                                     " WHERE id=%s AND status='running' RETURNING status",
-                                     (J(body.progress), run_id)).fetchone()
-        if not current:
+        updated = connection.execute("UPDATE runs SET heartbeat_at=now(), progress=progress || %s"
+                                     " WHERE id=%s AND status='running'",
+                                     (J(body.progress), run_id)).rowcount
+        if not updated:
             raise HTTPException(409, "run is no longer active")
         received = run_inbox.mark_received(connection, run_id, body.inbox_received) if body.inbox_received else []
         included = run_inbox.mark_included(connection, run_id, body.inbox_included) if body.inbox_included else []

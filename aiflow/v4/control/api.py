@@ -5481,7 +5481,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         details.pop("support_log_truncated", None)
         outcome = body.outcome
         late_result = run_inbox_control.finish(ctx, run, run_id, body, details, node)
-        account_update_allowed = not late_result and run_inbox_control.account_update_allowed(
+        account_update_allowed = not late_result and still_owner
+        status_update_allowed = account_update_allowed and run_inbox_control.account_update_allowed(
             ctx, run_id, run["account_id"], still_owner)
         if late_result:
             outcome = "lost"
@@ -5502,6 +5503,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             if body.quota:
                 ctx.db.run("UPDATE accounts SET quota=%s, updated_at=now() WHERE id=%s",
                            (J(body.quota), run["account_id"]))
+            if body.error_kind == "auth":
+                mark_machine_auth_failure(run["account_id"], node, body.summary)
+        if status_update_allowed:
             if body.error_kind == "quota":
                 until = body.reset_at or (utcnow() + timedelta(minutes=30))
                 seconds = max(60, int((until - utcnow()).total_seconds()))
@@ -5511,9 +5515,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                                      ("cooldown", until, body.summary[:300], run["account_id"], run["account_id"]))
                 if changed:
                     ctx.leases.cooldown(run["account_id"], seconds, "quota")
-            elif body.error_kind == "auth":
-                mark_machine_auth_failure(run["account_id"], node, body.summary)
-            else:
+            elif body.error_kind != "auth":
                 ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
                            " updated_at=now(), idle_since=coalesce(idle_since,now()), cooldown_since=NULL"
                            " WHERE id=%s AND status='working' AND NOT EXISTS"

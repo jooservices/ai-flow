@@ -505,6 +505,28 @@ def test_auth_failure_reported_by_a_run_does_not_cool_down_healthy_machine(clien
     assert beat(client, "node1", node1)["signin"][0]["account"] == "shared-01"
 
 
+def test_run_auth_and_quota_updates_are_kept_while_a_sibling_run_is_active(client, ctx):
+    cc, node1 = two_machines(client, ctx, limit=2)
+    failed_run = claim(client, node1, "TESTWP-1").json()
+    sibling_run = claim(client, cc, "TESTWP-2").json()
+    assert failed_run["claimed"] and sibling_run["claimed"]
+
+    quota = {"windows": {"five_hour": {"utilization": 0.25}}}
+    result = client.post(
+        f"/v1/runs/{failed_run['run_id']}/result",
+        json={"fence": failed_run["fence"], "outcome": "failed", "error_kind": "auth",
+              "summary": "provider rejected this machine's credentials", "quota": quota},
+        headers=node1,
+    )
+
+    assert result.status_code == 200
+    assert ctx.db.one("SELECT quota FROM accounts WHERE id='shared-01'")["quota"] == quota
+    assert ctx.db.one("SELECT status FROM account_machines WHERE account_id='shared-01' AND node='node1'")[
+        "status"] == "pending"
+    assert ctx.db.one("SELECT status FROM accounts WHERE id='shared-01'")["status"] == "working"
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (sibling_run["run_id"],))["status"] == "running"
+
+
 def test_failed_sign_in_can_be_retried_with_a_fresh_request(client, ctx):
     import threading
     from unittest.mock import patch

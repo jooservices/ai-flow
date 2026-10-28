@@ -469,7 +469,10 @@ def test_full_claim_flow_with_fencing(client, ctx, monkeypatch):
     # explicit-only account gets nothing without its label
     assert client.get("/v1/work/candidates", params={"account": "opencode-01"}, headers=cc).json()["tickets"] == []
 
-    r = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).json()
+    with monkeypatch.context() as patch:
+        patch.setattr(ctx.leases, "held_keys", lambda: (_ for _ in ()).throw(
+            AssertionError("a scoped claim should not scan every Redis lease")))
+        r = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).json()
     assert r["claimed"] and r["fence"] == 1 and r["model"] == "opus" and r["provider"] == "claude"
     assert r["project"]["repo"] == "jooservices/test-aiflow-wp" and r["identity"][0].endswith("[bot]")
     run_id, fence = r["run_id"], r["fence"]

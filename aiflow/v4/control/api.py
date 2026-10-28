@@ -4471,7 +4471,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                           + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
 
     def eligible(account_id: str, node: str, *, capacity_routing: bool = True,
-                 ticket_key: str | None = None) -> list[dict]:
+                 ticket_key: str | None = None, lease_checked: bool = False) -> list[dict]:
         """Tickets this account may take now; a claim can scope revalidation to its requested ticket."""
         repo = ctx.repo()
         acc = repo.account(account_id)
@@ -4561,7 +4561,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         def probation(role: str) -> bool:
             return modes.get(role) == "probation"
 
-        held = set(ctx.leases.held_keys())
+        # A claim has already checked this ticket's lease above and the atomic lease acquisition below handles
+        # races. Avoid scanning every Redis lease when revalidating that one requested ticket.
+        held = set() if lease_checked else set(ctx.leases.held_keys())
         out: list[dict] = []
         if not projects:
             return []
@@ -4968,7 +4970,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.step == "master":
             candidates = [master_candidate(body.account, node)]
         else:
-            candidates = eligible(body.account, node, ticket_key=body.ticket)
+            candidates = eligible(body.account, node, ticket_key=body.ticket, lease_checked=True)
             offered = next((candidate for candidate in candidates
                             if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
             if offered:

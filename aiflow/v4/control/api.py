@@ -4553,8 +4553,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                               " AND removed_at IS NULL AND status='online' AND last_heartbeat IS NOT NULL"
                               " AND last_heartbeat > now() - make_interval(secs => %s)",
                               (node, shared_accounts.NODE_ONLINE_S))
-        # A worker process can start before its node agent has delivered a post-reboot heartbeat. Never route from
-        # persisted pre-reboot readiness: the heartbeat refreshes machine state and installed tools first.
+        # Never route from persisted pre-reboot readiness; the agent must report a fresh heartbeat first.
         if not node_row:
             return []
         if not node_row.get("accepting_work", True):

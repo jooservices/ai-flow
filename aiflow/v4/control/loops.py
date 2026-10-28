@@ -433,7 +433,7 @@ def watchdog(ctx: Ctx) -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("role health evaluation failed: %s", e)
     switched_off = role_health.disabled_roles(ctx.db)
-    for role in ("master", "intake_refiner", "verify", "dev"):
+    for role in flow_doctor.ROLE_COVERAGE_ROLES:
         holders = [a for a in repo.accounts if role in (a.roles or [])]
         ok = [a for a in holders if a.id in ready and (a.id, role) not in switched_off]
         if not holders:

@@ -514,10 +514,22 @@ def join_node(client, name: str, ip: str = "", role: str = "worker", project: st
              condition("repository-network", "Repository network", "ready",
                        "The machine can reach GitHub over HTTPS.")],
             credential_checks=credentials)
-        # No HTTP heartbeat is sent by this helper, so retain the real joined status while modeling a ready agent
-        # report for tests that exercise work scheduling. Trigger tests use direct join requests instead.
+        # Model the agent's ready baseline without scheduling provider-backed checks after every fixture join.
         for item in readiness["machine"]:
             if item["id"] == "node-heartbeat":
                 item.update(result="ready", detail="The test agent is connected to the control API.", action="")
         ctx.db.run("UPDATE nodes SET readiness=%s WHERE name=%s", (J(readiness), name))
+        if heartbeat:
+            ctx.db.run("UPDATE nodes SET status='online',last_heartbeat=now() WHERE name=%s", (name,))
     return joined
+
+
+def report_account_credentials(ctx, node: str, checks: dict[str, dict[str, bool]]) -> None:
+    """Refresh a node's test readiness snapshot after the test adds or probes an account."""
+    from aiflow.v4.control.system_check import refresh_node
+
+    row = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,)) or {}
+    readiness = row.get("readiness") or {}
+    reported = dict(readiness.get("credential_statuses") or {})
+    reported.update(checks)
+    refresh_node(ctx, node, "heartbeat", credential_checks=reported)

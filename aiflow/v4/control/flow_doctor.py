@@ -6,6 +6,7 @@ operator-intervention ledger and are turned into AI Flow Bug tickets by the next
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
@@ -19,6 +20,7 @@ from .incidents import idle_reasons
 log = logging.getLogger("aiflow4.flow_doctor")
 CHECKED = ("parked tickets and tool waits", "retry backoff", "impossible dependencies", "licence", "version skew",
            "quota", "project pause", "role health", "account state", "machine state", "role account coverage")
+ROLE_COVERAGE_ROLES = ("master", "intake_refiner", "verify", "dev", "release")
 IMPOSSIBLE_STATUSES = {"backlog", "parked", "declined", "rejected", "won't do", "wont do"}
 _SAFE_ACCOUNT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}\Z")
 
@@ -452,7 +454,7 @@ def role_coverage(ctx, *, persist: bool = True) -> list[dict[str, Any]]:
     disabled = role_health.disabled_roles(ctx.db)
     accounts = {row["id"]: row for row in ctx.db.all("SELECT id,status,provider FROM accounts")}
     results = []
-    for role in ("master", "intake_refiner", "verify", "dev"):
+    for role in ROLE_COVERAGE_ROLES:
         holders = [acc for acc in repo.accounts if role in (acc.roles or []) and not acc.paused and not acc.explicit_only]
         ready = []
         expedited = []
@@ -584,9 +586,16 @@ def _assign_sessions(ctx, limit: int) -> None:
 
 
 def _session_evidence(ctx, session_id: int, offset: int = 0) -> tuple[list[dict], str]:
-    rows = ctx.db.all("SELECT happened_at,action,target,reason FROM operator_interventions WHERE session_id=%s"
+    rows = ctx.db.all("SELECT happened_at,action,target,reason,details FROM operator_interventions WHERE session_id=%s"
                       " ORDER BY happened_at,id OFFSET %s LIMIT 20", (session_id, offset))
-    return rows, "\n".join(f"- {r['happened_at'].isoformat()} {r['action']} {r['target']}" for r in rows)
+    evidence = []
+    for row in rows:
+        line = f"- {row['happened_at'].isoformat()} {row['action']} {row['target']}"
+        arguments = (row.get("details") or {}).get("arguments")
+        if isinstance(arguments, list) and arguments:
+            line += " args=" + json.dumps(arguments, ensure_ascii=False)
+        evidence.append(line)
+    return rows, "\n".join(evidence)
 
 
 def create_intervention_bugs(ctx, limit: int = 200) -> int:

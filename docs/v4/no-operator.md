@@ -32,8 +32,8 @@ Safe repairs use the existing routing and fencing rules:
   the doctor retires that interactive handoff and records why. Work routes through configured ready accounts; if no
   replacement is available, the Dashboard shows the coverage gap and the next step.
 - A healthy but switched-off role can receive another probation slot immediately. Each required role reports the
-  number of ready accounts and provider diversity. Where safe recovery cannot create a second provider, Dashboard
-  states the reason and the next practical step.
+  number of ready accounts and provider diversity, including `release` for post-merge checks. Where safe recovery
+  cannot create a second provider, Dashboard states the reason and the next practical step.
 
 The doctor does not bypass licence entitlements, project pause settings, provider quota, or release compatibility.
 It records those as gates and leaves protected business choices to the owner. Technical questions continue through
@@ -56,12 +56,17 @@ unless it can install both DDL event triggers; install migrations with a role au
 triggers. Direct changes record the database user, table and operation, plus a reason describing the observed
 operation, but never the SQL text or row values. Control and node installs enable Linux `auditd`
 rules for interactive commands, `/etc/aiflow`, `/etc/systemd/system`, and (on the control host) the control repo.
-The node agent forwards the executable basename and changed filename with a reason describing the observed command
-or file change; it never forwards shell arguments or file contents. The agent collapses one batch into one intervention per actor and source. Audit records are
-de-duplicated and the doctor creates one Bug per actor and source session (a gap of 30 minutes starts a new session)
-in the configured maintenance Jira project with the `flow-bug` and `operator-intervention` labels, so an SSH session
-or a deploy never floods the project. Sessions are stored (`operator_intervention_sessions`): an action that the
-doctor sees in a later pass joins its session and is commented on the session's Bug instead of opening a new one.
+The node agent forwards the executable basename, secret-redacted command arguments, and each changed filename; it
+never forwards file contents or full paths. Credential options and values, URL userinfo, and URL query strings are
+redacted before the event leaves the node. Each command and distinct changed file is kept as its own intervention
+row, so the evidence does not drop commands or files when a batch is large. The ledger is append-only for database
+roles other than the registered control-plane role: product bookkeeping may attach rows to a session and Bug, while
+interactive database roles cannot update, delete, or truncate the evidence. Audit records are de-duplicated and the
+doctor creates one Bug per actor and source session (a gap of 30 minutes starts a new session) in the configured
+maintenance Jira project with the `flow-bug` and `operator-intervention` labels, so an SSH session or a deploy never
+floods the project. Sessions are stored (`operator_intervention_sessions`): an action that the doctor sees in a later
+pass joins its session and is commented on the session's Bug instead of opening a new one. Safe command arguments
+are included in that Bug's evidence.
 Each Bug is moved from Created to Intake (retried every pass until it works), the state intake workers claim from.
 
 Each row records who, what, where and why, using the observed operation when a console request does not carry a

@@ -415,6 +415,18 @@ def test_role_coverage_requires_two_ready_providers_and_returns_reason_and_next_
     assert ctx.db.one("SELECT cause FROM flow_doctor_findings WHERE subject='role:dev'")["cause"] == "no_ready_account"
 
 
+def test_role_coverage_includes_the_post_merge_release_role(ctx):
+    online_node(ctx, "cc")
+    online_node(ctx, "node1")
+    for account_id in ("claude-01", "codex-01"):
+        account = ctx.repo().account(account_id)
+        account.roles = list(dict.fromkeys([*(account.roles or []), "release"]))
+        account_state(ctx, account_id, "idle")
+
+    coverage = next(row for row in flow_doctor.role_coverage(ctx, persist=False) if row["role"] == "release")
+    assert coverage["ready_count"] == 2 and coverage["provider_count"] == 2 and coverage["healthy"]
+
+
 def test_role_coverage_uses_routing_readiness_for_shared_accounts_pending_sign_in(ctx):
     online_node(ctx, "cc")
     online_node(ctx, "node1")
@@ -472,9 +484,12 @@ def test_doctor_expedites_a_healthy_disabled_role_through_probation(ctx):
 def test_only_business_or_protected_irreversible_escalations_reach_a_person(ctx):
     tool = escalations.classify(ctx.db, "MISSING-TOOL: gitleaks is not installed", "TESTWP")
     technical = escalations.classify(ctx.db, "Which file defines the worker heartbeat route?", "TESTWP")
-    business = escalations.classify(ctx.db, "Should the owner add another AI provider account?", "TESTWP")
+    unclear = escalations.classify(ctx.db, "Should worker heartbeats use polling or push?", "TESTWP")
+    business = escalations.classify(
+        ctx.db, "Should failed payment emails go to customers immediately or after 24 hours?", "TESTWP")
     assert tool.cls == escalations.MISSING and not tool.reaches_person
     assert technical.cls == escalations.AMBIGUITY and not technical.reaches_person
+    assert unclear.cls == escalations.AMBIGUITY and not unclear.reaches_person
     assert business.cls == escalations.BUSINESS and business.reaches_person
 
 
@@ -592,28 +607,63 @@ def test_intervention_bugs_reach_intake_with_a_retry_and_workers_can_claim_them(
     assert claimed.status_code == 200 and claimed.json()["claimed"]
 
 
-def test_node_agent_collapses_a_session_of_commands_into_one_intervention():
-    from aiflow.v4.node import agent
-    events = [{"source": "shell", "actor": "ops", "action": "execute", "target": f"c{n}",
-               "happened_at": f"2026-10-23T10:0{n}:00+00:00", "source_key": f"k{n}", "reason": "r"}
-              for n in range(4)]
-    grouped = agent._group_interventions(events)
-    assert len(grouped) == 1 and grouped[0]["details"]["events"] == 4 and grouped[0]["source_key"] == "k0"
-
-
-def test_node_audit_reasons_name_the_observed_command_and_file_without_arguments():
+def test_node_audit_keeps_actions_redacts_credentials_and_does_not_truncate_changed_files():
     from aiflow.v4.node import agent
 
     raw = (b'type=SYSCALL msg=audit(1790000000.123:77): auid=1000 exe="/usr/bin/systemctl"\n'
-           b'type=EXECVE msg=audit(1790000000.123:77): argc=3 a0="systemctl" a1="restart" a2="secret-value"\n'
+           b'type=EXECVE msg=audit(1790000000.123:77): argc=8 a0="systemctl" a1="restart" '
+           b'a2="aiflow4-worker.service" a3="--password=local-fixture-value" '
+           b'a4="--url=https://operator:creds@example.test/worker?token=url-fixture" '
+           b'a5="ghp_fake-fixture-token" a6="-pinline-fixture" a7="API_KEY=api-fixture"\n'
            b'type=PATH msg=audit(1790000000.123:77): name="/etc/aiflow/node.env"\n')
     events = agent._audit_interventions(raw)
     assert len(events) == 2
     shell = next(event for event in events if event["source"] == "shell")
     config = next(event for event in events if event["source"] == "configuration")
-    assert "systemctl" in shell["reason"] and "no reason was supplied" not in shell["reason"]
-    assert "node.env" in config["reason"] and "no reason was supplied" not in config["reason"]
-    assert "secret-value" not in repr(events)
+    assert shell["target"] == "systemctl"
+    assert shell["details"]["arguments"] == ["restart", "aiflow4-worker.service", "--password=[REDACTED]",
+                                               "--url=https://example.test/worker?[REDACTED]", "[REDACTED]",
+                                               "-p[REDACTED]", "API_KEY=[REDACTED]"]
+    assert config["target"] == "node.env"
+    assert all(value not in repr(events) for value in
+               ("local-fixture-value", "operator", "creds", "url-fixture", "ghp_fake-fixture-token",
+                "inline-fixture", "api-fixture"))
+
+    paths = [f'type=PATH msg=audit(1790000000.124:78): name="/etc/aiflow/file-{n}.conf"'.encode()
+             for n in range(21)]
+    many_files = (b'type=SYSCALL msg=audit(1790000000.124:78): auid=1000 exe="/usr/bin/install"\n'
+                  + b"\n".join(paths) + b"\n")
+    file_events = agent._audit_interventions(many_files)
+    assert len(file_events) == 21
+    assert {event["target"] for event in file_events} == {f"file-{n}.conf" for n in range(21)}
+
+
+def test_operator_intervention_evidence_includes_secret_safe_arguments(ctx):
+    start = datetime.now(timezone.utc)
+    flow_doctor.record_operator_intervention(
+        ctx, source_key="command-evidence", source="shell", actor="ops", action="execute", target="systemctl",
+        happened_at=start, details={"arguments": ["restart", "aiflow4-worker.service", "--token=[REDACTED]"]})
+    flow_doctor._assign_sessions(ctx, 100)
+    session = ctx.db.one("SELECT id FROM operator_intervention_sessions WHERE actor='ops'")
+    _, evidence = flow_doctor._session_evidence(ctx, session["id"])
+    assert 'args=["restart", "aiflow4-worker.service", "--token=[REDACTED]"]' in evidence
+
+
+def test_operator_intervention_ledger_rejects_human_edits_but_allows_product_bookkeeping(ctx):
+    intervention_id = flow_doctor.record_operator_intervention(
+        ctx, source_key="append-only", source="shell", actor="ops", action="execute", target="systemctl")
+    flow_doctor._assign_sessions(ctx, 100)
+    ctx.db.run("UPDATE operator_interventions SET bug_ticket_key='TESTWP-900' WHERE id=%s", (intervention_id,))
+    as_operator(ctx)
+    with psycopg.connect(ctx.db.url, autocommit=True, application_name="psql") as connection:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            connection.execute("UPDATE operator_interventions SET target='rewritten' WHERE id=%s", (intervention_id,))
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            connection.execute("DELETE FROM operator_interventions WHERE id=%s", (intervention_id,))
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            connection.execute("TRUNCATE operator_interventions")
+    assert ctx.db.one("SELECT target,bug_ticket_key FROM operator_interventions WHERE id=%s", (intervention_id,)) == {
+        "target": "systemctl", "bug_ticket_key": "TESTWP-900"}
 
 
 def as_operator(ctx) -> None:

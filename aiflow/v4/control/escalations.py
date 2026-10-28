@@ -129,6 +129,10 @@ REPOSITORY_FACT_RE = re.compile(
     r"\b(?:endpoint|route|api|function|handler)\b|"
     r"\bwhat\s+(?:value|setting)\b.{0,80}\b(?:existing|current|configured)\b.{0,80}\b(?:use|set|configured)\b",
     re.I | re.S)
+BUSINESS_TOPIC_RE = re.compile(
+    r"\b(?:customer(?:s|-facing)?|refund|payment|pricing|billing|subscription|marketing|brand|legal|contract|"
+    r"privacy|data retention)\b", re.I)
+BUSINESS_DECISION_CUE_RE = re.compile(r"\b(?:should|whether|choose|choice|decision|decide|option|or)\b|\?", re.I)
 
 
 def _search(pattern: str, text: str) -> bool:
@@ -188,7 +192,9 @@ def classify(db, text: str, project: str = "") -> Classification:
     if is_server_question(text):  # where and how something runs is never a question for the owner
         return Classification(MISSING, "a server, host, network or access question: the project configuration and the "
                                        "run environment answer it", environment="server")
-    return Classification(BUSINESS, "a business decision no source answers")
+    if BUSINESS_TOPIC_RE.search(text) and BUSINESS_DECISION_CUE_RE.search(text):
+        return Classification(BUSINESS, "an explicit customer-facing or commercial choice")
+    return Classification(AMBIGUITY, "no positive evidence of a new business decision; keep it in automated triage")
 
 
 # --- register ---------------------------------------------------------------------------------------------

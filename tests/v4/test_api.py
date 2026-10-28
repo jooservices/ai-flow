@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from conftest import add_open_escalation, add_ticket, join_node
+from conftest import add_open_escalation, add_ticket, join_node, report_account_credentials
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 
@@ -632,9 +632,9 @@ def test_predicted_runout_alerts_owner_and_routes_account_work_to_its_provider_p
     notifications = []
     monkeypatch.setattr(incidents.notify, "send", lambda *args, **kwargs: notifications.append(args) or ["email"])
     headers = join(client, "node1")
-    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=headers)
     ctx.repo().accounts.append(Account(id="codex-02", provider="codex", node="node1", tier="middle", roles=["dev"]))
     client.app.state.sync_accounts()
+    report_account_credentials(ctx, "node1", {"codex-02": {"present": True, "valid": True}})
     add_ticket(ctx.db, "TESTWP-QUOTA-1")
     now = datetime.now(timezone.utc)
     quota = {"windows": {"five_hour": {"utilization": .8,
@@ -690,9 +690,9 @@ def test_quota_exhaustion_routes_ticket_to_peer_and_returns_it_after_reset(clien
     from aiflow.v4.core.controlrepo import Account
 
     headers = join(client, "cc")
-    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=headers)
     ctx.repo().accounts.append(Account(id="claude-02", provider="claude", node="cc", tier="senior", roles=["dev"]))
     client.app.state.sync_accounts()
+    report_account_credentials(ctx, "cc", {"claude-02": {"present": True, "valid": True}})
     add_ticket(ctx.db, "TESTWP-QUOTA-RESET")
 
     claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-QUOTA-RESET", "account": "claude-01"},

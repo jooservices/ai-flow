@@ -738,6 +738,7 @@ def site_dir() -> Path | None:
 # helpers they call are still discovered; response helpers such as `state.snapshot` remain tracked normally.
 API_IMPLEMENTATION_ONLY_HELPERS = {
     "aiflow/v4/control/licensing.py": frozenset({"_row", "_row_in_connection"}),
+    "aiflow/v4/control/api.py": frozenset({"audit", "audit_in", "owner_auth"}),
 }
 
 @lru_cache(maxsize=1)

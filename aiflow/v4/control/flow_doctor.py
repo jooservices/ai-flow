@@ -25,6 +25,16 @@ IMPOSSIBLE_STATUSES = {"backlog", "parked", "declined", "rejected", "won't do", 
 _SAFE_ACCOUNT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}\Z")
 
 
+def exclude_failed_routes(ctx, account_id: str, node: str, tickets: list[dict]) -> list[dict]:
+    """Keep work away from accounts or nodes the Flow Doctor recently found failing."""
+    if not tickets:
+        return tickets
+    avoided = {(row["ticket_key"], row["step"]) for row in ctx.db.all(
+        "SELECT ticket_key,step FROM flow_doctor_route_exclusions WHERE expires_at > now()"
+        " AND ((account_id<>'' AND account_id=%s) OR (node<>'' AND node=%s))", (account_id, node))}
+    return [ticket for ticket in tickets if (ticket["key"], ticket["step"]) not in avoided]
+
+
 def record_action(ctx, action_key: str, action: str, *, finding_id: int | None = None, ticket: str = "",
                   node: str = "", account: str = "", outcome: str = "", detail: str = "") -> bool:
     """Append one idempotent doctor action; a retry never duplicates the same repair record."""

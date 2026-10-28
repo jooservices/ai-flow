@@ -61,9 +61,10 @@ reason and estimate are retained with that run. The per-ticket drawer loads the 
 The latest quota forecast is retained on the account. If forecasts are missing or every eligible account is predicted to run
 out, the existing eligible route remains available so a ticket is not starved; the reason records that fallback.
 
-Workers include their instance name as `worker_id` when calling `GET /v1/work/candidates`. It changes only the order
-of equally ranked development offers: projects are interleaved per worker session, while each project's ticket order
-and all higher-priority groups stay intact. Older workers may omit `worker_id` and retain the original ordering.
+Workers include their instance name as `worker_id` when calling `GET /v1/work/candidates`. Within a development
+priority group, it changes the order only for tickets created in the same minute; older creation-minute and
+higher-priority groups stay ahead. This spreads a burst across worker sessions without changing the order for older
+workers that omit `worker_id`.
 
 ## Weekly capacity
 

@@ -2,71 +2,73 @@
 from __future__ import annotations
 
 import hashlib
-from collections import deque
+from datetime import datetime
 from typing import Any, Mapping
+
+
+def _minute_bucket(value: Any) -> str | None:
+    """Return a stable minute bucket for database datetimes or API timestamp strings."""
+    if isinstance(value, datetime):
+        stamp = value
+    elif isinstance(value, str) and value:
+        try:
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+    else:
+        return None
+    return stamp.replace(second=0, microsecond=0).isoformat()
+
+
+def _rank(item: Mapping[str, Any], project_priorities: Mapping[str, int],
+          ticket_priorities: Mapping[str, int]) -> tuple[Any, ...] | None:
+    if item.get("step") != "dev":
+        return None
+    labels = set(item.get("labels") or ())
+    minute = _minute_bucket(item.get("jira_created"))
+    if minute is None:
+        return None
+    return (
+        project_priorities.get(str(item.get("project") or ""), 5),
+        "rework" not in labels,
+        ticket_priorities.get(str(item.get("priority") or ""), 2),
+        "flow-bug" in labels,
+        minute,
+    )
 
 
 def diversify_dev_candidates(candidates: list[dict[str, Any]], account_id: str, worker_id: str,
                              project_priorities: Mapping[str, int],
                              ticket_priorities: Mapping[str, int]) -> list[dict[str, Any]]:
-    """Rotate equally ranked development offers per worker session to reduce simultaneous claim collisions.
+    """Spread same-minute development offers across worker sessions.
 
-    The API already orders candidates by flow-bug status, project priority, rework status, ticket priority, and
-    creation time. Rotate only contiguous dev groups that share the same priority dimensions. Within a group, poll
-    projects in a stable worker-specific round robin while keeping each project's creation order. Stable hashing
-    keeps polls repeatable and higher-priority groups ahead of lower-priority groups. An empty worker id preserves
-    the original ordering for older clients.
+    The API already orders candidates by workflow stage, project priority, rework status, ticket priority, and
+    creation time. Rotate only contiguous development groups with the same ranking and creation minute. This keeps
+    older minute buckets and all higher-priority groups ahead while giving concurrent workers different tickets
+    from a burst created in the same minute. Stable hashing makes each worker's order repeatable. An empty worker
+    id preserves the original ordering for older clients.
     """
     ordered = list(candidates)
     if not worker_id:
         return ordered
+
     offset = 0
     while offset < len(ordered):
-        first = ordered[offset]
-        if first.get("step") != "dev":
+        rank = _rank(ordered[offset], project_priorities, ticket_priorities)
+        if rank is None:
             offset += 1
             continue
-        labels = set(first.get("labels") or ())
-        group_key = (
-            project_priorities.get(str(first.get("project") or ""), 5),
-            "rework" not in labels,
-            ticket_priorities.get(str(first.get("priority") or ""), 2),
-            "flow-bug" in labels,
-        )
         end = offset + 1
-        while end < len(ordered):
-            item = ordered[end]
-            if item.get("step") != "dev":
-                break
-            item_labels = set(item.get("labels") or ())
-            item_key = (
-                project_priorities.get(str(item.get("project") or ""), 5),
-                "rework" not in item_labels,
-                ticket_priorities.get(str(item.get("priority") or ""), 2),
-                "flow-bug" in item_labels,
-            )
-            if item_key != group_key:
-                break
+        while end < len(ordered) and _rank(ordered[end], project_priorities, ticket_priorities) == rank:
             end += 1
         group = ordered[offset:end]
         if len(group) > 1:
-            queues: dict[str, deque[dict[str, Any]]] = {}
-            for item in group:
-                queues.setdefault(str(item.get("project") or ""), deque()).append(item)
-        else:
-            queues = {}
-        if len(queues) > 1:
-            stable_key = f"{account_id}:{worker_id}:{group_key}".encode("utf-8")
-            projects = sorted(
-                queues,
-                key=lambda project: hashlib.blake2s(stable_key + b":" + project.encode("utf-8"),
-                                                    digest_size=8).digest(),
+            stable_key = f"{account_id}:{worker_id}:{rank}".encode("utf-8")
+            ordered[offset:end] = sorted(
+                group,
+                key=lambda item: hashlib.blake2s(
+                    stable_key + b":" + str(item.get("key") or "").encode("utf-8"), digest_size=8
+                ).digest(),
             )
-            diversified = []
-            while any(queues.values()):
-                for project in projects:
-                    if queues[project]:
-                        diversified.append(queues[project].popleft())
-            ordered[offset:end] = diversified
         offset = end
     return ordered

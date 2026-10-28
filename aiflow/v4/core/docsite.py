@@ -709,6 +709,13 @@ def site_dir() -> Path | None:
 
 
 # --- CI: documentation must follow the product ----------------------------------------------------------------------
+# These helpers are reached from many API handlers but only implement first-use persistence setup. Their source edits
+# must not be mistaken for changes to every route's public contract. Keep walking through them so contract-bearing
+# helpers they call are still discovered; response helpers such as `state.snapshot` remain tracked normally.
+API_IMPLEMENTATION_ONLY_HELPERS = {
+    "aiflow/v4/control/licensing.py": frozenset({"_row", "_row_in_connection"}),
+}
+
 @lru_cache(maxsize=1)
 def _control_function_registry():
     """Parse control functions and imports so route contracts include shared response helpers they call."""
@@ -815,7 +822,9 @@ def _called_control_function_spans(endpoint, registry) -> list[tuple[str, tuple[
             visited.add(key)
             decorators = getattr(target_node, "decorator_list", ())
             first = min([target_node.lineno, *(item.lineno for item in decorators)])
-            result[(modules[target_module][0], first, target_node.end_lineno or target_node.lineno)] = None
+            path = modules[target_module][0]
+            if target_function not in API_IMPLEMENTATION_ONLY_HELPERS.get(path, ()):
+                result[(path, first, target_node.end_lineno or target_node.lineno)] = None
             pending.append((target_module, target_node))
     return [(path, (first, last)) for path, first, last in sorted(result)]
 

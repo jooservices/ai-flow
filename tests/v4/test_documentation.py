@@ -2,6 +2,7 @@
 and the CI check that keeps documentation current."""
 from __future__ import annotations
 
+import ast
 import os
 import re
 import subprocess
@@ -201,6 +202,30 @@ def test_shared_state_response_helper_is_tracked_against_its_routes():
     text = "The shared snapshot is served by GET /v1/state and GET /v1/deploy/state."
     assert docsite.documentation_gaps([module, docs], read=lambda _path: text,
                                       routes=docsite.api_routes_by_module()) == []
+
+
+def test_license_row_initialization_is_not_mistaken_for_every_api_contract():
+    module = "aiflow/v4/control/licensing.py"
+    source = (ROOT / module).read_text().splitlines()
+    functions = {node.name: node for node in ast.walk(ast.parse("\n".join(source)))
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    contracts = docsite.api_route_contract_spans()[module]
+    for name in ("_row", "_row_in_connection"):
+        line = functions[name].lineno
+        assert not any(start <= line <= end for spans in contracts.values() for start, end in spans)
+
+    # The policy is narrow: entitlement/grace behavior is still linked to the six offer/claim routes it serves.
+    grace_line = functions["over_limit_grace"].lineno
+    grace_routes = {contract for contract, spans in contracts.items()
+                    if any(start <= grace_line <= end for start, end in spans)}
+    assert grace_routes == {
+        "GET /v1/work/candidates",
+        "GET /v1/master/candidate",
+        "GET /v1/ba-chat/candidate",
+        "POST /v1/work/claim",
+        "GET /v1/version-releases/candidates",
+        "POST /v1/version-releases/claim",
+    }
 
 
 def test_unchanged_ui_api_routes_are_not_reported_as_removed(monkeypatch):

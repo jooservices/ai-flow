@@ -79,6 +79,7 @@ PAGES: dict[str, tuple[str, ...]] = {
     "/licensing": ("/v1/licensing", "/v1/licensing/usage"),
     "/notifications": ("/v1/notifications",),
     "/settings": ("/v1/runtime-settings",),
+    "/system-check": ("/v1/system-check",),
     "/security": ("/v1/security/mfa", "/v1/security/settings", "/v1/security/users",
                   "/v1/security/sessions", "/v1/security/audit?limit=100"),
     "/support": (),
@@ -862,9 +863,9 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     measured, peak_checks = _measure_peak(client, ctx, sc, live, errors, page_results, picker_result,
                                                           claim_intervals, observed_activity)
                     log(f"peak: {peak_active} sessions working")
-                # run_result may embed captured work locally. Keep the completion burst small so its inference
-                # work cannot occupy every worker request slot while the independent lease heartbeats run.
-                with ThreadPoolExecutor(max_workers=min(8, len(live)),
+                # The keeper caps app requests and gives lease heartbeats priority, so completion concurrency can
+                # match the configured worker request budget without starving lease renewals.
+                with ThreadPoolExecutor(max_workers=min(sc.claim_concurrency, len(live)),
                                         thread_name_prefix="scale-complete") as pool:
                     completed = [pool.submit(finish_one, session, claim, keeper) for session, claim in live]
                     for future in completed:

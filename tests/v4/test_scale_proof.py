@@ -194,11 +194,13 @@ def test_console_view_endpoints_work_with_a_small_local_fleet(tmp_path):
 def test_every_top_level_console_tab_has_a_scale_measurement():
     import re
 
-    html = (ROOT / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
+    from aiflow.v4.control.ui import build_console_page
+
+    html = build_console_page()
     tabs = set(re.findall(r'<button class="tab"[^>]*data-view="([^"]+)"', html))
     measured = {path.lstrip("/") for path in scale_harness.PAGES}
     assert tabs == measured
-    assert len(tabs) == 19
+    assert len(tabs) == 20
 
 
 def test_full_run_report_is_bound_to_the_declared_plan(proof):

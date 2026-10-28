@@ -7,8 +7,8 @@ Users and roles (`/users`) lists the people who can sign in and lets an Administ
 ## What you can do here
 
 - Add a person with an email, a name and one or more roles. You can limit the person to selected projects or leave
-  access set to all projects. The form keeps its entered values while you change the roles or project access. A
-  temporary password is shown once after the person is created.
+  access set to all projects. The form keeps its entered values while you change the roles or project access, and
+  a refresh preserves the focused email or name field. A temporary password is shown once after the person is created.
 - Give or remove roles. A person with several roles sees the union of the views of those roles.
 - Limit a person to chosen projects, or leave the person on all projects.
 - Disable or enable a person.

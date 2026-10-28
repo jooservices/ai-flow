@@ -366,6 +366,7 @@ class _RunLeaseKeeper:
         self._waiting_heartbeats = 0
         self._lock = Lock()
         self._runs: dict[str, tuple[dict[str, str], dict[str, Any]]] = {}
+        self._run_locks: dict[str, Lock] = {}
         self._stop = Event()
         self._thread = Thread(target=self._heartbeat_loop, name="scale-run-heartbeats", daemon=True)
         self._thread.start()
@@ -393,13 +394,35 @@ class _RunLeaseKeeper:
 
     def add(self, session: dict[str, str], claim: dict[str, Any]) -> None:
         with self._lock:
-            self._runs[str(claim["run_id"])] = (session, claim)
+            run_id = str(claim["run_id"])
+            self._runs[run_id] = (session, claim)
+            self._run_locks[run_id] = Lock()
 
     def complete(self, run_id: str) -> None:
         with self._lock:
-            self._runs.pop(str(run_id), None)
+            run_id = str(run_id)
+            run_lock = self._run_locks.get(run_id)
+        if run_lock is None:
+            return
+        # Drain a renewal already on the wire before the caller reports and releases the run. Otherwise that
+        # renewal can arrive after release, get the expected 409, and be misreported as a lost lease.
+        with run_lock:
+            with self._lock:
+                self._runs.pop(run_id, None)
+                self._run_locks.pop(run_id, None)
 
     def _heartbeat(self, run_id: str, session: dict[str, str], claim: dict[str, Any]) -> None:
+        with self._lock:
+            run_lock = self._run_locks.get(run_id)
+        if run_lock is None:
+            return
+        with run_lock:
+            with self._lock:
+                if run_id not in self._runs:
+                    return
+            self._heartbeat_active(run_id, session, claim)
+
+    def _heartbeat_active(self, run_id: str, session: dict[str, str], claim: dict[str, Any]) -> None:
         path = f"/v1/runs/{run_id}/heartbeat"
         try:
             response = self._request(self.heartbeat_client, "post", path,
@@ -648,8 +671,12 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
         key = claim["ticket"]["key"]
         issues = []
         try:
-            for path, body in ((f"/v1/runs/{run_id}/heartbeat", {"fence": fence, "progress": {"phase": "ai"}}),
-                               (f"/v1/runs/{run_id}/result", {"fence": fence, "outcome": "done",
+            heartbeat = keeper.request("post", f"/v1/runs/{run_id}/heartbeat",
+                                       json={"fence": fence, "progress": {"phase": "ai"}}, headers=h)
+            if heartbeat.status_code != 200:
+                issues.append(f"/v1/runs/{run_id}/heartbeat answered HTTP {heartbeat.status_code}")
+            keeper.complete(run_id)
+            for path, body in ((f"/v1/runs/{run_id}/result", {"fence": fence, "outcome": "done",
                                                                "summary": "simulated session"}),
                                (f"/v1/runs/{run_id}/release", {"fence": fence})):
                 response = keeper.request("post", path, json=body, headers=h)

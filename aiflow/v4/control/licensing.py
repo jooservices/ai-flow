@@ -310,6 +310,10 @@ def over_limit_grace(ctx, state: dict[str, Any], now: datetime | None = None) ->
         state["over_limit_grace"] = False
         return False
     usage = resource_counts(ctx)
+    # All entitlement checks for this request share the same fleet-size snapshot. A candidate
+    # response can check many projects; recomputing these counts for every offered ticket scans
+    # the same accounts and machines repeatedly.
+    state["_resource_counts"] = usage
     over = sorted(key for key, limit in state["limits"].items() if usage.get(key, 0) > limit)
     since = state.get("over_limit_since")
     if over and not since:
@@ -362,6 +366,9 @@ def enforce_account_entitlement(ctx, account_id: str, *, public_key: str,
     if not state.get("limits_enforced", True) or over_limit_grace(ctx, state):
         return
     limit = state["limits"]["ai_accounts"]
+    usage = state.get("_resource_counts") or {}
+    if int(usage.get("ai_accounts", limit + 1)) <= limit:
+        return
     # A configured account can be intentionally absent from the database when startup sync skipped it at
     # capacity. Count the union so that this resource still cannot claim work through the node API.
     account_ids = sorted({str(row["id"]) for row in ctx.db.all(_ACTIVE_ACCOUNTS + " ORDER BY id")}
@@ -378,8 +385,11 @@ def enforce_machine_entitlement(ctx, node: str, *, public_key: str,
     state = state or require_writable(ctx.db, public_key)
     if not state.get("limits_enforced", True) or over_limit_grace(ctx, state):
         return
-    node_names = [str(row["name"]) for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NULL ORDER BY name")]
     limit = state["limits"]["machines"]
+    usage = state.get("_resource_counts") or {}
+    if int(usage.get("machines", limit + 1)) <= limit:
+        return
+    node_names = [str(row["name"]) for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NULL ORDER BY name")]
     if node in node_names and node_names.index(node) >= limit:
         _stop_work(ctx, "machines",
                    f"Machines limit of {limit} reached ({len(node_names)}/{limit}). Disable or remove extra machines or raise the limit in the Licence screen.",
@@ -392,8 +402,11 @@ def enforce_project_entitlement(ctx, project: str, *, public_key: str,
     state = state or require_writable(ctx.db, public_key)
     if not state.get("limits_enforced", True) or over_limit_grace(ctx, state):
         return
-    project_keys = sorted(ctx.repo().projects)
     limit = state["limits"]["projects"]
+    usage = state.get("_resource_counts") or {}
+    if int(usage.get("projects", limit + 1)) <= limit:
+        return
+    project_keys = sorted(ctx.repo().projects)
     if project in project_keys and project_keys.index(project) >= limit:
         _stop_work(ctx, "projects",
                    f"Projects limit of {limit} reached ({len(project_keys)}/{limit}). Disable or remove extra projects or raise the limit in the Licence screen.",

@@ -1245,6 +1245,8 @@ class ManagedAccountSignInStatusBody(BaseModel):
 def create_app(ctx: Ctx) -> FastAPI:
     from contextlib import asynccontextmanager
 
+    runtime_repo_cache: ContextVar[ControlRepo | None] = ContextVar("aiflow_runtime_repo_cache", default=None)
+    runtime_repo_cache_enabled: ContextVar[bool] = ContextVar("aiflow_runtime_repo_cache_enabled", default=False)
     capacity_history_lock = threading.Lock()
     capacity_history_cache: dict[str, Any] = {"at": 0.0, "samples": []}
     state_snapshot_lock = threading.Lock()
@@ -1278,6 +1280,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def runtime_repo() -> ControlRepo:
         """Merge console-managed accounts over the control-repo snapshot for live worker scheduling."""
+        cache_enabled = runtime_repo_cache_enabled.get()
+        cached = runtime_repo_cache.get() if cache_enabled else None
+        if cached is not None:
+            return cached
         base = configured_repo()
         overrides = ctx.db.one(
             "SELECT EXISTS(SELECT 1 FROM nodes WHERE removed_at IS NOT NULL) AS removed_nodes,"
@@ -1286,6 +1292,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             " EXISTS(SELECT 1 FROM account_machines) AS account_machines,"
             " EXISTS(SELECT 1 FROM account_machine_exclusions) AS account_machine_exclusions") or {}
         if not any(overrides.values()):
+            if cache_enabled:
+                runtime_repo_cache.set(base)
             return base
         removed_nodes = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NOT NULL")}
         managed_rows = ctx.db.all("SELECT * FROM managed_ai_accounts ORDER BY created_at,id")
@@ -1300,7 +1308,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                 id=row["id"], provider=row["provider"], node=row["node"], tier=row["tier"],
                 roles=list(row["roles"] or []), parallel=int(row["parallel"]),
                 explicit_only=bool(row["explicit_only"]), paused=bool(row["paused"]))
-        return shared_accounts.overlay(replace(base, accounts=list(accounts.values())), ctx.db)
+        merged = shared_accounts.overlay(replace(base, accounts=list(accounts.values())), ctx.db)
+        if cache_enabled:
+            runtime_repo_cache.set(merged)
+        return merged
 
     # The registry is the live source for screen-managed accounts. Configured accounts stay supported,
     # while the console can add and edit account assignments without a control-repo file change.
@@ -1320,6 +1331,22 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     app = FastAPI(title="AI Flow v4 control API", version=VERSION, lifespan=lifespan)
     app.state.ctx = ctx
+
+    @app.middleware("http")
+    async def isolate_runtime_repo_snapshot(request: Request, call_next):
+        """Reuse the live view only in worker routes that never change account/project configuration."""
+        enabled = request.url.path in {
+            "/v1/work/candidates", "/v1/work/claim",
+            "/v1/version-releases/candidates", "/v1/version-releases/claim",
+        }
+        cache_token = runtime_repo_cache.set(None)
+        enabled_token = runtime_repo_cache_enabled.set(enabled)
+        try:
+            return await call_next(request)
+        finally:
+            runtime_repo_cache_enabled.reset(enabled_token)
+            runtime_repo_cache.reset(cache_token)
+
     # `runtime_repo` also applies shared-account overlays. Keep a marker for code that checks the live view.
     ctx._shared_accounts = True
     support_bundle.control_log_buffer(

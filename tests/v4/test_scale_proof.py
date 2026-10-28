@@ -110,6 +110,49 @@ def test_active_simulated_runs_are_renewed_by_the_worker_heartbeat_loop():
     assert kwargs["headers"] == headers["scale-node-01"]
 
 
+def test_completing_a_simulated_run_drains_its_inflight_heartbeat():
+    from threading import Event, Thread
+
+    heartbeat_started = Event()
+    allow_heartbeat_to_finish = Event()
+    completion_started = Event()
+    completion_finished = Event()
+    requests = []
+
+    class Response:
+        status_code = 200
+
+    class Client:
+        def post(self, path, **kwargs):
+            requests.append((path, kwargs))
+            heartbeat_started.set()
+            assert allow_heartbeat_to_finish.wait(timeout=2)
+            return Response()
+
+    headers = {"scale-node-01": {"Authorization": "Bearer node-token"}}
+    keeper = scale_harness._RunLeaseKeeper(Client(), headers, [], max_parallel=1, interval_s=0.01)
+    keeper.add({"node": "scale-node-01"}, {"run_id": "run-1", "fence": 7})
+    assert heartbeat_started.wait(timeout=1)
+
+    def complete():
+        completion_started.set()
+        keeper.complete("run-1")
+        completion_finished.set()
+
+    thread = Thread(target=complete)
+    thread.start()
+    try:
+        assert completion_started.wait(timeout=1)
+        assert not completion_finished.wait(timeout=0.02)
+    finally:
+        allow_heartbeat_to_finish.set()
+        assert completion_finished.wait(timeout=1)
+        keeper.close()
+        thread.join(timeout=1)
+
+    assert len(requests) == 1
+
+
 def test_console_view_endpoints_work_with_a_small_local_fleet(tmp_path):
     scenario = Scenario(projects=10, machines=4, sessions=8, wave_sizes=(12,), history_per_project=2,
                         page_samples=1, picker_samples=1, claim_concurrency=4, measurement_concurrency=4,

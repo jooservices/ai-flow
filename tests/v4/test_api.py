@@ -481,6 +481,24 @@ def test_full_claim_flow_with_fencing(client, ctx, monkeypatch):
     assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "lost"
 
 
+def test_worker_claim_reuses_the_live_repo_overlay_once_per_request(client, ctx, monkeypatch):
+    cc = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-13")
+    original_one = ctx.db.one
+    overlay_reads = []
+
+    def count_overlay_reads(sql, params=None):
+        if "EXISTS(SELECT 1 FROM nodes WHERE removed_at IS NOT NULL)" in sql:
+            overlay_reads.append(sql)
+        return original_one(sql, params)
+
+    monkeypatch.setattr(ctx.db, "one", count_overlay_reads)
+    response = client.post("/v1/work/claim", json={"ticket": "TESTWP-13", "account": "claude-01"}, headers=cc)
+
+    assert response.status_code == 200 and response.json()["claimed"] is True
+    assert len(overlay_reads) == 1
+
+
 def test_quota_result_cools_the_account_down(client, ctx):
     cc = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-7")

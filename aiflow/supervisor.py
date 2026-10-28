@@ -22,6 +22,7 @@ from .lock import Redis, RedisError
 from .memory import cases as memory_cases
 from .memory.client import Memory
 from .project_database import ProjectDatabase, ticket_database_id
+from .worktree_sweep import cleanup_done_worktree, resolve_merged_pull_request
 
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
           "Human review": "human", "Ready to merge": "finalize"}
@@ -963,16 +964,11 @@ class Supervisor:
                 for issue in self.jira.search(f"key in ({', '.join(trees)})", 100):
                     path, branch = trees[issue["key"]]
                     if issue["status"] == "Done":
-                        merged_pr = False
-                        try:
-                            pr = GitHub(repo.github_slug()).find(branch)
-                            merged_pr = bool(pr and pr.get("state") == "MERGED")
-                        except (GitError, GitHubError) as error:
-                            log(f"{issue['key']}: cannot check pull request before cleanup ({error})")
-                        repo.cleanup(issue["key"], merged_pr=merged_pr)
-                        log(f"{issue['key']}: removed the worktree and branch of a finished ticket")
+                        merged_pr, lookup_error = resolve_merged_pull_request(repo, issue["key"], branch, self.gate_pr)
+                        cleanup_done_worktree(self.redis, repo, self.cfg.machine, issue["key"], branch, merged_pr, lookup_error, log)
                     elif issue["status"] == "Declined":
                         repo.remove_worktree(path)
+                        self.redis.delete(f"sweep-cleanup:{self.cfg.machine}:{issue['key']}:{branch}")
                         log(f"{issue['key']}: removed the worktree of a declined ticket (branch {branch} kept)")
             except (GitError, JiraError, OSError) as error:
                 log(f"sweep {project.repo}: {error}")

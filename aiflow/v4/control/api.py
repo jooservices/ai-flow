@@ -2105,7 +2105,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if not current:
                 raise HTTPException(404, "console user not found")
             roles_before = normalize_roles(current["roles"])
-            if not current["disabled"] and "administrator" in current_roles and "administrator" not in roles:
+            if not current["disabled"] and "administrator" in roles_before and "administrator" not in roles:
                 others = connection.execute("SELECT count(*) AS n FROM console_users WHERE email<>%s AND disabled=false"
                                             " AND 'administrator'=ANY(roles)", (email,)).fetchone()["n"]
                 if int(others) == 0:

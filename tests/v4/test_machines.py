@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import shlex
 import shutil
 import subprocess
@@ -13,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from conftest import add_ticket, join_node
+from console_test_utils import console_script
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 
@@ -56,9 +56,7 @@ def test_machine_screen_renders_machine_specs_account_controls_machine_usage_and
     if not node_js:
         import pytest
         pytest.skip("Node.js is needed to render the console screen")
-    page = Path("aiflow/v4/control/ui/console.html").read_text()
-    script = re.search(r"<script>\n(.*?)</script>", page, re.S).group(1)
-    script = script[:script.index("/* ---------- boot ---------- */")]
+    script = console_script(Path("aiflow/v4/control/ui/console.html"))
     driver = r'''
 var machinesView = {innerHTML: ''};
 document.querySelector = function (selector) { return selector === '#view-machines' ? machinesView : null; };

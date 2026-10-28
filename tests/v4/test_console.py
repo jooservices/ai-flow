@@ -740,12 +740,14 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
     assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
-            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'security', "
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', "
             "'notifications', 'settings', 'support']];"
             ) in page
+    assert "VIEW_GROUPS[2].push('security');" in page
+    assert "VIEW_GROUPS[2].push('system-check');" in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
     assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
-            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'security', 'notifications', 'settings', 'support']") in page
+            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']") in page
     assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
     assert "licensing: 'licensing.manage'" in page
 

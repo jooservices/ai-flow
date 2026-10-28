@@ -20,6 +20,7 @@ from aiflow.v4.control.ui import build_console_page
 from aiflow.v4.core.system_check import condition
 from aiflow.v4.node import agent
 from conftest import add_ticket, join_node
+from console_test_utils import console_script
 
 
 def _direct_join(client, name="cc"):
@@ -588,8 +589,7 @@ def test_projects_readiness_escapes_node_condition_names_and_actions():
     if not node:
         pytest.skip("Node.js is needed to render the Projects readiness panel")
     root = Path(__file__).resolve().parents[2]
-    page = (root / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
-    script = page.split("<script>\n", 1)[1].split("</script>", 1)[0].split("/* ---------- boot ---------- */", 1)[0]
+    script = console_script(root / "aiflow/v4/control/ui/console.html")
     extension = (root / "aiflow/v4/control/ui/system-check.js").read_text(encoding="utf-8")
     prelude = """
 var projectsView = {innerHTML: '', insertAdjacentHTML: function (_position, html) { this.innerHTML += html; }};

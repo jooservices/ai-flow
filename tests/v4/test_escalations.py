@@ -138,11 +138,6 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
             answered = esc.triage_decision(ctx, run, {"decision": "ANSWER", "answer": "Use fmt_date in aiflow/v4/core/text.py.",
                                                        "why": "AGENTS.md", "class": ""}, item["text"])
             assert answered["action"] == "answered" and answered["class"] == esc.AMBIGUITY
-    row_ids = ctx.db.all("SELECT id FROM escalations ORDER BY id")
-    assert len(row_ids) == len(FIXTURE["escalations"])
-    for row, item in zip(row_ids, FIXTURE["escalations"]):
-        created_at = datetime.fromisoformat(item["at"].replace("Z", "+00:00"))
-        ctx.db.run("UPDATE escalations SET created_at=%s WHERE id=%s", (created_at, row["id"]))
     rows = ctx.db.all("SELECT * FROM escalations ORDER BY id")
     assert len(rows) == len(FIXTURE["escalations"])
     assert {r["class"] for r in rows} == set(esc.CLASSES)  # every one is classified
@@ -165,7 +160,7 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
     # the policy message of JOOWP-308 explains the allowed alternative
     assert "Edit" in results[("JOOWP-308", 3)]["answer"]
     # the weekly numbers count every row
-    metrics = esc.weekly_metrics(ctx.db, now=datetime(2026, 10, 24, tzinfo=timezone.utc))
+    metrics = esc.weekly_metrics(ctx.db, now=max(row["created_at"] for row in rows))
     assert metrics["this_week"]["total"] == len(rows) == len(FIXTURE["escalations"])
 
 

@@ -3,6 +3,7 @@ disk, and fakes for Jira and GitHub so API flows run without the network."""
 from __future__ import annotations
 
 import os
+import threading
 import re
 import uuid
 from pathlib import Path
@@ -11,6 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 import redis
 
+from aiflow.v4.control import api, system_check_api
 from aiflow.v4.control.api import Ctx, create_app
 from aiflow.v4.control.db import DB, J
 from aiflow.v4.control.events import Events
@@ -109,6 +111,8 @@ class FakeJira:
                               {"key": "NEWAPP", "name": "New App"}]
         self.project_workflows: dict[str, list[str]] = {}
         self.project_reads: list[str] = []
+        self.project_permission_reads: list[str] = []
+        self.project_permissions: dict[str, dict[str, bool]] = {}
         self.versions_data: dict[str, list[dict]] = {}
         self.version_reads: list[str] = []
         self.search_data: list[dict] = []
@@ -128,6 +132,13 @@ class FakeJira:
         self.project_reads.append(key)
         return self.project_workflows.get(key, ["Backlog", "Intake", "To Do", "In Progress", "In Verify",
                                                 "Needs owner", "Done"])
+
+    def project_write_permissions(self, key: str) -> dict[str, bool]:
+        self.project_permission_reads.append(key)
+        return self.project_permissions.get(key, {
+            "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
+            "TRANSITION_ISSUES": True, "ADD_COMMENTS": True,
+        })
 
     def project_versions(self, key: str) -> list[dict]:
         self.version_reads.append(key)
@@ -216,6 +227,11 @@ class FakeJira:
 
 class FakeGitHub:
     def __init__(self) -> None:
+        self.meta = {"installation_id": 77}
+        self.app_permissions = {
+            "contents": "write", "pull_requests": "write", "workflows": "write",
+            "actions": "read", "checks": "read", "statuses": "read", "administration": "write",
+        }
         self.prs: list[dict] = []
         self.commits: list[dict] = []
         self.branches: list[tuple[str, str, str]] = []
@@ -244,6 +260,10 @@ class FakeGitHub:
 
     def installation_repositories(self) -> list[dict[str, str]]:
         return list(self.repositories)
+
+    def installation_details(self, installation_id: int) -> dict:
+        assert installation_id == self.meta["installation_id"]
+        return {"id": installation_id, "permissions": dict(self.app_permissions)}
 
     def branch_exists(self, repo: str, branch: str) -> bool:
         self.branches.append((repo, branch, "check"))
@@ -412,7 +432,12 @@ def client(ctx):
     from fastapi.testclient import TestClient
     app = create_app(ctx)
     app.state.sync_accounts()
-    return TestClient(app)
+    yield TestClient(app)
+    # Readiness checks run on background threads; let them finish before the next test reuses the database.
+    for thread in list(threading.enumerate()):
+        if thread.name.startswith(("aiflow4-join-readiness-", "aiflow4-heartbeat-readiness-")):
+            thread.join(timeout=15)
+    system_check_api._PENDING_REFRESHES.clear()
 
 
 def add_ticket(db, key: str, status: str = "To Do", labels=("aiflow-ready",), priority: str = "Medium", blocked_by=()):
@@ -432,4 +457,55 @@ def join_node(client, name: str, ip: str = "", role: str = "worker", project: st
     issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
                                                          "role": role, "project": project})
     assert issued.status_code == 200, issued.text
-    return client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    joined = client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    if joined.status_code == 200:
+        # A machine join starts a provider-backed readiness thread. Finish it before this helper seeds the
+        # connected-agent baseline so its older join snapshot cannot overwrite that baseline afterwards.
+        for thread in list(threading.enumerate()):
+            if thread.name == f"aiflow4-join-readiness-{name}":
+                thread.join(timeout=15)
+        # The API tests model an installed agent: after join it reports a healthy baseline before tests change a
+        # particular condition. Tests of the join-only result post directly to /v1/nodes/join instead.
+        from aiflow.v4.core.system_check import condition
+        from aiflow.v4.core.toolchains import pinned_version
+
+        ctx = client.app.state.ctx
+        repo = ctx.repo()
+        project_key = joined.json()["project"]
+        required = repo.tools_for_node(name, [project_key])
+        tools = {}
+        for tool in required:
+            pin = pinned_version(repo.versions, tool, repo.projects[project_key].stacks)
+            version = pin or "1.0"
+            tools[tool] = f"{tool} {version}"
+        tools.update({"git": "git version 2.43.0", "uv": "uv 0.8.1", "claude": "Claude Code 2.1.305",
+                      "codex": "codex 1.0.0", "codex-code-mode-host": "codex-code-mode-host 1.0.0",
+                      "opencode": "opencode 1.0.0", "grok": "grok 1.0.0", "php": "PHP 8.3.10",
+                      "composer": "Composer 2.8.4", "wp": "WP-CLI 2.12.0", "node": "node v24.0.0",
+                      "python3": "Python 3.12.2", "playwright": "Version 1.56.0",
+                      "playwright-browser": "Playwright Chromium 1.56.0"})
+        services = {name: {"state": "running", "healthy": True, "detail": "healthy"}
+                    for name in repo.projects[project_key].required_services}
+        credentials = {account.id: {"present": True, "valid": True} for account in repo.accounts_on(name)}
+        from aiflow.v4.control.db import J
+        from aiflow.v4.control.system_check import refresh_node
+
+        metrics = {"disk_free": 20 * 1024 ** 3, "services": services}
+        ctx.db.run("UPDATE nodes SET tools=%s,metrics=%s WHERE name=%s", (J(tools), J(metrics), name))
+        readiness = refresh_node(
+            ctx, name, "heartbeat",
+            [condition("disk-space", "Free disk space", "ready", "20 GiB is available."),
+             condition("workspace-permissions", "Work directory permissions", "ready",
+                       "The node can write its work and state directories."),
+             condition("control-network", "Control API network", "ready",
+                       "The machine reached the control API and sent this heartbeat."),
+             condition("repository-network", "Repository network", "ready",
+                       "The machine can reach GitHub over HTTPS.")],
+            credential_checks=credentials)
+        # No HTTP heartbeat is sent by this helper, so retain the real joined status while modeling a ready agent
+        # report for tests that exercise work scheduling. Trigger tests use direct join requests instead.
+        for item in readiness["machine"]:
+            if item["id"] == "node-heartbeat":
+                item.update(result="ready", detail="The test agent is connected to the control API.", action="")
+        ctx.db.run("UPDATE nodes SET readiness=%s WHERE name=%s", (J(readiness), name))
+    return joined

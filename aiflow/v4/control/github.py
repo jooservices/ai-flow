@@ -20,6 +20,15 @@ import httpx
 import jwt
 
 API = "https://api.github.com"
+GITHUB_APP_REQUIRED_PERMISSIONS = {
+    "contents": "write",
+    "pull_requests": "write",
+    "workflows": "write",
+    "actions": "read",
+    "checks": "read",
+    "statuses": "read",
+    "administration": "write",
+}
 
 
 class GitHubError(RuntimeError):

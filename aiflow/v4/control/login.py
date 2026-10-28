@@ -480,6 +480,8 @@ def install_login(app: FastAPI, ctx) -> None:
 
     def api_permission(path: str) -> str:
         """Return the view permission that owns a console API path."""
+        if path in ("/v1/system-check", "/v1/support-bundle"):
+            return "node.operations.read"
         if path in ("/v1/role-health", "/v1/master/autonomy", "/v1/master/report"):
             return "view.machines_ai"
         if path in ("/v1/role-health/settings", "/v1/master/autonomy/budget"):

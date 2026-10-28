@@ -40,9 +40,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from . import scale_proof
+from . import system_check
 from .scale_proof import BUDGETS, Budget, percentile
 
 PROVIDERS = ("codex", "claude", "opencode", "grok")
+REQUIRED_JIRA_STATUSES = ("Backlog", "Intake", "To Do", "In Progress", "In Verify", "Needs owner", "Done")
 PRIORITIES = ("Highest", "High", "Medium", "Low")
 HISTORY_STATUSES = (("Done", 70), ("In Progress", 10), ("In Verify", 10), ("Needs owner", 5))
 EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -91,7 +93,7 @@ class Scenario:
     seed: int = 236
     page_samples: int = 3
     picker_samples: int = 5
-    claim_concurrency: int = 24
+    claim_concurrency: int = 20
     measurement_concurrency: int = 2
     measurement_min_active: int = 150
     max_rounds: int = 20
@@ -217,6 +219,16 @@ class SimJira:
         self.created: list[dict] = []
         self.comments: list[tuple[str, str]] = []
 
+    def projects(self) -> list[dict[str, str]]:
+        return [{"key": key, "name": key} for key in project_keys(Scenario())]
+
+    def project_statuses(self, _key: str) -> list[str]:
+        return list(REQUIRED_JIRA_STATUSES)
+
+    def project_write_permissions(self, _key: str) -> dict[str, bool]:
+        return {"BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
+                "TRANSITION_ISSUES": True, "ADD_COMMENTS": True}
+
     def create_issue(self, project, summary, description, issuetype="Story", labels=None, parent="", **_):
         key = f"{project}-{9000 + len(self.created)}"
         self.created.append({"key": key, "project": project, "summary": summary, "description": description,
@@ -237,6 +249,32 @@ class SimJira:
         return None
 
 
+class SimGitHub:
+    """A local GitHub App stand-in that reports the scenario's configured repos and required permissions."""
+
+    kind = "app"
+    org = "jooservices"
+
+    def __init__(self, repositories: list[str]) -> None:
+        self.meta = {"installation_id": 1, "name": "Scale proof", "account_type": "Organization"}
+        self.repositories = [{"full_name": name} for name in repositories]
+        self.permissions = {"contents": "write", "pull_requests": "write", "workflows": "write",
+                            "actions": "read", "checks": "read", "statuses": "read",
+                            "administration": "write"}
+
+    def installation_repositories(self) -> list[dict[str, str]]:
+        return list(self.repositories)
+
+    def installation_details(self, installation_id: int) -> dict[str, Any]:
+        return {"id": installation_id, "permissions": dict(self.permissions)}
+
+    def branch_exists(self, _repository: str, branch: str) -> bool:
+        return branch == "develop"
+
+    def bot_identity(self) -> tuple[str, str]:
+        return "AI Flow scale proof", "scale-proof@example.test"
+
+
 def build_context(db, leases, root: Path, sc: Scenario, jira: Any = None):
     from ..core.controlrepo import ControlRepo
     from ..core.settings import Settings
@@ -247,9 +285,13 @@ def build_context(db, leases, root: Path, sc: Scenario, jira: Any = None):
     snap = ControlRepo.load(root)
     settings = Settings(join_token=JOIN_KEY, join_control_url="https://control.scale.test", reviewer_token="x" * 16,
                         owner_token="owner-scale-proof", lease_ms=90_000, env="scale-proof")
+    settings.jira_email = "scale-proof@example.test"
+    settings.jira_token = "simulated-jira-token"
     settings.jira_secret_dir = str(root / "jira-secrets")
     ctx = Ctx(settings=settings, db=db, leases=leases, events=Events(db), repo=lambda: snap,
               jira=jira if jira is not None else SimJira())
+    ctx.settings.github_org = "jooservices"
+    ctx.github = SimGitHub([f"jooservices/scale-{key.lower()}" for key in project_keys(sc)])
     ctx.jira_auth = JiraAuth(settings, SecretStore(settings.jira_secret_dir)).bind(ctx)
     return ctx
 
@@ -536,7 +578,7 @@ def _claim_round(client, sessions: list[dict[str, str]], headers: dict[str, dict
     picker_result = None
     measurement_client = measurement_client or client
     with ThreadPoolExecutor(max_workers=claim_workers, thread_name_prefix="scale-worker") as claims_pool:
-        # The bounded pool queues 200 sessions behind 24 request slots. Interleave that queue by node so the
+        # The bounded pool queues 200 sessions behind the configured request slots. Interleave that queue by node so the
         # first in-flight burst represents the fleet rather than six machines repeated four times each.
         claim_futures = [claims_pool.submit(_claim_session, client, session, headers,
                                             gate if gate is not None and i < claim_workers else None,
@@ -650,8 +692,37 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
             errors.append(f"node {name} could not join: HTTP {joined.status_code}")
             continue
         headers[name] = {"Authorization": f"Bearer {joined.json()['node_token']}"}
-        client.post(f"/v1/nodes/{name}/heartbeat", json={"slots_total": max(1, sc.sessions // sc.machines)},
-                    headers=headers[name])
+        accounts = ctx.repo().accounts_on(name)
+        heartbeat = client.post(f"/v1/nodes/{name}/heartbeat", json={
+            "slots_total": max(1, sc.sessions // sc.machines),
+            "tools": {"git": "git version 2.43.0", "uv": "uv 0.8.1", "codex": "codex 1.0.0",
+                      "codex-code-mode-host": "codex-code-mode-host 1.0.0", "claude": "Claude Code 2.1.305",
+                      "grok": "grok 1.0.0", "opencode": "opencode 1.0.0"},
+            "system_conditions": [{"id": item, "result": "ready"} for item in (
+                "disk-space", "workspace-permissions", "control-network", "repository-network")],
+            "credential_checks": {account.id: {"present": True, "valid": True} for account in accounts},
+        }, headers=headers[name])
+        if heartbeat.status_code != 200:
+            errors.append(f"node {name} heartbeat answered HTTP {heartbeat.status_code}")
+
+    # The scenario begins load traffic only after every simulated node has completed its normal readiness gate.
+    # This keeps the measurement about project/session scale rather than a race with asynchronous join probes.
+    with ThreadPoolExecutor(max_workers=min(sc.claim_concurrency, max(1, len(headers))),
+                            thread_name_prefix="scale-readiness") as pool:
+        refreshes = {pool.submit(system_check.refresh_node, ctx, name, "manual"): name for name in headers}
+        for future, name in ((future, refreshes[future]) for future in refreshes):
+            try:
+                readiness = future.result()
+            except Exception as exc:  # noqa: BLE001 - include readiness failures in the benchmark report
+                errors.append(f"node {name} readiness check failed: {type(exc).__name__}")
+                continue
+            accounts = [account.id for account in ctx.repo().accounts_on(name)]
+            for project in (key for key, nodes in hosts.items() if name in nodes):
+                blockers = system_check.blocking_reasons(readiness, project, accounts[0] if accounts else None,
+                                                        accounts)
+                if blockers:
+                    errors.append(f"node {name} is not ready for {project}: "
+                                  + ", ".join(str(item.get("id")) for item in blockers))
     last_node_heartbeat = time.perf_counter()
     _load_history(db, sc, pl, sessions)
     log(f"fleet ready: {len(headers)} machines, {len(sessions)} sessions, {len(pl['history'])} earlier tickets")
@@ -779,6 +850,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
         "environment": {"python": platform.python_version(), "platform": platform.system().lower(),
                         "cpus": os.cpu_count(), "api_execution": "FastAPI TestClient in-process",
                         "persistence": "PostgreSQL and Redis", "simulated_workers": True,
+                        "simulated_external_integrations": ["GitHub App", "Jira"],
                         "external_ai_providers_called": False,
                         "local_embeddings_enabled": False,
                         "max_parallel_worker_requests": sc.claim_concurrency,

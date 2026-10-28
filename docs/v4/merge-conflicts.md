@@ -97,4 +97,3 @@ The definition is printed under the numbers in the console.
 ## Tickets per hot file
 
 `AIFLOW4_HOT_FILE_SLOTS` (default 1) sets how many tickets may work on the same hot file at the same time. With 1 the flow never starts two tickets on the same hot file, which avoids conflicts but runs those tickets one after another. With 2 or 3 more tickets run at once; their branches are updated with develop before verification. The setting is read at start by the control services; the reservation table keeps one row for each file and ticket.
-

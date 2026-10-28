@@ -322,6 +322,9 @@ async function exerciseMachineAndUserAdministration(page, mode) {
 
   await page.getByRole('tab', { name: 'Users and roles', exact: true }).click();
   await page.getByRole('heading', { name: 'People and roles', exact: true }).waitFor({ state: 'visible' });
+  // The screen shell appears before its first people-list request finishes. Wait for that initial render so a late
+  // response cannot redraw the form while the browser is entering a new user's details.
+  await page.getByText('Loading people…', { exact: true }).waitFor({ state: 'hidden' });
   const email = `jaif252-${mode}-person@example.test`;
   const reviewerRole = page.getByRole('checkbox', { name: 'Reviewer', exact: true });
   await reviewerRole.waitFor({ state: 'visible' });

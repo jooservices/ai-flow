@@ -1,0 +1,1 @@
+- [System readiness check](../../../docs/v4/system-check.md): check machine and project assumptions after join, project addition, upgrade and hourly; safely repair supported problems, gate work, and include results in the support bundle

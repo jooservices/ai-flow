@@ -64,6 +64,21 @@ def test_node_tool_versions_report_success_without_output_as_missing(monkeypatch
     assert versions["php"] == "php version"
 
 
+def test_scratch_cleanup_that_restores_disk_minimum_is_reported_as_fixed(monkeypatch):
+    gib = 1024 ** 3
+    free_space = iter((4 * gib, 6 * gib))
+    monkeypatch.setattr(agent, "_disk_free_bytes", lambda: next(free_space))
+    monkeypatch.setattr(agent, "clean_scratch", lambda: 1)
+    auto_fixed_conditions = set()
+
+    assert agent._run_disk_cleanup(agent.clean_scratch, auto_fixed_conditions) == 1
+    assert auto_fixed_conditions == {"disk-space"}
+    disk = next(condition for condition in agent._system_machine_conditions({"disk_free": 6 * gib},
+                                                                            auto_fixed_conditions)
+                if condition["id"] == "disk-space")
+    assert disk["result"] == "fixed_automatically"
+
+
 def test_node_tool_versions_report_stack_tools(monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[0] == "wp":
@@ -128,6 +143,10 @@ def test_collect_heartbeat_gathers_metrics_tools_workers_and_settings(monkeypatc
 
     heartbeat = agent.collect_heartbeat(state, "node-test", 4, Relay(), "public-key")
 
+    readiness = {key: heartbeat.pop(key) for key in ("system_conditions", "credential_checks",
+                                                     "auto_fixed_tools", "auto_fixed_conditions")}
+    assert readiness["auto_fixed_tools"] == [] and readiness["auto_fixed_conditions"] == []
+    assert set(readiness["credential_checks"]) == {"codex-01", "claude-01"}
     assert heartbeat == {
         "slots_total": 4, "slots_used": 1, "release_version": "v4.2.0", "release_protocol": 1,
         "tools": {"codex": "Codex 1.0"}, "services": {"redis": {"healthy": True}},

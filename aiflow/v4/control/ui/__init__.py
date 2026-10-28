@@ -1,11 +1,11 @@
 """Console views for Dashboard, Work board, Delivery, SA, Machines and AI, Users and roles,
-Team Lead, Business, Human review, Stakeholder, Knowledge, Integrations, Projects, Licensing and Backup.
+Team Lead, Business, Human review, Stakeholder, Knowledge, Integrations, Projects, System check, Licensing and Backup.
 
 Dashboard (/dashboard, /cc), Work board (/work, /board), Delivery (/delivery), SA health (/sa),
 Machines and AI (/machines), Users and roles (/users), Team Lead (/lead),
 Business (/business), Human review (/review), Stakeholder (/stakeholder), Knowledge (/knowledge),
-Integrations (/integrations, control/jira_connect.py), Projects (/projects), Licensing (/licensing),
-Backup (/backup), Notifications (/notifications) and Support (/support), fed by /v1/state and relevant view APIs.
+Integrations (/integrations, control/jira_connect.py), Projects (/projects), System check (/system-check),
+Licensing (/licensing), Backup (/backup), Notifications (/notifications) and Support (/support), fed by /v1/state and relevant view APIs.
 All views are fed by the live registry; the Business view adds
 /v1/business/<project>/change-requests (see control/business.py). The console renders the live registry; extra
 read-only endpoints give its drawers ticket details, runs, events, audited writes and time segments.
@@ -26,12 +26,30 @@ HERE = Path(__file__).parent
 CONSOLE_PAGE_PATHS = (
     "/", "/dashboard", "/work", "/board", "/delivery", "/sa", "/business", "/review", "/stakeholder",
     "/machines", "/users", "/knowledge", "/backup", "/integrations", "/help", "/licensing", "/settings",
-    "/notifications", "/lead", "/projects", "/support", "/cc",
+    "/notifications", "/lead", "/projects", "/system-check", "/support", "/cc",
 )
 
 
+def build_console_page() -> str:
+    """Compose the console with the independently maintained System check view."""
+    html = (HERE / "console.html").read_text(encoding="utf-8")
+    tab_marker = '      <button class="tab" role="tab" id="tab-licensing"'
+    view_marker = '  <section class="view" id="view-licensing"'
+    script_marker = "})();\n</script>"
+    tab = ('      <button class="tab" role="tab" id="tab-system-check" aria-controls="view-system-check" '
+           'aria-selected="false" data-act="view" data-menu-view data-view="system-check">System check</button>')
+    panel = ('  <section class="view" id="view-system-check" role="tabpanel" '
+             'aria-labelledby="tab-system-check" hidden></section>')
+    for marker in (tab_marker, view_marker, script_marker):
+        if marker not in html:
+            raise RuntimeError("console template is missing a System check insertion point")
+    html = html.replace(tab_marker, tab + "\n" + tab_marker, 1)
+    html = html.replace(view_marker, panel + "\n" + view_marker, 1)
+    extension = (HERE / "system-check.js").read_text(encoding="utf-8")
+    return html.replace(script_marker, extension + "\n" + script_marker, 1)
+
+
 def mount_ui(app: FastAPI, ctx) -> None:
-    page = HERE / "console.html"
     logs_page = HERE / "logs.html"
     licensing_notice_script = HERE / "licensing_notice.js"
     release_readiness_script = HERE / "release-readiness.js"
@@ -64,12 +82,15 @@ def mount_ui(app: FastAPI, ctx) -> None:
         return FileResponse(user_form_state_script, media_type="application/javascript",
                             headers={"Cache-Control": "no-cache"})
 
+    def console_page() -> str:
+        return build_console_page()
+
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
         return RedirectResponse("/dashboard")
 
-    def console() -> FileResponse:
-        return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
+    def console() -> HTMLResponse:
+        return HTMLResponse(console_page(), headers={"Cache-Control": "no-store"})
 
     for path in CONSOLE_PAGE_PATHS:
         if path not in {"/", "/help", "/notifications", "/settings", "/logs"}:
@@ -114,7 +135,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
             raise HTTPException(401, "authenticated console session required")
         if not role_satisfies(user.effective_roles, {"notifications.manage"}):
             raise HTTPException(403, "not available for your role")
-        return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
+        return console()
 
     @app.get("/settings", include_in_schema=False)
     def settings_page(request: Request) -> FileResponse:
@@ -124,7 +145,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
             raise HTTPException(401, "authenticated console session required")
         if not role_satisfies(user.effective_roles, {"console.manage"}):
             raise HTTPException(403, "not available for your role")
-        return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
+        return console()
 
     @app.get("/v1/tickets/{key}")
     def ticket(key: str) -> dict:

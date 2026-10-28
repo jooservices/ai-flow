@@ -6091,7 +6091,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
             awareness_windows = (quota_by_account.get(account["id"]) or {}).get("windows") or []
             windows = [{
-                "label": str(window.get("label") or labels.get(str(window.get("name")), "Quota window")),
+                "label": labels.get(str(window.get("name")), str(window.get("label") or "Quota window")),
                 "used_pct": percent(window.get("used_pct")),
                 "reset_at": window.get("reset_at"),
                 "estimated": window.get("source") == "estimate",

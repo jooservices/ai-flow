@@ -314,6 +314,35 @@ def test_quota_cli_sends_only_fixed_read_only_command_after_prompt(tmp_path, mon
     assert command_log.read_text().strip() == "/status"
 
 
+def test_quota_cli_cleanup_does_not_block_on_an_unreaped_child(monkeypatch):
+    import threading
+    import time
+
+    from aiflow.v4.worker import quota_cli
+
+    waits = []
+    reapers = []
+
+    def deny_group_signal(_pid, _signal):
+        raise PermissionError
+
+    def report_running(_pid, options):
+        waits.append(options)
+        return 0, 0
+
+    monkeypatch.setattr(quota_cli.os, "killpg", deny_group_signal)
+    monkeypatch.setattr(quota_cli.os, "kill", lambda _pid, _signal: None)
+    monkeypatch.setattr(quota_cli.os, "waitpid", report_running)
+    monkeypatch.setattr(threading.Thread, "start", lambda _thread: reapers.append(True))
+
+    started = time.monotonic()
+    quota_cli._stop_process_group(123, grace_s=0.01)
+
+    assert time.monotonic() - started < 0.5
+    assert waits and all(options == quota_cli.os.WNOHANG for options in waits)
+    assert reapers == [True]
+
+
 def test_quota_cli_does_not_send_command_without_interactive_prompt(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()

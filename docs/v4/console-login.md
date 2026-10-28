@@ -52,13 +52,13 @@ as before.
 | `GET /login` | first-run setup when no console user exists, otherwise the sign-in page |
 | `GET /setup` | first Administrator bootstrap before any user exists; redirects to the Dashboard afterwards |
 | `GET /v1/setup/status` | before an Administrator exists, returns only the bootstrap token and lock state; after sign-in, checks each first-run step and reports its missing action |
-| `POST /v1/setup/bootstrap` | creates the first Administrator and saves the public address after the installation capability is supplied and consumed |
+| `POST /v1/setup/bootstrap` | creates the first Administrator and saves the public address after the installation capability is supplied and consumed; it checks the plan's user limit in the same admission transaction |
 | `POST /v1/setup/steps/{step}` | skip a step or resume it later |
 | `POST /v1/setup/sample-ticket` | creates and confirms the sample ticket in Intake; the Dashboard panel remains until all steps are ready |
 | `POST /v1/auth/login` | `{email, password}`; returns the user and sets the HttpOnly `aiflow4_session` cookie (SameSite=Strict, Secure behind HTTPS, 12 hours) |
 | `POST /v1/auth/logout`, `GET /logout` | clears the cookie |
 | `GET /v1/auth/me` | the signed-in user, or 401 |
-| `POST /v1/auth/users` | creates a console user for an Administrator with user-management permission |
+| `POST /v1/auth/users` | creates a console user for an Administrator with user-management permission, subject to the plan's user limit |
 | `GET /v1/console/session` | the signed-in user, assigned roles, effective permissions, role options and sign-in landing page |
 
 Because the cookie is Strict, a console page reached from another site arrives without it; the sign-in page then

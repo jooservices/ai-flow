@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Iterable
 
-from . import release_readiness
+from . import release_readiness, scale_proof
 
 RELEASED_SHOWN = 10  # most recent released versions listed per project
 STEPS = ("check", "changelog", "pr", "merge", "tag", "release")
@@ -105,14 +105,20 @@ def _release(db, row: dict | None, version: dict) -> dict[str, Any]:
             "steps": release_steps(db, row["tracker_key"], row["status"]) if row["tracker_key"] else []}
 
 
-def _extra_reasons(version: dict, release: dict) -> list[dict[str, Any]]:
+def _extra_reasons(version: dict, release: dict, proof: dict | None = None) -> list[dict[str, Any]]:
     if version["released"]:
         return []
+    out = []
     if release["status"] == "checking":
-        return [{"cause": "release_running", "ticket": None, "summary": "", "detail": release["detail"]}]
+        out.append({"cause": "release_running", "ticket": None, "summary": "", "detail": release["detail"]})
     if release["status"] == "failed":
-        return [{"cause": "release_failed", "ticket": None, "summary": "", "detail": release["detail"]}]
-    return []
+        out.append({"cause": "release_failed", "ticket": None, "summary": "", "detail": release["detail"]})
+    if proof is None:
+        out.append({"cause": "scale_proof_missing", "ticket": None, "summary": "",
+                    "detail": "No scale proof run is attached to this release"})
+    elif not proof["passed"]:
+        out.append({"cause": "scale_proof_failed", "ticket": None, "summary": "", "detail": proof["blocker"]})
+    return out
 
 
 def _load(db, versions: list[dict]) -> list[dict[str, Any]]:
@@ -137,6 +143,7 @@ def _load(db, versions: list[dict]) -> list[dict[str, Any]]:
         "SELECT ticket_key, version_id, added_at FROM ticket_version_added WHERE version_id = ANY(%s)", (ids,))}
     releases = {(r["project"], r["version_id"]): r for r in db.all(
         "SELECT * FROM version_releases WHERE version_id = ANY(%s)", (ids,))}
+    proofs = scale_proof.attached(db, [v["name"] for v in versions])  # scale-proof run attached to the version
     members: dict[str, list[dict]] = {}
     for link in links:
         if link["ticket_key"] in by_key:
@@ -148,7 +155,8 @@ def _load(db, versions: list[dict]) -> list[dict[str, Any]]:
         tickets = mark_late(mine, {t["key"]: added.get((t["key"], v["id"])) for t in mine}, started)
         readiness = release_readiness.evaluate(mine, by_key, latest_verify)
         release = _release(db, releases.get((v["project"], v["id"])), v)
-        reasons = [] if v["released"] else readiness["reasons"] + _extra_reasons(v, release)
+        proof = proofs.get(v["name"])
+        reasons = [] if v["released"] else readiness["reasons"] + _extra_reasons(v, release, proof)
         out.append({"project": v["project"], "version_id": v["id"], "version": v["name"],
                     "released": bool(v["released"]), "release_date": str(v["release_date"] or "") or None,
                     "ready": bool(v["released"]) or (readiness["ready"] and not reasons),
@@ -156,7 +164,7 @@ def _load(db, versions: list[dict]) -> list[dict[str, Any]]:
                     "started_at": _iso(started), "tickets": tickets,
                     "open_tickets": [t for t in tickets if t["status"] != "Done"],
                     "late_tickets": [t for t in tickets if t["added_late"]],
-                    "reasons": reasons, "release": release})
+                    "reasons": reasons, "release": release, "scale_proof": proof})
     return out
 
 

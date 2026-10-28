@@ -8,7 +8,7 @@
 
 An owner or Super Administrator opens **Notifications** in the v4 console, adds or edits a Telegram channel, enters the bot token and the owner's private chat ID, selects a configured Jira project, and enables **BA brainstorming chat**. The token is write-only in the screen and is never included in API responses. The existing notification channel and Jira connection are reused. Developers can also run `aiflow4 ba-chat setup --name "Owner brainstorm" --chat-id ID --project KEY`; the CLI reads the token through a hidden prompt, or from stdin with `--token-stdin`.
 
-The console reads channel settings with `GET /v1/notifications` and saves the Telegram setup with `PUT /v1/notifications/channels`. The worker claims durable chat turns with `GET /v1/ba-chat/candidate` and returns a question or proposal through `POST /v1/ba-chat/{job_id}/result`.
+The console reads channel settings with `GET /v1/notifications` and saves the Telegram setup with `PUT /v1/notifications/channels`. The worker claims durable chat turns with `GET /v1/ba-chat/candidate`; it submits the question or proposal through `POST /v1/ba-chat/{job_id}/result`, which records the turn outcome and releases the claim.
 
 Use a private one-to-one Telegram chat with the configured bot and chat ID. The receiver ignores group chats, other chat IDs, other senders, and messages without text. Enabling the feature makes the control loop poll Telegram updates and workers process durable chat turns with the shared BA prompt in `prompts/v4/ba-chat.md`.
 

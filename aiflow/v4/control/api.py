@@ -56,7 +56,7 @@ from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
-from . import capacity, conflict_loss, hotfiles, merge_queue, review_queue_api
+from . import capacity, conflict_loss, hotfiles, merge_queue, review_queue_api, worker_candidates
 from . import merge_flow
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
@@ -1245,33 +1245,13 @@ class ManagedAccountSignInStatusBody(BaseModel):
 def create_app(ctx: Ctx) -> FastAPI:
     from contextlib import asynccontextmanager
 
+    ctx._worker_resource_counts = licensing.ResourceCountsCache(ctx)
     runtime_repo_cache: ContextVar[ControlRepo | None] = ContextVar("aiflow_runtime_repo_cache", default=None)
     runtime_repo_cache_enabled: ContextVar[bool] = ContextVar("aiflow_runtime_repo_cache_enabled", default=False)
     capacity_history_lock = threading.Lock()
     capacity_history_cache: dict[str, Any] = {"at": 0.0, "samples": []}
-    license_resource_counts_lock = threading.Lock()
-    license_resource_counts_cache: dict[str, Any] = {"at": 0.0, "counts": None}
     state_snapshot_lock = threading.Lock()
     state_snapshot_cache: dict[bool, tuple[float, dict[str, Any]]] = {}
-
-    def worker_resource_counts() -> dict[str, int]:
-        """Share stable licence resource totals across the burst of worker polls at fleet scale.
-
-        Resource creation still performs a fresh count inside its admission transaction. A one-second read cache
-        only avoids recounting the same fleet for each concurrent work eligibility and claim request.
-        """
-        with license_resource_counts_lock:
-            now = time.monotonic()
-            cached = license_resource_counts_cache["counts"]
-            if cached is not None and now - float(license_resource_counts_cache["at"]) < 1.0:
-                return dict(cached)
-            counts = licensing.resource_counts(ctx)
-            license_resource_counts_cache.update(at=time.monotonic(), counts=counts)
-            return dict(counts)
-
-    def enforce_worker_entitlement(account: str, node: str) -> dict[str, Any]:
-        return licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key,
-                                                  resource_counts_reader=worker_resource_counts)
 
     def capacity_history() -> list[dict[str, Any]]:
         """Share the completed-work estimate sample across concurrent worker polls for one second."""
@@ -4774,7 +4754,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
         if capacity_routing and out:
             out = route_capacity(account_id, node, out, ticket_key=ticket_key)
-        return out
+        return worker_candidates.diversify_dev_candidates(out, account_id, prio, PRIORITY)
 
     def route_capacity(account_id: str, node: str, offered: list[dict],
                        ticket_key: str | None = None) -> list[dict]:
@@ -4891,7 +4871,8 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def entitled_candidates(account: str, node: str) -> tuple[list[dict], str]:
         """Filter offers by account, machine, and project plan limits without affecting active runs."""
-        state = enforce_worker_entitlement(account, node)
+        state = licensing.enforce_work_entitlement(ctx, account, node,
+                                                    public_key=ctx.settings.license_public_key)
         candidates = eligible(account, node)
         allowed: list[dict] = []
         refused: list[str] = []
@@ -4924,7 +4905,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/master/candidate")
     def master_cycle_candidate(account: str, node: str = Depends(node_auth)) -> dict:
         try:
-            enforce_worker_entitlement(account, node)
+            licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             return {"candidate": None, "reason": str(exc)}
         return {"candidate": master_candidate(account, node)}
@@ -4932,7 +4913,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/ba-chat/candidate")
     def ba_chat_candidate(account: str, node: str = Depends(node_auth)) -> dict:
         try:
-            enforce_worker_entitlement(account, node)
+            licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             return {"job": None, "reason": str(exc)}
         try:
@@ -4972,7 +4953,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             if account:
                 return JSONResponse({"claimed": False, "reason": "ticket is already claimed"}, status_code=409)
         try:
-            state = enforce_worker_entitlement(body.account, node)
+            state = licensing.enforce_work_entitlement(ctx, body.account, node,
+                                                        public_key=ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
         # a node outside the version skew policy gets no new work (docs/v4/fleet-upgrade.md)
@@ -5203,7 +5185,8 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/version-releases/candidates")
     def version_release_candidates(account: str, node: str = Depends(node_auth)) -> dict:
         try:
-            state = enforce_worker_entitlement(account, node)
+            state = licensing.enforce_work_entitlement(ctx, account, node,
+                                                        public_key=ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             return {"versions": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)
@@ -5245,7 +5228,8 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
         try:
-            state = enforce_worker_entitlement(body.account, node)
+            state = licensing.enforce_work_entitlement(ctx, body.account, node,
+                                                        public_key=ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(409, str(exc)) from None
         policy = rollout.node_compatible(ctx, node, RELEASES)

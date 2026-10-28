@@ -9,6 +9,8 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -267,6 +269,27 @@ def resource_counts(ctx, *, connection=None) -> dict[str, int]:
     }
 
 
+class ResourceCountsCache:
+    """Share stable licence totals across a short burst of worker polls."""
+
+    def __init__(self, ctx, ttl_seconds: float = 1.0) -> None:
+        self.ctx = ctx
+        self.ttl_seconds = max(0.0, float(ttl_seconds))
+        self._lock = threading.Lock()
+        self._at = 0.0
+        self._counts: dict[str, int] | None = None
+
+    def __call__(self) -> dict[str, int]:
+        with self._lock:
+            now = time.monotonic()
+            if self._counts is not None and now - self._at < self.ttl_seconds:
+                return dict(self._counts)
+            counts = resource_counts(self.ctx)
+            self._at = time.monotonic()
+            self._counts = counts
+            return dict(counts)
+
+
 def require_writable(db, public_key: str, *, connection=None) -> dict[str, Any]:
     state = snapshot(db, public_key, connection=connection)
     if state["read_only"]:
@@ -422,7 +445,8 @@ def enforce_work_entitlement(ctx, account_id: str, node: str, *, public_key: str
                              resource_counts_reader: Callable[[], dict[str, int]] | None = None) -> dict[str, Any]:
     """Return the active plan state after checking the machine and account that would start new work."""
     state = require_writable(ctx.db, public_key)
-    over_limit_grace(ctx, state, resource_counts_reader=resource_counts_reader)
+    reader = resource_counts_reader or getattr(ctx, "_worker_resource_counts", None)
+    over_limit_grace(ctx, state, resource_counts_reader=reader)
     enforce_account_entitlement(ctx, account_id, public_key=public_key, state=state)
     enforce_machine_entitlement(ctx, node, public_key=public_key, state=state)
     return state

@@ -89,8 +89,9 @@ a failure, but it counts toward the retry backoff so the ticket is not offered a
 ## Thresholds
 
 Defaults: window 10 runs, failure score above 60 %. An owner (permission `console.manage`) edits both on the panel;
-`PUT /v1/role-health/settings` with `{"window_runs": 1-100, "failure_percent": 0-99}` stores them in
-`role_health_settings`, records the change in `write_audit` and re-scores every role at once.
+`PUT /v1/role-health/settings` with `{"window_runs": 1-100, "failure_percent": 0-99}` validates and stores them in
+`role_health_settings`, records the change in `write_audit` and re-scores every role before returning the updated
+summary.
 
 ## Timeouts and lost leases
 

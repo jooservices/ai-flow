@@ -65,6 +65,8 @@ provider observations; task usage remains separate from provider-reported utiliz
 
 - `GET /v1/capacity` and `GET /v1/dashboard/quota` return capacity and quota views based on the latest trusted
   snapshot. Capacity assignment also accounts for active token reservations and measured usage after that snapshot.
+- `GET /v1/work/candidates` retains its response contract and selects work using the latest trusted quota snapshot,
+  live reservations, unresolved estimates for lost runs, and actual usage newer than the snapshot.
 - `GET /v1/master/autonomy`, `GET /v1/master/report`, `GET /v1/state`, and `GET /v1/deploy/state` retain their
   existing response contracts; quota fields without trusted provenance are shown as unknown.
 - `POST /v1/work/claim` atomically records an estimated upper-bound reservation for concurrent development runs.

@@ -2871,7 +2871,10 @@ function renderDBody() {
   h += '<section class="panel" data-block="runs" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
   h += analyticsPanel();
   }
-  var target = S.view === 'work' ? $('#work-body') : $('#dbody'); if (window.AIFlowConsole && window.AIFlowConsole.runInboxPanel) h += window.AIFlowConsole.runInboxPanel(); var focusedId = target && target.contains(document.activeElement) && /^(run-inbox-draft|run-inbox-kind|run-inbox-run)$/.test(document.activeElement.id) ? document.activeElement.id : ''; var selection = focusedId === 'run-inbox-draft' ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
+  var target = S.view === 'work' ? $('#work-body') : $('#dbody'); if (window.AIFlowConsole && window.AIFlowConsole.runInboxPanel) h += window.AIFlowConsole.runInboxPanel();
+  var focused = target && typeof target.contains === 'function' && target.contains(document.activeElement) ? document.activeElement : null;
+  var focusedId = focused && /^(run-inbox-draft|run-inbox-kind|run-inbox-run)$/.test(focused.id) ? focused.id : '';
+  var selection = focusedId === 'run-inbox-draft' ? [focused.selectionStart, focused.selectionEnd] : null;
   if (target) target.innerHTML = h; if (focusedId) { var restore = target && target.querySelector('#' + focusedId); if (restore) { restore.focus(); if (selection) restore.setSelectionRange(selection[0], selection[1]); } }
   if (target && S.view === 'delivery') applyLayout('delivery', target);
 }

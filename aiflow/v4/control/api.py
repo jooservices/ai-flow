@@ -3829,7 +3829,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.post("/v1/accounts/{account_id}/sign-in/status")
     def report_account_sign_in_status(account_id: str, body: ManagedAccountSignInStatusBody,
                                       node: str = Depends(node_auth)) -> dict:
-        row = ctx.db.one("SELECT node,provider,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
+        row = ctx.db.one("SELECT node,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
                          " WHERE id=%s AND removed_at IS NULL", (account_id,))
         if not row or row["node"] != node:
             raise HTTPException(404, "account sign-in request is not assigned to this machine")
@@ -3859,7 +3859,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if not updated:
                 raise HTTPException(409, "sign-in request has been replaced")
             if body.status == "completed":
-                quota_refresh.on_sign_in_completed(connection, account_id, row["provider"])
+                quota_refresh.on_sign_in_completed(connection, account_id)
         return {"account": account_id, "status": body.status}
 
     @app.post("/v1/accounts/{account_id}/sign-in/complete")

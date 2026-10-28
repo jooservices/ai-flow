@@ -87,6 +87,9 @@ def parse_quota_text(provider: str, text: str, observed_at: datetime | None = No
     labels.sort(key=lambda item: item[1])
     for index, (name, start, _) in enumerate(labels):
         end = labels[index + 1][1] if index + 1 < len(labels) else min(len(normalized), start + 180)
+        context_window = re.search(r"\bcontext\s+window\b", normalized[start:end])
+        if context_window:
+            end = start + context_window.start()
         segment = normalized[start:end]
         percentage = re.search(r"(?<![\d.])(\d{1,3}(?:\.\d+)?)\s*%", segment)
         if not percentage or name in windows:

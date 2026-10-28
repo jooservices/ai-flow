@@ -13,10 +13,11 @@ The interval is configurable from **Settings → Account quota refresh**, is sto
 execution. The first refresh is due as soon as a worker polls. A failed refresh records its reason and waits for the
 configured interval before retrying.
 
-Provider-owned login completion updates authentication health only; it never creates a quota snapshot. After a managed
-provider sign-in completes, AI Flow schedules a fresh quota read immediately. A successful read that started after
-that sign-in satisfies the existing account verification gate. Quota refreshes do not clear task quota cooldowns or
-rewrite general account health; those continue to follow task results and sign-in flows.
+Managed provider sign-in completion updates authentication health and schedules a fresh quota read immediately.
+Authentication health does not depend on whether a provider CLI can return quota; a failed or unsupported quota read
+retains the prior snapshot and reports the read error. A successful quota read updates quota separately. Quota refreshes
+do not clear task quota cooldowns or rewrite general account health; those continue to follow task results and sign-in
+flows.
 
 Refresh uses a fixed, provider-owned read-only CLI status command. Codex uses `/status`; Claude Code uses `/usage`.
 AI Flow starts the provider TUI only to issue that command and never falls back to a natural-language prompt. The
@@ -40,8 +41,10 @@ recorded task usage remains available for estimate-based forecasts.
 
 For accounts configured with multiple concurrent sessions, the control API records each development run's estimated
 upper-bound token reservation atomically with the run claim under the account lock. Candidate assignment subtracts live
-reservations, and subtracts actual tokens from completed runs newer than the latest provider snapshot. A later
-provider snapshot reconciles those amounts; single-session accounts keep their existing serialized claim path.
+reservations, unresolved estimates for runs that lost their lease, and actual tokens from completed runs newer than the
+latest provider snapshot. A provider snapshot newer than a lost run reconciles and releases its estimate; a recorded
+result replaces it with reported usage. Existing lost runs without an end time are anchored at upgrade time so an
+older snapshot cannot release their reservation. Single-session accounts keep their existing serialized claim path.
 
 The console API is `GET` and `PUT /v1/quota-refresh/settings`. Both return `settings` (including the interval and
 update metadata) plus the per-account `jobs` status list. `PUT` accepts `{"interval_minutes": 15}`; the allowed range
@@ -67,8 +70,8 @@ provider observations; task usage remains separate from provider-reported utiliz
 - `POST /v1/runs/{run_id}/result` records the task's token and cost totals independently. It updates provider quota
   only when the worker reports a fresh quota observation; it never copies an older account snapshot into a new sample.
 - `POST /v1/accounts/{account_id}/probe` remains available for legacy worker checks with its existing request shape.
-- `POST /v1/accounts/{account_id}/sign-in/status` reports managed sign-in state and queues an immediate refresh when
-  that flow completes. `POST /v1/accounts/{account_id}/signin-complete` reports local shared sign-in and updates auth
-  health only; it does not create quota data.
+- `POST /v1/accounts/{account_id}/sign-in/status` reports managed sign-in state, updates authentication health, and
+  queues an immediate refresh when that flow completes. `POST /v1/accounts/{account_id}/signin-complete` reports
+  local shared sign-in and updates auth health only; it does not create quota data.
 - `POST /v1/version-releases/claim` keeps its existing version-release claim contract and remains independent of
   quota refresh scheduling.

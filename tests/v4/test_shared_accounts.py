@@ -343,6 +343,30 @@ def test_simultaneous_claims_include_reported_usage_after_the_last_quota_snapsho
     assert running[0]["details"]["quota_reservation"] == {"tokens": 30_000}
 
 
+def test_atomic_claim_keeps_lost_reservation_until_a_newer_provider_snapshot(client, ctx):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.control.db import J
+
+    two_machines(client, ctx, limit=2)
+    acc = ctx.repo().account("shared-01")
+    observed_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+    lost_at = observed_at + timedelta(minutes=1)
+    forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s,quota_observed_at=%s WHERE id='shared-01'",
+               (J(forecast), observed_at))
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,ended_at,details)"
+               " VALUES (%s,'TESTWP-LOST-QUOTA','TESTWP','dev','shared-01','claude','cc',1,'lost',%s,%s)",
+               ("00000000-0000-0000-0000-000000000077", lost_at,
+                J({"quota_reservation": {"tokens": 50_000}})))
+    values = ("00000000-0000-0000-0000-000000000078", "TESTWP-LOST-GUARD", "TESTWP", "dev", "shared-01",
+              "claude", "", "cc", 78, "x")
+    assert not shared_accounts.claim_run(ctx.db, acc, values, quota_reservation_tokens=60_000)
+
+    ctx.db.run("UPDATE accounts SET quota_observed_at=%s WHERE id='shared-01'", (lost_at + timedelta(seconds=1),))
+    assert shared_accounts.claim_run(ctx.db, acc, values, quota_reservation_tokens=60_000)
+
+
 def test_work_moves_to_the_other_machine_when_one_goes_offline(client, ctx):
     cc, node1 = two_machines(client, ctx, limit=2)
     assert claim(client, cc, "TESTWP-1").json()["claimed"]

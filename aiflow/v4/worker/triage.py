@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, with_knowledge_context
+from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
 from .gitops import Git
 from .notes import note
 
@@ -127,7 +127,7 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             hb.progress = {"phase": "triage-ai", "events": events["n"],
                            "elapsed_s": int(time.time() - t0)}
 
-        res = adapter.run(spec, on_progress, stop=hb.lost)
+        res = run_with_inbox(adapter, spec, hb, on_progress)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       head_sha=head)

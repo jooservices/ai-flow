@@ -6,6 +6,7 @@ const path = require('node:path');
 const { chromium } = require(process.env.AIFLOW4_CONSOLE_BROWSER_MODULE);
 
 const config = JSON.parse(fs.readFileSync(process.env.AIFLOW4_CONSOLE_BROWSER_CONFIG, 'utf8'));
+const runInboxMessages = Object.create(null);
 const traceDir = process.env.AIFLOW4_PLAYWRIGHT_TRACE_DIR;
 
 function forwardedIp(person, mode) {
@@ -272,6 +273,111 @@ async function exerciseWorkAndSearch(page) {
   await page.getByRole('button', { name: 'Close details', exact: true }).click();
 }
 
+async function exerciseRunInbox(page, mode) {
+  const message = `Please preserve the existing work and add a regression test (${mode}).`;
+  await page.getByRole('tab', { name: 'Work board', exact: true }).click();
+  const workInbox = page.getByRole('tabpanel', { name: 'Work board' }).locator('#run-inbox');
+  await workInbox.waitFor({ state: 'visible' });
+  await workInbox.getByRole('heading', { name: 'Guide a live run', exact: true }).waitFor({ state: 'visible' });
+  await workInbox.getByLabel('Active run').selectOption(config.inboxRunId);
+  await workInbox.getByLabel('Message type').selectOption('request');
+  await workInbox.getByLabel('Message for the worker').fill(message);
+  const send = page.waitForResponse((response) => response.request().method() === 'POST' &&
+    new URL(response.url()).pathname === `/v1/runs/${config.inboxRunId}/inbox`);
+  await workInbox.getByRole('button', { name: 'Send to worker', exact: true }).click();
+  const response = await send;
+  assert.equal(response.status(), 201, 'The active-run composer did not queue the request');
+  const created = await response.json();
+  assert.equal(created.message.status, 'queued', 'A new inbox message did not start in the queued state');
+  runInboxMessages[mode] = { id: created.message.id, body: message };
+  const sentEntry = workInbox.locator('article.alert').filter({ hasText: message });
+  await sentEntry.getByText(message, { exact: true }).waitFor({ state: 'visible' });
+  await sentEntry.getByText(/request · Waiting for checkpoint/).waitFor({ state: 'visible' });
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.getByRole('tab', { name: 'Work board', exact: true }).waitFor({ state: 'visible' });
+  await page.getByRole('tab', { name: 'Work board', exact: true }).click();
+  const refreshedInbox = page.getByRole('tabpanel', { name: 'Work board' }).locator('#run-inbox');
+  const refreshedEntry = refreshedInbox.locator('article.alert').filter({ hasText: message });
+  await refreshedEntry.getByText(message, { exact: true }).waitFor({ state: 'visible' });
+  await refreshedEntry.getByText(/request · Waiting for checkpoint/).waitFor({ state: 'visible' });
+
+  await page.getByRole('tab', { name: 'Delivery', exact: true }).click();
+  const deliveryInbox = page.getByRole('tabpanel', { name: 'Delivery' }).locator('#run-inbox');
+  await deliveryInbox.waitFor({ state: 'visible' });
+  const deliveryEntry = deliveryInbox.locator('article.alert').filter({ hasText: message });
+  await deliveryEntry.getByText(message, { exact: true }).waitFor({ state: 'visible' });
+  await deliveryEntry.getByText(/request · Waiting for checkpoint/).waitFor({ state: 'visible' });
+}
+
+async function exerciseRunInboxLifecycle(page) {
+  const messages = ['light', 'dark', 'phone'].map((mode) => runInboxMessages[mode]);
+  assert.ok(messages.every((message) => message && message.id), 'Each viewport must queue one run-inbox message');
+  const expectedBodies = messages.map((message) => message.body);
+  await page.getByRole('tab', { name: 'Delivery', exact: true }).click();
+  const deliveryInbox = page.getByRole('tabpanel', { name: 'Delivery' }).locator('#run-inbox');
+  const cards = deliveryInbox.locator('.dsec article.alert');
+  await cards.filter({ hasText: expectedBodies[2] }).getByText(expectedBodies[2], { exact: true })
+    .waitFor({ state: 'visible' });
+  const bodyOrder = await cards.evaluateAll((items, expected) => items
+    .map((item) => expected.find((body) => item.innerText.includes(body))).filter(Boolean), expectedBodies);
+  assert.deepEqual(bodyOrder, expectedBodies, 'Inbox messages must remain in submission order');
+
+  for (const body of expectedBodies) {
+    const entry = cards.filter({ hasText: body });
+    const detail = await entry.locator('.a-detail').innerText();
+    assert.equal(await entry.locator('.a-detail strong').innerText(), config.adminEmail, 'Inbox author is missing');
+    assert.match(detail, new RegExp(`^${config.adminEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} · .+\\n`),
+      'Inbox creation timestamp is missing');
+    await entry.getByText(/request · Waiting for checkpoint/).waitFor({ state: 'visible' });
+  }
+
+  const runUrl = `${config.baseUrl}/v1/runs/${encodeURIComponent(config.inboxRunId)}`;
+  const workerHeaders = { Authorization: `Bearer ${config.inboxNodeToken}` };
+  const heartbeat = async (data) => {
+    const response = await page.request.post(`${runUrl}/heartbeat`, {
+      headers: workerHeaders,
+      data: { fence: config.inboxFence, ...data }
+    });
+    assert.equal(response.status(), 200, `Worker checkpoint failed: ${await response.text()}`);
+  };
+  const refreshDelivery = async () => {
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('tab', { name: 'Delivery', exact: true }).waitFor({ state: 'visible' });
+    await page.getByRole('tab', { name: 'Delivery', exact: true }).click();
+    return page.getByRole('tabpanel', { name: 'Delivery' }).locator('#run-inbox').locator('.dsec article.alert');
+  };
+
+  await heartbeat({ inbox_received: [messages[0].id] });
+  let refreshedCards = await refreshDelivery();
+  await refreshedCards.filter({ hasText: messages[0].body }).getByText(/request · Received by worker/)
+    .waitFor({ state: 'visible' });
+  await refreshedCards.filter({ hasText: messages[1].body }).getByText(/request · Waiting for checkpoint/)
+    .waitFor({ state: 'visible' });
+
+  await heartbeat({ inbox_included: [messages[0].id], inbox_received: [messages[1].id] });
+  refreshedCards = await refreshDelivery();
+  await refreshedCards.filter({ hasText: messages[0].body }).getByText(/request · Included in provider prompt/)
+    .waitFor({ state: 'visible' });
+  await refreshedCards.filter({ hasText: messages[1].body }).getByText(/request · Received by worker/)
+    .waitFor({ state: 'visible' });
+  await refreshedCards.filter({ hasText: messages[2].body }).getByText(/request · Waiting for checkpoint/)
+    .waitFor({ state: 'visible' });
+
+  const result = await page.request.post(`${runUrl}/result`, {
+    headers: workerHeaders,
+    data: { fence: config.inboxFence, outcome: 'done', summary: 'Browser inbox lifecycle acceptance fixture' }
+  });
+  assert.equal(result.status(), 200, `Worker run close failed: ${await result.text()}`);
+  refreshedCards = await refreshDelivery();
+  await refreshedCards.filter({ hasText: messages[0].body }).getByText(/request · Included in provider prompt/)
+    .waitFor({ state: 'visible' });
+  for (const message of messages.slice(1)) {
+    const entry = refreshedCards.filter({ hasText: message.body });
+    await entry.getByText(/request · run ended before the next safe checkpoint/).waitFor({ state: 'visible' });
+  }
+}
+
 async function exerciseReviews(page, mode) {
   await page.getByRole('tab', { name: 'Human review', exact: true }).click();
   await page.getByRole('heading', { name: 'Human review queue', exact: true }).waitFor({ state: 'visible' });
@@ -451,10 +557,12 @@ async function exerciseMode(browser, mode) {
     await visitScreens(page, administrator.views);
     await exerciseConflictLossDashboard(page);
     await exerciseWorkAndSearch(page);
+    await exerciseRunInbox(page, mode);
     await exerciseReviews(page, mode);
     await exerciseMachineAndUserAdministration(page, mode);
     await page.getByRole('tab', { name: 'Dashboard', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('[aria-label="Console views"] [role="tab"][aria-selected="true"]')?.innerText.trim() === 'Dashboard');
+    if (mode === 'phone') await exerciseRunInboxLifecycle(page);
   });
   await context.close();
 }

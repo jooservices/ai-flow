@@ -289,6 +289,8 @@ def test_context_pack_uses_vector_only_study_case_retrieval(db, monkeypatch):
 
 def test_work_claim_delivers_stored_pack_into_worker_prompt_and_run_result_is_captured(client, ctx, monkeypatch):
     no_embedding(monkeypatch)
+    monkeypatch.setattr(knowledge, "capture_closed_tickets",
+                        lambda *_args: pytest.fail("closed-ticket backfill belongs to Jira sync"))
     from conftest import add_ticket
     from test_api import join
     from aiflow.v4.control import memory

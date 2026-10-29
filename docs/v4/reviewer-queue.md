@@ -36,7 +36,13 @@ header for reviewer actions. Metrics, action availability, and the complete acti
 
 **Approve and merge** acquires a ticket lease, creates a short lived QA run with a fencing token, and runs the
 same GitHub merge operation used by verify. When GitHub confirms the merge, control records a Jira comment and
-moves the ticket to `Done`. If the merge is refused, the ticket stays in review.
+moves the ticket to `Done`. The API action is `POST /v1/reviews/{key}/approve`; `POST /v1/reviews/{key}/skip-gate`
+uses the same merge path when the `require-human` gate is present. After a confirmed merge, the run is captured
+and only that newly closed ticket is considered for a study case. If an approval merge is refused, the flow
+comments on the PR and moves the ticket to `Ready to merge` so it can retry; the ticket remains in `Human review`
+only if that Jira transition fails. A refused skip-gate merge leaves the ticket in review.
 
 **Send for rework** requires a comment, records it on the Jira ticket, adds the `rework` label, and moves the ticket
-to `To Do`. Reviewer actions are recorded in `write_audit` with their run fence.
+to `To Do`. Other reviewer actions use `POST /v1/reviews/{key}/answer`, `POST /v1/reviews/{key}/ask-ai`,
+`POST /v1/reviews/{key}/reject`, and `POST /v1/reviews/{key}/rework`. Reviewer actions are recorded in
+`write_audit` with their run fence; these actions do not trigger a closed-ticket study-case backfill.

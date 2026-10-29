@@ -1,6 +1,7 @@
 import csv
 import io
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -577,6 +578,9 @@ def test_state_snapshot_and_watchdog(client, ctx):
     s = client.get("/v1/state").json()
     assert any(n["name"] == "cc" and n["status"] == "online" for n in s["nodes"])
     assert s["active_runs"][0]["ticket"] == "TESTWP-9"
+    assert next(n for n in s["nodes"] if n["name"] == "cc")["sessions_busy"] == 1
+    account = next(a for a in s["accounts"] if a["id"] == "claude-01")
+    assert account["runs_active"] == 1 and account["run"]["id"] == r["run_id"]
     assert any(a["id"] == "claude-01" and a["status"] == "working" for a in s["accounts"])
     # node goes silent, lease expires: watchdog marks node offline, opens an incident, requeues the ticket
     ctx.db.run("UPDATE nodes SET last_heartbeat = now() - interval '5 minutes' WHERE name='cc'")
@@ -633,10 +637,15 @@ def test_predicted_runout_alerts_owner_and_routes_account_work_to_its_provider_p
 
     notifications = []
     monkeypatch.setattr(incidents.notify, "send", lambda *args, **kwargs: notifications.append(args) or ["email"])
-    headers = join(client, "node1")
-    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=headers)
+    # Seed both accounts before joining: join starts asynchronous readiness checks, which must see the peer's
+    # credential baseline before candidate routing treats that peer as available.
     ctx.repo().accounts.append(Account(id="codex-02", provider="codex", node="node1", tier="middle", roles=["dev"]))
     client.app.state.sync_accounts()
+    headers = join(client, "node1")
+    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=headers)
+    for thread in list(threading.enumerate()):
+        if thread.name == "aiflow4-heartbeat-readiness-node1":
+            thread.join(timeout=15)
     add_ticket(ctx.db, "TESTWP-QUOTA-1")
     now = datetime.now(timezone.utc)
     quota = {"windows": {"five_hour": {"utilization": .8,

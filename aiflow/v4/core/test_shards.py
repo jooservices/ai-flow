@@ -20,9 +20,7 @@ def sharded_files(root: Path = Path(".")) -> list[Path]:
     return sorted(p for p in (root / TESTS).rglob("test_*.py") if p.relative_to(root / TESTS).as_posix() not in OWN_JOB)
 
 
-# Test files that fail when they share one pytest process (a known order dependency, see JAIF-437): the sharder puts
-# them in different shards until the cause is fixed.
-KEEP_APART = (("test_fleet_install.py", "test_system_check.py"),)
+KEEP_APART: tuple[tuple[str, str], ...] = ()  # files that must not share a shard; empty since JAIF-437 was fixed
 
 
 def partition(files: list[Path], total: int = SHARDS) -> list[list[Path]]:

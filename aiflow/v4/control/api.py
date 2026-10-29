@@ -1008,13 +1008,6 @@ class ViewAsBody(BaseModel):
     role: str
 
 
-class BaChatResultBody(BaseModel):
-    account: str = ""
-    claim_token: str = ""
-    output: dict[str, Any] = Field(default_factory=dict)
-    error_kind: str = ""
-
-
 class BackupConfigBody(BaseModel):
     schedule: Literal["daily", "weekly"] = "daily"
     destination_kind: Literal["local", "mounted", "s3"] = "local"
@@ -4743,28 +4736,6 @@ def create_app(ctx: Ctx) -> FastAPI:
     load_policy_api.register_worker_candidate_routes(app, ctx, node_auth, RELEASES, entitled_candidates,
                                                      master_candidate)
 
-    @app.get("/v1/ba-chat/candidate")
-    def ba_chat_candidate(account: str, node: str = Depends(node_auth)) -> dict:
-        try:
-            licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
-        except licensing.LicenseError as exc:
-            return {"job": None, "reason": str(exc)}
-        try:
-            return {"job": ba_chat.claim_job(ctx, account, node)}
-        except Exception as exc:  # noqa: BLE001 - poll failures must not expose chat text
-            log.warning("BA chat claim failed account=%s error=%s", account, type(exc).__name__)
-            return {"job": None}
-
-    @app.post("/v1/ba-chat/{job_id}/result")
-    def ba_chat_result(job_id: str, body: BaChatResultBody, node: str = Depends(node_auth)) -> dict:
-        try:
-            parsed_id = str(uuid.UUID(job_id))
-        except ValueError:
-            raise HTTPException(404, "chat turn was not found") from None
-        if not ba_chat.complete_job(ctx, parsed_id, body.claim_token, body.account, node,
-                                    body.output, body.error_kind):
-            raise HTTPException(409, "chat turn is no longer assigned to this worker")
-        return {"accepted": True}
 
     def related_hits(t: dict) -> list[dict]:
         """Up to 3 past entries related to the ticket summary; memory is advice, so an error gives none."""

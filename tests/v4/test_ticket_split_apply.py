@@ -9,9 +9,9 @@ from aiflow.v4.core.ticket_splitting import InvalidSplitPlan
 
 
 PLAN = [
-    {"summary": "First child ticket here", "description": "AC1: First child is testable."},
-    {"summary": "Second child ticket here", "description": "AC1: Second child is testable."},
-    {"summary": "Third child ticket here", "description": "AC1: Third child is testable."},
+    {"summary": "First child ticket here", "description": "AC1: First child is testable.\nFiles: aiflow/v4/x.py, tests/v4/test_x.py\nSkeleton: class X with run()\nTest cases: run returns the value"},
+    {"summary": "Second child ticket here", "description": "AC1: Second child is testable.\nFiles: aiflow/v4/x.py, tests/v4/test_x.py\nSkeleton: class X with run()\nTest cases: run returns the value"},
+    {"summary": "Third child ticket here", "description": "AC1: Third child is testable.\nFiles: aiflow/v4/x.py, tests/v4/test_x.py\nSkeleton: class X with run()\nTest cases: run returns the value"},
 ]
 
 

@@ -18,7 +18,7 @@ def _estimate(high: float) -> dict:
 def _child(n: int = 1) -> dict[str, str]:
     return {
         "summary": f"Child ticket {n} for the split",
-        "description": f"AC1: Child {n} is testable.\n",
+        "description": f"AC1: Child {n} is testable.\nFiles: aiflow/v4/x.py, tests/v4/test_x.py\nSkeleton: class X with run()\nTest cases: run returns the value\n",
     }
 
 

@@ -27,6 +27,8 @@ so the aim is a change a careful reviewer finds nothing in the first time.
      every project check below pass?
    Fix what you find, then run the checks again. Do not hand over a change you would send back yourself.
 Rules:
+- When the ticket has Files, Skeleton and Test cases sections, they are your job description: create or change exactly those
+  files, write the skeleton as given and write those test cases. Do not redesign the structure and do not ask about it.
 - Do not run git commit, git push or anything that changes branches or history. AI Flow commits and pushes your
   work after you finish and opens the pull request. Ending with uncommitted changes (a resolved merge included)
   is the expected way to finish: never report BLOCKED because you cannot commit, push or write to .git.

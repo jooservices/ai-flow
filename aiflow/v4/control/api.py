@@ -58,13 +58,12 @@ from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, resolve_session_user,
                            verify_session)
-from . import capacity, claim_project, conflict_loss, hotfiles, merge_queue, review_queue_api, worker_candidates
+from . import capacity, claim_project, hotfiles, merge_queue, review_queue_api, worker_candidates
 from . import merge_flow
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from . import route_deps
-from .human_review_notice import notify_human_review
 from .db import DB, J
 from .route_deps import github_connection_used, h
 from .events import Events
@@ -6034,7 +6033,6 @@ def create_app(ctx: Ctx) -> FastAPI:
     current_review_item_kind = review_queue.current_item_kind
     review_thread = review_queue.thread
     review_data = review_queue.data
-    review_queue_keys = review_queue.queue_keys
     app.state.review_queue = review_queue  # routers outside api.py reach the queue through the app
 
     @app.post("/v1/github/webhook", include_in_schema=False)

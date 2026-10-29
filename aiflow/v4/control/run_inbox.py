@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
+from . import ticket_split_apply
 from .db import J
 from .repositories import run_inbox
 
@@ -93,6 +94,8 @@ def finish(ctx, run: dict, run_id: str, body, details: dict, node: str) -> bool:
     _message_ids, run_status = _close_messages(ctx, run, run_id, body.fence, node, reason, update_sql, params,
                                                allowed_statuses=("running", "lost"), require_unrecorded=True)
     late = run_status == "lost"
+    if not late:
+        ticket_split_apply.after_intake_result(ctx, run, body)
     return late
 
 

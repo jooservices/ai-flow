@@ -26,4 +26,11 @@ When `needs_split` is true, intake returns an `INTAKE: SPLIT` JSON list that `va
 fails `validate_plan` is rejected and Jira is not written. A ticket that does not need splitting keeps the existing
 `INTAKE: REWRITE` path. Intake still does not create child issues.
 
+## Apply the plan to Jira
+
+`apply_plan` in `aiflow/v4/control/ticket_split_apply.py` creates Story children from a valid plan. Each child
+gets a stable `aiflow-split-<parent>-<index>` label so a second apply returns the same keys and does not duplicate
+issues. Each child Relates to the parent; child N+1 is Blocked by child N. The parent loses `aiflow-ready` and
+gains `aiflow-split-parent`. Children do not receive `aiflow-ready` here.
+
 **Console screens:** none (library contract; no UI in this ticket).

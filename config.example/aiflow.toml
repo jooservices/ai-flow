@@ -65,8 +65,8 @@ ignored_authors = ["codecov-commenter", "github-actions", "sonarqubecloud", "son
 health_ticket = "JAIF-12"        # ticket that receives health alerts and the daily AI usage summary (built-in default: none, no alert is written)
 # workspace_name = "WSL"         # name written in the Jira field Workspace; default: WSL / Mac by machine, else the machine name
 # --- Redis namespace (host, port and password are per machine: see .env.example) ---
-# --- shared memory (docs/MEMORY.md): the address of the memory service; the tokens are AIFLOW_MEMORY_TOKEN / AIFLOW_MEMORY_AI_TOKEN in Workspaces/.env ---
-memory_url = "http://127.0.0.1:8750"  # empty = the AIs work without the shared memory
+# --- shared memory: configure memory_url per project in config/aiflow/<KEY>.toml; tokens stay in Workspaces/.env ---
+memory_url = ""  # optional fallback for projects without an override; empty keeps shared memory off
 # --- observability: every event of the control, workers, operator and health goes to OpenObserve (docs/OBSERVABILITY.md) ---
 obs_url = "http://127.0.0.1:15080"   # OpenObserve of the shared Docker stack; empty = no events are sent. The login is AIFLOW_OBS_USER / AIFLOW_OBS_PASSWORD in Workspaces/.env
 obs_org = "default"                  # OpenObserve organization

@@ -176,17 +176,25 @@ class Control:
         return plan
 
 
-def memory_tasks(memory: Any, redis: Any, owner: str, interval_seconds: int = 1800) -> dict[str, int]:
+def memory_tasks(memory: Any, redis: Any, owner: str, interval_seconds: int = 1800, curator_key: str = "memory:curate") -> dict[str, int]:
     """Send the entries kept while the memory service was down; every `interval_seconds` run the curator (plain rules, no AI)."""
     done: dict[str, int] = {}
     if not memory.enabled:
         return done
-    sent = memory.flush()
+    try:
+        sent = memory.flush()
+    except Exception as error:
+        events.emit("memory.flush", error=type(error).__name__)
+        sent = 0
     if sent:
         done["sent"] = sent
         events.emit("memory.flush", sent=sent)
-    if redis.acquire("memory:curate", owner, interval_seconds):
-        curated = memory.curate()
+    if redis.acquire(curator_key, owner, interval_seconds):
+        try:
+            curated = memory.curate()
+        except Exception as error:
+            events.emit("memory.curate", error=type(error).__name__)
+            curated = None
         if curated is not None:
             done.update(curated)
             events.emit("memory.curate", **curated)
@@ -217,13 +225,20 @@ def main(argv: list[str] | None = None) -> int:
     events.emit("control.start", version_hash=config_hash(CONFIG_DIR)[:12])
     supervisor = Supervisor(holder, Jira(cfg.root), redis)
     operator = Operator(supervisor, holder.operator_policy)
-    from .memory.client import Memory
-    memory = Memory(cfg.memory.get("AIFLOW_MEMORY_URL", ""), cfg.memory.get("AIFLOW_MEMORY_TOKEN", ""),
-                    spool=cfg.root / ".tmp" / "aiflow" / "memory-spool.jsonl", log=log)
+    from .memory.client import Memory, spool_path
+    default_url = cfg.memory.get("AIFLOW_MEMORY_URL", "")
+    memory_services = {}
+    for project in cfg.registry.projects.values():
+        url = project.memory_url if project.memory_url is not None else default_url
+        if url and url not in memory_services:
+            memory_services[url] = Memory(url, cfg.memory.get("AIFLOW_MEMORY_TOKEN", ""),
+                                          spool=spool_path(cfg.root, url, default_url), log=log)
 
     def maintenance(_cfg: Any) -> None:
         operator.cycle()
-        memory_tasks(memory, redis, holder.owner)
+        for url, memory in memory_services.items():
+            key = "memory:curate:" + hashlib.sha256(url.rstrip("/").encode()).hexdigest()[:12]
+            memory_tasks(memory, redis, holder.owner, curator_key=key)
     control = Control(Systemd(), redis, config.load, operator=maintenance, log=log)
     if args.dry_run or args.once:
         plan, _ = control.cycle(dry_run=args.dry_run)

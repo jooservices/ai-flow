@@ -3,19 +3,31 @@ returns nothing, and a proposal that cannot be sent is kept in a local spool and
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from . import guard
+
 
 class Unavailable(RuntimeError):
     pass
 
 
+def spool_path(root: Path, url: str, default_url: str = "") -> Path:
+    """Keep the historic spool for the default service and isolate queues for project overrides."""
+    directory = root / ".tmp" / "aiflow"
+    if url.rstrip("/") == default_url.rstrip("/"):
+        return directory / "memory-spool.jsonl"
+    suffix = hashlib.sha256(url.rstrip("/").encode()).hexdigest()[:12]
+    return directory / f"memory-spool-{suffix}.jsonl"
+
+
 class Memory:
-    def __init__(self, url: str, token: str, spool: Path | None = None, timeout: float = 4.0,
+    def __init__(self, url: str, token: str, spool: Path | None = None, timeout: float = 1.0,
                  opener: Callable[..., Any] = urllib.request.urlopen, log: Callable[[str], None] = lambda _m: None) -> None:
         self.url, self.token, self.spool, self.timeout, self.opener, self.log = url.rstrip("/"), token, spool, timeout, opener, log
         self.down_until = 0.0
@@ -61,14 +73,26 @@ class Memory:
     def get(self, entry_id: str) -> dict[str, Any]:
         return self.call("GET", f"/v1/entries/{entry_id}")
 
+    def scoped(self, operation: str, arguments: dict[str, Any]) -> Any:
+        """Call the scoped-notes API; PostgreSQL access stays behind the service credential."""
+        return self.call("POST", f"/v1/scoped/{operation}", arguments)["result"]
+
     # ---- write -----------------------------------------------------------------------------------------------------
     def propose(self, entry: dict[str, Any]) -> str | None:
         """Send an entry; when the service is down keep it in the spool. Returns the id, or None when spooled or refused."""
         try:
+            guard.check_entry(entry)
+        except guard.Rejected as error:
+            self.log(f"memory entry refused: {error}")
+            return None
+        try:
             return self.call("POST", "/v1/entries", entry)["id"]
         except Unavailable as error:
-            self.keep(entry)
-            self.log(f"memory entry kept for later: {error}")
+            try:
+                self.keep(entry)
+                self.log("memory entry kept for later: service unavailable")
+            except (OSError, TypeError, ValueError) as spool_error:
+                self.log(f"memory entry spool skipped: {type(spool_error).__name__}")
         except ValueError as error:
             self.log(f"memory entry refused: {error}")
         return None
@@ -80,6 +104,7 @@ class Memory:
             self.log(f"memory feedback skipped: {error}")
 
     def keep(self, entry: dict[str, Any]) -> None:
+        guard.check_entry(entry)
         if self.spool:
             self.spool.parent.mkdir(parents=True, exist_ok=True)
             with self.spool.open("a", encoding="utf-8") as handle:
@@ -89,18 +114,27 @@ class Memory:
         """Send the spooled entries; the ones the service refuses are dropped, the ones it cannot take stay. Returns how many were sent."""
         if not self.spool or not self.spool.is_file():
             return 0
-        lines = [line for line in self.spool.read_text(encoding="utf-8").splitlines() if line.strip()]
+        try:
+            lines = [line for line in self.spool.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except (OSError, UnicodeError) as error:
+            self.log(f"memory spool read skipped: {type(error).__name__}")
+            return 0
         left, sent = [], 0
         for index, line in enumerate(lines):
             try:
-                self.call("POST", "/v1/entries", json.loads(line))
+                entry = json.loads(line)
+                guard.check_entry(entry)
+                self.call("POST", "/v1/entries", entry)
                 sent += 1
             except Unavailable:
                 left = lines[index:]
                 break
-            except ValueError:
+            except (ValueError, TypeError, AttributeError):
                 continue  # refused for good (a secret, a wrong scope): not worth keeping
-        self.spool.write_text("".join(f"{line}\n" for line in left), encoding="utf-8")
+        try:
+            self.spool.write_text("".join(f"{line}\n" for line in left), encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            self.log(f"memory spool update skipped: {type(error).__name__}")
         return sent
 
     def curate(self) -> dict[str, int] | None:

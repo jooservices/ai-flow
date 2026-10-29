@@ -86,3 +86,10 @@ def test_cut_titles_never_end_on_a_determiner_or_pronoun(summary):
     assert rules.violations(title, pr_title=True) == []
     last_word = title.removesuffix(" (K-1)").split(" ")[-1].lower()
     assert last_word not in {"its", "their", "this", "each", "every", "any", "some", "the", "a", "and", "to"}
+
+
+def test_one_overlong_word_is_never_cut_inside_the_word():
+    title = rules.normalize_title("feat", "K-1", "x" * 300)
+    assert title == "feat: Change K-1" and rules.violations(title, pr_title=True) == []
+    non_ascii = rules.normalize_title("feat", "K-1", "é" * 300)
+    assert non_ascii == "feat: Change K-1"

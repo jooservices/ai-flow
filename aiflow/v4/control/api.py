@@ -1048,10 +1048,6 @@ class StakeholderVerdictBody(BaseModel):
     screenshot_filename: str = Field(default="screenshot.png", max_length=255)
 
 
-class EventsBody(BaseModel):
-    events: list[dict[str, Any]]
-
-
 class WorktreeSweepBody(BaseModel):
     dirs: list[str] = []   # "<project>/<directory>" entries found under /srv/aiflow/work on the node
 
@@ -6278,16 +6274,6 @@ def create_app(ctx: Ctx) -> FastAPI:
                         cost_usd=body.cost_usd)
         return {"ok": True}
 
-    @app.post("/v1/events")
-    def events_in(body: EventsBody, node: str = Depends(node_auth)) -> dict:
-        n = 0
-        for e in body.events[:500]:
-            e = dict(e)
-            t = str(e.pop("type", "node.event"))
-            e["node"] = node
-            ctx.events.emit(t, **e)
-            n += 1
-        return {"accepted": n}
 
     # --- state for dashboards ---------------------------------------------------------------------------------
     @app.get("/v1/projects/{key}/versions")

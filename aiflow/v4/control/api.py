@@ -6612,13 +6612,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"run_id": run_id, "release": run["release"], "passed": run["passed"], "blocked": not run["passed"],
                 "failures": run["report"]["failures"], "tickets": tickets}
 
-    @app.get("/v1/tickets/{key}/timeline")
-    def ticket_timeline(key: str) -> dict:
-        from .timeline import timeline
-        tl = timeline(ctx.db, key)
-        if tl is None:
-            raise HTTPException(404, "unknown ticket")
-        return tl
 
     @app.get("/v1/capacity")
     def capacity_plan(request: Request) -> dict:

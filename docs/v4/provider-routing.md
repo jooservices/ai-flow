@@ -99,3 +99,10 @@ machine is shared by the worker polls of the next fifteen seconds (`PEER_OFFERS_
 routing state, ready accounts and machine capacity by the polls of the next two seconds (`SNAPSHOT_TTL_S`), so ticket
 pickup stays within its 30-second budget (6 s without provider routing, 9 s with it, measured on the scale proof) at 100 projects, 50 machines and 200 sessions. Headroom is advisory: a claim
 is always checked again without the preference.
+
+## Cost of a pickup
+
+`POST /v1/work/claim` and `POST /v1/work/candidates` ask for the prior development run of a ticket only through
+`control/dev_history.py`, in one query (the latest run that delivered work, else the latest finished one), so a node that
+lacks the container runtime does not pay two queries per ticket and account (JAIF-449). On the 100/50/200 scale proof this
+removed about 9% of the database statements of a run (147,343 to 134,068).

@@ -140,6 +140,35 @@ def test_online_activation_sends_only_key_and_installation_identifier(client, ct
     assert stored == {"license_token": signed, "license_source": "online"}
 
 
+def test_successful_license_configuration_changes_are_write_audited_without_operator_bugs(client, ctx, monkeypatch):
+    from aiflow.v4.control import flow_doctor
+
+    private, public = issuer_key()
+    sign_in(client, ctx)
+    ctx.settings.license_public_key = public
+    ctx.settings.license_service_url = "https://licenses.example.test/activate"
+    installation_id = client.get("/v1/licensing").json()["installation_id"]
+    signed = token(private, installation_id, plan="team")
+    monkeypatch.setattr(licensing.httpx, "post", lambda *a, **k: FakeResponse({"license_token": signed}))
+
+    online = client.post("/v1/licensing/activate", json={"key": "customer-key"})
+    offline = client.post("/v1/licensing/offline", json={"license_file": signed})
+    limits = client.put("/v1/licensing/limits", json={
+        "plan": "team", "limits": {"machines": 4, "ai_accounts": 10, "projects": 20, "users": 20},
+    })
+    assert online.status_code == offline.status_code == limits.status_code == 200
+
+    writes = ctx.db.all("SELECT actor,action,accepted FROM write_audit WHERE target='licensing' ORDER BY id")
+    assert writes == [
+        {"actor": "owner@example.test", "action": "license_activate", "accepted": True},
+        {"actor": "owner@example.test", "action": "license_activate", "accepted": True},
+        {"actor": "owner@example.test", "action": "license_limits", "accepted": True},
+    ]
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
+
+
 def test_invalid_online_key_and_bad_offline_signature_leave_current_license_unchanged(client, ctx, monkeypatch):
     private, public = issuer_key()
     other_private, _ = issuer_key()

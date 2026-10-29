@@ -61,14 +61,15 @@ IMAGE = "ghcr.io/jooservices/ai-flow/control-api"
 REPO_URL = "https://github.com/jooservices/ai-flow.git"
 SERVER_INSTALLER_URL = f"https://github.com/jooservices/server-installer/archive/refs/tags/{SERVER_INSTALLER_VERSION}.tar.gz"
 SUPPORTED_UBUNTU = ("22.04", "24.04")
-STEPS = ("preflight", "os", "tools", "release", "secrets", "infra", "migrate", "admin", "deploy", "health", "cli")
+STEPS = ("preflight", "os", "tools", "release", "secrets", "operator-audit", "infra", "migrate", "admin",
+         "deploy", "health", "cli")
 ADMIN_EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}$")
 ADMIN_PASSWORD_FILE = "super-admin-password"  # in Layout.console_secrets; the CLI writes it 0600 and never prints it
 _TRUSTED_PROXY_PRIVATE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
 OS_MODULES = ("packages", "timesync", "swap", "ulimits", "docker", "docker_group")
 VPN_MODULES = ("tailscale", "wireguard")
-HOST_PACKAGES = ("ca-certificates", "curl", "git", "tar")
+HOST_PACKAGES = ("ca-certificates", "curl", "git", "tar", "auditd")
 APP_SERVICES = ("control-api-a", "control-api-b", "control-loops")
 HEALTH_COMPONENTS = ("postgres", "redis", "traefik", "openobserve", "gatus",
                      "control-api-a", "control-api-b", "control-loops", "command-center")
@@ -232,6 +233,8 @@ class ControlInstaller:
         self.stage(v)
         self.step("secrets")
         self.write_secrets_and_config()
+        self.step("operator-audit")
+        self.configure_operator_audit()
         self.step("infra")
         self.start_infra(v)
         self.configure_trusted_proxies()
@@ -381,9 +384,9 @@ class ControlInstaller:
                 raise InstallError(f"could not install {' '.join(missing)} with apt-get", EXIT_OS)
         if not lay.cosign.is_file():
             self.install_cosign()
-        for script in ("aiflow4-deploy", "aiflow4-control-install"):
+        for script in ("aiflow4-deploy", "aiflow4-control-install", "aiflow4-audit-install"):
             dest, src = lay.sbin / script, self.source / "deploy/v4/bin" / script
-            if dest.is_file():
+            if dest.is_file() and script != "aiflow4-audit-install":
                 continue  # later releases install their own copies (aiflow4-deploy)
             if not src.is_file():
                 raise InstallError(f"{script} is not installed and this aiflow4 has no release tree; start with "
@@ -391,6 +394,13 @@ class ControlInstaller:
             lay.sbin.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dest)
             os.chmod(dest, 0o755)
+        audit_rules = self.source / "deploy/v4/audit/aiflow4-operator.rules"
+        if not audit_rules.is_file():
+            raise InstallError("AI Flow operator audit rules are missing", EXIT_USAGE)
+        audit_dest = lay.p("/usr/local/share/aiflow4/audit/aiflow4-operator.rules")
+        audit_dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(audit_rules, audit_dest)
+        os.chmod(audit_dest, 0o640)
         if not (lay.repo / ".git").exists():
             lay.repo.parent.mkdir(parents=True, exist_ok=True)
             r = h.run(["git", "clone", "--quiet", REPO_URL, str(lay.repo)], env=self.deploy_env())
@@ -402,6 +412,14 @@ class ControlInstaller:
             r = h.run(["docker", "login", "ghcr.io", "--username", "aiflow4", "--password-stdin"], stdin=token + "\n")
             if r.returncode:
                 raise InstallError("docker login to ghcr.io with GH_TOKEN failed", EXIT_RELEASE)
+
+    def configure_operator_audit(self) -> None:
+        """Install host audit rules so manual shell and configuration actions enter the intervention ledger."""
+        command = [str(self.layout.sbin / "aiflow4-audit-install"), "--control-repo",
+                   str(self.layout.control / "repos/aiflow-control")]
+        result = self.host.run(command)
+        if result.returncode:
+            raise InstallError("could not enable operator audit capture", EXIT_OS)
 
     def install_cosign(self) -> None:
         arch = COSIGN.get(self.host.machine())

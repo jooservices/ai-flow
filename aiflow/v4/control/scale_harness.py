@@ -1050,9 +1050,11 @@ def _checks(client, ctx, sc, pl, sessions, hosts, headers, peak_checks, pickup) 
     expected = [t["key"] for t in traffic if not t["held"]]
     missing = [k for k in expected if k not in per_ticket]
     twice = [k for k, rs in per_ticket.items() if len(rs) > 1]
+    duplicate_detail = ", ".join(f"{key} ({len(per_ticket[key])} runs)" for key in twice[:5])
     check("every_ready_ticket_picked_once", not missing and not twice,
           f"{len(expected) - len(missing)} of {len(expected)} ready tickets picked, {len(twice)} picked more than once"
-          + (f" (not picked: {', '.join(missing[:5])})" if missing else ""))
+          + (f" (not picked: {', '.join(missing[:5])})" if missing else "")
+          + (f" (duplicates: {duplicate_detail})" if duplicate_detail else ""))
     held = [t["key"] for t in traffic if t["held"] and t["key"] in per_ticket]
     check("held_tickets_not_picked", not held, f"{len(held)} held tickets were picked" + (f": {', '.join(held[:5])}" if held else ""))
     late = []

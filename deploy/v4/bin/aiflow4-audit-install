@@ -1,0 +1,43 @@
+#!/bin/bash
+# Configure OS audit capture for operator interventions on an AI Flow host.
+set -euo pipefail
+CONTROL_REPO=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --control-repo) [ $# -ge 2 ] || { echo "--control-repo needs a path" >&2; exit 2; }; CONTROL_REPO=$2; shift 2 ;;
+    *) echo "usage: aiflow4-audit-install [--control-repo PATH]" >&2; exit 2 ;;
+  esac
+done
+[ "$(id -u)" -eq 0 ] || { echo "run the audit installer as root" >&2; exit 2; }
+if ! command -v auditctl >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq auditd
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y -q audit
+  else
+    echo "auditd is unavailable on this host" >&2; exit 3
+  fi
+fi
+RULES_DIR=/etc/audit/rules.d
+install -d -m 0750 "$RULES_DIR"
+RULES="$RULES_DIR/70-aiflow4-operator.rules"
+RULE_SOURCE=/usr/local/share/aiflow4/audit/aiflow4-operator.rules
+[ -f "$RULE_SOURCE" ] || RULE_SOURCE=$(dirname "$0")/../audit/aiflow4-operator.rules
+[ -f "$RULE_SOURCE" ] || { echo "AI Flow audit rules are missing" >&2; exit 4; }
+TMP=$(mktemp "$RULES_DIR/.aiflow4-operator.XXXXXX")
+trap 'rm -f "$TMP"' EXIT
+cat "$RULE_SOURCE" > "$TMP"
+if [ -n "$CONTROL_REPO" ] && [ -d "$CONTROL_REPO" ]; then
+  printf '%s\n' "-w $CONTROL_REPO -p wa -k aiflow4-human-config" >> "$TMP"
+fi
+if cmp -s "$TMP" "$RULES" && systemctl is-active --quiet auditd; then
+  echo "AI Flow operator audit is already active"
+  exit 0
+fi
+install -m 0640 "$TMP" "$RULES"
+systemctl enable auditd >/dev/null
+systemctl restart auditd
+if command -v augenrules >/dev/null 2>&1; then augenrules --load; else auditctl -R "$RULES"; fi
+echo "AI Flow operator audit is active"

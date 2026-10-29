@@ -47,9 +47,10 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from .audit import record_console_user_change as audit_user, record_console_user_roles_change as audit_user_roles
-from . import (business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               dashboard_timeout_routes, load_policy, load_policy_api, role_health, rollout, runtime_settings, scale_proof, setup_wizard,
-               shared_accounts, support_bundle, system_check, system_check_api, tooling, version_release, work_steps)
+from . import (business, dashboard_timeout_routes, escalations, flow_doctor, flow_doctor_api, jira_connect, knowledge,
+               layouts, licensing, load_policy, load_policy_api, log_viewer, memory, role_health, rollout,
+               runtime_settings, scale_proof, setup_wizard, shared_accounts, state_schema, support_bundle, system_check,
+               system_check_api, tooling, version_release, work_steps)
 from . import run_inbox as run_inbox_control
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
@@ -79,6 +80,7 @@ PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 MASTER_SCOPE = "master:global"
 MASTER_CYCLE_S = 60
 DEFAULT_MASTER_DAILY_BUDGET_MINUTES = 60
+OWNER_TOKEN_PRINCIPAL = "owner-token"
 HUMAN_QUEUE_WAIT_S = 90  # an approve click waits this long for its turn in the merge queue
 HUMAN_QUEUE_POLL_S = 2
 RELEASES = Path("/srv/aiflow/control/releases")
@@ -116,275 +118,7 @@ WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval 
 ORDER BY ticket_key, started_at DESC
 """
 
-# `/v1/state` is consumed by the console and deployment tools. Its implementation is a shared helper in
-# control/state.py, so keep its complete response contract explicit in OpenAPI for generated docs.
-def _state_object(properties: dict, required: tuple[str, ...] = ()) -> dict:
-    return {"type": "object", "properties": properties, "additionalProperties": True,
-            **({"required": list(required)} if required else {})}
-
-
-def _state_array(items: dict) -> dict:
-    return {"type": "array", "items": items}
-
-
-def _state_nullable(value: dict) -> dict:
-    return {"anyOf": [value, {"type": "null"}]}
-
-
-_STATE_STRING = {"type": "string"}
-_STATE_INTEGER = {"type": "integer"}
-_STATE_NUMBER = {"type": "number"}
-_STATE_BOOLEAN = {"type": "boolean"}
-_STATE_DATETIME = {"type": "string", "format": "date-time"}
-_STATE_ANY_OBJECT = _state_object({})
-_STATE_STRING_ARRAY = _state_array(_STATE_STRING)
-_STATE_RATE = _state_object({"tokens_per_hour": _STATE_NUMBER, "cost_usd_per_hour": _STATE_NUMBER,
-                             "runs": _STATE_INTEGER, "steady_runs": _STATE_INTEGER},
-                            ("tokens_per_hour", "cost_usd_per_hour", "runs", "steady_runs"))
-_STATE_RUN = _state_object({
-    "id": _STATE_STRING, "ticket": _STATE_STRING, "project": _STATE_STRING,
-    "summary": _state_nullable(_STATE_STRING), "step": _STATE_STRING, "account": _STATE_STRING,
-    "provider": _STATE_STRING, "model": _STATE_STRING, "node": _STATE_STRING, "fence": _STATE_INTEGER,
-    "elapsed_s": _state_nullable(_STATE_INTEGER), "heartbeat_age_s": _state_nullable(_STATE_INTEGER),
-    "lease_ms": _STATE_INTEGER, "progress": _STATE_ANY_OBJECT,
-}, ("id", "ticket", "summary", "project", "step", "account", "provider", "model", "node", "fence",
-    "elapsed_s", "heartbeat_age_s", "lease_ms", "progress"))
-_STATE_RECENT_RUN = _state_object({
-    "id": _STATE_STRING, "ticket": _STATE_STRING, "summary": _state_nullable(_STATE_STRING),
-    "step": _STATE_STRING, "account": _STATE_STRING, "provider": _STATE_STRING, "model": _STATE_STRING,
-    "node": _STATE_STRING, "outcome": _STATE_STRING, "error_kind": _STATE_STRING,
-    "duration_s": _state_nullable(_STATE_INTEGER), "cost_usd": _STATE_NUMBER,
-    "tokens_in": _STATE_INTEGER, "tokens_out": _STATE_INTEGER, "pr_url": _STATE_STRING,
-    "already_done": _STATE_BOOLEAN,
-    "ended_age_s": _state_nullable(_STATE_INTEGER),
-}, ("id", "ticket", "summary", "step", "account", "provider", "model", "node", "outcome", "error_kind",
-    "duration_s", "cost_usd", "tokens_in", "tokens_out", "pr_url", "already_done", "ended_age_s"))
-_STATE_ACCOUNT = _state_object({
-    "id": _STATE_STRING, "provider": _STATE_STRING, "node": _STATE_STRING, "tier": _STATE_STRING,
-    "roles": _STATE_STRING_ARRAY, "explicit_only": _STATE_BOOLEAN, "paused": _STATE_BOOLEAN,
-    "jobs": _STATE_STRING_ARRAY, "sign_in_pending": _STATE_BOOLEAN, "sign_in_status": _STATE_STRING,
-    "status": _STATE_STRING, "provider_status": _STATE_STRING,
-    "cooldown": _state_nullable(_state_object({"reason": _STATE_STRING, "seconds_left": _STATE_INTEGER},
-                                               ("reason", "seconds_left"))),
-    "cooldown_until": _state_nullable(_STATE_DATETIME), "cooldown_since": _state_nullable(_STATE_DATETIME),
-    "idle_since": _state_nullable(_STATE_DATETIME), "credential_expires_at": _STATE_STRING,
-    "credential_expiry_warning": _STATE_BOOLEAN, "check_failed": _STATE_BOOLEAN,
-    "quota": _STATE_ANY_OBJECT,
-    "quota_awareness": _state_object({
-        "source": _STATE_STRING, "is_estimate": _STATE_BOOLEAN, "runs_24h": _STATE_INTEGER,
-        "confidence": _STATE_STRING, "rate_spread_ratio": _state_nullable(_STATE_NUMBER),
-        "burn_rates": _state_object({"last_hour": _STATE_RATE, "last_day": _STATE_RATE,
-                                     "whole_window": _STATE_RATE},
-                                    ("last_hour", "last_day", "whole_window")),
-        "usage_7d": _state_object({"tokens_in": _STATE_INTEGER, "tokens_out": _STATE_INTEGER,
-                                   "tokens": _STATE_INTEGER, "cost_usd": _STATE_NUMBER,
-                                   "runs": _STATE_INTEGER},
-                                  ("tokens_in", "tokens_out", "tokens", "cost_usd", "runs")),
-        "largest_run": _state_nullable(_state_object({"ticket": _state_nullable(_STATE_STRING),
-            "model": _STATE_STRING, "tokens": _STATE_INTEGER, "context_tokens": _STATE_INTEGER,
-            "cost_usd": _STATE_NUMBER, "duration_s": _STATE_NUMBER},
-            ("ticket", "model", "tokens", "context_tokens", "cost_usd", "duration_s"))),
-        "history": _state_array(_state_object({"day": _STATE_STRING, "tokens_in": _STATE_INTEGER,
-            "tokens_out": _STATE_INTEGER, "tokens": _STATE_INTEGER, "cost_usd": _STATE_NUMBER,
-            "runs": _STATE_INTEGER}, ("day", "tokens_in", "tokens_out", "tokens", "cost_usd", "runs"))),
-        "windows": _state_array(_state_object({
-            "name": _STATE_STRING, "label": _STATE_STRING, "source": _STATE_STRING,
-            "used_pct": _state_nullable(_STATE_NUMBER), "left_pct": _state_nullable(_STATE_NUMBER),
-            "used_tokens": _STATE_INTEGER, "left_tokens": _state_nullable(_STATE_INTEGER),
-            "quota_tokens": _state_nullable(_STATE_NUMBER), "reset_at": _state_nullable(_STATE_DATETIME),
-            "reset_source": _STATE_STRING, "tokens": _STATE_INTEGER, "cost_usd": _STATE_NUMBER,
-            "burn_rates": _state_object({"last_hour": _STATE_RATE, "last_day": _STATE_RATE,
-                                         "whole_window": _STATE_RATE},
-                                        ("last_hour", "last_day", "whole_window")),
-            "prediction": _state_object({"status": _STATE_STRING, "before_reset": _STATE_BOOLEAN,
-                "confidence": _STATE_STRING, "exhaustion_at": _state_nullable(_STATE_DATETIME),
-                "remaining_at_reset_pct": _state_nullable(_STATE_NUMBER),
-                "remaining_now_pct": _state_nullable(_STATE_NUMBER)},
-                ("status", "before_reset", "confidence", "exhaustion_at", "remaining_at_reset_pct",
-                 "remaining_now_pct")),
-        }, ("name", "label", "source", "used_pct", "left_pct", "used_tokens", "left_tokens",
-            "quota_tokens", "reset_at", "reset_source", "tokens", "cost_usd", "burn_rates", "prediction"))),
-        "at_risk": _STATE_BOOLEAN,
-    }, ("source", "is_estimate", "runs_24h", "confidence", "rate_spread_ratio", "burn_rates", "usage_7d",
-        "largest_run", "history", "windows", "at_risk")),
-    "quota_used": _state_nullable(_STATE_NUMBER), "quota_resets_at": _state_nullable(_STATE_DATETIME),
-    "tokens_today": _STATE_INTEGER, "cost_today": _STATE_NUMBER, "last_error": _STATE_STRING,
-    "worker": _STATE_ANY_OBJECT, "model": _STATE_STRING, "effort": _state_nullable(_STATE_STRING),
-    "runs_active": _STATE_INTEGER, "parallel": _STATE_INTEGER,
-    "run": _state_nullable(_state_object({
-        "id": _STATE_STRING, "ticket": _STATE_STRING, "summary": _state_nullable(_STATE_STRING),
-        "step": _STATE_STRING, "elapsed_s": _state_nullable(_STATE_INTEGER), "fence": _STATE_INTEGER,
-        "progress": _STATE_ANY_OBJECT,
-    }, ("id", "ticket", "step", "elapsed_s", "fence", "progress"))),
-}, ("id", "provider", "node", "tier", "roles", "explicit_only", "paused", "jobs", "sign_in_pending",
-    "sign_in_status", "status", "provider_status", "cooldown", "cooldown_until", "cooldown_since", "idle_since",
-    "credential_expires_at", "credential_expiry_warning", "check_failed", "quota", "quota_awareness", "quota_used",
-    "quota_resets_at", "tokens_today", "cost_today", "last_error", "worker", "model", "effort", "runs_active",
-    "parallel", "run"))
-_STATE_INCIDENT = _state_object({
-    "id": _STATE_INTEGER, "opened_at": _STATE_DATETIME, "closed_at": _state_nullable(_STATE_DATETIME),
-    "severity": _STATE_STRING, "kind": _STATE_STRING, "subject": _STATE_STRING, "title": _STATE_STRING,
-    "detail": _STATE_STRING,
-}, ("id", "opened_at", "severity", "kind", "subject", "title", "detail"))
-_STATE_READINESS_REASON = _state_object({"cause": _STATE_STRING, "ticket": _state_nullable(_STATE_STRING),
-    "summary": _STATE_STRING, "status": _STATE_STRING, "bug": _STATE_STRING, "detail": _STATE_STRING},
-    ("cause", "ticket", "summary"))
-_STATE_RELEASE_STEP = _state_object({"step": _STATE_STRING, "state": _STATE_STRING, "run_id": _STATE_STRING,
-    "node": _STATE_STRING, "detail": _STATE_STRING, "at": _state_nullable(_STATE_DATETIME), "url": _STATE_STRING},
-    ("step", "state", "run_id", "node", "detail", "at"))
-
-STATE_RESPONSE_SCHEMA = _state_object({
-    "generated_at": _STATE_DATETIME, "env": _STATE_STRING, "control_repo": _STATE_STRING,
-    "versions": {"type": "object", "additionalProperties": _STATE_STRING}, "version": _STATE_STRING,
-    "links": _state_object({"o2": _STATE_STRING, "mail": _STATE_STRING, "gatus": _STATE_STRING},
-                            ("o2", "mail", "gatus")),
-    "tool_waits": _state_array(_state_object({
-        "requirement": _STATE_STRING,
-        "tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
-                                               "machine": _STATE_STRING, "requirement": _STATE_STRING,
-                                               "since": _STATE_DATETIME, "action": _STATE_STRING,
-                                               "detail": _STATE_STRING},
-                                              ("key", "summary", "machine", "requirement", "since", "action", "detail"))),
-        "projects": _STATE_STRING_ARRAY, "machines": _STATE_STRING_ARRAY, "since": _STATE_DATETIME,
-        "count": _STATE_INTEGER, "maintenance_ticket": _STATE_STRING, "action": _STATE_STRING,
-    }, ("requirement", "tickets", "projects", "machines", "since", "count", "maintenance_ticket", "action"))),
-    "nodes": _state_array(_state_object({
-        "name": _STATE_STRING, "ip": _STATE_STRING, "services": _state_array(_state_object({
-            "name": _STATE_STRING, "projects": _STATE_STRING_ARRAY, "healthy": _STATE_BOOLEAN,
-            "state": _STATE_STRING, "endpoint": _STATE_STRING, "image": _STATE_STRING, "detail": _STATE_STRING,
-        }, ("name", "projects", "healthy", "state", "endpoint", "image", "detail"))),
-        "role": _STATE_STRING, "status": _STATE_STRING, "accepting_work": _STATE_BOOLEAN,
-        "sessions_busy": _STATE_INTEGER, "slots_total": _STATE_INTEGER, "slots_used": _STATE_INTEGER,
-        "release": _STATE_STRING, "metrics": _STATE_ANY_OBJECT, "tools": _STATE_ANY_OBJECT,
-        "load_limits": _STATE_ANY_OBJECT, "load_state": _STATE_ANY_OBJECT,
-        "host_load_limits": _STATE_ANY_OBJECT, "host_load_state": _STATE_ANY_OBJECT,
-        "has_agent": _STATE_BOOLEAN, "required_tools": _STATE_STRING_ARRAY,
-        "desired_services": _state_array(_state_object({"name": _STATE_STRING, "unit": _STATE_STRING,
-            "healthcheck_configured": _STATE_BOOLEAN}, ("name", "unit", "healthcheck_configured"))),
-        "missing_tools": _STATE_STRING_ARRAY, "heartbeat_age_s": _state_nullable(_STATE_INTEGER),
-        "accounts_assigned": _STATE_INTEGER, "in_control_repo": _STATE_BOOLEAN,
-        "last_heartbeat": _state_nullable(_STATE_DATETIME), "idle_since": _state_nullable(_STATE_DATETIME),
-        "purpose": _STATE_STRING, "notes": _STATE_STRING, "capabilities": _STATE_STRING_ARRAY,
-        "projects": _STATE_STRING_ARRAY,
-        "version_policy": _state_object({"compatible": _STATE_BOOLEAN, "state": _STATE_STRING,
-                                          "reason": _STATE_STRING}, ("compatible", "state", "reason")),
-        "joined_at": _STATE_DATETIME,
-    }, ("name", "ip", "services", "role", "status", "accepting_work", "sessions_busy", "slots_total", "slots_used",
-        "release", "metrics", "tools", "has_agent", "required_tools", "desired_services", "missing_tools",
-        "heartbeat_age_s", "accounts_assigned", "in_control_repo", "last_heartbeat", "idle_since", "purpose", "notes",
-        "capabilities", "projects", "version_policy", "joined_at"))),
-    "accounts": _state_array(_STATE_ACCOUNT),
-    "active_runs": _state_array(_STATE_RUN), "recent_runs": _state_array(_STATE_RECENT_RUN),
-    "projects": _state_array(_state_object({
-        "key": _STATE_STRING, "repo": _STATE_STRING, "repositories": _STATE_STRING_ARRAY,
-        "base": _STATE_STRING, "environments": _STATE_ANY_OBJECT,
-        "work_minutes": _state_object({"target": _STATE_INTEGER, "warn": _STATE_INTEGER, "hard": _STATE_INTEGER},
-                                       ("target", "warn", "hard")),
-        "counts": {"type": "object", "additionalProperties": _STATE_INTEGER},
-        "status": _STATE_STRING, "closed": _STATE_BOOLEAN, "closed_at": _state_nullable(_STATE_DATETIME),
-        "closed_by": _STATE_STRING, "report_version": _STATE_INTEGER, "close_suggested": _STATE_BOOLEAN,
-    }, ("key", "repo", "repositories", "base", "environments", "work_minutes", "counts", "status", "closed",
-        "closed_at", "closed_by", "report_version", "close_suggested"))),
-    "tickets": _state_array(_state_object({
-        "key": _STATE_STRING, "project": _STATE_STRING, "status": _STATE_STRING, "type": _STATE_STRING,
-        "priority": _STATE_STRING, "labels": _STATE_STRING_ARRAY, "summary": _STATE_STRING,
-        "parent_key": _state_nullable(_STATE_STRING), "blocked_by": _STATE_STRING_ARRAY,
-        "done_at": _state_nullable(_STATE_DATETIME),
-        "epic": _STATE_STRING, "repository": _STATE_STRING, "run": _state_nullable(_STATE_RUN),
-        "last_run": _state_nullable(_STATE_RECENT_RUN), "updated_age_s": _state_nullable(_STATE_INTEGER),
-        "already_done": _state_nullable(_state_object({"pr_url": _STATE_STRING, "run_id": _STATE_STRING}, ("pr_url", "run_id"))),
-    }, ("key", "project", "status", "type", "priority", "labels", "summary", "parent_key", "blocked_by", "done_at", "epic",
-        "repository", "run", "last_run", "updated_age_s", "already_done"))),
-    "release_readiness": _state_array(_state_object({
-        "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "ready": _STATE_BOOLEAN,
-        "ticket_count": _STATE_INTEGER, "done_count": _STATE_INTEGER, "tickets": _STATE_STRING_ARRAY,
-        "reasons": _state_array(_STATE_READINESS_REASON),
-    }, ("project", "version_id", "version", "ready", "ticket_count", "done_count", "tickets", "reasons"))),
-    "release_progress": _state_array(_state_object({
-        "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "released": _STATE_BOOLEAN,
-        "release_date": _state_nullable(_STATE_STRING), "ready": _STATE_BOOLEAN, "ticket_count": _STATE_INTEGER,
-        "done_count": _STATE_INTEGER, "started_at": _state_nullable(_STATE_DATETIME),
-        "tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
-            "status": _STATE_STRING, "added_at": _state_nullable(_STATE_DATETIME), "added_late": _STATE_BOOLEAN},
-            ("key", "summary", "status", "added_at", "added_late"))),
-        "open_tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
-            "status": _STATE_STRING, "added_at": _state_nullable(_STATE_DATETIME), "added_late": _STATE_BOOLEAN},
-            ("key", "summary", "status", "added_at", "added_late"))),
-        "late_tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
-            "status": _STATE_STRING, "added_at": _state_nullable(_STATE_DATETIME), "added_late": _STATE_BOOLEAN},
-            ("key", "summary", "status", "added_at", "added_late"))),
-        "reasons": _state_array(_STATE_READINESS_REASON),
-        "release": _state_object({"status": _STATE_STRING, "tracker": _STATE_STRING, "tag": _STATE_STRING,
-            "github_release_url": _STATE_STRING, "detail": _STATE_STRING, "steps": _state_array(_STATE_RELEASE_STEP)},
-            ("status", "tracker", "tag", "github_release_url", "detail", "steps")),
-    }, ("project", "version_id", "version", "released", "release_date", "ready", "ticket_count", "done_count",
-        "started_at", "tickets", "open_tickets", "late_tickets", "reasons", "release"))),
-    "incidents": _state_array(_STATE_INCIDENT), "incidents_recent": _state_array(_STATE_INCIDENT),
-    "events": _state_array(_state_object({
-        "ts": _STATE_DATETIME, "type": _STATE_STRING, "ticket": _STATE_STRING, "account": _STATE_STRING,
-        "node": _STATE_STRING, "outcome": _STATE_STRING, "reason": _STATE_STRING,
-    }, ("ts", "type", "ticket", "account", "node", "outcome", "reason"))),
-    "sa": _state_object({
-        "thresholds": _state_object({"slots_used_percent": _STATE_NUMBER, "slots_duration_minutes": _STATE_NUMBER,
-            "role_cooldown_minutes": _STATE_NUMBER, "idle_days": _STATE_NUMBER,
-            "credential_expiry_days": _STATE_NUMBER},
-            ("slots_used_percent", "slots_duration_minutes", "role_cooldown_minutes", "idle_days", "credential_expiry_days")),
-        "slots": _state_object({"used": _STATE_INTEGER, "total": _STATE_INTEGER,
-            "utilization_percent": _state_nullable(_STATE_NUMBER), "pressure_since": _state_nullable(_STATE_DATETIME)},
-            ("used", "total", "utilization_percent", "pressure_since")),
-        "recommendations": _state_array(_state_object({"kind": _STATE_STRING, "subject": _STATE_STRING,
-            "reason": _STATE_STRING}, ("kind", "subject", "reason"))),
-        "policy_denials": _state_array(_state_object({"id": _STATE_INTEGER, "ts": _STATE_DATETIME,
-            "ticket": _STATE_STRING, "account": _STATE_STRING, "node": _STATE_STRING, "run_id": _STATE_STRING,
-            "reason": _STATE_STRING, "command": _state_nullable(_STATE_STRING)},
-            ("id", "ts", "ticket", "account", "node", "run_id",
-                "reason", "command"))),
-        "provider_blocks": _state_array(_STATE_ACCOUNT),
-        "network_issues": _state_array(_state_object({"source": _STATE_STRING,
-            "id": {"anyOf": [_STATE_INTEGER, _STATE_STRING]},
-            "ts": _STATE_DATETIME, "type": _STATE_STRING, "ticket": _STATE_STRING, "project": _STATE_STRING,
-            "step": _STATE_STRING, "account": _STATE_STRING, "node": _STATE_STRING, "run_id": _STATE_STRING,
-            "status": _STATE_STRING, "outcome": _STATE_STRING, "error_kind": _STATE_STRING,
-            "detail": _STATE_STRING, "attempts": _STATE_INTEGER, "retry": _STATE_BOOLEAN,
-            "reason": _STATE_STRING, "data": _STATE_ANY_OBJECT}, ("source",))),
-    }, ("thresholds", "slots", "recommendations", "policy_denials", "provider_blocks", "network_issues")),
-    "role_health": _state_object({
-        "settings": _state_object({"window_runs": _STATE_INTEGER, "failure_percent": _STATE_NUMBER,
-            "updated_by": _STATE_STRING, "updated_at": _state_nullable(_STATE_DATETIME),
-            "defaults": _state_object({"window_runs": _STATE_INTEGER, "failure_percent": _STATE_INTEGER},
-                                       ("window_runs", "failure_percent"))},
-            ("window_runs", "failure_percent", "updated_by", "updated_at", "defaults")),
-        "metrics_days": _STATE_INTEGER,
-        "roles": _state_array(_state_object({
-            "account": _STATE_STRING, "provider": _STATE_STRING, "role": _STATE_STRING, "enabled": _STATE_BOOLEAN,
-            "mode": _STATE_STRING, "note": _STATE_STRING, "disabled_at": _state_nullable(_STATE_DATETIME),
-            "failure_score": _state_nullable(_STATE_NUMBER), "scored_runs": _STATE_INTEGER,
-            "success_rate": _state_nullable(_STATE_NUMBER), "finished_tickets": _STATE_INTEGER,
-            "cost_per_finished_ticket": _state_nullable(_STATE_NUMBER), "rework_rounds": _STATE_INTEGER,
-            "probation": _state_nullable(_state_object({"open_ticket": _STATE_STRING, "streak": _STATE_INTEGER,
-                "needed": _STATE_INTEGER, "results": _STATE_STRING_ARRAY}, ("open_ticket", "streak", "needed", "results"))),
-        }, ("account", "provider", "role", "enabled", "mode", "note", "disabled_at", "failure_score", "scored_runs",
-            "success_rate", "finished_tickets", "cost_per_finished_ticket", "rework_rounds", "probation"))),
-    }, ("settings", "metrics_days", "roles")),
-    "rollout": _state_nullable(_state_object({
-        "id": _STATE_INTEGER, "target": _STATE_STRING, "previous": _STATE_STRING, "status": _STATE_STRING,
-        "wave": _STATE_INTEGER, "batch_size": _STATE_INTEGER, "failed_node": _STATE_STRING,
-        "reason": _STATE_STRING, "rollback": _STATE_STRING, "started_at": _STATE_DATETIME,
-        "nodes": _state_array(_state_object({"node": _STATE_STRING, "wave": _STATE_INTEGER,
-            "status": _STATE_STRING, "from": _STATE_STRING, "detail": _STATE_STRING},
-            ("node", "wave", "status", "from", "detail"))),
-    }, ("id", "target", "previous", "status", "wave", "batch_size", "failed_node", "reason", "rollback",
-        "started_at", "nodes"))),
-    "version_policy": _state_object({"control": _STATE_STRING, "max_minor_lag": _STATE_INTEGER},
-                                     ("control", "max_minor_lag")),
-    "totals": _state_object({"runs_24h": _STATE_INTEGER, "cost_24h": _STATE_NUMBER,
-        "tokens_in_24h": _STATE_INTEGER, "tokens_out_24h": _STATE_INTEGER,
-        "done_24h": _STATE_INTEGER, "failed_24h": _STATE_INTEGER},
-        ("runs_24h", "cost_24h", "tokens_in_24h", "tokens_out_24h", "done_24h", "failed_24h")),
-}, ("generated_at", "env", "control_repo", "versions", "version", "links", "tool_waits", "nodes", "accounts",
-    "active_runs", "recent_runs", "projects", "tickets", "release_readiness", "release_progress", "incidents",
-    "incidents_recent", "events", "sa", "role_health", "rollout", "version_policy", "totals"))
-
+STATE_RESPONSE_SCHEMA = state_schema.STATE_RESPONSE_SCHEMA
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -1296,7 +1030,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if (configured and separator and scheme.lower() == "bearer" and token.strip()
                 and secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
             writable()
-            return ""
+            return OWNER_TOKEN_PRINCIPAL
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
         user = resolve_session_user(ctx.db, claims) if claims else None
         if user and has_permission(user.effective_roles, "knowledge.approve"):
@@ -2014,7 +1748,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.put("/v1/notifications/channels")
     async def notification_channel_save(request: Request) -> dict:
-        notification_admin(request, "write")
+        user = notification_admin(request, "write")
         payload = await notification_json(request)
         config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
         if str(payload.get("kind") or "").strip().lower() == "telegram" and config.get("ba_chat_enabled"):
@@ -2025,22 +1759,31 @@ def create_app(ctx: Ctx) -> FastAPI:
             channel = notify.save_channel(ctx.db, payload)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+        audit("notifications", "channel_save", "", "", None, user.subject, True,
+              "notification channel saved", {"channel_id": channel["id"], "kind": channel["kind"],
+                                               "enabled": channel["enabled"]})
         return {"channel": channel}
 
     @app.delete("/v1/notifications/channels/{channel_id}")
     def notification_channel_delete(channel_id: int, request: Request) -> dict:
-        notification_admin(request, "write")
+        user = notification_admin(request, "write")
         if not notify.delete_channel(ctx.db, channel_id):
             raise HTTPException(404, "notification channel was not found")
+        audit("notifications", "channel_delete", "", "", None, user.subject, True,
+              "notification channel deleted", {"channel_id": channel_id})
         return {"deleted": True}
 
     @app.put("/v1/notifications/preferences")
     async def notification_preferences_save(request: Request) -> dict:
-        notification_admin(request, "write")
+        user = notification_admin(request, "write")
         try:
             preferences = notify.save_preferences(ctx.db, await notification_json(request))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+        audit("notifications", "preferences_save", "", "", None, user.subject, True,
+              "notification routing preferences saved",
+              {"route_count": sum(len(ids) for ids in preferences["routes"].values()),
+               "quiet_hours_enabled": bool(preferences["quiet_start"] and preferences["quiet_end"])})
         return {"preferences": preferences}
 
     @app.post("/v1/notifications/channels/{channel_id}/test")
@@ -2068,28 +1811,37 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/licensing/activate")
     def activate_license(body: LicenseKeyBody, request: Request) -> dict:
-        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        user = console_user(request, "licensing.manage", target="licensing", action="license_activate")
         try:
-            return licensing.activate_online(ctx.db, body.key, ctx.settings.license_service_url,
-                                             ctx.settings.license_public_key)
+            state = licensing.activate_online(ctx.db, body.key, ctx.settings.license_service_url,
+                                              ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
+        audit("licensing", "license_activate", "", "", None, user.subject, True, "activated online",
+              {"source": "online", "plan": state["plan"]})
+        return state
 
     @app.post("/v1/licensing/offline")
     def activate_license_offline(body: OfflineLicenseBody, request: Request) -> dict:
-        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        user = console_user(request, "licensing.manage", target="licensing", action="license_activate")
         try:
-            return licensing.activate(ctx.db, body.license_file, ctx.settings.license_public_key, "offline")
+            state = licensing.activate(ctx.db, body.license_file, ctx.settings.license_public_key, "offline")
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
+        audit("licensing", "license_activate", "", "", None, user.subject, True, "activated offline",
+              {"source": "offline", "plan": state["plan"]})
+        return state
 
     @app.put("/v1/licensing/limits")
     def update_license_limits(body: PlanLimitsBody, request: Request) -> dict:
-        console_user(request, "licensing.manage", target="licensing", action="license_limits")
+        user = console_user(request, "licensing.manage", target="licensing", action="license_limits")
         try:
-            return licensing.save_limits(ctx.db, body.plan, body.limits, ctx.settings.license_public_key)
+            state = licensing.save_limits(ctx.db, body.plan, body.limits, ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
+        audit("licensing", "license_limits", "", "", None, user.subject, True, "limits updated",
+              {"plan": body.plan, "limits": body.limits})
+        return state
 
     @app.get("/v1/licensing/usage")
     def licensing_usage(request: Request) -> dict:
@@ -3821,6 +3573,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("node.removed", node=name, outcome="removed", reason="removed from Machines and AI screen")
         return {"node": name, "removed": True}
 
+    flow_doctor_api.mount_node_routes(app, ctx, node_auth)
+
     @app.post("/v1/nodes/{name}/operations", status_code=202)
     def create_node_operation(name: str, body: NodeOperationBody, request: Request) -> dict:
         user = console_user(request, {"nodes.manage"}, target="node", action=body.action, node=name)
@@ -4139,7 +3893,12 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         quota_at_risk = quota_forecast_at_risk(account_id)
         node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics,readiness,accepting_work FROM nodes WHERE name=%s"
-                              " AND removed_at IS NULL", (node,)) or {}
+                              " AND removed_at IS NULL AND status='online' AND last_heartbeat IS NOT NULL"
+                              " AND last_heartbeat > now() - make_interval(secs => %s)",
+                              (node, shared_accounts.NODE_ONLINE_S))
+        # Never route from persisted pre-reboot readiness; the agent must report a fresh heartbeat first.
+        if not node_row:
+            return []
         if not node_row.get("accepting_work", True):
             return []
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
@@ -4395,6 +4154,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
                                          PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
             out += dev_rows
+        # Routes the Flow doctor moved a ticket away from (failed account or machine) are not offered again.
+        out = flow_doctor.exclude_failed_routes(ctx, account_id, node, out)
         # Keep the normal workflow order stable, but put a generated flow bug first whenever it is eligible.
         out.sort(key=lambda t: "flow-bug" not in (t.get("labels") or []))
         if quota_at_risk and out:
@@ -6162,6 +5923,18 @@ def create_app(ctx: Ctx) -> FastAPI:
                        " cooldown_until=NULL, last_error='', cooldown_since=NULL,"
                        " idle_since=CASE WHEN status='working' THEN NULL ELSE coalesce(idle_since,now()) END"
                        " WHERE id=%s", (account_id,))
+            # Provider authorization is complete when the node reports the first successful credential probe.
+            # Clearing this state here removes the former nodes.manage console confirmation from recovery.
+            completed = ctx.db.one(
+                "UPDATE managed_ai_accounts m SET sign_in_url='',sign_in_code='',sign_in_error='',"
+                " sign_in_status='idle',sign_in_request_id='',sign_in_expires_at=NULL,"
+                " sign_in_started_at=NULL,updated_at=now() FROM accounts a"
+                " WHERE m.id=%s AND m.node=%s AND m.removed_at IS NULL AND m.sign_in_status='completed'"
+                " AND a.id=m.id AND a.status IN ('idle','working') AND a.last_probe_at>=m.sign_in_started_at"
+                " RETURNING m.provider", (account_id, node))
+            if completed:
+                ctx.events.emit("account.sign_in_completed", account=account_id, provider=completed["provider"],
+                                node=node, outcome="ready", reason="successful credential probe confirmed provider sign-in")
         else:
             ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'error' END, last_error=%s,"
                        " cooldown_since=NULL, idle_since=NULL"
@@ -6525,9 +6298,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, "knowledge.manage", target="knowledge", action="item_save")
         try:
             item = knowledge.save_item(ctx.db, project=body.project, scope=body.scope, epic=body.epic, kind=body.kind,
-                                       title=body.title, content=body.content, actor=body.actor or user.subject)
+                                       title=body.title, content=body.content, actor=user.subject)
         except knowledge.Invalid as exc:
             raise HTTPException(422, str(exc)) from exc
+        audit("knowledge", "item_save", str(item["id"]), "", None, user.subject, True, "saved",
+              {"kind": body.kind, "project": body.project, "scope": body.scope})
         return knowledge._pack_item(item)
 
     @app.post("/v1/knowledge/items/{item_id}/{action}")
@@ -6535,12 +6310,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, "knowledge.manage", target="knowledge", action="item_" + action,
                             node=str(item_id))
         try:
-            item = knowledge.moderate_item(ctx.db, item_id, action=action, actor=body.actor or user.subject,
+            item = knowledge.moderate_item(ctx.db, item_id, action=action, actor=user.subject,
                                            content=body.content, title=body.title,
                                            duplicate_id=body.duplicate_id, project=body.project,
                                            scope=body.scope or None, epic=body.epic)
         except knowledge.Invalid as exc:
             raise HTTPException(422 if "not found" not in str(exc) else 404, str(exc)) from exc
+        audit("knowledge", "item_" + action, str(item_id), "", None, user.subject, True, "updated",
+              {"item_id": item_id})
         return knowledge._pack_item(item)
 
     # --- Knowledge screen: versioned control-repo resources -------------------------------------------------
@@ -6619,24 +6396,24 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/knowledge/resources")
     def knowledge_save(body: KnowledgeBody, request: Request) -> dict:
-        console_user(request, "knowledge.manage", target="aiflow-control", action="resource_save")
+        user = console_user(request, "knowledge.manage", target="aiflow-control", action="resource_save")
         if not body.id.strip():
             raise HTTPException(400, "resource id is required")
         action = "archive" if body.archived else "save"
-        return submit_resource_change(body.type, body.id, body.title, body.content, body.archived, body.actor, action,
+        return submit_resource_change(body.type, body.id, body.title, body.content, body.archived, user.subject, action,
                                       body.version)
 
     @app.post("/v1/knowledge/resources/{kind}/{resource_id}/restore")
     def knowledge_restore(kind: str, resource_id: str, body: KnowledgeRestoreBody, request: Request) -> dict:
-        console_user(request, "knowledge.manage", target="aiflow-control", action="resource_restore",
-                     node=resource_id)
+        user = console_user(request, "knowledge.manage", target="aiflow-control", action="resource_restore",
+                            node=resource_id)
         load_managed_resources()
         version = ctx.db.one("SELECT title,content,archived FROM managed_resource_history WHERE resource_type=%s"
                              " AND resource_id=%s AND version=%s", (kind, resource_id, body.version))
         if not version:
             raise HTTPException(404, "resource version not found")
         return submit_resource_change(kind, resource_id, version["title"], version["content"], version["archived"],
-                                      body.actor, "restore")
+                                      user.subject, "restore")
 
     @app.post("/v1/knowledge/proposals/{proposal_id}/approve")
     def knowledge_approve(proposal_id: int, body: KnowledgeApprovalBody,
@@ -6648,7 +6425,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(409, "policy proposal is no longer pending")
         github = github_control_gateway(ctx)
         repo_name = Path(ctx.settings.control_repo).name
-        owner = _owner or body.approved_by.strip() or "owner"
+        owner = _owner
         try:
             merged = github.merge_pr(repo_name, int(proposal["pr_number"]),
                                          f"Policy: {proposal['title']}", "squash")

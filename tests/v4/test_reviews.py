@@ -158,6 +158,8 @@ def test_reviewer_approve_merges_with_fence_and_marks_ticket_done(client, ctx):
     audit = ctx.db.one("SELECT target, action, accepted, fence FROM write_audit WHERE ticket='TESTWP-83'"
                        " AND action='merge' ORDER BY id DESC LIMIT 1")
     assert audit == {"target": "github", "action": "merge", "accepted": True, "fence": 1}
+    # a review decision is the product working, never an operator intervention (JAIF-260 AC6)
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
 
 
 def test_refused_approval_is_recorded_on_jira_pr_and_audit(client, ctx, monkeypatch):

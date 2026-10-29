@@ -224,6 +224,13 @@ def assign_probation(db, account_id: str, role: str, ticket_key: str) -> int | N
     return row["id"] if row else None
 
 
+def expedite_probation(db, account_id: str, role: str) -> bool:
+    """True when a switched-off role has a free probation slot now (no day-long wait) after a repair."""
+    return bool(db.one("SELECT 1 AS x FROM role_health WHERE account_id=%s AND role=%s AND NOT enabled"
+                       " AND NOT EXISTS (SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND result='')",
+                       (account_id, role, account_id, role)))
+
+
 def attach_probation_run(db, probation_id: int, run_id: str) -> None:
     db.run("UPDATE role_probation SET run_id=%s WHERE id=%s", (run_id, probation_id))
 
@@ -388,7 +395,8 @@ def switch_off(ctx, account_id: str, role: str, score: float, window: int, histo
             f"scored runs is above {percent}%. Its other roles stay on. {diagnostics}\n"
             "One easy probation ticket may run at a time; two in a row that succeed bring the role back.")
     ctx.db.run("INSERT INTO role_health (account_id, role, enabled, note, score, disabled_at) VALUES (%s,%s,false,%s,%s,now())"
-               " ON CONFLICT (account_id, role) DO UPDATE SET enabled=false, note=EXCLUDED.note, score=EXCLUDED.score,"
+               " ON CONFLICT (account_id, role) DO UPDATE SET enabled=false,"
+               " note=EXCLUDED.note, score=EXCLUDED.score,"
                " disabled_at=now(), updated_at=now()", (account_id, role, note, round(score, 4)))
     ctx.events.emit("role.disabled", account=account_id, step=role, outcome="disabled", reason=note,
                     score=round(score, 4))

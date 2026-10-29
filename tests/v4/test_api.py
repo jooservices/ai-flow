@@ -7,13 +7,13 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from conftest import add_open_escalation, add_ticket, join_node
+from conftest import add_open_escalation, add_ticket, join_node, report_account_credentials
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 
 
-def join(client, name, ip=""):
-    r = join_node(client, name, ip=ip)
+def join(client, name, ip="", *, heartbeat=True):
+    r = join_node(client, name, ip=ip, heartbeat=heartbeat)
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
@@ -701,9 +701,9 @@ def test_quota_exhaustion_routes_ticket_to_peer_and_returns_it_after_reset(clien
     from aiflow.v4.core.controlrepo import Account
 
     headers = join(client, "cc")
-    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=headers)
     ctx.repo().accounts.append(Account(id="claude-02", provider="claude", node="cc", tier="senior", roles=["dev"]))
     client.app.state.sync_accounts()
+    report_account_credentials(ctx, "cc", {"claude-02": {"present": True, "valid": True}})
     add_ticket(ctx.db, "TESTWP-QUOTA-RESET")
 
     claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-QUOTA-RESET", "account": "claude-01"},
@@ -1066,7 +1066,7 @@ def test_role_with_one_ready_account_is_reported(client, ctx):
     ctx.db.run("UPDATE accounts SET status='signed_out' WHERE id='codex-01'")
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title FROM incidents WHERE kind='role_coverage' AND subject='verify' AND closed_at IS NULL")
-    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account"
+    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account(s) from 1 provider(s)"
 
 
 def test_state_reports_registration_and_last_seen_for_an_offline_node(client, ctx):

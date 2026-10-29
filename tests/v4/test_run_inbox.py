@@ -5,9 +5,10 @@ from uuid import uuid4
 from conftest import add_ticket, join_node
 
 
-def _claim(client, ctx, key: str):
-    joined = join_node(client, "cc")
-    node = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+def _claim(client, ctx, key: str, node: dict | None = None):
+    if node is None:
+        joined = join_node(client, "cc")
+        node = {"Authorization": f"Bearer {joined.json()['node_token']}"}
     add_ticket(ctx.db, key)
     claimed = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01"}, headers=node)
     assert claimed.status_code == 200 and claimed.json()["claimed"]
@@ -94,7 +95,7 @@ def test_lost_run_accepts_late_usage_once_without_reopening_or_resetting_account
     watchdog(ctx)
     assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run["run_id"],))["status"] == "lost"
     assert ctx.db.one("SELECT status FROM accounts WHERE id=%s", (run["account"],))["status"] == "idle"
-    replacement_node, replacement = _claim(client, ctx, "TESTWP-INBOX-REPLACEMENT")
+    replacement_node, replacement = _claim(client, ctx, "TESTWP-INBOX-REPLACEMENT", node=node)
     assert replacement["account"] == run["account"]
 
     result_body = {"fence": run["fence"], "outcome": "done", "tokens_in": 17,

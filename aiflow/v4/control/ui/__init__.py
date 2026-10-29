@@ -69,6 +69,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     licensing_notice_script = HERE / "licensing_notice.js"
     release_readiness_script = HERE / "release-readiness.js"
     scale_proof_script = HERE / "scale-proof.js"
+    flow_doctor_script = HERE / "flow-doctor.js"
     run_inbox_script = HERE / "run-inbox.js"
     user_form_state_script = HERE / "user-form-state.js"
 
@@ -85,6 +86,11 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/console-assets/scale-proof.js", include_in_schema=False)
     def scale_proof_asset() -> FileResponse:
         return FileResponse(scale_proof_script, media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/console-assets/flow-doctor.js", include_in_schema=False)
+    def flow_doctor_asset() -> FileResponse:
+        return FileResponse(flow_doctor_script, media_type="application/javascript",
                             headers={"Cache-Control": "no-cache"})
 
     @app.get("/console-assets/run-inbox.js", include_in_schema=False)

@@ -367,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
         import uvicorn
         from .control.api import create_app
         from .control.ui import mount_ui
+        wait_for_control_stores(s)
         ctx = build_ctx(s)
         ctx.db.migrate()
         ctx.events.start()
@@ -376,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "control-loops":
         from .control.loops import run_loops
+        wait_for_control_stores(s)
         ctx = build_ctx(s)
         ctx.db.migrate()
         run_loops(ctx)
@@ -487,6 +489,25 @@ def main(argv: list[str] | None = None) -> int:
                heartbeat_s=s.heartbeat_s, poll_s=s.poll_s).run_forever()
         return 0
     return 2
+
+
+def wait_for_control_stores(settings) -> None:
+    """Wait for PostgreSQL and Redis on boot so the control plane starts after its durable stores."""
+    import time
+
+    import psycopg
+    import redis
+
+    while True:
+        try:
+            with psycopg.connect(settings.database_url, connect_timeout=5) as connection:
+                connection.execute("SELECT 1")
+            redis.Redis.from_url(settings.redis_url, socket_connect_timeout=5, socket_timeout=5).ping()
+            return
+        except (psycopg.Error, redis.exceptions.RedisError, OSError) as exc:
+            logging.getLogger("aiflow4.startup").warning(
+                "control stores are not ready (%s); retrying automatically", type(exc).__name__)
+            time.sleep(2)
 
 
 if __name__ == "__main__":

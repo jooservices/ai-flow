@@ -862,12 +862,11 @@ def test_develop_deploy_with_node_agent_off_installs_nothing(tmp_path):
     assert "not installed" in out
 
 
-def test_develop_deploy_with_node_agent_off_disables_an_earlier_agent(tmp_path):
+def test_develop_deploy_with_node_agent_off_preserves_an_earlier_agent(tmp_path):
     out, calls = _run_develop_node_agent_step(tmp_path / "a", "0", True)
-    assert "systemctl disable -q --now aiflow4-node-agent" in calls
-    assert "systemctl reset-failed aiflow4-node-agent" in calls
-    assert "install " not in calls
-    assert "node agent disabled and stopped" in out
+    assert "systemctl list-unit-files aiflow4-node-agent.service" in calls
+    assert "install x.tar.gz 0123456789" in calls
+    assert "node agent disabled and stopped" not in out
 
 
 # JAIF-244: with console sign-in on, /v1/state answers 401 (the curl stubs above refuse it). The scripts read the

@@ -62,6 +62,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderGitHubIntegrations": ("integrations",),
     "renderLive": None,
     "renderDashboard": ("cc",),
+    "flowDoctorPanel": ("cc",),
     "scaleProofPanel": ("cc",),
     "dashboardProjectCounts": ("cc",),
     "providerUsageChart": ("cc",),
@@ -225,6 +226,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # `HINTS` are mapped to their own screen instead.
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
+    # The changed pointer behavior lets Dashboard actions remain clickable beneath the toast area.
+    (re.compile(r"^\s*\.toasts\{"), "cc"),
     (re.compile(r"^\s+(?:release_running|release_failed|scale_proof_(?:missing|failed)): function"), "cc"),
     (re.compile(r"^\s+(?:release_running|release_failed|scale_proof_(?:missing|failed)): function"), "business"),
     (re.compile(r"Scale proof \(/v1/state scale_proof\)|value against every budget"), "cc"),
@@ -751,6 +754,7 @@ def site_dir() -> Path | None:
 # helpers they call are still discovered; response helpers such as `state.snapshot` remain tracked normally.
 API_IMPLEMENTATION_ONLY_HELPERS = {
     "aiflow/v4/control/licensing.py": frozenset({"_row", "_row_in_connection"}),
+    "aiflow/v4/control/api.py": frozenset({"audit", "audit_in", "owner_auth"}),
 }
 
 @lru_cache(maxsize=1)

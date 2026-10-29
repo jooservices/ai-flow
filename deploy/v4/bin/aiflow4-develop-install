@@ -24,9 +24,14 @@ PREV=$(readlink -f /srv/aiflow/current 2>/dev/null || true)
 ln -sfn "$REL" /srv/aiflow/current.new && mv -T /srv/aiflow/current.new /srv/aiflow/current
 install -m 0755 "$REL/deploy/v4/bin/aiflow4-develop-install" /usr/local/sbin/aiflow4-develop-install.new
 mv -f /usr/local/sbin/aiflow4-develop-install.new /usr/local/sbin/aiflow4-develop-install
+install -m 0755 "$REL/deploy/v4/bin/aiflow4-audit-install" /usr/local/sbin/aiflow4-audit-install.new
+mv -f /usr/local/sbin/aiflow4-audit-install.new /usr/local/sbin/aiflow4-audit-install
+install -d -m 0755 /usr/local/share/aiflow4/audit
+install -m 0640 "$REL/deploy/v4/audit/aiflow4-operator.rules" /usr/local/share/aiflow4/audit/aiflow4-operator.rules
 install -m 0644 "$REL"/deploy/v4/node/systemd/*.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable -q aiflow4-node-agent
+/usr/local/sbin/aiflow4-audit-install
 systemctl restart aiflow4-node-agent
 sleep 15
 if ! systemctl is-active --quiet aiflow4-node-agent || ! /srv/aiflow/current/.venv/bin/aiflow4 version >/dev/null 2>&1; then

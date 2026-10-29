@@ -38,8 +38,8 @@ def process_ticket(supervisor: Any, issue: dict[str, Any], view: dict[str, Any],
     project = supervisor.cfg.project(key)
     if issue["status"] == "To Do" and supervisor.incomplete(key, view):
         return True
-    from .gitops import Repo
-    repo = Repo(supervisor.cfg.root, ticket_field(description, "Repo", project.repo), project.company)
+    from . import supervisor as supervisor_module  # the repository class is looked up where tests and callers replace it
+    repo = supervisor_module.Repo(supervisor.cfg.root, ticket_field(description, "Repo", project.repo), project.company)
     change = supervisor.change_type(key)
     base, start = branch_for(project, change, str(view.get("type", "")), description)
     record_process_metadata(supervisor, key, issue, view, role, agent, change, log_message)

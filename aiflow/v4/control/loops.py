@@ -361,6 +361,12 @@ def watchdog(ctx: Ctx) -> None:
             retry_hold.apply(ctx)
         except Exception as e:  # noqa: BLE001 - a failing hold pass must not stop the rest of the watchdog
             log.warning("retry hold pass failed: %s", e)
+
+    try:  # an unanswered owner question with a reversible recommendation is applied after its deadline
+        from . import escalation_deadline
+        escalation_deadline.apply_due(ctx)
+    except Exception as e:  # noqa: BLE001 - a failing deadline pass must not stop the rest of the watchdog
+        log.warning("escalation deadline pass failed: %s", e)
     # a flow that stands still and a configuration that keeps a project from getting work
     try:
         check_stack_pins(ctx)

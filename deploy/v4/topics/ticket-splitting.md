@@ -1,1 +1,1 @@
-- [Ticket splitting](../../../docs/v4/ticket-splitting.md): validate_plan accepts 2 to 8 children; decide_split sets needs_split from capacity.estimate high minutes versus the project target
+- [Ticket splitting](../../../docs/v4/ticket-splitting.md): validate_plan accepts 2 to 8 children; needs_split tickets return that list from intake without creating Jira issues

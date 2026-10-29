@@ -13,12 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-VERBS = frozenset("""
+_VERB_TEXT = """
 accept acknowledge activate add answer apply approve attach cancel check claim close complete connect create deactivate decide
 delete detach disable disconnect download enable escalate execute export finish generate heartbeat import install join leave
 login logout merge pause probe raise reject reload release remove reopen reset restart restore resume retry revoke rollback
 rotate run scan send start stop submit sweep sync test transition trigger unlock update upgrade validate verify
-""".split())
+"""
+VERBS = frozenset(_VERB_TEXT.split())
 PARAM = re.compile(r"\{[^}]+\}")
 EXEMPT = ("/healthz",)
 OPERATION_OK = "operation endpoint (allowed by the standard when documented)"
@@ -70,7 +71,7 @@ def findings_for(method: str, path: str) -> list[str]:
         found.append("no version prefix")
     if re.search(r"\.[a-z0-9]{2,5}($|/)", path):
         found.append("file extension in the path (use content negotiation or a download resource)")
-    for before, after in zip(segs, segs[1:]):
+    for before, after in zip(segs, segs[1:], strict=False):
         if PARAM.fullmatch(after) and not PARAM.fullmatch(before) and before != "v1" and not before.endswith("s"):
             found.append(f"collection `{before}` is not plural")
     return list(dict.fromkeys(found))

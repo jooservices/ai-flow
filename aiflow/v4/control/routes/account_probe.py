@@ -27,6 +27,20 @@ class ProbeBody(BaseModel):
     credential_expires_at: datetime | None = None
 
 
+def _complete_sign_in(ctx, account_id: str, node: str) -> None:
+    """The first successful credential probe completes a provider sign-in; no console confirmation is needed."""
+    completed = ctx.db.one(
+        "UPDATE managed_ai_accounts m SET sign_in_url='',sign_in_code='',sign_in_error='',"
+        " sign_in_status='idle',sign_in_request_id='',sign_in_expires_at=NULL,"
+        " sign_in_started_at=NULL,updated_at=now() FROM accounts a"
+        " WHERE m.id=%s AND m.node=%s AND m.removed_at IS NULL AND m.sign_in_status='completed'"
+        " AND a.id=m.id AND a.status IN ('idle','working') AND a.last_probe_at>=m.sign_in_started_at"
+        " RETURNING m.provider", (account_id, node))
+    if completed:
+        ctx.events.emit("account.sign_in_completed", account=account_id, provider=completed["provider"],
+                        node=node, outcome="ready", reason="successful credential probe confirmed provider sign-in")
+
+
 def _node_auth(request: Request, authorization: str = Header(default="")) -> str:
     return request.app.state.control_api_auth["node_auth"](authorization)
 
@@ -73,6 +87,7 @@ def account_probe(account_id: str, body: ProbeBody, request: Request,
                    "cooldown_until=NULL,last_error='',cooldown_since=NULL,"
                    "idle_since=CASE WHEN status='working' THEN NULL ELSE coalesce(idle_since,now()) END"
                    " WHERE id=%s", (account_id,))
+        _complete_sign_in(ctx, account_id, node)
     else:
         ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'error' END,last_error=%s,"
                    "cooldown_since=NULL,idle_since=NULL WHERE id=%s",

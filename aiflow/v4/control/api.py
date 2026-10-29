@@ -56,14 +56,16 @@ from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts,
 from . import run_inbox as run_inbox_control
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
-                           issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
+                           issue_session, landing_page, normalize_role, normalize_roles, resolve_session_user,
                            verify_session)
 from . import capacity, claim_project, conflict_loss, hotfiles, merge_queue, review_queue_api, worker_candidates
 from . import merge_flow
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
+from . import route_deps
 from .db import DB, J
+from .route_deps import github_connection_used, h
 from .events import Events
 from .github import GitHubApp, GitHubError
 from .github_connect import GitHubSecretStore, app_metadata
@@ -387,10 +389,6 @@ STATE_RESPONSE_SCHEMA = _state_object({
     "incidents_recent", "events", "sa", "role_health", "rollout", "version_policy", "totals"))
 
 
-def h(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
-
-
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -485,8 +483,6 @@ class Ctx:
     refresh_repo: Callable[[], None] | None = None
     jira_auth: Any = None  # jira_connect.JiraAuth: the Jira credential connected on the Integrations screen
 
-
-github_connection_used: ContextVar[str] = ContextVar("github_connection_used", default="")
 
 
 def github_connections(ctx: Ctx) -> GitHubConnections:
@@ -1419,12 +1415,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     # --- auth -----------------------------------------------------------------------------------------------
     def node_auth(authorization: str = Header(default="")) -> str:
-        token = authorization.removeprefix("Bearer ").strip()
-        row = ctx.db.one("SELECT name FROM nodes WHERE token_hash = %s AND token_hash <> '' AND removed_at IS NULL",
-                         (h(token),)) if token else None
-        if not row:
-            raise HTTPException(401, "unknown node token")
-        return row["name"]
+        return route_deps.node_auth(ctx, authorization)
 
     def release_reader(authorization: str = Header(default="")) -> str:
         """A node token, or an unexpired, unconsumed join token so a new machine can fetch the signed release."""
@@ -1497,57 +1488,18 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
-        with ctx.db.transaction() as connection:
-            audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload)
+        route_deps.audit(ctx, target, action, ticket, run_id, fence, actor, accepted, result, payload)
 
     def audit_in(connection, target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str,
-                  accepted: bool, result: str, payload: dict | None = None) -> None:
-        connection.execute(
-            "INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (target, action, ticket, run_id, fence, actor, accepted, result[:500],
-             J(with_connection(target, payload))))
-
-    def with_connection(target: str, payload: dict | None) -> dict:
-        """Name the GitHub connection behind a GitHub write; it is an id, never a credential."""
-        payload = dict(payload or {})
-        used = github_connection_used.get()
-        if used and target in ("github", "aiflow-control") and "connection" not in payload:
-            payload["connection"] = used
-        return payload
+                 accepted: bool, result: str, payload: dict | None = None) -> None:
+        route_deps.audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload)
 
     def console_user(request: Request, permissions: set[str] | str | None, target: str = "console", action: str = "read",
                      node: str = "") -> ConsoleUser:
-        """Require a signed, unexpired console session. Role and subject headers are deliberately ignored."""
-        secret = ctx.settings.console_session_secret
-        if len(secret.encode()) < 32:
-            if action != "read":
-                audit(target, action, node, "", None, "", False, "console session signing key is not configured")
-            raise HTTPException(503, "console session authentication is not configured")
-        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), secret)
-        user = resolve_session_user(ctx.db, claims) if claims else None
-        if not user:
-            if action != "read":
-                audit(target, action, node, "", None, "", False, "authenticated console session required")
-            raise HTTPException(401, "authenticated console session required")
-        required = {permissions} if isinstance(permissions, str) else permissions
-        if required is not None and not role_satisfies(user.effective_roles, required):
-            if action != "read":
-                audit(target, action, node, "", None, user.subject, False, "not available for your role")
-            raise HTTPException(403, "not available for your role")
-        read_actions = {"read", "project_catalog", "project_repositories", "project_preflight",
-                        "list_import_installations", "open_installation_settings"}
-        if action not in read_actions | {"license_activate"}:
-            try:
-                licensing.require_writable(ctx.db, ctx.settings.license_public_key)
-            except licensing.LicenseError as exc:
-                raise HTTPException(423, str(exc)) from None
-        return user
+        return route_deps.console_user(ctx, request, permissions, target, action, node)
 
     def optional_console_user(request: Request) -> ConsoleUser | None:
-        """Read a session when present without changing the legacy open-console mode."""
-        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
-        return resolve_session_user(ctx.db, claims) if claims else None
+        return route_deps.optional_console_user(ctx, request)
 
     def require_capacity(resource: str, count: int | None = None, *, connection=None) -> dict:
         try:
@@ -1557,31 +1509,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(409, str(exc)) from None
 
     def run_row(run_id: str) -> dict:
-        try:
-            uuid.UUID(run_id)
-        except ValueError:
-            raise HTTPException(404, "unknown run")
-        row = ctx.db.one("SELECT * FROM runs WHERE id = %s", (run_id,))
-        if not row:
-            raise HTTPException(404, "unknown run")
-        return row
+        return route_deps.run_row(ctx, run_id)
 
     def fenced(run_id: str, fence: int, target: str, action: str, payload: dict | None = None) -> dict:
-        run = run_row(run_id)
-        ok = int(run["fence"]) == int(fence) and ctx.leases.valid(run["ticket_key"], str(run["id"]), int(fence))
-        if not ok:
-            audit(target, action, run["ticket_key"], run_id, fence, run["account_id"], False, "stale fencing token", payload)
-            ctx.events.emit("write.refused", ticket=run["ticket_key"], run_id=run_id, fence=fence,
-                            account=run["account_id"], node=run["node"], reason=f"{target}.{action}: stale fence")
-            raise HTTPException(409, "fencing token is no longer valid")
-        if run["step"] == "master" and target != "master":
-            audit(target, action, run["ticket_key"], run_id, fence, run["account_id"], False,
-                  "master writes must use the restricted master action API", payload)
-            ctx.events.emit("write.refused", ticket=run["ticket_key"], run_id=run_id, fence=fence,
-                            account=run["account_id"], node=run["node"],
-                            reason=f"{target}.{action}: master writes require the restricted action API")
-            raise HTTPException(403, "master writes must use the restricted master action API")
-        return run
+        return route_deps.fenced(ctx, run_id, fence, target, action, payload)
 
     def master_run(run_id: str, fence: int, node: str, action: str, payload: dict | None = None) -> dict:
         run = fenced(run_id, fence, "master", action, payload)

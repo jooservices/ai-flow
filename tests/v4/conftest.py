@@ -335,6 +335,19 @@ class FakeGitHub:
         self.branch_heads[(repo, branch)] = f"{len(self.commits):040x}"
         return f"commit{len(self.commits):04d}"
 
+    def commit_changes(self, repo, branch, expected_sha, writes, deletions, message):
+        if self.branch_heads.get((repo, branch), f"sha-{branch}") != expected_sha:
+            raise RuntimeError("422: Update is not a fast forward")
+        for path in deletions:
+            self.deleted_files.append((repo, path))
+            self.files.pop((repo, branch, path), None)
+        for path, content in writes.items():
+            self.files[(repo, branch, path)] = content
+        self.commits.append({"repo": repo, "branch": branch, "writes": dict(writes), "deletions": list(deletions),
+                             "message": message})
+        self.branch_heads[(repo, branch)] = f"{len(self.commits):040x}"
+        return self.branch_heads[(repo, branch)]
+
     def delete_file(self, repo, branch, path, message):
         self.deleted_files.append((repo, path))
         self.commits.append({"repo": repo, "branch": branch, "path": path, "content": "", "message": message,

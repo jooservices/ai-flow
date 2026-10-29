@@ -1,8 +1,9 @@
 # Needs owner triage
 
-A developer AI that stops with a question parks the ticket in **Needs owner**. Accounts with the `master` role in
-`aiflow-control/accounts.yaml` (Claude and Codex both hold it) answer those questions so that only real
-requirement conflicts and business decisions reach the owner.
+A developer AI that stops with a question parks the ticket in **Needs owner**. Accounts with the `master` role answer
+those questions so that only real requirement conflicts and business decisions reach the owner. After the one-time
+legacy inventory import, account roles are stored in the control database and managed in **Machines and AI**; the
+control plane does not read `accounts.yaml` for roles again.
 
 ## Candidates
 

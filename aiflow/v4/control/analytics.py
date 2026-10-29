@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .repositories import developer_runs
+
 FAILED = ("failed", "blocked", "timeout", "lost")
 DAILY_SQL = """
 SELECT (r.started_at AT TIME ZONE 'UTC')::date AS day, r.project, r.account_id AS account,
@@ -53,6 +55,26 @@ def daily_usage(db, days: int = 14, project_keys: list[str] | tuple[str, ...] | 
              "tokens_in": int(row["tokens_in"]), "tokens_out": int(row["tokens_out"]),
              "tokens": int(row["tokens_in"] + row["tokens_out"]),
              "cost_usd": round(float(row["cost_usd"]), 6)} for row in rows]
+
+
+def timeouts(db, days: int = 30, project_keys: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+    """Timeout counts by UTC day and ticket, plus the developer-run timeout share."""
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 90:
+        raise ValueError("days must be between 1 and 90")
+    daily_rows, ticket_rows = developer_runs.timeout_analytics(db, days, project_keys)
+    runs = sum(int(row["developer_runs"]) for row in daily_rows)
+    timeout_count = sum(int(row["timeouts"]) for row in daily_rows)
+    return {"days": days, "developer_runs": runs, "timeouts": timeout_count,
+            "timeout_share_pct": round(100 * timeout_count / runs, 2) if runs else 0.0,
+            "target_share_pct": 10.0,
+            "daily": [{"day": row["day"].isoformat(), "developer_runs": int(row["developer_runs"]),
+                       "timeouts": int(row["timeouts"]),
+                       "timeout_share_pct": round(100 * int(row["timeouts"]) / int(row["developer_runs"]), 2)
+                       if row["developer_runs"] else 0.0} for row in daily_rows],
+            "tickets": [{"ticket": row["ticket"], "project": row["project"],
+                         "developer_runs": int(row["developer_runs"]), "timeouts": int(row["timeouts"]),
+                         "latest_timeout": row["latest_timeout"].isoformat() if row["latest_timeout"] else None}
+                        for row in ticket_rows]}
 
 
 USAGE_DIMENSIONS = {"account": "account_id", "ai": "provider", "machine": "node", "project": "project",

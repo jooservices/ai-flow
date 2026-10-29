@@ -13,7 +13,9 @@ Each encrypted backup includes:
   `/etc/aiflow/secrets/runtime.env` file, and the project env directory on the control host. Project values managed
   from Settings keep a canonical copy there; replacement workers receive missing values encrypted on their first
   heartbeat before assigned workers start. The backup encryption key is excluded.
-- The control repository's current files, without its `.git` directory.
+- The control repository's versioned policy files, without its `.git` directory or legacy runtime inventory
+  (`accounts.yaml`, `nodes/` and project-level machine assignments). Machine profiles and assignments are in the
+  database dump.
 - A separate snapshot of managed knowledge, memory and project reports. Restore verifies the snapshot against the
   restored database.
 

@@ -1,0 +1,21 @@
+# Quiet reviews: CodeRabbit leaves findings as review threads and nothing else (no walkthrough, summary, diagrams, status,
+# labels or reviewer suggestions). Code quality never depends on this tool: see docs/v4/code-quality.md.
+language: en-US
+reviews:
+  profile: quiet
+  high_level_summary: false
+  poem: false
+  review_status: false
+  collapse_walkthrough: true
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  assess_linked_issues: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  in_progress_fortune: false
+  auto_review:
+    enabled: true
+    drafts: false

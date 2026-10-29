@@ -145,6 +145,11 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
         ctx.db.run("UPDATE escalations SET created_at=%s WHERE id=%s", (created_at, row["id"]))
     rows = ctx.db.all("SELECT * FROM escalations ORDER BY id")
     assert len(rows) == len(FIXTURE["escalations"])
+    # Keep the database rows aligned with the historical replay dates in this fixture.
+    for item, row in zip(FIXTURE["escalations"], rows, strict=True):
+        ctx.db.run("UPDATE escalations SET created_at=%s WHERE id=%s",
+                   (datetime.fromisoformat(item["at"].replace("Z", "+00:00")), row["id"]))
+    rows = ctx.db.all("SELECT * FROM escalations ORDER BY id")
     assert {r["class"] for r in rows} == set(esc.CLASSES) - {esc.TECHNICAL}  # every one is classified; the recorded fixtures predate the technical class
     person_rows = [r for r in rows if r["reached_person"]]
     assert sorted(r["ticket_key"] for r in person_rows) == sorted(reached) == ["JOOWP-320", "JOOWP-322"]

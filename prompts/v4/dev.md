@@ -23,10 +23,16 @@ so the aim is a change a careful reviewer finds nothing in the first time.
    - Robustness: what happens on error, timeout, concurrent calls, a repeat call and a partial failure?
    - Scope and structure: does anything outside the ticket change, does a file or function grow past what the
      architecture document allows, is anything duplicated?
+   - Code quality (a minimum for every change, whatever reviewer bots are available): one responsibility per module and
+     function; a new feature extends the code by a new module that registers itself, never by growing a central file;
+     nothing duplicated; no swallowed error; and `python3 -m aiflow.v4.core.quality_checks check --base origin/{base}`
+     passes (ruff findings, functions above 80 lines and layer imports must not grow).
    - Documentation and checks: are the docs, changelog and configuration the project requires updated, and does
      every project check below pass?
    Fix what you find, then run the checks again. Do not hand over a change you would send back yourself.
 Rules:
+- When the ticket has Files, Skeleton and Test cases sections, they are your job description: create or change exactly those
+  files, write the skeleton as given and write those test cases. Do not redesign the structure and do not ask about it.
 - Do not run git commit, git push or anything that changes branches or history. AI Flow commits and pushes your
   work after you finish and opens the pull request. Ending with uncommitted changes (a resolved merge included)
   is the expected way to finish: never report BLOCKED because you cannot commit, push or write to .git.
@@ -58,6 +64,14 @@ Ticket description:
 ---
 {description}
 ---
+Test order and time budget:
+- Run the configured checks that cover the changed code first, before the full suite.
+- Run the full configured suite exactly once at the end of implementation.
+- Reserve the final {test_time_slice}-minute test time slice for that one full-suite attempt, within the run's hard limit.
+- If the full suite does not finish in that slice or the hard limit arrives first, stop it and report it as unfinished.
+  An unfinished suite is not a reason to withhold RESULT: DONE.
+- Do not claim a full-suite pass unless the suite completed successfully. In the final response include exactly one line:
+  `FULL SUITE: FINISHED` or `FULL SUITE: UNFINISHED - <why>`.
 {related}
 
 Finish your reply with these lines, exactly:

@@ -16,3 +16,6 @@ Delivery (`/delivery`) shows one project at a time.
 
 - Open a ticket card for its timeline: runs, events and the writes AI Flow made to Jira.
 - A ticket that failed three runs in a row has a `ticket_stuck` incident: see its [runbook](../runbooks/ticket_stuck.md).
+
+The run clock on a ticket card uses the project's work limits: by default a 15-minute target, a warning at 30 minutes and a hard
+stop at 45 minutes. A project can change them in its control-repo file.

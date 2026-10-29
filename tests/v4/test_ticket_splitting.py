@@ -11,18 +11,21 @@ from aiflow.v4.core.ticket_splitting import (
 )
 
 
+SECTIONS = "Files: aiflow/v4/x.py, tests/v4/test_x.py\nSkeleton: class X with run()\nTest cases: run returns the value"
+
+
 def _child(n: int = 1, summary: str | None = None, description: str | None = None) -> dict[str, str]:
     return {
         "summary": summary if summary is not None else f"Child ticket {n} for the split",
         "description": description if description is not None else (
-            f"Business requirement: do one thing.\nAC1: The child {n} change is testable.\n"
+            f"Business requirement: do one thing.\nAC1: The child {n} change is testable.\n{SECTIONS}\n"
         ),
     }
 
 
 def test_valid_two_item_plan_is_stripped_and_does_not_mutate_input():
     original = [
-        {"summary": "  First child ticket  ", "description": "  AC1: First criterion.  "},
+        {"summary": "  First child ticket  ", "description": "  AC1: First criterion.\n{}  ".format(SECTIONS)},
         _child(2),
     ]
     snapshot = [dict(item) for item in original]
@@ -30,9 +33,9 @@ def test_valid_two_item_plan_is_stripped_and_does_not_mutate_input():
     plan = validate_plan(original)
 
     assert plan == [
-        {"summary": "First child ticket", "description": "AC1: First criterion."},
+        {"summary": "First child ticket", "description": f"AC1: First criterion.\n{SECTIONS}"},
         {"summary": "Child ticket 2 for the split",
-         "description": "Business requirement: do one thing.\nAC1: The child 2 change is testable."},
+         "description": f"Business requirement: do one thing.\nAC1: The child 2 change is testable.\n{SECTIONS}"},
     ]
     assert original == snapshot
     assert plan is not original
@@ -79,10 +82,10 @@ def test_missing_ac1_names_the_failing_index():
 @pytest.mark.parametrize(
     "description",
     [
-        "AC1: Plain heading.\nMore text.",
-        "- AC1: List form.\n",
-        "* AC1: Star list form.",
-        "Intro\n  - AC1: Indented list form.\n",
+        f"AC1: Plain heading.\nMore text.\n{SECTIONS}",
+        f"- AC1: List form.\n{SECTIONS}\n",
+        f"* AC1: Star list form.\n{SECTIONS}",
+        f"Intro\n  - AC1: Indented list form.\n{SECTIONS}\n",
     ],
 )
 def test_accepted_ac1_line_prefixes(description):
@@ -93,3 +96,23 @@ def test_accepted_ac1_line_prefixes(description):
 
 def test_min_and_max_constants_match_the_ticket():
     assert (MIN_CHILDREN, MAX_CHILDREN) == (2, 8)
+
+
+@pytest.mark.parametrize("missing", ["Files", "Skeleton", "Test cases"])
+def test_a_child_without_a_required_section_is_rejected_and_named(missing):
+    lines = [line for line in SECTIONS.split("\n") if not line.startswith(missing + ":")]
+    description = "AC1: The change is testable.\n" + "\n".join(lines)
+    with pytest.raises(InvalidSplitPlan, match=rf"split ticket 2 needs these sections with content: {missing}"):
+        validate_plan([_child(1), _child(2, description=description)])
+
+
+def test_an_empty_section_counts_as_missing():
+    description = "AC1: The change is testable.\nFiles:\nSkeleton: class X\nTest cases: it runs"
+    with pytest.raises(InvalidSplitPlan, match="needs these sections with content: Files"):
+        validate_plan([_child(1), _child(2, description=description)])
+
+
+def test_sections_may_be_bulleted_or_bold_and_hold_several_lines():
+    description = ("AC1: The change is testable.\n- **Files:** aiflow/v4/x.py\n  tests/v4/test_x.py\n"
+                   "* Skeleton: class X\n  def run(self)\nTest cases:\n- run returns the value\n- run rejects empty input")
+    assert validate_plan([_child(1), _child(2, description=description)])[1]["description"] == description

@@ -454,19 +454,19 @@ def watchdog(ctx: ApplicationContext) -> None:
     switched_off = role_health.disabled_roles(ctx.db)
     for role in flow_doctor.ROLE_COVERAGE_ROLES:
         holders = [a for a in repo.accounts if role in (a.roles or [])]
-        ok = [a for a in holders if a.id in ready and (a.id, role) not in switched_off]
+        ok = [a for a in holders if a.id in ready and not a.paused and (a.id, role) not in switched_off]
         if not holders:
             continue
         providers = {a.provider for a in ok}
-        if len(ok) < 2 or len(providers) < 2:
+        if len(providers) < 2:  # two ready accounts of the same provider do not survive that provider's quota or outage
             open_incident(ctx, "role_coverage", role, "critical" if not ok else "warning",
-                          f"role {role} has {len(ok)} ready account(s) from {len(providers)} provider(s)",
+                          f"role {role} has {len(providers)} ready provider{'s' if len(providers) != 1 else ''}",
                           f"Accounts with the role: {', '.join(a.id for a in holders)}; ready: "
-                          f"{', '.join(a.id for a in ok) or 'none'}; providers ready: "
-                          f"{', '.join(sorted(providers)) or 'none'}. Every role needs two ready accounts from "
+                          f"{', '.join(a.id for a in ok) or 'none'} across "
+                          f"{', '.join(sorted(providers)) or 'no providers'}. Every role needs two ready accounts of "
                           "different providers so one quota or outage cannot stop the flow.")
         else:
-            close_incident(ctx, "role_coverage", role, f"{len(ok)} accounts ready")
+            close_incident(ctx, "role_coverage", role, f"{len(ok)} accounts from {len(providers)} providers ready")
     # quota windows reported by the provider (Claude: five_hour and seven_day utilization with reset times)
     for a in ctx.db.all("SELECT id,provider,quota FROM accounts WHERE quota_source<>'' AND quota ? 'windows'"):
         for wname, w in (a["quota"].get("windows") or {}).items():

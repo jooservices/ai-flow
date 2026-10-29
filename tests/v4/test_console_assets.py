@@ -13,10 +13,29 @@ def test_console_loads_licensing_notice_from_its_ui_asset():
     script = client.get("/console-assets/licensing-notice.js")
 
     assert page.status_code == 200
-    assert 'src="/console-assets/licensing-notice.js"' in page.text
+    features = client.get("/console-assets/console-features.js")
+
+    assert 'src="/console-assets/console-features.js"' in page.text
     assert script.status_code == 200
-    assert "function licensingNotice(state, escapeHtml)" in script.text
-    assert "escapeHtml(new Date(state.over_limit_since)" in script.text
+    assert features.status_code == 200
+    assert "function licensingNotice(state, escapeHtml)" in features.text
+    assert "escapeHtml(new Date(state.over_limit_since)" in features.text
+
+
+def test_console_loads_provider_routing_from_its_feature_asset():
+    app = FastAPI()
+    mount_ui(app, None)
+    client = TestClient(app)
+
+    page = client.get("/machines")
+    script = client.get("/console-assets/console-features.js")
+
+    assert page.status_code == 200
+    assert 'src="/console-assets/console-features.js"' in page.text
+    assert script.status_code == 200
+    assert "AIFlowProviderRouting" in script.text
+    assert "function render()" in script.text
+    assert "MutationObserver" in script.text
 
 
 def test_console_loads_flow_doctor_panel_from_its_ui_asset():

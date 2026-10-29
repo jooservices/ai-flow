@@ -48,7 +48,8 @@ def test_every_block_of_the_registry_is_marked_in_the_console_and_the_other_way_
     html = PAGE.read_text()
     doctor_asset = (PAGE.parent / "flow-doctor.js").read_text()
     escalation_asset = (PAGE.parent / "owner_escalation.js").read_text()
-    marked = set(re.findall(r'data-block="([a-z-]+)"', html + doctor_asset + escalation_asset))
+    routing_asset = (PAGE.parent / "provider-routing.js").read_text()
+    marked = set(re.findall(r'data-block="([a-z-]+)"', html + doctor_asset + escalation_asset + routing_asset))
     registered = {block for _, blocks in layouts.PAGES.values() for block, _, _ in blocks}
     # Work board reuses the Delivery board markup; it has no layout of its own.
     assert marked == registered
@@ -211,7 +212,7 @@ def test_saving_ignores_unknown_blocks_and_refuses_unknown_pages_and_sizes(clien
     sign_in(client, ctx, "owner", "layout-valid@example.test")
     ok = client.put("/v1/console/layouts/machines", json={"blocks": [
         {"id": "no-such-block", "size": "full", "hidden": False}, {"id": "add-machine", "size": "medium", "hidden": False}]})
-    assert ok.status_code == 200 and ids(ok.json()["blocks"]) == ["add-machine", "machines"]
+    assert ok.status_code == 200 and ids(ok.json()["blocks"]) == ["add-machine", "machines", "routing"]
     stored = ctx.db.one("SELECT blocks FROM console_layouts WHERE email=%s AND page='machines'",
                         ("layout-valid@example.test",))
     assert ids(stored["blocks"]) == ["add-machine"]

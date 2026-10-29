@@ -452,6 +452,52 @@ def test_ci_check_maps_screen_state_and_event_handlers_to_their_pages(monkeypatc
     assert docsite.documentation_gaps(pages, views=views) == []
 
 
+def test_provider_routing_ui_changes_map_to_machines_and_ai(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result("\n".join(source_lines) + "\n")
+        if "--name-only" in command:
+            return Result("aiflow/v4/control/ui/provider-routing.js\n")
+        return Result("")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == {"machines"}
+
+
+def test_provider_routing_topic_names_its_screen_and_claim_route():
+    topic = (ROOT / "docs/v4/provider-routing.md").read_text()
+    readme = (ROOT / "deploy/v4/README.md").read_text()
+    assert "**Console screens:** `cc`, `machines`." in topic
+    assert "`POST /v1/work/claim`" in topic
+    assert "distinct providers among each role's ready accounts" in topic
+    assert "[Provider routing by quota](../../docs/v4/provider-routing.md)" in readme
+
+    api = "aiflow/v4/control/api.py"
+    capacity = "aiflow/v4/control/capacity.py"
+    routing = "aiflow/v4/control/provider_routing.py"
+    routes = "aiflow/v4/control/routes/provider_routing.py"
+    changed_routes = {api: {"POST /v1/work/claim", "GET /v1/work/candidates", "GET /v1/master/candidate",
+                            "GET /v1/ba-chat/candidate", "POST /v1/ba-chat/{job_id}/result",
+                            "POST /v1/runs/{run_id}/result"},
+                      capacity: {"GET /v1/capacity"}, routing: {"POST /v1/work/claim"},
+                      routes: {"GET /v1/provider-routing", "GET /v1/provider-routing/decisions",
+                               "PUT /v1/provider-routing/settings"}}
+    assert docsite.documentation_gaps(
+        ["aiflow/v4/control/ui/console.html", "aiflow/v4/control/ui/provider-routing.js",
+         api, capacity, routing, routes, "docs/v4/provider-routing.md", "docs/v4/telegram-ba-chat.md"],
+        routes=changed_routes, views={"machines"}, changed_routes=changed_routes,
+    ) == []
+
+
 def test_container_project_ui_changes_map_to_projects_screen(monkeypatch):
     ui = "aiflow/v4/control/ui/console.html"
     source_lines = (ROOT / ui).read_text().splitlines()

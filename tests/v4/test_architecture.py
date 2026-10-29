@@ -112,6 +112,14 @@ def test_feature_route_installers_are_registered_in_create_app():
     assert not missing, f"feature route installers must be registered from create_app: {sorted(set(missing))}"
 
 
+def test_provider_routing_routes_delegate_orchestration_to_service():
+    route = (ROOT / "aiflow/v4/control/routes/provider_routing.py").read_text(encoding="utf-8")
+    assert "ctx.provider_routing" in route
+    for forbidden in ("ProviderRoutingRepository", "AccountRepository", "provider_routing.evaluate",
+                      "provider_routing.set_settings"):
+        assert forbidden not in route
+
+
 def test_architecture_contract_and_readme_registration_are_present():
     architecture = ARCHITECTURE.read_text(encoding="utf-8")
     topics = (ROOT / "deploy/v4/README.md").read_text(encoding="utf-8").split("## Topics", 1)[1]

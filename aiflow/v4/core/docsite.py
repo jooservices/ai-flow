@@ -174,6 +174,12 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "escalationsPanel": ("cc", "machines"),
     "renderCommandSearchResults": None,
     "renderRoleHealthSettings": ("machines",),
+    "renderRouting": ("machines",),
+    "loadRouting": ("machines",),
+    "applyRouting": ("machines",),
+    "loadRoutingDecisions": ("machines",),
+    "moveRoutingProvider": ("machines",),
+    "saveRouting": ("machines",),
     "roleHealthPanel": ("machines",),
     "render": None,
     "viewOf": None,
@@ -236,6 +242,8 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"Scale proof \(/v1/state scale_proof\)|value against every budget"), "cc"),
     # The quota-refresh settings asset is loaded before the console router and only renders in Settings.
     (re.compile(r"quota-refresh-settings\.js"), "settings"),
+    (re.compile(r"provider routing|routing:\s*\{|S\.routing|data-routing|routing-host|routing-(?:move|save|find|more)|"
+                r"/v1/provider-routing"), "machines"),
     (re.compile(r"runtimeSettings|data-runtime|runtime-setting"), "settings"),
     (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
@@ -339,6 +347,7 @@ SCREEN_RENDERER_LINE_VIEWS = (
 # A change to one of these needs a documentation change in the same pull request.
 SCREEN_PATHS = ("aiflow/v4/control/ui/",)
 DOC_PATHS = ("docs/guide/", "docs/v4/")
+SCREEN_ASSET_VIEWS = {"aiflow/v4/control/ui/provider-routing.js": ("machines",)}
 
 
 # --- what the code raises ---------------------------------------------------------------------------------------
@@ -1231,6 +1240,10 @@ def changed_views(base: str) -> set[str]:
                                  capture_output=True, check=True).stdout
     base_lines = base_source.splitlines()
     all_views = set(console_views(UI))
+    asset_diff = subprocess.run(["git", "diff", "--name-only", f"{base}...HEAD", "--", "aiflow/v4/control/ui/"],
+                                cwd=ROOT, text=True, capture_output=True, check=True).stdout
+    touched: set[str] = set().union(*(SCREEN_ASSET_VIEWS.get(path.strip(), ())
+                                      for path in asset_diff.splitlines()))
     hints_start = next((i for i, line in enumerate(lines) if line.startswith("var HINTS = {")), None)
     hints_end = next((i for i in range(hints_start + 1, len(lines)) if lines[i] == "};"), None) \
         if hints_start is not None else None
@@ -1257,7 +1270,6 @@ def changed_views(base: str) -> set[str]:
     if sec_start is not None:
         sec_end = next((j for j in range(sec_start + 1, len(lines)) if lines[j].startswith("/* ---------- ")), len(lines))
         security_lines |= set(range(sec_start + 1, sec_end + 1))
-    touched: set[str] = set()
     unmapped: set[int] = set()
     for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, re.M):
         old_first, old_count = int(m.group(1)), int(m.group(2) or 1)
@@ -1298,7 +1310,7 @@ def changed_views(base: str) -> set[str]:
             specific_views |= {view for pattern, view in SCREEN_LOCAL_LINE_VIEWS if pattern.search(changed_line)}
             layout_markup = ('id="layout-live"' in changed_line
                              or ('data-block="' in changed_line and 'data-block="first-run-setup"' not in changed_line)
-                             or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
+                             or "layouts: {" in changed_line
                              or "S.layouts." in changed_line or "layoutAction(act" in changed_line
                              or "applyLayout('delivery'" in changed_line
                              or re.search(r"\bloadLayouts\(\)", changed_line))

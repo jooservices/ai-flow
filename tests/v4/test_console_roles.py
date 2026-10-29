@@ -297,7 +297,8 @@ def test_usage_and_infrastructure_apis_follow_role_permissions_for_every_role(ct
             if not can_view_machines:
                 assert response.json()["detail"] == "not available for your role"
 
-        for path in ("/v1/role-health", "/v1/master/autonomy", "/v1/master/report"):
+        for path in ("/v1/role-health", "/v1/master/autonomy", "/v1/master/report", "/v1/provider-routing",
+                     "/v1/provider-routing/decisions"):
             response = client.get(path)
             assert response.status_code == (200 if can_view_machines else 403), (role, path, response.text)
             if not can_view_machines:

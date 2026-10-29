@@ -41,3 +41,10 @@ def test_the_jobs_that_install_the_dependencies_restore_the_uv_cache_before_inst
     for name in ("docs", "quality", "v4-shard", "v4-browser", "v4-scale"):
         steps = [step.get("name") for step in CI["jobs"][name]["steps"]]
         assert steps.index("Cache uv downloads") < steps.index("Install"), name
+
+
+def test_files_known_to_break_each_other_are_never_in_the_same_shard():
+    parts = shards.partition(shards.sharded_files(ROOT), shards.SHARDS)
+    for first, second in shards.KEEP_APART:
+        homes = {path.name: index for index, part in enumerate(parts) for path in part}
+        assert homes[first] != homes[second]

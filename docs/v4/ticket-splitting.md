@@ -31,6 +31,7 @@ fails `validate_plan` is rejected and Jira is not written. A ticket that does no
 `apply_plan` in `aiflow/v4/control/ticket_split_apply.py` creates Story children from a valid plan. Each child
 gets a stable `aiflow-split-<parent>-<index>` label so a second apply returns the same keys and does not duplicate
 issues. Each child Relates to the parent; child N+1 is Blocked by child N. The parent loses `aiflow-ready` and
-gains `aiflow-split-parent`. Children do not receive `aiflow-ready` here.
+gains `aiflow-split-parent`. Children do not receive `aiflow-ready` here. `after_intake_result` runs from
+`run_inbox.finish` after a successful intake `split_plan` on `POST /v1/runs/{run_id}/result`.
 
 **Console screens:** none (library contract; no UI in this ticket).

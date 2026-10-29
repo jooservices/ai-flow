@@ -15,6 +15,7 @@ import yaml
 
 from .environment import EnvItem, items_of
 from .services import normalize_services
+from . import work_limits
 from .toolchains import (BASE_TOOLS, CATALOG_TOOLS, CONTAINER_RUNTIME_TOOL, NODE_TOOLS, STACK_TOOLS, missing_tools,
                          tools_for_providers, tools_for_stack,
                          tools_for_stacks, tools_for_stacks_in_project, normalize_stacks)
@@ -166,8 +167,7 @@ class Project:
                                                    if isinstance(item, dict) and item.get("repo")]))
 
     def work_minutes(self) -> dict[str, int]:
-        wm = (self.limits or {}).get("work_minutes") or {}
-        return {"target": int(wm.get("target", 30)), "warn": int(wm.get("warn", 45)), "hard": int(wm.get("hard", 60))}
+        return work_limits.from_setting((self.limits or {}).get("work_minutes"))
 
     @property
     def tools(self) -> list[str]:

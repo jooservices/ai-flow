@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 
 from .. import VERSION
 from ..core.controlrepo import Account, ControlRepo, epic_for_ticket
-from ..core import backups as control_backups, handover, log_sources as log_sources_core
+from ..core import backups as control_backups, handover, log_sources as log_sources_core, work_limits
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import normalize_services, service_gaps
@@ -1730,7 +1730,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         clocks = []
         for run in running:
             project = repo.projects.get(run["project"])
-            limits = project.work_minutes() if project else {"target": 30, "warn": 45, "hard": 60}
+            limits = project.work_minutes() if project else dict(work_limits.DEFAULTS)
             elapsed = max(0, (now - run["started_at"]).total_seconds() / 60)
             clocks.append({"run_id": str(run["id"]), "ticket": run["ticket_key"], "project": run["project"],
                            "step": run["step"], "account": run["account_id"], "provider": run["provider"],
@@ -3214,7 +3214,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
                           "services": normalize_services(body.services), "checks": checks, "containers": body.containers, "merge": {"method": body.merge_method},
                           "limits": {"parallel": body.parallel_limit,
-                                     "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
+                                     "work_minutes": dict(work_limits.DEFAULTS)},
                           "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
                 content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
                 control_name = Path(ctx.settings.control_repo).name
@@ -5725,7 +5725,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if ticket_row["status"] in ("Done", "Needs owner", "Human review"):
                 refuse_master_action(f"a run on a ticket in {ticket_row['status']} cannot be restarted by the master")
             project = ctx.repo().projects.get(target["project"])
-            hard = project.work_minutes()["hard"] if project else 60
+            hard = project.work_minutes()["hard"] if project else work_limits.HARD
             elapsed = max(0.0, (utcnow() - target["started_at"]).total_seconds() / 60)
             if elapsed < hard:
                 refuse_master_action(f"target run has not passed its {hard} minute work-time limit")

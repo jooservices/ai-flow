@@ -25,7 +25,6 @@ from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
                                parse_missing_requirements)
-from ..core import work_limits
 from . import timeout_handover
 from .client import Conflict, ControlClient
 from . import gate_step

@@ -640,7 +640,7 @@ def test_api_and_database_actions_are_recorded_and_create_a_bug_ticket(client, c
     assert {"flow-bug", "operator-intervention"} <= set(ctx.jira.created[0]["labels"])
 
 
-def test_human_console_configuration_mutation_is_an_intervention_and_creates_a_bug(client, ctx):
+def test_console_configuration_mutation_is_write_audited_not_a_manual_intervention(client, ctx):
     from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 
     email, secret = "owner@example.test", "c" * 40
@@ -651,13 +651,12 @@ def test_human_console_configuration_mutation_is_an_intervention_and_creates_a_b
     client.cookies.set(COOKIE_NAME, issue_session(email, ["administrator"], expires, secret))
     changed = client.patch("/v1/accounts/claude-01", json={"sessions": 2})
     assert changed.status_code == 200, changed.text
-    row = ctx.db.one("SELECT source,actor,action,target,reason FROM operator_interventions")
-    assert row["source"] == "control-api" and row["actor"] == email
-    assert row["action"] == "ai-account.update" and row["target"] == "claude-01"
-    assert "Authenticated principal owner@example.test" in row["reason"] and "updated" in row["reason"]
-    assert flow_doctor.create_intervention_bugs(ctx) == 1
-    bug = ctx.db.one("SELECT bug_ticket_key FROM operator_interventions")
-    assert bug["bug_ticket_key"] and ctx.jira.created[0]["issuetype"] == "Bug"
+    audit = ctx.db.one("SELECT target,action,actor,accepted FROM write_audit WHERE target='ai-account'"
+                       " AND action='update' ORDER BY id DESC LIMIT 1")
+    assert audit == {"target": "ai-account", "action": "update", "actor": email, "accepted": True}
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
 
 
 def test_one_session_of_many_commands_creates_one_bug_and_a_new_session_another(ctx):
@@ -904,8 +903,10 @@ def test_restricted_migration_role_cannot_mark_flow_doctor_applied_without_ddl_a
     from psycopg.conninfo import make_conninfo
 
     migration = (ROOT / "aiflow/v4/control/migrations/018_flow_doctor.sql").read_text()
-    setup = re.search(r"DO \$\$\nBEGIN\n    IF NOT EXISTS \(SELECT 1 FROM pg_event_trigger.*?\nEND\n\$\$;", migration, re.S)
-    assert setup and "RAISE EXCEPTION" in migration and "RAISE NOTICE" not in migration
+    setup = re.search(r"DO \$\$\nBEGIN\n.*?CREATE EVENT TRIGGER aiflow4_operator_drop.*?END\n\$\$;",
+                      migration, re.S)
+    assert setup and "current_schema() = 'public'" in setup.group(0)
+    assert "RAISE EXCEPTION" in migration and "RAISE NOTICE" not in migration
     role = "aiflow_restricted_" + uuid.uuid4().hex[:12]
     admin = psycopg.connect(ctx.db.url, autocommit=True)
     owner = admin.execute("SELECT current_user").fetchone()[0]

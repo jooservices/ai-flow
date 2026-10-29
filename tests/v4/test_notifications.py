@@ -120,7 +120,7 @@ def test_admin_screen_channel_test_results_and_hidden_credentials(client, ctx, m
     assert client.get("/notifications").status_code == 403
 
 
-def test_human_notification_configuration_changes_are_interventions_and_create_a_bug(client, ctx):
+def test_notification_configuration_changes_are_write_audited_without_an_operator_bug(client, ctx):
     email, secret = "notification-admin@example.test", "n" * 40
     ctx.settings.console_session_secret = secret
     ctx.db.run("INSERT INTO console_users (email,role,roles,password_hash) VALUES (%s,'administrator',%s,'test')",
@@ -141,18 +141,15 @@ def test_human_notification_configuration_changes_are_interventions_and_create_a
     deleted = client.delete(f"/v1/notifications/channels/{channel_id}")
     assert deleted.status_code == 200, deleted.text
 
-    interventions = ctx.db.all("SELECT source,actor,action,target,reason,details FROM operator_interventions"
-                               " ORDER BY id")
-    assert [row["action"] for row in interventions] == [
-        "notifications.channel_save", "notifications.preferences_save", "notifications.channel_delete"]
-    assert all(row["source"] == "control-api" and row["actor"] == email for row in interventions)
-    assert all("Authenticated principal" in row["reason"] for row in interventions)
-    assert "never-audit-this" not in str(interventions)
-
-    assert flow_doctor.create_intervention_bugs(ctx) == 1
-    bug = ctx.db.one("SELECT bug_ticket_key FROM operator_intervention_sessions WHERE actor=%s", (email,))
-    assert bug and bug["bug_ticket_key"] and ctx.jira.created[0]["issuetype"] == "Bug"
-    assert {"flow-bug", "operator-intervention"} <= set(ctx.jira.created[0]["labels"])
+    writes = ctx.db.all("SELECT actor,action,accepted FROM write_audit WHERE target='notifications' ORDER BY id")
+    assert writes == [
+        {"actor": email, "action": "channel_save", "accepted": True},
+        {"actor": email, "action": "preferences_save", "accepted": True},
+        {"actor": email, "action": "channel_delete", "accepted": True},
+    ]
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
 
 
 def test_route_selection_for_each_alert_kind_and_quiet_hours(client, ctx, monkeypatch):

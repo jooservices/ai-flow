@@ -1230,30 +1230,19 @@ def create_app(ctx: Ctx) -> FastAPI:
         return "deploy"
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
-              result: str, payload: dict | None = None, *, human: bool = False) -> None:
+              result: str, payload: dict | None = None) -> None:
         with ctx.db.transaction() as connection:
-            audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload, human=human)
+            audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload)
 
     def audit_in(connection, target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str,
-                 accepted: bool, result: str, payload: dict | None = None, *, human: bool = False) -> None:
+                 accepted: bool, result: str, payload: dict | None = None) -> None:
         entry = connection.execute(
             "INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
             " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (target, action, ticket, run_id, fence, actor, accepted, result[:500],
              J(with_connection(target, payload)))).fetchone()
-        # A signed console principal is a human, even when the mutation goes through a product API route. Keep the
-        # intervention and write-audit entry in one transaction; the doctor creates its Bug on the next pass.
-        known_console_user = bool(actor and connection.execute(
-            "SELECT 1 AS person FROM console_users WHERE email=%s AND disabled=false", (actor,)).fetchone())
-        if accepted and entry and (human or known_console_user):
-            connection.execute(
-                "INSERT INTO operator_interventions (source_key,source,actor,action,target,reason,details)"
-                " VALUES (%s,'control-api',%s,%s,%s,%s,%s) ON CONFLICT (source_key) DO NOTHING",
-                (f"control-api:{entry['id']}", actor, f"{target}.{action}"[:120],
-                 (ticket or target)[:300], f"Authenticated principal {actor} completed {action} on {target}: "
-                 f"{result[:200]}.",
-                 J({"write_audit_id": entry["id"], "write_target": target, "write_action": action,
-                    "ticket": ticket, "result": result[:200]})))
+        # Normal product API actions, including signed-in console changes and business decisions, are not operator
+        # interventions. Out-of-band DB, host, direct-config, and non-flow Jira actions use their own audit sources.
 
     def with_connection(target: str, payload: dict | None) -> dict:
         """Name the GitHub connection behind a GitHub write; it is an id, never a credential."""
@@ -2113,7 +2102,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
         audit("licensing", "license_activate", "", "", None, user.subject, True, "activated online",
-              {"source": "online", "plan": state["plan"]}, human=True)
+              {"source": "online", "plan": state["plan"]})
         return state
 
     @app.post("/v1/licensing/offline")
@@ -2124,7 +2113,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
         audit("licensing", "license_activate", "", "", None, user.subject, True, "activated offline",
-              {"source": "offline", "plan": state["plan"]}, human=True)
+              {"source": "offline", "plan": state["plan"]})
         return state
 
     @app.put("/v1/licensing/limits")
@@ -2135,7 +2124,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
         audit("licensing", "license_limits", "", "", None, user.subject, True, "limits updated",
-              {"plan": body.plan, "limits": body.limits}, human=True)
+              {"plan": body.plan, "limits": body.limits})
         return state
 
     @app.get("/v1/licensing/usage")
@@ -7117,7 +7106,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         except knowledge.Invalid as exc:
             raise HTTPException(422, str(exc)) from exc
         audit("knowledge", "item_save", str(item["id"]), "", None, user.subject, True, "saved",
-              {"kind": body.kind, "project": body.project, "scope": body.scope}, human=True)
+              {"kind": body.kind, "project": body.project, "scope": body.scope})
         return knowledge._pack_item(item)
 
     @app.post("/v1/knowledge/items/{item_id}/{action}")
@@ -7132,7 +7121,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         except knowledge.Invalid as exc:
             raise HTTPException(422 if "not found" not in str(exc) else 404, str(exc)) from exc
         audit("knowledge", "item_" + action, str(item_id), "", None, user.subject, True, "updated",
-              {"item_id": item_id}, human=True)
+              {"item_id": item_id})
         return knowledge._pack_item(item)
 
     # --- Knowledge screen: versioned control-repo resources -------------------------------------------------
@@ -7171,8 +7160,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                             current["version"] if current else 0, actor, action, branch, int(pr["number"]),
                             str(pr.get("html_url") or "")))
                 audit("aiflow-control", "policy-pr", "", "", None, actor, True, str(pr["html_url"]),
-                      {"type": kind, "id": resource_id, "branch": branch, "pr": int(pr["number"]), "commit": sha},
-                      human=True)
+                      {"type": kind, "id": resource_id, "branch": branch, "pr": int(pr["number"]), "commit": sha})
                 ctx.events.emit("resource.policy_proposed", project=resource_id if resource_id != "default" else "",
                                 account=actor, outcome="pending", reason=f"PR #{pr['number']}",
                                 data={"type": kind, "id": resource_id})
@@ -7189,7 +7177,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         row = knowledge.save_current(ctx.db, kind=kind, resource_id=resource_id, title=title, content=content,
                                      archived=archived, actor=actor, action=action, path=path, commit_sha=sha)
         audit("aiflow-control", "resource-commit", "", "", None, actor, True, sha,
-              {"type": kind, "id": resource_id, "version": row["version"], "path": path}, human=True)
+              {"type": kind, "id": resource_id, "version": row["version"], "path": path})
         ctx.events.emit("resource.changed", account=actor, outcome=action, reason=f"{kind}/{resource_id}",
                         data={"type": kind, "id": resource_id, "version": row["version"], "commit": sha})
         return row
@@ -7258,8 +7246,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.run("UPDATE managed_resource_proposals SET status='merged',merged_at=now(),approved_by=%s WHERE id=%s",
                    (owner, proposal_id))
         audit("aiflow-control", "policy-merge", "", "", None, owner, True, str(merged.get("sha") or ""),
-              {"id": proposal["resource_id"], "pr": proposal["pr_number"], "version": resource["version"]},
-              human=True)
+              {"id": proposal["resource_id"], "pr": proposal["pr_number"], "version": resource["version"]})
         ctx.events.emit("resource.policy_merged", project=proposal["resource_id"] if proposal["resource_id"] != "default" else "",
                         account=owner, outcome="merged", reason=f"PR #{proposal['pr_number']}",
                         data={"type": "policy", "id": proposal["resource_id"], "version": resource["version"]})

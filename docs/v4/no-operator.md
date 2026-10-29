@@ -42,67 +42,34 @@ Only a new business decision or protected irreversible/production action can rea
 
 ## Intervention audit
 
-Accepted writes made by an authenticated console user are recorded as operator interventions as well as control API
-write-audit entries. This includes account, machine, project, integration, policy, backup, and other console
-configuration changes; the next doctor pass groups them into a Bug session. Worker and control-loop writes remain
-product actions. Jira sync compares changelog authors with AI Flow's Jira identity
-and records non-flow edits by field name only. Migration `018_flow_doctor.sql` installs statement-level audit triggers,
-and every migration pass attaches the trigger to any table that lacks it, so tables added later are audited too. The
-triggers cover INSERT, UPDATE, DELETE and TRUNCATE; event triggers cover schema changes (CREATE, ALTER, DROP,
-including a dropped audit trigger). Product connections are told apart by the database role they log in with
-(`audit_product_roles`, filled by `Database.migrate` with the control plane's own role), never by the client-chosen
-`application_name`: people must use their own database role. The migration fails and is not recorded as applied
-unless it can install both DDL event triggers; install migrations with a role authorized to create PostgreSQL event
-triggers. Direct changes record the database user, table and operation, plus a reason describing the observed
-operation, but never the SQL text or row values. Control and node installs enable Linux `auditd`
-rules for interactive commands, `/etc/aiflow`, `/etc/systemd/system`, and (on the control host) the control repo.
-The node agent forwards the executable basename, secret-redacted command arguments, and each changed filename; it
-never forwards file contents or full paths. Credential options and values, URL userinfo, and URL query strings are
-redacted before the event leaves the node. Each command and distinct changed file is kept as its own intervention
-row, so the evidence does not drop commands or files when a batch is large. The ledger is append-only for database
-roles other than the registered control-plane role: product bookkeeping may attach rows to a session and Bug, while
-interactive database roles cannot update, delete, or truncate the evidence. Audit records are de-duplicated and the
-doctor creates one Bug per actor and source session (a gap of 30 minutes starts a new session) in the configured
-maintenance Jira project with the `flow-bug` and `operator-intervention` labels, so an SSH session or a deploy never
-floods the project. Sessions are stored (`operator_intervention_sessions`): an action that the doctor sees in a later
-pass joins its session and is commented on the session's Bug instead of opening a new one. Safe command arguments
-are included in that Bug's evidence.
-Each Bug is moved from Created to Intake (retried every pass until it works), the state intake workers claim from.
+Accepted requests through the product API, including console configuration, review decisions, and business escalation
+answers, stay in the control API write-audit log. They are expected product actions and do not create operator
+interventions or Bug tickets. The intervention ledger is for out-of-band work that bypasses the product flow: direct
+database changes, interactive host commands or direct file edits, and Jira changes made by an identity other than AI
+Flow. This keeps normal review and owner decisions from becoming false intervention counts or recurring Bugs.
 
-Each row records who, what, where and why, using the observed operation when a console request does not carry a
-separate rationale. The Dashboard counts all captured interventions over rolling 24-hour and
-7-day windows and links the resulting Bug key. Reasons are attached to product incidents so recurring manual work
-can be eliminated.
+Jira sync compares changelog authors with AI Flow's Jira identity and records non-flow edits by field name only.
+Migration `018_flow_doctor.sql` installs statement-level audit triggers, and every migration pass attaches the
+trigger to any table that lacks it, so tables added later are audited too. The triggers cover INSERT, UPDATE, DELETE
+and TRUNCATE; event triggers cover schema changes (CREATE, ALTER, DROP, including a dropped audit trigger). Product
+connections are identified by the database role they log in with (`audit_product_roles`, filled by `Database.migrate`
+with the control plane's own role), never by the client-chosen `application_name`: people must use their own database
+role. Production event triggers are installed from the public schema because PostgreSQL event triggers are global
+to the database. Direct changes record the database user, table and operation, plus a reason describing the observed
+operation, but never the SQL text or row values.
 
-### Audited console routes
-
-Each of these routes records an operator intervention for the authenticated console principal when it accepts a change:
-`DELETE /v1/integrations/github/connections/{connection_id}`, `DELETE /v1/notifications/channels/{channel_id}`,
-`GET /v1/analytics/usage`, `GET /v1/github/ci-log`, `GET /v1/github/pr`,
-`GET /v1/integrations/github/imports/{pending_id}/install`, `GET /v1/integrations/github/installation-settings`,
-`GET /v1/integrations/github/manifest/callback`, `GET /v1/integrations/github/manifest/start`,
-`GET /v1/integrations/github/setup`, `GET /v1/knowledge/items`, `GET /v1/licensing/status`,
-`GET /v1/memory/study-cases`, `GET /v1/notifications`, `GET /v1/releases/{sha}.tar.gz`, `GET /v1/reviews`,
-`GET /v1/reviews/export.csv`, `POST /v1/backups/key`, `POST /v1/backups/run`,
-`POST /v1/business/{key}/change-requests`, `POST /v1/console/view-as`, `POST /v1/console/view-as/stop`,
-`POST /v1/decisions`, `POST /v1/decisions/{decision_id}/answer`, `POST /v1/decisions/{decision_id}/retire`,
-`POST /v1/escalations/raise`, `POST /v1/escalations/triage`, `POST /v1/github/comment`,
-`POST /v1/github/delete-branch`, `POST /v1/github/pr`, `POST /v1/github/token`, `POST /v1/github/update-branch`,
-`POST /v1/integrations/github/connections/token`, `POST /v1/integrations/github/connections/{connection_id}/test`,
-`POST /v1/integrations/github/imports`, `POST /v1/integrations/github/imports/{pending_id}/connect`,
-`POST /v1/jira/{key}/comment`, `POST /v1/jira/{key}/description`, `POST /v1/jira/{key}/fields`,
-`POST /v1/jira/{key}/transition`, `POST /v1/knowledge/items`, `POST /v1/knowledge/items/{item_id}/{action}`,
-`POST /v1/knowledge/proposals/{proposal_id}/approve`, `POST /v1/knowledge/resources`,
-`POST /v1/knowledge/resources/{kind}/{resource_id}/restore`, `POST /v1/licensing/activate`,
-`POST /v1/licensing/offline`, `POST /v1/master/actions`, `POST /v1/nodes/{name}/check-probes/token`,
-`POST /v1/nodes/{name}/join-command`, `POST /v1/notify/triage`, `POST /v1/policy/decide`,
-`POST /v1/reviews/{key}/answer`, `POST /v1/reviews/{key}/approve`, `POST /v1/reviews/{key}/ask-ai`,
-`POST /v1/reviews/{key}/reject`, `POST /v1/reviews/{key}/rework`, `POST /v1/reviews/{key}/skip-gate`,
-`POST /v1/stakeholder/{key}/verdict`, `PUT /v1/backups/config`,
-`PUT /v1/integrations/github/connections/{connection_id}/token`, `PUT /v1/licensing/limits`,
-`PUT /v1/master/autonomy/budget`, `PUT /v1/nodes/{name}/work-acceptance`, `PUT /v1/notifications/channels`,
-`PUT /v1/notifications/preferences`, `PUT /v1/projects/{key}/repositories`, `PUT /v1/role-health/settings`.
-Read-only routes in this list are named for the API reference and are not recorded as interventions.
+Control and node installs enable Linux `auditd` rules for interactive commands, `/etc/aiflow`,
+`/etc/systemd/system`, and (on the control host) the control repo. The node agent forwards the executable basename,
+secret-redacted command arguments, and each changed filename; it never forwards file contents or full paths.
+Credential options and values, URL userinfo, and URL query strings are redacted before the event leaves the node.
+Each command and distinct changed file is kept as its own intervention row, so evidence does not drop commands or
+files in a batch. The ledger is append-only for database roles other than the registered control-plane role:
+product bookkeeping may attach rows to a session and Bug, while interactive database roles cannot update, delete, or
+truncate the evidence. The doctor de-duplicates records and creates one Bug per actor and source session (a gap of
+30 minutes starts a new session) in the configured maintenance Jira project with the `flow-bug` and
+`operator-intervention` labels. Later actions in the same session are attached to its Bug. Each Bug is moved from
+Created to Intake, retrying every pass until it works. The Dashboard counts captured interventions over rolling
+24-hour and 7-day windows and links each resulting Bug key.
 
 ## Reboot and clean install
 
@@ -144,8 +111,8 @@ Routes used by this feature, all on the control API:
   sign-in automatically after the machine reports a successful credential check.
 - Project environment configuration and its validation are available at `GET /v1/projects/{key}/environment`,
   `PUT /v1/projects/{key}/environment`, `GET /v1/environment/missing`, `GET /v1/environment/scan`,
-  `POST /v1/environment/scan` and `POST /v1/environment/removals`. Mutations made with a console session are
-  recorded in the intervention ledger like other console configuration changes.
+  `POST /v1/environment/scan` and `POST /v1/environment/removals`. Console changes stay in control API write-audit;
+  direct environment-file edits are captured as operator interventions by `auditd`.
 - Console users (behaviour unchanged, listed because the route module changed): `POST /v1/console/users`,
   `PUT /v1/console/users/{email}` and `PATCH /v1/console/users/{email}/disabled`.
 

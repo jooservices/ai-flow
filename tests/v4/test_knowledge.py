@@ -69,14 +69,12 @@ def test_resource_types_commit_to_control_repo_archive_and_restore_with_history(
     listed = client.get("/v1/knowledge/resources?include_archived=true").json()["resources"]
     assert {row["type"] for row in listed} >= {item[0] for item in examples}
     assert "aiflow-control" in {row["updated_by"] for row in listed if row["type"] == "policy"}
-    interventions = ctx.db.all("SELECT actor,bug_ticket_key FROM operator_interventions ORDER BY id")
-    assert len(interventions) == 20 and all(row["actor"] == "knowledge@example.test" for row in interventions)
-    assert flow_doctor.create_intervention_bugs(ctx) == 1
-    assert all(row["bug_ticket_key"] for row in ctx.db.all("SELECT bug_ticket_key FROM operator_interventions"))
-    assert ctx.jira.created[0]["issuetype"] == "Bug"
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
 
 
-def test_knowledge_item_save_and_moderation_use_authenticated_actor_and_create_bug(client, ctx):
+def test_knowledge_item_save_and_moderation_use_authenticated_actor_without_operator_bug(client, ctx):
     sign_in(client, ctx)
     saved = client.post("/v1/knowledge/items", json={
         "scope": "general", "kind": "decision", "title": "Use signed console identity",
@@ -96,13 +94,9 @@ def test_knowledge_item_save_and_moderation_use_authenticated_actor_and_create_b
         {"actor": "knowledge@example.test", "action": "item_save", "accepted": True},
         {"actor": "knowledge@example.test", "action": "item_approve", "accepted": True},
     ]
-    interventions = ctx.db.all("SELECT actor,action,reason FROM operator_interventions ORDER BY id")
-    assert len(interventions) == 2
-    assert all(row["actor"] == "knowledge@example.test" for row in interventions)
-    assert all("Authenticated principal knowledge@example.test" in row["reason"] for row in interventions)
-    assert flow_doctor.create_intervention_bugs(ctx) == 1
-    assert all(row["bug_ticket_key"] for row in ctx.db.all("SELECT bug_ticket_key FROM operator_interventions"))
-    assert ctx.jira.created[0]["issuetype"] == "Bug"
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
 
 
 def test_policy_waits_for_owner_pr_merge_then_refreshes_active_policy(client, ctx):
@@ -153,14 +147,9 @@ def test_policy_waits_for_owner_pr_merge_then_refreshes_active_policy(client, ct
         {"actor": "knowledge@example.test", "action": "policy-pr", "accepted": True},
         {"actor": "owner-token", "action": "policy-merge", "accepted": True},
     ]
-    interventions = ctx.db.all("SELECT actor,action,bug_ticket_key FROM operator_interventions ORDER BY id")
-    assert [(row["actor"], row["action"]) for row in interventions] == [
-        ("knowledge@example.test", "aiflow-control.policy-pr"),
-        ("owner-token", "aiflow-control.policy-merge"),
-    ]
-    assert flow_doctor.create_intervention_bugs(ctx) == 2
-    assert all(row["bug_ticket_key"] for row in ctx.db.all("SELECT bug_ticket_key FROM operator_interventions"))
-    assert len(ctx.jira.created) == 2 and all(row["issuetype"] == "Bug" for row in ctx.jira.created)
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
 
 
 def test_project_scoped_policy_files_are_used_by_controlrepo_and_archived_files_are_inactive(control_repo):

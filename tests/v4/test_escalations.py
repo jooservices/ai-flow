@@ -325,6 +325,9 @@ NEW = {"decision": "ESCALATE", "class": esc.BUSINESS, "why": "Failed payment ema
 
 
 def test_a_new_decision_is_asked_once_then_becomes_a_register_entry(client, ctx):
+    # Model an actual authenticated console user, not a legacy signed session without a DB account.
+    ctx.db.run("INSERT INTO console_users (email,role,roles,password_hash) VALUES (%s,'administrator',%s,'test')",
+               ("owner@example.test", ["administrator"]))
     owner(client, ctx)
     put_ticket(ctx, "JOOWP-322", "Acceptance criteria:\n- AC1: x")
     put_ticket(ctx, "JOOWP-323", "Acceptance criteria:\n- AC1: y")

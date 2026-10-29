@@ -140,7 +140,7 @@ def test_online_activation_sends_only_key_and_installation_identifier(client, ct
     assert stored == {"license_token": signed, "license_source": "online"}
 
 
-def test_successful_license_configuration_changes_are_interventions_and_create_a_bug(client, ctx, monkeypatch):
+def test_successful_license_configuration_changes_are_write_audited_without_operator_bugs(client, ctx, monkeypatch):
     from aiflow.v4.control import flow_doctor
 
     private, public = issuer_key()
@@ -164,13 +164,9 @@ def test_successful_license_configuration_changes_are_interventions_and_create_a
         {"actor": "owner@example.test", "action": "license_activate", "accepted": True},
         {"actor": "owner@example.test", "action": "license_limits", "accepted": True},
     ]
-    interventions = ctx.db.all("SELECT actor,action,target,reason,bug_ticket_key FROM operator_interventions")
-    assert len(interventions) == 3
-    assert all(row["actor"] == "owner@example.test" and row["target"] == "licensing" for row in interventions)
-    assert all("Authenticated principal owner@example.test" in row["reason"] for row in interventions)
-    assert flow_doctor.create_intervention_bugs(ctx) == 1
-    assert all(row["bug_ticket_key"] for row in ctx.db.all("SELECT bug_ticket_key FROM operator_interventions"))
-    assert ctx.jira.created[0]["issuetype"] == "Bug"
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
 
 
 def test_invalid_online_key_and_bad_offline_signature_leave_current_license_unchanged(client, ctx, monkeypatch):

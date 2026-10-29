@@ -80,6 +80,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Analytics routes](../../docs/v4/route-module-analytics.md): the analytics routes are served from their own router module
 - [Persistent learning and run context](../../docs/v4/knowledge-learning.md): automatically capture run, ticket and incident learning, then hand scoped semantic context to each run
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
+- [Machines and accounts in the database](../../docs/v4/inventory-in-database.md): machines, AI accounts, roles and worker counts are managed on screen, stored in the control database, backed up with it and imported once from the control repository
 - [Machines and AI management](../../docs/v4/machines-and-ai.md): enroll machines and add, pause, resume, sign in, edit and remove AI accounts on screen
 - [Repositories by Jira epic](../../docs/v4/epic-repositories.md): map Jira epics to connected GitHub App repositories with per-repository defaults in Projects
 - [Connect GitHub from the console](../../docs/v4/github-connect.md): manage several Apps or access tokens and assign each repository a connection
@@ -207,8 +208,8 @@ time starts at the first known event or run.
 
 ## Intake refinement
 
-Tickets written by people go to the **Intake** status first. Accounts with the `intake_refiner` role in
-`aiflow-control/accounts.yaml` see them as step `intake` (after verify work, before development); `aiflow-hold`
+Tickets written by people go to the **Intake** status first. Accounts with the `intake_refiner` role (set on the
+Machines and AI screen, not in a file) see them as step `intake` (after verify work, before development); `aiflow-hold`
 and `explicit_only` work as for the other steps. The worker checks out the project's base branch and runs
 `prompts/v4/intake.md` with the ticket text and the repository's `docs/SPEC.md` (when present). An intake run
 may read files but never change them: the policy hook denies the editor tools and allows only inspection

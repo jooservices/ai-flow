@@ -2377,13 +2377,13 @@ function renderCC() {
     h += '<button class="node" data-act="open-node" data-id="' + esc(n.name) + '"' + (off ? ' data-off' : '') + ' aria-label="Open node ' + esc(n.name) + '">';
     h += '<span class="node-top"><span class="n-name">' + esc(n.name) + '</span><span class="mono muted" style="font-size:12px">' + esc(n.ip) + (n.name === 'cc' ? ' · control plane' : '') + '</span><span class="spacer"></span>' + (!off && !accs.length ? pill('warn', 'No AI') : '') + pill(nodeTone(n), nodeLabel(n), n.status !== 'online') + '</span>';
     if (off) h += '<span class="offnote">No heartbeat for ' + mmss((n.heartbeat_age_s || 0) + since()) + '. Its runs go back to To Do when their lease ends.</span>';
-    else if (!accs.length) h += '<span class="offnote" style="color:var(--warn)">No AI account on this node: it adds ' + n.slots_total + ' slots but cannot take work.' + (n.in_control_repo === false ? ' Not described in aiflow-control/nodes/.' : '') + '</span>';
+    else if (!accs.length) h += '<span class="offnote" style="color:var(--warn)">No AI account on this node: it adds ' + n.slots_total + ' slots but cannot take work. Add an account on Machines and AI.</span>';
     var mm = n.metrics || {};
     h += '<span class="small mono">' + esc(mm.hostname || '—') + (n.purpose ? ' · ' + esc(n.purpose) : '') + '</span>';
     h += nodeMetrics(n);
     h += '<span class="slots">Slots ' + sl + '<span>' + runs + ' / ' + n.slots_total + '</span><span class="spacer"></span><span class="mono">' + relLabel(n) + '</span> · <span class="mono" data-since="' + (n.heartbeat_age_s == null ? '' : n.heartbeat_age_s) + '" data-fmt="ago"></span></span>';
     h += '<span class="node-accs">';
-    if (!accs.length) h += '<span class="node-acc"><span class="what">No accounts assigned (aiflow-control/accounts.yaml)</span></span>';
+    if (!accs.length) h += '<span class="node-acc"><span class="what">No accounts assigned. Manage accounts on Machines and AI.</span></span>';
     accs.forEach(function (a) { h += '<span class="node-acc"><span class="sdot" data-tone="' + accTone(a) + '"></span><span class="who">' + esc(a.id) + '</span><span class="what">' + esc(doing(a)) + '</span></span>'; });
     h += '</span></button>';
   });
@@ -4126,7 +4126,7 @@ function drawerTicket(key) {
 function drawerNode(name) {
   var n = nodeBy(name); if (!n) return drawerShell('node', esc(name), '', '<div class="empty">This node is no longer registered.</div>');
   var d = D(), accs = d.accounts.filter(function (a) { return accountAssignedTo(a, n.name); }), m = n.metrics || {};
-  var b = (n.purpose || n.notes ? '<div style="font-size:13.5px">' + esc(n.purpose || '') + (n.notes ? '<div class="small" style="margin-top:4px">' + esc(n.notes) + '</div>' : '') + '</div>' : '<div class="small">No purpose or notes yet: add <span class="mono">purpose</span> and <span class="mono">notes</span> to aiflow-control/nodes/' + esc(n.name) + '.yaml</div>') +
+  var b = (n.purpose || n.notes ? '<div style="font-size:13.5px">' + esc(n.purpose || '') + (n.notes ? '<div class="small" style="margin-top:4px">' + esc(n.notes) + '</div>' : '') + '</div>' : '<div class="small">No additional machine profile details are set.</div>') +
     '<div class="facts">' + fact('IP', '<span class="mono">' + esc(n.ip || '—') + '</span>') + fact('Joined', when(n.joined_at)) + fact('Projects', esc((n.projects || []).join(', ') || '—')) + fact('Capabilities', esc((n.capabilities || []).join(', ') || '—')) + fact('Status', nodeLabel(n)) + fact('Release', '<span class="mono">' + relLabel(n) + '</span>') + fact('Slots', d.active_runs.filter(function (r) { return r.node === n.name; }).length + ' / ' + n.slots_total) + fact('Last heartbeat', nodeLastSeen(n)) + fact('CPUs', String(m.cpus || '—')) + fact('Hostname', '<span class="mono">' + esc(m.hostname || '—') + '</span>') + '</div>';
   if (n.status === 'offline') b += '<div class="offnote">The node stopped sending heartbeats. The watchdog opened an incident and emailed it; runs on this node lose their lease after 90 s and their tickets return to To Do.</div>';
   b += '<div class="dsec"><h4>Resources</h4>' + nodeMetrics(n) + '</div>';
@@ -4212,7 +4212,7 @@ function drawerInc(id) {
     run_slow: 'The run passed the warning clock. It keeps working until the hard limit.',
     role_coverage: 'A role the flow needs (master, intake, verify, dev) has fewer than two ready accounts, so one quota limit or outage could stop it. Sign in or add an account with that role, ideally from another provider.',
     role_health: 'A role is switched off for an account only while the pool keeps at least two enabled accounts and no more than half are switched off. If every eligible account scores badly, AI Flow keeps the role on and reports the most frequent failure kind. Completed pull requests and clean no-change runs are successes. A corrected history or installed missing tool restores the role immediately; otherwise successful probation runs can restore it without a day-long wait. Failure counts and involved tickets appear above. Thresholds are on the Command Center, under AI quality by role.',
-    node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.',
+    node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Add an account for this machine on Machines and AI, then complete the sign-in handoff.',
     node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
     node_services: 'A test service (PostgreSQL or Redis) that a project declares is missing or unhealthy on this node, so the node takes no work for that project. The node agent recreates missing or stopped services; the incident closes when a later heartbeat reports them healthy.',
     service_undeclared: 'Tickets of a project are parked on a test service (PostgreSQL or Redis) that the project does not declare. The flow doctor declares it itself; this alert appears only when it could not. Add the service to Test services of the project on the Projects screen.',
@@ -4360,9 +4360,7 @@ function addMachineAccount(name) {
   var jobs = $$('[data-new-job]:checked', form).map(function (item) { return item.value; });
   var sessions = Number($('[name="sessions"]', form).value || 0), provider = $('[name="provider"]', form).value;
   machineRequest('/v1/machines/' + encodeURIComponent(name) + '/accounts', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({provider: provider, sessions: sessions, jobs: jobs})
-  }).then(function (d) { S.machines.signIns[d.account] = d; S.machines.signInRefreshAt[d.account] = Date.now(); S.machines.addAccount = ''; S.machines.error = ''; poll(); renderMachines(); })
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({provider: provider, name: ($('[name="name"]', form).value || '').trim(), sessions: sessions, jobs: jobs})}).then(function (d) { S.machines.signIns[d.account] = d; S.machines.signInRefreshAt[d.account] = Date.now(); S.machines.addAccount = ''; S.machines.error = ''; poll(); renderMachines(); })
     .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
 }
 function startAccountSignIn(id) {
@@ -4386,9 +4384,8 @@ function loadAccountSignIn(id) {
 function saveAccountSettings(id) {
   var form = $('#account-edit-' + CSS.escape(id)); if (!form) return;
   var jobs = $$('[data-edit-job]:checked', form).map(function (item) { return item.value; });
-  var sessions = Number($('[name="sessions"]', form).value || 0);
-  machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'PATCH', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sessions: sessions, jobs: jobs})})
+  var field = $('[name="sessions"]', form), payload = {jobs: jobs}; if (field) payload.sessions = Number(field.value || 0);  /* shared accounts keep one total limit */
+  machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)})
     .then(function () { S.machines.accountEditor = null; S.machines.error = ''; poll(); renderMachines(); })
     .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
 }
@@ -4452,7 +4449,7 @@ function renderMachines() {
     h += '<span>Configured AI sessions <strong>' + esc(assignedSessions) + ' / 8</strong></span>';
     h += '<span>Last heartbeat <strong>' + esc(nodeLastSeen(n)) + '</strong></span></div>';
     if (state.addAccount === n.name && consoleCan('nodes.manage')) {
-      h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider" aria-label="AI provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label>';
+      h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider" aria-label="AI provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label><label>Name<input name="name" type="text" maxlength="40" placeholder="Optional, e.g. Team plan" aria-label="Account name"></label>';
       h += '<label>Sessions at once<input name="sessions" type="number" min="1" max="' + availableSessions + '" value="1"' + (availableSessions < 1 ? ' disabled' : '') + '></label>';
       h += '<div class="small">' + availableSessions + ' of the machine’s eight AI sessions are available.</div><div class="wide job-options">' + jobChecks(['develop', 'verify'], 'data-new-job') + '</div>';
       h += '<div class="project-actions wide"><button class="btn primary" data-act="machine-account-save" data-name="' + esc(n.name) + '"' + (availableSessions < 1 ? ' disabled' : '') + '>Create sign-in link and code</button><button class="btn" data-act="machine-account-cancel">Cancel</button></div></form>';
@@ -4495,20 +4492,20 @@ function renderMachines() {
       var machineUsage = (a.machines || []).find(function (m) { return m.node === n.name; }) || {};
       var sharedAssignment = !!(a.shared || a.shared_managed || machineUsage.shared_assignment);
       var removableAssignment = (a.machines || []).some(function (m) { return m.node === n.name && m.removable; });
-      h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill(accTone(a), a.paused ? 'Paused' : accLabel(a)) +
+      h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.name || a.id) + '</h4>' + pill(accTone(a), a.paused ? 'Paused' : accLabel(a)) +
         '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + (sharedAssignment
           ? ' · total limit ' + esc(a.session_limit || a.parallel) + ' sessions'
           : ' · ' + esc(a.parallel) + ' session' + (a.parallel === 1 ? '' : 's') +
             ' · ' + esc((a.jobs || []).join(', ') || 'no jobs')) + '</span><span class="spacer"></span>';
       if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-pause" data-id="' + esc(a.id) + '" data-paused="' + String(!a.paused) + '">' + (a.paused ? 'Resume' : 'Pause') + '</button>';
-      if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">Sessions and jobs</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">' + (sharedAssignment ? 'Jobs' : 'Sessions and jobs') + '</button>';
       if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">' + (a.status === 'signed_out' ? 'Sign in' : 'Sign in again') + '</button>';
       if (consoleCan('nodes.manage') && removableAssignment) h += '<button class="btn sm danger" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(n.name) + '" data-last="' + ((a.machines || []).length === 1 ? '1' : '') + '">Remove</button>';
       else if (consoleCan('nodes.manage') && !sharedAssignment) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
       h += '</div><div class="machine-facts"><span>Tokens today <strong>' + esc(tok(machineUsage.tokens_today || 0)) + '</strong></span>';
       h += '<span>Cost today <strong>' + esc(usd(machineUsage.cost_today || 0)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>';
-      if (!sharedAssignment && state.accountEditor === a.id) {
-        h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false"><label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label><div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
+      if (state.accountEditor === a.id && consoleCan('nodes.manage')) {
+        h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false">' + (sharedAssignment ? '' : '<label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label>') + '<div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
         h += '<div class="project-actions wide"><button class="btn primary" data-act="account-edit-save" data-id="' + esc(a.id) + '">Save changes</button><button class="btn" data-act="account-edit-cancel">Cancel</button></div></form>';
       }
       h += '</section>';

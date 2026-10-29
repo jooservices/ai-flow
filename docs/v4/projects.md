@@ -18,9 +18,11 @@ GitHub project repositories. The toolchain result shows each node's reported sta
 missing; an unready node receives the project requirements at its next heartbeat and cannot claim work until
 its toolchain passes the normal gate.
 
-Saving writes `projects/<KEY>.yaml` to the `aiflow-control` default branch through the GitHub App, producing a
-bot commit. Worker nodes in the control repo are assigned the new project in that file and receive it at their
-next heartbeat. Jira sync includes configured active projects automatically.
+Saving writes the versioned project policy in `projects/<KEY>.yaml` to the `aiflow-control` default branch through
+the GitHub App, producing a bot commit. The file contains no machine list: eligible worker machine assignments are
+stored in the control database and are returned to each node at its next heartbeat. Creating a project makes it
+available to current worker machines; enrolling a machine through **Machines and AI** records its selected project.
+Jira sync includes configured active projects automatically.
 
 The generated YAML has this shape (with the selected checks, stack, priority, limit and merge method):
 
@@ -41,9 +43,11 @@ limits:
     hard: 60
 priority: 5
 paused: false
-nodes:
-  - node1
 ```
+
+Older project files may have a `nodes` list. The one-time inventory import copies those assignments to the control
+database and removes the list from the control repository. Do not add or edit `nodes` in project YAML; see
+[Database-backed inventory](inventory-in-database.md).
 
 ## Pause and remove
 

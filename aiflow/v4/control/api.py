@@ -74,7 +74,8 @@ from .github_connections import DEFAULT_ID, Connection, GitHubConnections, GitHu
 from .jira import Jira
 from .policy import Decision, decide, decide_master_action, decide_read_only, explain
 from .report import ReportNotFound, build_report, render_csv, render_html, render_markdown
-from . import notify
+from . import notify, pr_comments
+from .pr_comments import PRCommentBody
 
 log = logging.getLogger("aiflow4.api")
 
@@ -898,12 +899,6 @@ class MergeBody(BaseModel):
     title: str = ""
     method: str = "squash"
 
-
-class PRCommentBody(BaseModel):
-    run_id: str
-    fence: int
-    number: int
-    body: str
 
 
 class BranchCleanupBody(BaseModel):
@@ -6327,10 +6322,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = ctx.repo().projects[run["project"]]
         repository = repository_for_run(run, project)
         github = github_gateway(ctx, repository)
-        github.comment(repository.split("/", 1)[-1], body.number, body.body)
+        outcome = pr_comments.post(github, repository.split("/", 1)[-1], body.number, body.kind, body.body)
         audit("github", "comment", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "ok",
-              {"number": body.number, "repo": repository})
-        return {"ok": True}
+              {"number": body.number, "repo": repository, "kind": body.kind, "outcome": outcome})
+        return {"ok": True, "outcome": outcome}
 
     @app.post("/v1/github/delete-branch")
     def github_delete_branch(body: BranchCleanupBody, node: str = Depends(node_auth)) -> dict:

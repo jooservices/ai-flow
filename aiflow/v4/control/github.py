@@ -223,6 +223,22 @@ class GitHubApp:
     def comment(self, repo: str, number: int, body: str) -> None:
         self.api("POST", f"/repos/{self.org}/{repo}/issues/{number}/comments", {"body": body[:60000]}, repo=repo)
 
+    def upsert_comment(self, repo: str, number: int, kind: str, body: str) -> str:
+        """One comment per kind on a pull request, edited in place: "created" or "updated".
+
+        A hidden marker identifies the comment, so repeated verification results or answers replace the last one instead of
+        piling up (the history stays in the Jira ticket)."""
+        marker = f"<!-- aiflow:{kind} -->"
+        text = f"{marker}\n{body}"[:60000]
+        existing = self.api("GET", f"/repos/{self.org}/{repo}/issues/{number}/comments?per_page=100", repo=repo) or []
+        mine = next((c for c in existing if marker in str(c.get("body") or "")), None)
+        if mine:
+            if mine.get("body") != text:
+                self.api("PATCH", f"/repos/{self.org}/{repo}/issues/comments/{mine['id']}", {"body": text}, repo=repo)
+            return "updated"
+        self.api("POST", f"/repos/{self.org}/{repo}/issues/{number}/comments", {"body": text}, repo=repo)
+        return "created"
+
     # --- control repo knowledge and policy files -----------------------------------------------------------
     def default_branch(self, repo: str) -> str:
         data = self.api("GET", f"/repos/{self.org}/{repo}", repo=repo)

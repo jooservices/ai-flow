@@ -898,12 +898,6 @@ class BranchCleanupBody(BaseModel):
     branch: str
 
 
-class TriageAlertBody(BaseModel):
-    run_id: str
-    fence: int
-    detail: str
-
-
 class ReviewerBody(BaseModel):
     comment: str = ""
     reason: str = ""
@@ -5682,22 +5676,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         audit("github", "ci-log", run["ticket_key"], run_id, fence, run["account_id"], True,
               log_tail.get("job") or "no failing job", {"sha": sha[:12], "lines": lines})
         return {"sha": sha, **log_tail}
-
-    @app.post("/v1/notify/triage")
-    def triage_alert(body: TriageAlertBody, node: str = Depends(node_auth)) -> dict:
-        run = fenced(body.run_id, body.fence, "notify", "triage-alert", {"chars": len(body.detail)})
-        if run["step"] != "triage":
-            raise HTTPException(403, "only a triage run can alert the owner")
-        blocks = ctx.db.one("SELECT 1 FROM tickets WHERE status <> 'Done' AND %s::text = ANY(blocked_by) LIMIT 1",
-                            (run["ticket_key"],))
-        severity = "critical" if blocks else "warning"
-        sent = notify.send(severity, f"{run['ticket_key']} needs owner decision", body.detail[:3000],
-                           ctx.settings.jira_site.rstrip("/") + f"/browse/{run['ticket_key']}"
-                           if ctx.settings.jira_site else "", ctx=ctx, alert_kind="ticket_needs_person",
-                           ticket=run["ticket_key"], needed="Review the question and provide an owner decision.")
-        audit("notify", "triage-alert", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
-              ",".join(sent) or "no channel configured", {"severity": severity})
-        return {"ok": True, "severity": severity, "sent": sent}
 
 
     # --- GitHub (fenced) --------------------------------------------------------------------------------------

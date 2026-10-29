@@ -122,11 +122,54 @@ jobs:
           BASE: ${{ github.event.pull_request.base.ref == 'develop' && github.event.pull_request.base.sha || 'origin/develop' }}
         run: uv run --frozen python -m aiflow.v4.core.quality_checks check --base "$BASE"
 
-  v4:
-    name: Test (v4)
+  # The v4 suite runs on parallel runners (JAIF-431): balanced shards of the test files, the browser journeys, and the
+  # scale proof (JAIF-432, not a required check). Each runner has its own Redis and PostgreSQL. The required check
+  # "Test (v4)" is the job `v4` below: it passes only when every shard and the browser journeys passed.
+  v4-shard:
+    name: Test (v4) shard ${{ matrix.shard }}
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      redis:
+        image: redis:8.2.10-bookworm
+        ports: ["6379:6379"]
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg18-trixie
+        env:
+          POSTGRES_USER: aiflow
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aiflow4
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U aiflow -d aiflow4"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install
+        run: |
+          pip install uv==0.13.4
+          uv sync --frozen --group dev
+
+      - name: Tests of this shard (real Redis and PostgreSQL)
+        env:
+          AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
+          AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+        run: uv run pytest $(uv run python -m aiflow.v4.core.test_shards files --index ${{ matrix.shard }} --total 4) -p no:warnings
+
+  v4-browser:
+    name: Test (v4) browser journeys
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       redis:
         image: redis:8.2.10-bookworm
@@ -154,16 +197,12 @@ jobs:
           npm install --global playwright@1.64.1
           playwright install chromium --with-deps
 
-      - name: Tests (real Redis and PostgreSQL)
+      - name: Browser journeys (real Redis and PostgreSQL)
         env:
           AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
           AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
           AIFLOW4_PLAYWRIGHT_TRACE_DIR: ${{ runner.temp }}/aiflow-playwright-traces
-        run: |
-          # The 100/50/200 benchmark runs first against a fresh PostgreSQL service, before the
-          # rest of the suite repeatedly drops and recreates schemas and triggers slow CI checkpoints.
-          uv run pytest tests/v4/test_scale_proof.py -p no:warnings
-          uv run pytest tests/v4 --ignore=tests/v4/test_scale_proof.py -p no:warnings
+        run: uv run pytest tests/v4/test_console_browser.py tests/v4/test_log_viewer_browser.py -p no:warnings
 
       - name: Upload sanitized Playwright traces
         if: failure()
@@ -173,6 +212,57 @@ jobs:
           path: ${{ runner.temp }}/aiflow-playwright-traces/
           if-no-files-found: ignore
           retention-days: 14
+
+  # The 100/50/200 benchmark is sensitive to runner speed, so it is not a required check: it runs on its own against a
+  # fresh PostgreSQL service on every pull request and nightly, and its result is read next to the pull request.
+  v4-scale:
+    name: Scale proof (not required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      redis:
+        image: redis:8.2.10-bookworm
+        ports: ["6379:6379"]
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg18-trixie
+        env:
+          POSTGRES_USER: aiflow
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aiflow4
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U aiflow -d aiflow4"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install
+        run: |
+          pip install uv==0.13.4
+          uv sync --frozen --group dev
+
+      - name: Scale proof (real Redis and PostgreSQL)
+        env:
+          AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
+          AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+        run: uv run pytest tests/v4/test_scale_proof.py -p no:warnings
+
+  v4:
+    name: Test (v4)
+    if: always() && github.event_name != 'schedule'
+    needs: [v4-shard, v4-browser]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every shard and the browser journeys passed
+        env:
+          RESULTS: ${{ needs.v4-shard.result }} ${{ needs.v4-browser.result }}
+        run: |
+          echo "results: $RESULTS"
+          for result in $RESULTS; do test "$result" = success || exit 1; done
 
   # Clean-install acceptance test (docs/v4/clean-install-acceptance.md): the fast version on every pull request
   # that touches install, deploy, control or node code ...

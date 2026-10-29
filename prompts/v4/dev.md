@@ -23,6 +23,10 @@ so the aim is a change a careful reviewer finds nothing in the first time.
    - Robustness: what happens on error, timeout, concurrent calls, a repeat call and a partial failure?
    - Scope and structure: does anything outside the ticket change, does a file or function grow past what the
      architecture document allows, is anything duplicated?
+   - Code quality (a minimum for every change, whatever reviewer bots are available): one responsibility per module and
+     function; a new feature extends the code by a new module that registers itself, never by growing a central file;
+     nothing duplicated; no swallowed error; and `python3 -m aiflow.v4.core.quality_checks check --base origin/{base}`
+     passes (ruff findings, functions above 80 lines and layer imports must not grow).
    - Documentation and checks: are the docs, changelog and configuration the project requires updated, and does
      every project check below pass?
    Fix what you find, then run the checks again. Do not hand over a change you would send back yourself.

@@ -12,6 +12,7 @@ Do this:
    Map each criterion to the one configured command that proves it. Do not reuse an unrelated passing check, invent
    a command, fail review for a deferred criterion, or ask about its environment. List nothing when all criteria can be
    checked in this review run.
+   Code quality does not depend on any bot reviewer: fail the review when the change grows a central file instead of adding a module, duplicates logic, swallows an error or adds a ruff, function-size or layer finding (`python3 -m aiflow.v4.core.quality_checks check`).
    Use `docs/v4/architecture.md` as the architecture checklist: verify layer ownership and dependency direction,
    registration points, the named patterns, and the principle checks for the changed code.
 3. Run the project's checks and the tests of this change:

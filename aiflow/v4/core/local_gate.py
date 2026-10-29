@@ -2,7 +2,7 @@
 
     python3 -m aiflow.v4.core.local_gate run --path <worktree> --base develop [--title "<pull request title>"]
 
-The steps are the commands of the CI jobs ``Test (Unit)``, ``Giant files``, ``Documentation`` and ``Test (v4)`` plus the
+The steps are the commands of the CI jobs ``Test (Unit)``, ``Giant files``, ``Documentation``, ``Code quality`` and ``Test (v4)`` plus the
 header rules of the commit and the pull request title. ``tests/v4/test_local_gate.py`` compares them with
 ``.github/workflows/ci.yml`` so the gate cannot drift away from CI.
 
@@ -12,9 +12,9 @@ service or variable that is not provided, so CI has to complete it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
-import re
 import shlex
 import signal
 import subprocess
@@ -111,6 +111,8 @@ def steps(base: str) -> list[Step]:
         Step("docs-check", ("uv", "run", "--frozen", "python", "-m", "aiflow.v4.core.docsite", "check", "--base", ref),
              "docs", 300, needs_commit=True),
         Step("headers", check=check_headers, needs_commit=True),
+        Step("quality", ("uv", "run", "--frozen", "python", "-m", "aiflow.v4.core.quality_checks", "check", "--base", ref),
+             "quality", 300, needs_commit=True),
         Step("scale-proof", ("uv", "run", "--frozen", "pytest", "tests/v4/test_scale_proof.py", "-p", "no:warnings"),
              "v4", 900, TEST_SERVICES, retries=1),
         Step("v4", ("uv", "run", "--frozen", "pytest", "tests/v4", "--ignore=tests/v4/test_scale_proof.py",
@@ -143,10 +145,8 @@ def _read_tail(path: Path, limit: int = 65536) -> str:
 
 
 def _kill(proc: subprocess.Popen) -> None:
-    try:
+    with contextlib.suppress(ProcessLookupError):
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
 
 
 def run_command(step: Step, ctx: Context, env: dict[str, str]) -> StepResult:
@@ -163,10 +163,8 @@ def run_command(step: Step, ctx: Context, env: dict[str, str]) -> StepResult:
                 proc.wait(timeout=step.timeout_s)
             except subprocess.TimeoutExpired:
                 _kill(proc)  # the whole process group, so a detached child cannot keep the gate waiting
-                try:
+                with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
                 return StepResult(step.name, TIMEOUT, time.monotonic() - started,
                                   f"no result after {step.timeout_s} s\n{_tail(_read_tail(log_path))}")
         return StepResult(step.name, PASSED if proc.returncode == 0 else FAILED, time.monotonic() - started,
@@ -174,7 +172,8 @@ def run_command(step: Step, ctx: Context, env: dict[str, str]) -> StepResult:
 
 
 def run_step(step: Step, ctx: Context, env: dict[str, str] | None = None) -> StepResult:
-    env = dict(os.environ if env is None else env)
+    env = {k: v for k, v in (os.environ if env is None else env).items()
+           if not k.startswith("GIT_") or k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}  # a hook runs with GIT_DIR set: a check that makes its own repository would write into this one
     missing = [name for name in step.needs_env if not env.get(name)]
     if missing:
         return StepResult(step.name, MISSING_ENV, 0.0, "not provided: " + ", ".join(missing))

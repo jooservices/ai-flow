@@ -6,8 +6,9 @@ def _ticket(key, labels, blocked_by=()):
     return {"key": key, "labels": list(labels), "blocked_by": list(blocked_by), "status": "To Do"}
 
 
-def test_dev_ticket_sql_escapes_like_wildcard_for_psycopg():
-    assert "LIKE 'aiflow-split-%%'" in DEV_TICKET_SQL
+def test_dev_ticket_sql_matches_split_children_without_psycopg_placeholders():
+    assert "starts_with(label, 'aiflow-split-')" in DEV_TICKET_SQL
+    assert "%" not in DEV_TICKET_SQL
 
 
 def test_split_parent_is_never_a_developer_candidate():

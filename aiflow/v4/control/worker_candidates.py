@@ -68,7 +68,7 @@ DEV_TICKET_SQL = (
     " AND ((status = 'To Do' AND 'aiflow-ready' = ANY(labels))"
     "      OR (status IN ('To Do', 'Backlog')"
     "          AND EXISTS (SELECT 1 FROM unnest(labels) AS label"
-    "                      WHERE label LIKE 'aiflow-split-%%' AND label <> 'aiflow-split-parent')))"
+    "                      WHERE starts_with(label, 'aiflow-split-') AND label <> 'aiflow-split-parent')))"
 )
 
 

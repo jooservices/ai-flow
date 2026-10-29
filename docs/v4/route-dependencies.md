@@ -251,3 +251,10 @@ Every control API route is served from `api.py` or a router under `routes/` and 
 - `POST /v1/version-releases/{version_id}/complete`
 - `GET /v1/work/candidates`
 - `POST /v1/work/claim`
+
+## Routes served from included routers
+
+FastAPI wraps an included router in one object that has no `endpoint`, `path` or `dependant`. Code that inspects the app's routes
+(the sign-in gate that lets a bearer token through to routes that check it, the audit log that names the route template, and the
+documentation check that maps handlers to API contracts) walks `route_registry.concrete_routes(app.routes)` instead of
+`app.routes`, so a route moved out of `api.py` keeps the same gate, audit and documentation behaviour.

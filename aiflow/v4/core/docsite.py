@@ -870,7 +870,8 @@ def api_route_contract_spans() -> dict[str, dict[str, list[tuple[int, int]]]]:
     Derived from the running app, so a new route module is watched without editing this file."""
     found: dict[str, dict[str, list[tuple[int, int]]]] = {}
     helper_registry = _control_function_registry()
-    for route in _mounted_control_app().routes:
+    from ..control.route_registry import concrete_routes
+    for route in concrete_routes(_mounted_control_app().routes):
         endpoint = getattr(route, "endpoint", None)
         code = getattr(endpoint, "__code__", None)
         path = getattr(route, "path", "")

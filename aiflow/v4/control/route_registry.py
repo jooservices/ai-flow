@@ -32,6 +32,37 @@ def discover_routers(package_name: str = ROUTES_PACKAGE) -> list[tuple[int, str,
     return sorted(routers, key=lambda item: (item[0], item[1]))
 
 
+class _Prefixed:
+    """A route of an included router seen at the path it is served on."""
+
+    def __init__(self, route, prefix: str) -> None:
+        self._route, self._prefix = route, prefix
+
+    def __getattr__(self, name):
+        return getattr(self._route, name)
+
+    @property
+    def path(self) -> str:
+        return self._prefix + self._route.path
+
+    def matches(self, scope):
+        stripped = dict(scope, path=scope["path"][len(self._prefix):]) if scope["path"].startswith(self._prefix) else scope
+        return self._route.matches(stripped)
+
+
+def concrete_routes(routes):
+    """The concrete routes of an app. FastAPI wraps an included router in one object without `endpoint`, `path` or
+    `dependant`, so code that inspects routes (the sign-in gate, the audit log, the documentation check) must look inside."""
+    for route in routes:
+        inner = getattr(route, "original_router", None)
+        if inner is None:
+            yield route
+            continue
+        prefix = getattr(getattr(route, "include_context", None), "prefix", "") or ""
+        for sub in concrete_routes(inner.routes):
+            yield _Prefixed(sub, prefix) if prefix else sub
+
+
 def mount_discovered_routers(app: FastAPI, package_name: str = ROUTES_PACKAGE) -> None:
     """Mount all routers discovered under the feature route package."""
     for _priority, _module_name, router in discover_routers(package_name):

@@ -348,6 +348,7 @@ else{m.textContent=x[1].detail||"Sign-in failed";b.disabled=false;if(x[1].mfa_re
 
 def install_login(app: FastAPI, ctx) -> None:
     from . import setup_wizard
+    from .route_registry import concrete_routes
     from .security import install_security
 
     settings = ctx.settings
@@ -364,7 +365,7 @@ def install_login(app: FastAPI, ctx) -> None:
         return any(param.name == "authorization" for d in flatten(route.dependant) for param in d.header_params)
 
     def checks_token(request: Request) -> bool:
-        for route in app.routes:
+        for route in concrete_routes(app.routes):
             if route.matches(request.scope)[0] == Match.FULL:
                 if id(route) not in token_routes:
                     token_routes[id(route)] = isinstance(route, APIRoute) and route_checks_token(route)

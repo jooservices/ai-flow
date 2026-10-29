@@ -34,3 +34,30 @@ def test_the_check_finds_an_undefined_name():
 def test_every_route_module_defines_or_imports_every_name_it_uses():
     problems = {p.name: undefined_names(p.read_text(encoding="utf-8")) for p in ROUTES}
     assert {k: v for k, v in problems.items() if v} == {}
+
+
+def test_concrete_routes_look_inside_included_routers():
+    from fastapi import APIRouter, FastAPI
+
+    from aiflow.v4.control.route_registry import concrete_routes
+
+    app = FastAPI()
+    plain, nested = APIRouter(), APIRouter()
+
+    @plain.get("/a")
+    def a():
+        return 1
+
+    @nested.get("/b")
+    def b():
+        return 2
+
+    app.include_router(plain)
+    app.include_router(nested, prefix="/v1")
+
+    @app.get("/c")
+    def c():
+        return 3
+
+    paths = sorted(getattr(r, "path", "") for r in concrete_routes(app.routes) if getattr(r, "path", "").startswith(("/a", "/v1/b", "/c")))
+    assert paths == ["/a", "/c", "/v1/b"]

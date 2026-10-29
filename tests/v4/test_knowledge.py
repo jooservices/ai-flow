@@ -1,6 +1,7 @@
 """Knowledge screen CRUD, version history and owner-gated policy rollout."""
 
 from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.control import flow_doctor
 from aiflow.v4.control.console_auth import issue_session
 
 
@@ -33,7 +34,7 @@ def test_resource_types_commit_to_control_repo_archive_and_restore_with_history(
         response = save(client, kind=kind, resource_id=resource_id, title=title, content=content)
         assert response.status_code == 200, response.text
         row = response.json()
-        assert row["version"] == 1 and row["updated_by"] == "Mai Nguyen"
+        assert row["version"] == 1 and row["updated_by"] == "knowledge@example.test"
         commit = ctx.github.commits[-1]
         assert commit["repo"] == "aiflow-control" and commit["branch"] == "develop"
         assert commit["path"] == row["path"] and "Mai Nguyen" not in commit["content"]
@@ -55,7 +56,7 @@ def test_resource_types_commit_to_control_repo_archive_and_restore_with_history(
 
         history = client.get(f"/v1/knowledge/resources/{kind}/{resource_id}/history").json()["history"]
         assert [entry["version"] for entry in history] == [3, 2, 1]
-        assert history[0]["actor"] == "An Tran" and history[0]["action"] == "archive"
+        assert history[0]["actor"] == "knowledge@example.test" and history[0]["action"] == "archive"
         assert history[1]["content"] == content + " Revised."
         assert history[2]["content"] == content
 
@@ -68,6 +69,34 @@ def test_resource_types_commit_to_control_repo_archive_and_restore_with_history(
     listed = client.get("/v1/knowledge/resources?include_archived=true").json()["resources"]
     assert {row["type"] for row in listed} >= {item[0] for item in examples}
     assert "aiflow-control" in {row["updated_by"] for row in listed if row["type"] == "policy"}
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
+
+
+def test_knowledge_item_save_and_moderation_use_authenticated_actor_without_operator_bug(client, ctx):
+    sign_in(client, ctx)
+    saved = client.post("/v1/knowledge/items", json={
+        "scope": "general", "kind": "decision", "title": "Use signed console identity",
+        "content": "Keep the approval owner in history.",
+        "actor": "body-supplied-actor",
+    })
+    assert saved.status_code == 200, saved.text
+    item = saved.json()
+    assert item["created_by"] == "knowledge@example.test"
+
+    approved = client.post(f"/v1/knowledge/items/{item['id']}/approve", json={"actor": "different-body-actor"})
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["approved"] is True and approved.json()["approved_by"] == "knowledge@example.test"
+
+    writes = ctx.db.all("SELECT actor,action,accepted FROM write_audit WHERE target='knowledge' ORDER BY id")
+    assert writes == [
+        {"actor": "knowledge@example.test", "action": "item_save", "accepted": True},
+        {"actor": "knowledge@example.test", "action": "item_approve", "accepted": True},
+    ]
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
 
 
 def test_policy_waits_for_owner_pr_merge_then_refreshes_active_policy(client, ctx):
@@ -106,12 +135,21 @@ def test_policy_waits_for_owner_pr_merge_then_refreshes_active_policy(client, ct
     assert refreshes == [True]
     sign_in(client, ctx)
     history = client.get("/v1/knowledge/resources/policy/default/history").json()["history"]
-    assert history[0]["content"] == new_content and history[0]["actor"] == "Mai Nguyen"
-    assert history[0]["approved_by"] == "Owner"
+    assert history[0]["content"] == new_content and history[0]["actor"] == "knowledge@example.test"
+    assert history[0]["approved_by"] == "owner-token"
     after = client.get("/v1/knowledge/resources?include_archived=true").json()
     current_after = next(row for row in after["resources"] if row["type"] == "policy" and row["id"] == "default")
     assert current_after["content"] == new_content and current_after["version"] == current["version"] + 1
     assert after["proposals"] == []
+    writes = ctx.db.all("SELECT actor,action,accepted FROM write_audit"
+                        " WHERE target='aiflow-control' AND action IN ('policy-pr','policy-merge') ORDER BY id")
+    assert writes == [
+        {"actor": "knowledge@example.test", "action": "policy-pr", "accepted": True},
+        {"actor": "owner-token", "action": "policy-merge", "accepted": True},
+    ]
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
 
 
 def test_project_scoped_policy_files_are_used_by_controlrepo_and_archived_files_are_inactive(control_repo):

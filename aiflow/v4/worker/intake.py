@@ -5,27 +5,34 @@ The AI reads the ticket and the project spec (docs/SPEC.md on the project's base
 
 Outcomes:
   refined    original description kept as a comment, description replaced, aiflow-ready added, ticket in To Do
+  split_plan validated child list on the run result; Jira children are not created
   questions  the AI needs answers first: questions in a comment, ticket in Needs owner
   quota      the account cannot work now; the ticket stays in Intake for another account
   failed     anything else (the ticket stays in Intake and is retried after a short wait)
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
 from pathlib import Path
+from typing import Any
 
+from ..core import work_limits
 from ..adapters import RunSpec, get_adapter
+from ..control.ticket_split_decision import decide_split
 from ..core.environment import find_server_wording, is_server_question, kinds_of, redact, rejection_message
+from ..core.ticket_splitting import InvalidSplitPlan, validate_plan
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
 from .gitops import Git
 from .notes import note
 
 log = logging.getLogger("aiflow4.intake")
-KIND = re.compile(r"^INTAKE:\s*(REWRITE|QUESTIONS)\b", re.M)
+KIND = re.compile(r"^INTAKE:\s*(REWRITE|QUESTIONS|SPLIT)\b", re.M)
 DESCRIPTION = re.compile(r"^DESCRIPTION:\s*\n<<<\s*\n(.*?)\n>>>\s*$", re.M | re.S)
+SPLIT_BLOCK = re.compile(r"^SPLIT:\s*\n<<<\s*\n(.*?)\n>>>\s*$", re.M | re.S)
 QUESTIONS = re.compile(r"^QUESTIONS:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
 REMOVED = re.compile(r"^REMOVED:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
 ENVIRONMENT_NEEDS = re.compile(r"^ENVIRONMENT NEEDS:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
@@ -92,12 +99,14 @@ def template_gaps(description: str, issue_type: str | None = "Story") -> list[st
     return gaps
 
 
-def parse(text: str, issue_type: str | None = "Story") -> tuple[str, str]:
-    """AI answer -> ("rewrite", description) | ("questions", bullet list) | ("invalid", what the rewrite lacks)
-    | ("", "") when neither is usable."""
+def parse(text: str, issue_type: str | None = "Story") -> tuple[str, Any]:
+    """AI answer -> ("rewrite", description) | ("questions", bullet list) | ("split", plan)
+    | ("invalid", why) | ("", "") when neither is usable."""
     text = text or ""
     kinds = KIND.findall(text)
     kind = kinds[-1] if kinds else ""
+    if kind == "SPLIT":
+        return _parse_split(text)
     d, q = DESCRIPTION.search(text), QUESTIONS.search(text)
     if kind == "REWRITE" and d and d.group(1).strip():
         gaps = template_gaps(d.group(1).strip(), issue_type)
@@ -110,6 +119,21 @@ def parse(text: str, issue_type: str | None = "Story") -> tuple[str, str]:
     if kind == "QUESTIONS" and q:
         return "questions", q.group(1).strip()
     return "", ""
+
+
+def _parse_split(text: str) -> tuple[str, Any]:
+    """INTAKE: SPLIT payload -> ("split", plan) or ("invalid", why). Does not write Jira."""
+    block = SPLIT_BLOCK.search(text)
+    if not block or not block.group(1).strip():
+        return "invalid", "the split plan is missing"
+    try:
+        payload = json.loads(block.group(1).strip())
+    except json.JSONDecodeError:
+        return "invalid", "the split plan is not JSON"
+    try:
+        return "split", validate_plan(payload)
+    except InvalidSplitPlan as exc:
+        return "invalid", str(exc)
 
 
 def _bullets(match: re.Match[str] | None) -> list[str]:
@@ -146,7 +170,7 @@ def read_spec(worktree: Path | None) -> str:
     return text[:SPEC_CHARS] + ("\n(truncated)" if len(text) > SPEC_CHARS else "")
 
 
-def build_prompt(c: Claimed, spec: str) -> str:
+def build_prompt(c: Claimed, spec: str, needs_split: bool = False) -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "intake.md").read_text(encoding="utf-8")
     t = c.ticket
     comments = [f"- {x.get('created', '')} {x.get('author', 'unknown')}: {x.get('body', '')}" if isinstance(x, dict)
@@ -166,8 +190,45 @@ def build_prompt(c: Claimed, spec: str) -> str:
                       template_outline=outline, label_context=label_context,
                       environment=environment_context,
                       description=t["description"] or "(no description)",
-                      comments="\n".join(comments) or "(no comments)")
+                      comments="\n".join(comments) or "(no comments)",
+                      split_instructions=_split_instructions(needs_split))
     return with_knowledge_context(prompt, c.context_pack)
+
+
+def _split_instructions(needs_split: bool) -> str:
+    if not needs_split:
+        return "This ticket does not need splitting. Use the DESCRIPTION / INTAKE: REWRITE form only."
+    return (
+        "This ticket needs splitting. Do not rewrite it as one description. Return 2 to 8 child tickets. "
+        "Each child is an object with only summary and description. You are the Team Lead: the developer gets an exact "
+        "job that one short AI run (15 minutes) can finish, so the description must have an AC1: line and these sections, "
+        "each with content: Files: (the files to create or change; put the feature in a module that owns it), "
+        "Skeleton: (the classes and functions to write, one line each), Test cases: (the tests to write, one line each).\n"
+        "When you split:\nSPLIT:\n<<<\n"
+        '[{"summary":"First child title here","description":"AC1: First observable behaviour.\\nFiles: aiflow/v4/x.py, '
+        'tests/v4/test_x.py\\nSkeleton: class X with run(); function y()\\nTest cases: run returns the value; y rejects empty input"},'
+        '{"summary":"Second child title here","description":"AC1: Second observable behaviour.\\nFiles: aiflow/v4/z.py\\n'
+        'Skeleton: function z()\\nTest cases: z handles the empty case"}]\n'
+        ">>>\nINTAKE: SPLIT"
+    )
+
+
+def _ticket_needs_split(ticket: dict) -> bool:
+    """True when capacity.estimate high minutes exceed the project target. Does not write Jira."""
+    return bool(decide_split(ticket, [])["needs_split"])
+
+
+def _split_result(result: dict, kind: str, payload: Any) -> dict:
+    """Keep a valid plan on the run result. Never create Jira children from intake."""
+    if kind == "split":
+        result.update(outcome="split_plan",
+                      summary=f"split plan with {len(payload)} children; child issues are not created")
+        result.setdefault("details", {})["split_plan"] = payload
+        return result
+    result["summary"] = (
+        payload[:1000] if kind == "invalid" else "needs_split tickets must return a validate_plan split list"
+    )
+    return result
 
 
 def _outline_section(section: str) -> str:
@@ -189,6 +250,15 @@ def _outline_section(section: str) -> str:
         "Impact:": "<security impact if exploited>", "Reader:": "<intended reader>",
     }
     return f"{section} {prompts[section]}"
+
+
+def _provider_result(res) -> dict:
+    """What the provider run reported: usage, the quota reading with its observation time, errors and the log."""
+    observed = getattr(res, "quota_observed_at", None)
+    return {"tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd, "quota": res.quota,
+            "quota_observed_at": observed.isoformat() if observed else None, "error_kind": res.error_kind,
+            "reset_at": res.reset_at.isoformat() if res.reset_at else None,
+            "details": {"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path}}
 
 
 def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,
@@ -213,9 +283,10 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         hb.progress = {"phase": "intake", "head": head[:10]}
         logs = Path(srv_root) / "logs" / "runs"
         logs.mkdir(parents=True, exist_ok=True)
-        spec = RunSpec(prompt=build_prompt(c, read_spec(wt)), cwd=str(wt),
+        needs_split = _ticket_needs_split(c.ticket)
+        spec = RunSpec(prompt=build_prompt(c, read_spec(wt), needs_split=needs_split), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("target", 30)) * 60, control_url=control_url,
+                       timeout_s=int(project.get("work_minutes", {}).get("target", work_limits.TARGET)) * 60, control_url=control_url,
                        run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
         adapter = get_adapter(c.provider)
         base_argv = adapter.argv
@@ -227,24 +298,25 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             hb.progress = {"phase": "intake-ai", "events": events["n"], "elapsed_s": int(time.time() - t0)}
 
         res = run_with_inbox(adapter, spec, hb, on_progress)
-        result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
-                      quota_observed_at=(getattr(res, "quota_observed_at", None).isoformat()
-                                         if getattr(res, "quota_observed_at", None) else None),
-                      error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
-                      details={"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})
+        result.update(_provider_result(res))
         if hb.lost.is_set():
             raise LeaseLost()
         if res.error_kind in ("quota", "auth"):
             result.update(outcome="quota", summary=f"{c.account} cannot work now ({res.error_kind}): {res.error_message}"[:500])
             return result
         kind, text = parse(res.final_text or "", c.ticket.get("type"))
-        if kind == "rewrite":
-            removed, needs = parse_removals(res.final_text or "")
-            return refined(c, jira, result, text, t0, api_node(api), api=api, removed=removed, needs=needs)
         if kind == "questions":
             if is_server_question(text):
                 return environment_questions(c, jira, result, project.get("environment") or [], t0)
             return questions(c, jira, result, text, t0, api_node(api))
+        if needs_split:
+            return _split_result(result, kind, text)
+        if kind == "split":
+            result["summary"] = "this ticket does not need splitting; use the rewrite path"
+            return result
+        if kind == "rewrite":
+            removed, needs = parse_removals(res.final_text or "")
+            return refined(c, jira, result, text, t0, api_node(api), api=api, removed=removed, needs=needs)
         if kind == "invalid":
             result["summary"] = text[:1000]
             jira("comment", body=note(c, "rewrite rejected", what="The intake rewrite did not meet the ready check",

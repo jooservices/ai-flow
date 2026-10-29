@@ -125,15 +125,17 @@ The scale-proof record and read routes are `POST /v1/scale-proof/results` and `G
 
 ### API routes covered and referenced
 
-These are the concrete control API routes used by the measured screens and worker scenario, plus related route
-contracts changed alongside this feature. “Measured” means the harness sends that request during its timed run;
-it does not mean every possible request or user action on that screen is load-tested.
+These are the concrete control API routes used by the measured screens and worker scenario, plus routes reachable
+through shared worker, review, learning and operations helpers in this area. “Measured” means the harness sends
+that request during its timed run; it does not mean every possible request or user action on that screen is
+load-tested.
 
 | Route | Measured | Purpose |
 |---|---:|---|
 | `GET /v1/capacity` | Yes | Command Center capacity summary. |
 | `GET /v1/dashboard/quota` | Yes | Command Center quota summary. |
 | `GET /v1/dashboard/waiting` | Yes | Waiting-ticket data for the Command Center, Work and Delivery views. |
+| `GET /v1/ba-chat/candidate` | No | Poll for the next business-analysis chat turn. |
 | `GET /v1/reviews` | Yes | Review queue data. |
 | `GET /v1/system-check` | Yes | Read readiness conditions for the System check screen. |
 | `GET /v1/reviews/export.csv` | No | Export review metrics. |
@@ -147,6 +149,7 @@ it does not mean every possible request or user action on that screen is load-te
 | `POST /v1/runs/{run_id}/result` | Yes | Submit each simulated worker’s run result and release its lease. |
 | `GET /v1/runtime-settings` | Yes | Load the Runtime settings screen. |
 | `POST /v1/runtime-settings` | No | Set a runtime value and queue its restart. |
+| `PUT /v1/role-health/settings` | No | Configure the role-health evaluation window and failure threshold. |
 | `GET /v1/deploy/state` | No | Read control-machine deployment state. |
 | `POST /v1/version-releases/claim` | No | Claim a version-release check. |
 | `GET /v1/backups` | No | Read backup status and configured targets. |
@@ -165,7 +168,9 @@ it does not mean every possible request or user action on that screen is load-te
 | `GET /v1/master/autonomy` | No | Read the master agent's autonomy settings. |
 | `GET /v1/master/candidate` | No | Read the current master-agent candidate. |
 | `GET /v1/master/context` | No | Read the master agent's decision context. |
+| `POST /v1/master/plan-outcome` | No | Record the result of a master plan. |
 | `PUT /v1/master/autonomy/budget` | No | Change the master agent's autonomy budget. |
+| `POST /v1/nodes/{name}/release-failures` | No | Report a node release failure. |
 | `POST /v1/knowledge/proposals/{proposal_id}/approve` | No | Approve a knowledge proposal. |
 | `POST /v1/knowledge/resources` | No | Create or update a knowledge resource. |
 | `POST /v1/knowledge/resources/{kind}/{resource_id}/restore` | No | Restore a prior knowledge-resource version. |
@@ -191,3 +196,11 @@ uv run --frozen aiflow4 scale-proof --release v4.0.0-local --out scale.json \
 Run duration depends on the host and database; the JSON report records `duration_s`. The test module runs the full
 100/50/200 scenario once, checks every console view with a smaller local fleet, enforces the budgets, and tests
 release blocking and ticket creation with synthetic reports.
+
+## Duplicate picks (JAIF-425)
+
+The check "every ready ticket is picked once" failed in about one CI run in three with "1 or 2 picked more than once". The harness
+marked a finished ticket `Done` after it had posted the result and the release, while a real worker moves the ticket in Jira
+before it reports the result. On a slow runner a concurrent claim could pick the ticket inside that window. The harness now marks the
+ticket first (and puts it back when the result or the release fails), so a duplicate pick is a real fencing defect again and not
+a harness race. The console page-load budget is a separate source of flakes and is still open.

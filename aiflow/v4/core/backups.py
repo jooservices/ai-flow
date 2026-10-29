@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import httpx
+import io
 import json
 import os
 import re
@@ -26,6 +27,7 @@ from cryptography.exceptions import InvalidTag
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import psycopg
+import yaml
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import dict_row
 from psycopg import sql
@@ -201,6 +203,47 @@ def _add_tree(tar: tarfile.TarFile, source: Path, prefix: str, excluded: set[Pat
                 tar.addfile(info, stream)
 
 
+def _add_control_repository(tar: tarfile.TarFile, source: Path) -> None:
+    """Archive policy from the control checkout, filtering legacy runtime inventory from older repositories."""
+    if not source.is_dir():
+        return
+    for item in sorted(source.rglob("*")):
+        try:
+            relative = item.relative_to(source)
+        except ValueError:
+            continue
+        if (any(part == ".git" for part in relative.parts) or relative.parts[0] == "nodes"
+                or relative.as_posix() == "accounts.yaml" or item.is_symlink()):
+            continue
+        arcname = (PurePosixPath("repository") / PurePosixPath(relative.as_posix())).as_posix()
+        if item.is_dir():
+            info = tarfile.TarInfo(arcname.rstrip("/") + "/")
+            info.type, info.mode = tarfile.DIRTYPE, 0o700
+            tar.addfile(info)
+        elif item.is_file():
+            if relative.parts[0] == "projects" and item.suffix.lower() in {".yaml", ".yml"}:
+                try:
+                    data = yaml.safe_load(item.read_text(encoding="utf-8"))
+                except (OSError, yaml.YAMLError) as exc:
+                    raise BackupError("a project file in the control repository could not be archived") from exc
+                if isinstance(data, dict) and "nodes" in data:
+                    data.pop("nodes", None)
+                    payload = yaml.safe_dump(data, sort_keys=False, allow_unicode=True).encode("utf-8")
+                    info = tar.gettarinfo(str(item), arcname=arcname)
+                    info.uid = info.gid = 0
+                    info.uname = info.gname = ""
+                    info.mode &= 0o700
+                    info.size = len(payload)
+                    tar.addfile(info, io.BytesIO(payload))
+                    continue
+            info = tar.gettarinfo(str(item), arcname=arcname)
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.mode &= 0o700
+            with item.open("rb") as stream:
+                tar.addfile(info, stream)
+
+
 def _secret_roots(settings) -> list[tuple[str, Path]]:
     roots = [("control", Path(settings.control_secrets_dir)), ("console", Path(settings.console_secrets_dir)),
              ("jira", Path(settings.jira_secret_dir)), ("github", Path(settings.github_app_dir)),
@@ -297,7 +340,7 @@ def create_archive(database_url: str, repo_root: str | Path, settings, target: P
             knowledge.write_bytes(_knowledge_bytes_from_connection(snapshot_conn))
         repo_archive = tmpdir / "control-repository.tar.gz"
         with tarfile.open(repo_archive, "w:gz") as tar:
-            _add_tree(tar, Path(repo_root), "repository")
+            _add_control_repository(tar, Path(repo_root))
         secret_archive = tmpdir / "stored-secrets.tar.gz"
         excluded = {Path(settings.backup_key_file).absolute()}
         with tarfile.open(secret_archive, "w:gz") as tar:

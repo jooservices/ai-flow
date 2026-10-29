@@ -134,6 +134,7 @@ def control_repo(tmp_path: Path) -> Path:
 
 class FakeJira:
     normalize = staticmethod(Jira.normalize)
+    operator_changes = staticmethod(Jira.operator_changes)
 
     def __init__(self) -> None:
         self.status_of: dict[str, str] = {}
@@ -258,6 +259,17 @@ class FakeJira:
     def link_issues(self, blocker, blocked, link_type="Blocks"):
         self.issue_links.append((blocker, blocked, link_type))
 
+    def issue_links_for(self, key):
+        return list(getattr(self, "links_by_ticket", {}).get(key, []))
+
+    def get_issue_links(self, key):
+        return list(getattr(self, "links_by_ticket", {}).get(key, []))
+
+    def delete_issue_link(self, link_id):
+        self.deleted_issue_links = getattr(self, "deleted_issue_links", []) + [str(link_id)]
+        for key in list(getattr(self, "links_by_ticket", {})):
+            self.links_by_ticket[key] = [link for link in self.links_by_ticket[key] if link.get("id") != str(link_id)]
+
     def add_attachment(self, key, filename, content, content_type):
         self.attachments.append((key, filename, content, content_type))
 
@@ -335,6 +347,19 @@ class FakeGitHub:
         self.files[(repo, branch, path)] = content
         self.branch_heads[(repo, branch)] = f"{len(self.commits):040x}"
         return f"commit{len(self.commits):04d}"
+
+    def commit_changes(self, repo, branch, expected_sha, writes, deletions, message):
+        if self.branch_heads.get((repo, branch), f"sha-{branch}") != expected_sha:
+            raise RuntimeError("422: Update is not a fast forward")
+        for path in deletions:
+            self.deleted_files.append((repo, path))
+            self.files.pop((repo, branch, path), None)
+        for path, content in writes.items():
+            self.files[(repo, branch, path)] = content
+        self.commits.append({"repo": repo, "branch": branch, "writes": dict(writes), "deletions": list(deletions),
+                             "message": message})
+        self.branch_heads[(repo, branch)] = f"{len(self.commits):040x}"
+        return self.branch_heads[(repo, branch)]
 
     def delete_file(self, repo, branch, path, message):
         self.deleted_files.append((repo, path))
@@ -423,6 +448,10 @@ class FakeGitHub:
     def comment(self, repo, number, body):
         self.comments = getattr(self, "comments", []) + [(number, body)]
 
+    def upsert_comment(self, repo, number, kind, body):
+        self.comment(repo, number, body)
+        return "created"
+
     def branch_sha(self, repo, branch):
         return self.branch_heads.get((repo, branch), f"sha-{branch}")
 
@@ -489,7 +518,7 @@ def add_open_escalation(db, key: str, question: str = "Which option should be us
     escalations.record(db, key, key.split("-")[0], "dev", "", escalations.AMBIGUITY, question)
 
 
-def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP"):
+def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP", *, heartbeat: bool = True):
     issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
                                                          "role": role, "project": project})
     assert issued.status_code == 200, issued.text
@@ -545,10 +574,22 @@ def join_node(client, name: str, ip: str = "", role: str = "worker", project: st
              condition("repository-network", "Repository network", "ready",
                        "The machine can reach GitHub over HTTPS.")],
             credential_checks=credentials)
-        # No HTTP heartbeat is sent by this helper, so retain the real joined status while modeling a ready agent
-        # report for tests that exercise work scheduling. Trigger tests use direct join requests instead.
+        # Model the agent's ready baseline without scheduling provider-backed checks after every fixture join.
         for item in readiness["machine"]:
             if item["id"] == "node-heartbeat":
                 item.update(result="ready", detail="The test agent is connected to the control API.", action="")
         ctx.db.run("UPDATE nodes SET readiness=%s WHERE name=%s", (J(readiness), name))
+        if heartbeat:
+            ctx.db.run("UPDATE nodes SET status='online',last_heartbeat=now() WHERE name=%s", (name,))
     return joined
+
+
+def report_account_credentials(ctx, node: str, checks: dict[str, dict[str, bool]]) -> None:
+    """Refresh a node's test readiness snapshot after the test adds or probes an account."""
+    from aiflow.v4.control.system_check import refresh_node
+
+    row = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,)) or {}
+    readiness = row.get("readiness") or {}
+    reported = dict(readiness.get("credential_statuses") or {})
+    reported.update(checks)
+    refresh_node(ctx, node, "heartbeat", credential_checks=reported)

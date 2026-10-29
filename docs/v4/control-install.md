@@ -26,7 +26,7 @@ sudo aiflow4 install control --version vX.Y.Z --domain aiflow.example.com
 ```
 
 On a host that already has `aiflow4`, run this second command directly. Every later run, upgrade or rollback uses
-it. The steps run in this order, and each one prints `==> [n/11] step`:
+it. The steps run in this order, and each one prints `==> [n/12] step`:
 
 | Step | What happens |
 |---|---|
@@ -35,6 +35,7 @@ it. The steps run in this order, and each one prints `==> [n/11] step`:
 | tools | AI Flow's own needs: `git`, `curl`, cosign, `aiflow4-deploy`, the `jooservices/ai-flow` checkout in `/srv/aiflow/control/repos/ai-flow` (for tag checks) |
 | release | `aiflow4-deploy --stage-only vX.Y.Z`: release assets, SHA-256 and cosign checks of the tarball and of `ghcr.io/jooservices/ai-flow/control-api:vX.Y.Z`, compose bundle in `/srv/aiflow/build/vX.Y.Z` |
 | secrets | generates any internal secrets that are missing (below), asks for an ownership capability on an interactive first install, and writes `/etc/aiflow/control.env` (domain and join URL; no secrets) |
+| operator-audit | installs `auditd` and the interactive shell, configuration, and control-repository audit rules used by the Dashboard intervention ledger |
 | infra | copies `deploy/v4/control/infra.yaml`, `gatus.yaml` and `deploy/v4/o2/lab.env` of the release to `/srv/aiflow/control/infra/`, then `docker compose up -d`; waits for PostgreSQL and Redis |
 | migrate | for an upgrade, the pre-upgrade check first; then `aiflow4 migrate` from the release image |
 | admin | Console login is on (`AIFLOW4_CONSOLE_LOGIN=1`). On first browser visit, `/setup` saves the public address and creates the first Administrator; no email or password file is required. A legacy `--admin-email` may still seed a user for controlled CI installs; see [console login](console-login.md) |

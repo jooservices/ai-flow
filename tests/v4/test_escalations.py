@@ -52,8 +52,8 @@ def put_ticket(ctx, key: str, description: str, status: str = "Needs owner") -> 
 
 
 # --- AC1: every escalation is classified when it is raised; only two classes reach a person --------------------
-def test_there_are_seven_classes_and_only_two_reach_a_person():
-    assert len(esc.CLASSES) == 7
+def test_there_are_eight_classes_and_only_two_reach_a_person():
+    assert len(esc.CLASSES) == 8
     assert set(esc.PERSON_CLASSES) == {esc.BUSINESS, esc.IRREVERSIBLE}
     assert all(esc.FIXES[c] and esc.LABELS[c] for c in esc.CLASSES)
 
@@ -66,7 +66,7 @@ def test_every_recorded_escalation_gets_its_class(ctx, item):
 
 
 def test_each_of_the_seven_classes_is_covered_by_the_recorded_escalations():
-    assert {i["expected_class"] for i in FIXTURE["escalations"]} == set(esc.CLASSES)
+    assert {i["expected_class"] for i in FIXTURE["escalations"]} == set(esc.CLASSES) - {esc.TECHNICAL}
 
 
 @pytest.mark.parametrize("question", [
@@ -111,6 +111,29 @@ def test_standard_missing_tool_marker_is_classified_as_machine_environment(ctx):
     assert classified.cls == esc.MISSING and classified.environment == "php"
 
 
+def test_unrecognized_technical_question_stays_in_automated_triage(ctx):
+    key = "TESTWP-403"
+    question = "How do worker heartbeats get sent?"
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: explain worker recovery")
+    classified = esc.classify(ctx.db, question, "TESTWP")
+    assert classified.cls == esc.AMBIGUITY and not classified.reaches_person
+
+    raised = esc.dev_question(ctx, run_of(key), question)
+    assert raised["class"] == esc.AMBIGUITY and not raised["resolved"]
+    refused = esc.triage_decision(ctx, run_of(key), {
+        "decision": "ESCALATE", "why": "the source did not answer", "options": ["A", "B"],
+        "recommended": "A"}, question)
+    assert refused["action"] == "refused" and not refused.get("reached_person", False)
+    row = ctx.db.one("SELECT class,reached_person,resolution FROM escalations WHERE ticket_key=%s", (key,))
+    assert row == {"class": esc.AMBIGUITY, "reached_person": False, "resolution": "open"}
+
+
+def test_customer_facing_decision_still_reaches_owner(ctx):
+    classified = esc.classify(
+        ctx.db, "Should a customer-facing refund email go immediately or after 24 hours?", "TESTWP")
+    assert classified.cls == esc.BUSINESS and classified.reaches_person
+
+
 # --- AC8: replay of 2026-10-22 and 23 ---------------------------------------------------------------------------
 def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_families_to_a_person(client, ctx, monkeypatch):
     alerts = []
@@ -145,7 +168,12 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
         ctx.db.run("UPDATE escalations SET created_at=%s WHERE id=%s", (created_at, row["id"]))
     rows = ctx.db.all("SELECT * FROM escalations ORDER BY id")
     assert len(rows) == len(FIXTURE["escalations"])
-    assert {r["class"] for r in rows} == set(esc.CLASSES)  # every one is classified
+    # Keep the database rows aligned with the historical replay dates in this fixture.
+    for item, row in zip(FIXTURE["escalations"], rows, strict=True):
+        ctx.db.run("UPDATE escalations SET created_at=%s WHERE id=%s",
+                   (datetime.fromisoformat(item["at"].replace("Z", "+00:00")), row["id"]))
+    rows = ctx.db.all("SELECT * FROM escalations ORDER BY id")
+    assert {r["class"] for r in rows} == set(esc.CLASSES) - {esc.TECHNICAL}  # every one is classified; the recorded fixtures predate the technical class
     person_rows = [r for r in rows if r["reached_person"]]
     assert sorted(r["ticket_key"] for r in person_rows) == sorted(reached) == ["JOOWP-320", "JOOWP-322"]
     assert all(r["class"] in esc.PERSON_CLASSES for r in person_rows)
@@ -165,7 +193,9 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
     # the policy message of JOOWP-308 explains the allowed alternative
     assert "Edit" in results[("JOOWP-308", 3)]["answer"]
     # the weekly numbers count every row
-    metrics = esc.weekly_metrics(ctx.db, now=datetime(2026, 10, 24, tzinfo=timezone.utc))
+    latest_fixture_time = max(datetime.fromisoformat(item["at"].replace("Z", "+00:00"))
+                              for item in FIXTURE["escalations"])
+    metrics = esc.weekly_metrics(ctx.db, now=latest_fixture_time + timedelta(hours=1))
     assert metrics["this_week"]["total"] == len(rows) == len(FIXTURE["escalations"])
 
 
@@ -300,6 +330,9 @@ NEW = {"decision": "ESCALATE", "class": esc.BUSINESS, "why": "Failed payment ema
 
 
 def test_a_new_decision_is_asked_once_then_becomes_a_register_entry(client, ctx):
+    # Model an actual authenticated console user, not a legacy signed session without a DB account.
+    ctx.db.run("INSERT INTO console_users (email,role,roles,password_hash) VALUES (%s,'administrator',%s,'test')",
+               ("owner@example.test", ["administrator"]))
     owner(client, ctx)
     put_ticket(ctx, "JOOWP-322", "Acceptance criteria:\n- AC1: x")
     put_ticket(ctx, "JOOWP-323", "Acceptance criteria:\n- AC1: y")
@@ -332,6 +365,9 @@ def test_a_new_decision_is_asked_once_then_becomes_a_register_entry(client, ctx)
     entry = ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (first["decision_id"],))
     assert entry["status"] == "decided" and entry["decision"] == "Email after 24 hours (see support)"
     assert entry["decided_by"] == "owner@example.test"
+    # the owner's business answer is the product working, never an operator intervention (JAIF-260 AC6)
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='decision-answer' AND accepted")["n"] == 1
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
     resolved_waiting = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key='JOOWP-323'")
     assert resolved_waiting == {"resolution": "person", "reached_person": True,
                                 "answer": "Email after 24 hours (see support)"}
@@ -600,7 +636,7 @@ def test_saved_owner_decision_retries_a_failed_ticket_resume(ctx, monkeypatch):
     for key in (first_key, second_key):
         add_ticket(ctx.db, key, status="Needs owner", labels=("owner-escalated",))
         ctx.jira.status_of[key] = "Needs owner"
-    question = "Should the new export be CSV or JSON by default?"
+    question = "Should the customer-facing export be CSV or JSON by default?"
     for key in (first_key, second_key):
         esc.dev_question(ctx, run_of(key), question)
         asked = esc.triage_decision(ctx, run_of(key), export_decision, question)

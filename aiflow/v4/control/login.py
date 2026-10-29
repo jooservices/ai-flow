@@ -48,6 +48,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
+
+from .application_context import ApplicationContext
 from starlette.routing import Match
 
 from . import audit as audit_log
@@ -346,8 +348,9 @@ else{m.textContent=x[1].detail||"Sign-in failed";b.disabled=false;if(x[1].mfa_re
 """
 
 
-def install_login(app: FastAPI, ctx) -> None:
+def install_login(app: FastAPI, ctx: ApplicationContext) -> None:
     from . import setup_wizard
+    from .route_registry import concrete_routes
     from .security import install_security
 
     settings = ctx.settings
@@ -375,7 +378,7 @@ def install_login(app: FastAPI, ctx) -> None:
         return None
 
     def checks_token(request: Request) -> bool:
-        for route in app.routes:
+        for route in concrete_routes(app.routes):
             if route.matches(request.scope)[0] == Match.FULL:
                 matched = resolved_route(route, request.scope)
                 if matched is None:

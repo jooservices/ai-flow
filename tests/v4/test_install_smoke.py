@@ -65,11 +65,12 @@ def test_install_smoke_authenticates_system_check_and_support_bundle_requests():
 
 def test_console_browser_suite_runs_in_pr_and_release_smokes_with_failure_traces():
     ci = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
-    v4 = ci["jobs"]["v4"]
+    v4 = ci["jobs"]["v4-browser"]
     install = next(step for step in v4["steps"] if step.get("name") == "Install")
     assert "npm install --global playwright@1.64.1" in install["run"]
     assert "playwright install chromium --with-deps" in install["run"]
-    assert "tests/v4" in next(step for step in v4["steps"] if step.get("name") == "Tests (real Redis and PostgreSQL)")["run"]
+    assert "tests/v4/test_console_browser.py" in next(
+        step for step in v4["steps"] if step.get("name") == "Browser journeys (real Redis and PostgreSQL)")["run"]
     upload = next(step for step in v4["steps"] if step.get("name") == "Upload sanitized Playwright traces")
     assert upload["if"] == "failure()"
     assert "aiflow-playwright-traces" in upload["with"]["path"]

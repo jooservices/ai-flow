@@ -53,7 +53,7 @@ def test_sweep_drops_old_and_legacy_idle_databases_but_keeps_young_and_used_ones
     used = admin.make(testdb.new_name(now - 4 * 3600))
     other = admin.make("aiflow4_not_a_test_db_" + uuid.uuid4().hex[:8])
     with psycopg.connect(make_conninfo(DATABASE_URL, dbname=used)):  # a live session keeps its database
-        dropped = testdb.sweep(DATABASE_URL, now=now)
+        dropped = testdb.sweep(DATABASE_URL, now=now, only={old, young, legacy, used, other})
         assert old in dropped and legacy in dropped
         assert not exists(admin, old) and not exists(admin, legacy)
         assert exists(admin, young) and exists(admin, used) and exists(admin, other)
@@ -67,7 +67,8 @@ def test_sweep_trims_idle_databases_beyond_the_limit_but_protects_the_active_ses
     ages = [now - 700 - i for i in range(4)]
     mine = [admin.make(testdb.new_name(a)) for a in ages]
     session_db = conninfo_to_dict(test_database_url)["dbname"]
-    testdb.sweep(DATABASE_URL, now=now, max_databases=1)
+    testdb.sweep(DATABASE_URL, now=now, max_databases=1, protected_databases={session_db},
+                 only={fresh, session_db, *mine})  # never touch the database of a parallel pytest session
     assert exists(admin, fresh)  # younger than ten minutes: never trimmed for crowding
     assert not any(exists(admin, n) for n in mine)
     assert exists(admin, session_db)  # the session fixture's keepalive connection protects it without an allowlist
@@ -90,6 +91,14 @@ def test_concurrent_sweeps_do_not_drop_the_active_session_database(admin, test_d
     assert exists(admin, session_db)
 
 
+def test_sweeper_cannot_remove_the_pytest_session_database_between_tests(admin, test_database_url):
+    session_db = conninfo_to_dict(test_database_url)["dbname"]
+    now = int(time.time()) + 3600
+    dropped = testdb.sweep(DATABASE_URL, now=now, max_databases=0, only={session_db})
+    assert session_db not in dropped
+    assert exists(admin, session_db)
+
+
 def test_node_agent_sweeps_the_databases_named_in_the_project_env_files(admin, tmp_path, monkeypatch,
                                                                        test_database_url):
     old = admin.make(testdb.new_name(int(time.time()) - 5 * 3600))
@@ -98,6 +107,8 @@ def test_node_agent_sweeps_the_databases_named_in_the_project_env_files(admin, t
     (tmp_path / "TESTWP.env").write_text("WP_TESTS_DB_HOST=x\n")
     assert agent._test_database_urls(str(tmp_path)) == [DATABASE_URL]
     monkeypatch.setattr(agent, "_last_testdb_sweep", 0.0)
+    real_sweep = testdb.sweep  # candidates limited to our own database: parallel sessions keep theirs
+    monkeypatch.setattr(testdb, "sweep", lambda url: real_sweep(url, only={old}))
     assert agent.sweep_test_databases(str(tmp_path), every_s=600) >= 1
     assert not exists(admin, old)
     assert exists(admin, session_db)  # the session fixture keeps its active database out of the sweeper

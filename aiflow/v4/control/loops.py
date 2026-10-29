@@ -27,15 +27,18 @@ from urllib.parse import quote
 
 from . import environment as environment_reports
 from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
+from . import flow_doctor
 from . import run_inbox as run_inbox_lifecycle
 from . import system_check
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
+from ..core import work_limits
 from ..core.services import service_gaps
 from ..core.toolchains import toolchain_gaps
+from .application_context import ApplicationContext
 from .incidents import check_idle_flow, check_stack_pins, close_incident, open_incident
-from .api import Ctx, notify_human_review
+from .human_review_notice import notify_human_review
 from .db import J
 from .state import NODE_OFFLINE_S
 from .quota import assessments as quota_assessments
@@ -57,7 +60,7 @@ def _is_under_epic(ticket: dict, epic_key: str, by_key: dict[str, dict]) -> bool
     return False
 
 
-def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str],
+def _reconcile_epics(ctx: ApplicationContext, projects: list[str], changed_ticket_keys: set[str],
                      first_seen_ticket_keys: set[str], preexisting_ticket_keys: set[str]) -> None:
     """Close epics whose mirrored children are all Done, and reopen on newly active child work."""
     for project in projects:
@@ -131,7 +134,7 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
                 log.warning("could not reconcile epic %s: %s", epic["key"], e)
 
 
-def jira_sync(ctx: Ctx, full: bool = False) -> int:
+def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
     configured = ctx.repo().projects
     # The control repo is authoritative: paused or removed projects must stop being queried on the next pass.
     keys = sorted(key for key, project in configured.items() if not project.paused)
@@ -157,9 +160,20 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     }
     # The sync reads each issue with its change history (Fix version attach dates, first In Progress).
     search = getattr(ctx.jira, "search_history", ctx.jira.search)
+    try:
+        jira_flow_actor = ctx.jira.current_account_id()
+    except Exception:  # noqa: BLE001 - no authenticated identity means external history cannot be classified safely
+        jira_flow_actor = ""
     for issue in search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
-        old = ctx.db.one("SELECT status, labels, parent_key FROM tickets WHERE key=%s", (t["key"],))
+        old = ctx.db.one("SELECT status, labels, parent_key, jira_updated FROM tickets WHERE key=%s", (t["key"],))
+        if old and jira_flow_actor:
+            for change in ctx.jira.operator_changes(issue, old.get("jira_updated"), jira_flow_actor):
+                flow_doctor.record_operator_intervention(
+                    ctx, source_key=change["source_key"], source="jira", actor=change["actor"],
+                    action="edit", target=change["target"], happened_at=change["happened_at"],
+                    reason="Jira history records a change by an account outside AI Flow",
+                    details={"fields": change["fields"]})
         if not old:
             first_seen_ticket_keys.add(t["key"])
         if (not old or old["parent_key"] != t["parent_key"] or
@@ -221,7 +235,7 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     return n
 
 
-def watchdog(ctx: Ctx) -> None:
+def watchdog(ctx: ApplicationContext) -> None:
     now = datetime.now(timezone.utc)
     # nodes
     for n in ctx.db.all("SELECT name, status, last_heartbeat FROM nodes"):
@@ -302,10 +316,10 @@ def watchdog(ctx: Ctx) -> None:
     with_accounts = {m for a in repo.accounts for m in a.machines}
     for n in ctx.db.all("SELECT name, status FROM nodes"):
         if n["status"] == "online" and n["name"] not in with_accounts:
-            where = "" if n["name"] in repo.nodes else " and is not described in aiflow-control/nodes/"
+            where = "" if n["name"] in repo.nodes or repo.inventory_in_db else " and is not described in aiflow-control/nodes/"
             open_incident(ctx, "node_no_ai", n["name"], "warning", f"node {n['name']} has no AI account",
                           f"{n['name']} is online{where}, but no AI account is assigned to it, so it cannot take any ticket."
-                          " Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.")
+                          " Add and sign in to an AI account for this machine on the Machines and AI screen.")
         elif n["name"] in with_accounts or n["status"] != "online":
             close_incident(ctx, "node_no_ai", n["name"], "accounts assigned" if n["name"] in with_accounts else "node left")
     # orphans: Jira says In Progress but no run is working on it (a worker died between writes, a deploy, a manual
@@ -353,6 +367,18 @@ def watchdog(ctx: Ctx) -> None:
             continue  # tooling.check_stalled_waits owns the two-hour missing-requirement warning lifecycle
         if stuck.get(i["subject"], 0) < 3:
             close_incident(ctx, "ticket_stuck", i["subject"], "a run produced work again")
+    if ctx.jira:  # the third unsuccessful run in a row ends the automatic retries of that ticket
+        from . import retry_hold
+        try:
+            retry_hold.apply(ctx)
+        except Exception as e:  # noqa: BLE001 - a failing hold pass must not stop the rest of the watchdog
+            log.warning("retry hold pass failed: %s", e)
+
+    try:  # an unanswered owner question with a reversible recommendation is applied after its deadline
+        from . import escalation_deadline
+        escalation_deadline.apply_due(ctx)
+    except Exception as e:  # noqa: BLE001 - a failing deadline pass must not stop the rest of the watchdog
+        log.warning("escalation deadline pass failed: %s", e)
     # a flow that stands still and a configuration that keeps a project from getting work
     try:
         check_stack_pins(ctx)
@@ -391,7 +417,7 @@ def watchdog(ctx: Ctx) -> None:
             continue
         # clocks: 30 target, 45 warn, 60 hard (per project)
         p = ctx.repo().projects.get(r["project"])
-        wm = p.work_minutes() if p else {"target": 30, "warn": 45, "hard": 60}
+        wm = p.work_minutes() if p else dict(work_limits.DEFAULTS)
         minutes = (now - r["started_at"]).total_seconds() / 60
         if minutes >= wm["hard"]:
             open_incident(ctx, "run_hard_limit", r["ticket_key"], "critical", f"{r['ticket_key']} passed {wm['hard']} minutes",
@@ -426,16 +452,19 @@ def watchdog(ctx: Ctx) -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("role health evaluation failed: %s", e)
     switched_off = role_health.disabled_roles(ctx.db)
-    for role in ("master", "intake_refiner", "verify", "dev"):
+    for role in flow_doctor.ROLE_COVERAGE_ROLES:
         holders = [a for a in repo.accounts if role in (a.roles or [])]
-        ok = [a.id for a in holders if a.id in ready and (a.id, role) not in switched_off]
+        ok = [a for a in holders if a.id in ready and (a.id, role) not in switched_off]
         if not holders:
             continue
-        if len(ok) < 2:
+        providers = {a.provider for a in ok}
+        if len(ok) < 2 or len(providers) < 2:
             open_incident(ctx, "role_coverage", role, "critical" if not ok else "warning",
-                          f"role {role} has {len(ok)} ready account{'s' if len(ok) != 1 else ''}",
-                          f"Accounts with the role: {', '.join(a.id for a in holders)}; ready: {', '.join(ok) or 'none'}."
-                          " Every role needs two ready accounts of different providers so one quota or outage cannot stop the flow.")
+                          f"role {role} has {len(ok)} ready account(s) from {len(providers)} provider(s)",
+                          f"Accounts with the role: {', '.join(a.id for a in holders)}; ready: "
+                          f"{', '.join(a.id for a in ok) or 'none'}; providers ready: "
+                          f"{', '.join(sorted(providers)) or 'none'}. Every role needs two ready accounts from "
+                          "different providers so one quota or outage cannot stop the flow.")
         else:
             close_incident(ctx, "role_coverage", role, f"{len(ok)} accounts ready")
     # quota windows reported by the provider (Claude: five_hour and seven_day utilization with reset times)
@@ -479,20 +508,20 @@ def watchdog(ctx: Ctx) -> None:
             close_incident(ctx, "quota_prediction", account_id, "quota forecast is no longer before reset")
 
 
-def fleet_rollout(ctx: Ctx) -> dict | None:
+def fleet_rollout(ctx: ApplicationContext) -> dict | None:
     """The rolling node upgrade toward CURRENT: health checks, next wave, halt and rollback (rollout.tick)."""
     from . import api as control_api
     return rollout.tick(ctx, rollout.read_current(control_api.RELEASES))
 
 
-def version_release_scan(ctx: Ctx) -> int:
+def version_release_scan(ctx: ApplicationContext) -> int:
     """Refresh live Jira version membership and audit which configured versions are ready or blocked."""
     from . import api as control_api
     control_api.github_gateway(ctx)  # merge-back retries for released versions need GitHub
     return version_release.scan(ctx)
 
 
-def reconcile_loop(ctx: Ctx, stop: threading.Event) -> None:
+def reconcile_loop(ctx: ApplicationContext, stop: threading.Event) -> None:
     """Compare every ticket that has a pull request with GitHub, a pass every merge_flow.RECONCILE_EVERY_S."""
     from . import api as control_api
     while not stop.is_set():
@@ -507,13 +536,13 @@ def reconcile_loop(ctx: Ctx, stop: threading.Event) -> None:
         stop.wait(max(1.0, merge_flow.RECONCILE_EVERY_S - (time.monotonic() - started)))
 
 
-def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
+def run_loops(ctx: ApplicationContext, stop: threading.Event | None = None) -> None:
     from . import support_bundle
 
     support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
     stop = stop or threading.Event()
     last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
-    last_ba_chat = last_system_check = 0.0
+    last_doctor = last_system_check = last_ba_chat = 0.0
     last_merge = 0.0
     from . import api as control_api
     ctx.events.start()
@@ -567,4 +596,12 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
         except Exception as e:  # noqa: BLE001
             log.exception("loop error: %s", e)
             ctx.events.emit("control.error", reason=str(e)[:300])
+        if now - last_doctor >= 60 and ctx.leases.leader("flow_doctor", OWNER, 70_000):
+            last_doctor = now  # a failed pass still observes the minute cadence, rather than retrying every 2 s
+            try:
+                report = flow_doctor.tick(ctx)
+                log.info("flow doctor: %s", report)
+            except Exception as e:  # noqa: BLE001 - doctor failures stay visible and retry next minute
+                log.exception("flow doctor failed: %s", e)
+                ctx.events.emit("flow_doctor.error", outcome="failed", reason=type(e).__name__)
         stop.wait(2)

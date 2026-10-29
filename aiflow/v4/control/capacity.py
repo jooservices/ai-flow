@@ -276,10 +276,9 @@ def with_active_quota_reservations(db, forecasts: dict[str, dict[str, Any]]) -> 
                 continue
             reservations[account_id] = reservations.get(account_id, 0) + tokens
             continue
-        if not is_active:
-            if (forecast.get("source") != "reported" or not snapshot_at or not run.get("ended_at")
-                    or run["ended_at"] <= snapshot_at):
-                continue
+        if not is_active and (forecast.get("source") != "reported" or not snapshot_at or not run.get("ended_at")
+                              or run["ended_at"] <= snapshot_at):
+            continue
         details = run.get("details") if isinstance(run.get("details"), dict) else {}
         if is_active:
             tokens = reservation_tokens(details)

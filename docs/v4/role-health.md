@@ -96,4 +96,3 @@ summary.
 ## Timeouts and lost leases
 
 A run stopped by the time limit or by a lost lease counts as a quarter of a failed run in the failure score. The size of the ticket and the load of the machine are often the cause, so ten such runs alone never switch a role off, while real failures still do.
-

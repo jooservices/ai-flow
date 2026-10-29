@@ -284,7 +284,8 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
         fresh.control_repo.joinpath("accounts.yaml").read_text()
         + "  - {id: grok-01, provider: grok, node: cc, tier: middle, roles: [intake_refiner]}\n")
     snap = ControlRepo.load(fresh.control_repo)
-    ctx.repo = lambda: snap
+    from aiflow.v4.control.inventory import apply as apply_inventory
+    ctx.repo = lambda: apply_inventory(snap, ctx.db)
     ctx.refresh_repo = lambda: None
     fresh.app.state.sync_accounts()
     heartbeat = fresh.heartbeat("cc", cc)
@@ -523,6 +524,10 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     # Ensure a restored serial value collides with a newly initialized sequence unless restore advances it.
     ctx.db.run("TRUNCATE events RESTART IDENTITY")
     ctx.db.run("INSERT INTO events (type, ticket, outcome, data) VALUES ('backup.test','TESTWP-9','saved','{}')")
+    ctx.db.run("INSERT INTO operator_interventions "
+               "(source_key,source,actor,action,target,reason,details) "
+               "VALUES ('backup-test:operator-event','test','restore-fixture','manual_change','config',"
+               "'preserve audit evidence during restore','{}')")
 
     # Seed realistic active Integration credentials on the clean machine. They must be restored along with the
     # control keys because the connected Jira OAuth app and the GitHub App private key live outside `control/`.
@@ -562,6 +567,10 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
 
     # the disaster: a fresh install has recreated the registry schema and its sequences start at 1.
     with ctx.db.pool.connection() as c:
+        # Model a DBA replacing the database schema. Remove the old database-level audit event triggers before
+        # dropping their role registry and ledger as part of this destructive fixture reset.
+        c.execute("DROP EVENT TRIGGER IF EXISTS aiflow4_operator_ddl")
+        c.execute("DROP EVENT TRIGGER IF EXISTS aiflow4_operator_drop")
         c.execute("DROP TABLE " + ", ".join(f'"{t}"' for t in made["tables"]) + " CASCADE")
     ctx.db.migrate()
     shutil.rmtree(lay.p("/etc/aiflow/secrets"))
@@ -569,11 +578,14 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     ctx.db.run("INSERT INTO audit_log (actor, category, action, target, ip, detail) "
                "VALUES ('restore-target', 'security', 'fresh_install', 'control', '', '{}')")
     assert fresh.client.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password}).status_code == 401
-
     restored = backup.restore(test_database_url, archive, lay)
     assert restored["release"] == "v4.1.0"
     assert ctx.db.one("SELECT 1 FROM audit_log WHERE action='fresh_install'")
     assert ctx.db.one("SELECT count(*) AS n FROM audit_log")["n"] >= source_audit_count + 1
+    assert ctx.db.one("SELECT actor,reason FROM operator_interventions "
+                      "WHERE source_key='backup-test:operator-event'") == {
+                          "actor": "restore-fixture", "reason": "preserve audit evidence during restore"}
+    assert ctx.db.one("SELECT count(*) AS n FROM audit_product_roles WHERE role_name=session_user")["n"] == 1
     assert {p: p.read_bytes() for p in secret_files} == secrets_before
     assert all(p.stat().st_mode & 0o777 == 0o600 for p in secret_files)
     assert fresh.machine.p("/etc/aiflow/secrets/control").stat().st_mode & 0o777 == 0o700
@@ -735,10 +747,9 @@ def test_adding_a_machine_and_an_ai_account_while_sign_in_is_on(fresh):
     assert probed.status_code == 200, probed.text
     beat = machine_api.post("/v1/nodes/node3/heartbeat", json={"tools": TOOLS, "slots_total": 2}, headers=headers)
     assert beat.status_code == 200 and account_id in beat.json()["desired"]["accounts"]
+    # A successful credential probe automatically completes the recovery and retires the interactive handoff.
     details = client.get(f"/v1/accounts/{account_id}/sign-in")
-    assert details.status_code == 200 and details.json()["code"] == "ABCD-EFGH"
-    completed = client.post(f"/v1/accounts/{account_id}/sign-in/complete")
-    assert completed.status_code == 200 and completed.json()["signed_in"] is True
+    assert details.status_code == 404
     # A machine's own work request is authorized by its node token without a console cookie.
     assert machine_api.get("/v1/work/candidates", params={"account": account_id}, headers=headers).status_code == 200
 

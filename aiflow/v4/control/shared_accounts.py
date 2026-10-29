@@ -16,6 +16,7 @@ Design (docs/v4/shared-accounts.md):
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -26,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from .capacity import reported_run_tokens, reservation_tokens, unresolved_run_reservation_tokens
 from ..core.controlrepo import Account, ControlRepo
+from .application_context import ApplicationContext
 from .db import J
 
 NODE_ONLINE_S = 75
@@ -122,6 +124,96 @@ def machine_capacities(queryable, machines: list[str] | set[str], account_id: st
     return out
 
 
+def _routing_capacity_snapshot(db, machines: list[str]) -> tuple[
+        dict[str, int], dict[str, int], dict[str, dict[str | None, int]]]:
+    rows = _all(
+        db,
+        "SELECT n.name,n.slots_total,r.account_id,count(r.id) AS account_runs"
+        " FROM nodes n LEFT JOIN runs r ON r.node=n.name AND r.status='running'"
+        " WHERE n.name=ANY(%s) AND n.removed_at IS NULL AND n.status='online'"
+        " AND n.last_heartbeat IS NOT NULL"
+        " AND n.last_heartbeat > now() - make_interval(secs => %s)"
+        " GROUP BY n.name,n.slots_total,r.account_id",
+        (machines, NODE_ONLINE_S))
+    slots: dict[str, int] = {}
+    counts: dict[str, dict[str | None, int]] = {}
+    for row in rows:
+        name = row["name"]
+        slots[name] = max(0, int(row["slots_total"] or 0))
+        counts.setdefault(name, {})[row["account_id"]] = int(row["account_runs"] or 0)
+    free = {name: max(0, slots[name] - sum(counts[name].values())) for name in counts}
+    return free, slots, counts
+
+
+def routable_machines_many(db, accounts: Iterable[Account], online: set[str]) -> dict[str, list[str]]:
+    """Evaluate routing readiness for many accounts with a fixed number of database reads.
+
+    Keep the same admission rules as ``pending_nodes`` and ``may_take`` while batching their per-account lookups.
+    The capacity query intentionally uses the same online-heartbeat filter as ``machine_capacities``; a machine
+    that is online but drained can still affect a shared account's capacity share, even though it is not routable.
+    """
+    by_id = {account.id: account for account in accounts}
+    if not by_id:
+        return {}
+
+    account_ids = sorted(by_id)
+    pending_by_account: dict[str, set[str]] = {account_id: set() for account_id in account_ids}
+    for row in _all(db,
+                    "SELECT account_id,node FROM account_machines WHERE account_id=ANY(%s) AND status='pending'",
+                    (account_ids,)):
+        pending_by_account[row["account_id"]].add(row["node"])
+
+    bounded = [account for account in by_id.values() if account.session_limit]
+    free_by_node: dict[str, int] = {}
+    slots_by_node: dict[str, int] = {}
+    counts_by_node: dict[str, dict[str | None, int]] = {}
+    running_by_account: dict[str, dict[str, int]] = {account.id: {} for account in bounded}
+    if bounded:
+        machines = sorted({machine for account in bounded for machine in account.machines})
+        if machines:
+            free_by_node, slots_by_node, counts_by_node = _routing_capacity_snapshot(db, machines)
+
+        bounded_ids = sorted(account.id for account in bounded)
+        for row in _all(db,
+                        "SELECT account_id,node,count(*) AS n FROM runs"
+                        " WHERE account_id=ANY(%s) AND status='running' GROUP BY account_id,node",
+                        (bounded_ids,)):
+            running_by_account[row["account_id"]][row["node"]] = int(row["n"] or 0)
+
+    result: dict[str, list[str]] = {}
+    for account in by_id.values():
+        pending = pending_by_account[account.id]
+        assigned = [node for node in account.machines if node not in pending]
+        if not account.session_limit:
+            result[account.id] = [node for node in assigned if node in online]
+            continue
+
+        account_running = running_by_account[account.id]
+        total_running = sum(account_running.values())
+        eligible: dict[str, int] = {}
+        account_capacities: dict[str, dict[str, int]] = {}
+        for machine in assigned:
+            if machine not in counts_by_node:
+                continue
+            counts = counts_by_node[machine]
+            other_runs = sum(count for owner, count in counts.items()
+                             if owner is not None and owner != account.id)
+            capacity = {"free": free_by_node[machine],
+                        "account": max(0, slots_by_node[machine] - other_runs)}
+            account_capacities[machine] = capacity
+            if capacity["free"] > 0:
+                eligible[machine] = capacity["account"]
+        shares = capacity_shares(account.sessions, eligible)
+        result[account.id] = [
+            node for node in assigned
+            if node in online
+            and account_capacities.get(node, {}).get("free", 0) > 0
+            and total_running < account.sessions
+            and account_running.get(node, 0) < shares.get(node, 0)
+        ]
+    return result
+
+
 def capacity_shares(session_limit: int, capacities: dict[str, int]) -> dict[str, int]:
     """Apportion the account limit in whole sessions, proportional to machine capacity.
 
@@ -169,6 +261,38 @@ def may_take(db, acc: Account, node: str, *, as_peer: bool = False) -> tuple[boo
         if running.get(node, 0) >= share:
             return False, "other machines of the account have free capacity"
     return True, ""
+
+
+def _quota_reservation_short(conn, acc: Account, quota_reservation_tokens: int) -> bool:
+    """True when the tokens already reserved by running, unresolved and newly reported runs leave too little quota."""
+    account = conn.execute("SELECT quota_forecast,quota_observed_at FROM accounts WHERE id=%s",
+                           (acc.id,)).fetchone()
+    forecast = (account or {}).get("quota_forecast") or {}
+    observed_at = (account or {}).get("quota_observed_at")
+    windows = forecast.get("windows") if isinstance(forecast, dict) else []
+    balances = [int(window["left_tokens"]) for window in windows or []
+                if isinstance(window, dict) and window.get("left_tokens") is not None]
+    if balances:
+        reserved = 0
+        for active in conn.execute("SELECT details FROM runs WHERE account_id=%s AND status='running'",
+                                   (acc.id,)):
+            detail = active.get("details") if isinstance(active.get("details"), dict) else {}
+            reserved += reservation_tokens(detail)
+        for unresolved in conn.execute(
+                "SELECT details,started_at,ended_at FROM runs WHERE account_id=%s"
+                " AND status IN ('lost','released')",
+                (acc.id,)):
+            reserved += unresolved_run_reservation_tokens(unresolved, observed_at)
+        reported = 0
+        if forecast.get("source") == "reported" and observed_at:
+            for completed in conn.execute(
+                    "SELECT details,tokens_in,tokens_out FROM runs WHERE account_id=%s"
+                    " AND status='finished' AND ended_at>%s", (acc.id, observed_at)):
+                reported += reported_run_tokens(completed)
+        reserved += reported
+        if reserved and min(balances) - reserved < quota_reservation_tokens:
+            return True
+    return False
 
 
 def claim_run(db, acc: Account, values: tuple, *, max_node_runs: int | None = None,
@@ -237,33 +361,8 @@ def claim_run(db, acc: Account, values: tuple, *, max_node_runs: int | None = No
                 if counts.get(node, 0) >= share:
                     return False
             if quota_reservation_tokens and quota_reservation_tokens > 0:
-                account = conn.execute("SELECT quota_forecast,quota_observed_at FROM accounts WHERE id=%s",
-                                       (acc.id,)).fetchone()
-                forecast = (account or {}).get("quota_forecast") or {}
-                observed_at = (account or {}).get("quota_observed_at")
-                windows = forecast.get("windows") if isinstance(forecast, dict) else []
-                balances = [int(window["left_tokens"]) for window in windows or []
-                            if isinstance(window, dict) and window.get("left_tokens") is not None]
-                if balances:
-                    reserved = 0
-                    for active in conn.execute("SELECT details FROM runs WHERE account_id=%s AND status='running'",
-                                               (acc.id,)):
-                        detail = active.get("details") if isinstance(active.get("details"), dict) else {}
-                        reserved += reservation_tokens(detail)
-                    for unresolved in conn.execute(
-                            "SELECT details,started_at,ended_at FROM runs WHERE account_id=%s"
-                            " AND status IN ('lost','released')",
-                            (acc.id,)):
-                        reserved += unresolved_run_reservation_tokens(unresolved, observed_at)
-                    reported = 0
-                    if forecast.get("source") == "reported" and observed_at:
-                        for completed in conn.execute(
-                                "SELECT details,tokens_in,tokens_out FROM runs WHERE account_id=%s"
-                                " AND status='finished' AND ended_at>%s", (acc.id, observed_at)):
-                            reported += reported_run_tokens(completed)
-                    reserved += reported
-                    if reserved and min(balances) - reserved < quota_reservation_tokens:
-                        return False
+                if _quota_reservation_short(conn, acc, quota_reservation_tokens):
+                    return False
             else:
                 quota_reservation_tokens = None
             details = dict(run_details or {})
@@ -408,7 +507,7 @@ class SigninCompleteBody(BaseModel):
     request_id: str = Field(min_length=1, max_length=160)
 
 
-def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
+def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_auth) -> None:
     sync_accounts = app.state.sync_accounts
 
     def sync() -> list[str]:

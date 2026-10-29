@@ -17,8 +17,9 @@ MIGRATIONS = Path(__file__).with_name("migrations")
 
 class DB:
     def __init__(self, url: str, min_size: int = 1, max_size: int = 10) -> None:
-        self.pool = ConnectionPool(url, min_size=min_size, max_size=max_size, kwargs={"row_factory": dict_row},
-                                   open=True)
+        self.url = url
+        self.pool = ConnectionPool(url, min_size=min_size, max_size=max_size,
+                                   kwargs={"row_factory": dict_row, "application_name": "aiflow4-control"}, open=True)
         self._active_connection: ContextVar[psycopg.Connection | None] = ContextVar(
             f"aiflow4_db_connection_{id(self)}", default=None)
 
@@ -90,6 +91,12 @@ class DB:
                         c.execute("INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s)",
                                   (f.stem, migration_checksum(f)))
                     applied.append(f.stem)
+                # the role the control plane logs in with is the product; any other role is an operator (AC6)
+                if c.execute("SELECT to_regclass('audit_product_roles') AS t").fetchone()["t"]:
+                    c.execute("INSERT INTO audit_product_roles (role_name) VALUES (session_user) ON CONFLICT DO NOTHING")
+                # tables added by later migrations get the operator audit trigger too (AC6)
+                if c.execute("SELECT to_regproc('aiflow4_attach_audit_triggers') AS f").fetchone()["f"]:
+                    c.execute("SELECT aiflow4_attach_audit_triggers()")
             finally:
                 c.execute("SELECT pg_advisory_unlock(424204)")
         return applied

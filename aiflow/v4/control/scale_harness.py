@@ -827,6 +827,10 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
             if heartbeat.status_code != 200:
                 issues.append(f"/v1/runs/{run_id}/heartbeat answered HTTP {heartbeat.status_code}")
             keeper.complete(run_id)
+            # A real worker moves the ticket in Jira before it reports the result, so the ticket is never offered
+            # again between the release and the transition. Mirror that order: marking it Done after the release left
+            # a window in which a concurrent claim could pick the same ticket twice on a slow machine.
+            db.run("UPDATE tickets SET status='Done' WHERE key=%s", (key,))  # what Jira sync mirrors back
             for path, body in ((f"/v1/runs/{run_id}/result", {"fence": fence, "outcome": "done",
                                                                "summary": "simulated session"}),
                                (f"/v1/runs/{run_id}/release", {"fence": fence})):
@@ -835,8 +839,9 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     issues.append(f"{path} answered HTTP {response.status_code}")
         finally:
             keeper.complete(run_id)
+        if issues:
+            db.run("UPDATE tickets SET status='To Do' WHERE key=%s AND status='Done'", (key,))  # the run did not finish
         if not issues:
-            db.run("UPDATE tickets SET status='Done' WHERE key=%s", (key,))  # what Jira sync mirrors back
             # The next poll pass can run while completions are still draining. Publish a dependent ticket's
             # ready time as soon as its blocker is done so that early claim is measured from the real transition.
             with ready_at_lock:
@@ -1045,9 +1050,11 @@ def _checks(client, ctx, sc, pl, sessions, hosts, headers, peak_checks, pickup) 
     expected = [t["key"] for t in traffic if not t["held"]]
     missing = [k for k in expected if k not in per_ticket]
     twice = [k for k, rs in per_ticket.items() if len(rs) > 1]
+    duplicate_detail = ", ".join(f"{key} ({len(per_ticket[key])} runs)" for key in twice[:5])
     check("every_ready_ticket_picked_once", not missing and not twice,
           f"{len(expected) - len(missing)} of {len(expected)} ready tickets picked, {len(twice)} picked more than once"
-          + (f" (not picked: {', '.join(missing[:5])})" if missing else ""))
+          + (f" (not picked: {', '.join(missing[:5])})" if missing else "")
+          + (f" (duplicates: {duplicate_detail})" if duplicate_detail else ""))
     held = [t["key"] for t in traffic if t["held"] and t["key"] in per_ticket]
     check("held_tickets_not_picked", not held, f"{len(held)} held tickets were picked" + (f": {', '.join(held[:5])}" if held else ""))
     late = []

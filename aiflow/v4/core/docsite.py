@@ -52,7 +52,8 @@ SCREEN_TOPIC_DOCS = {"settings": "docs/v4/runtime-settings.md"}
 TOPIC_DOCS = {"scale-proof": "docs/v4/scale-proof.md",
               "load-aware-scheduling": "docs/v4/load-aware-scheduling.md"}
 UI_EXTENSION_VIEWS = {"system-check.js": {"system-check", "projects"},
-                      "load-policy.js": {"cc", "machines"}}
+                      "load-policy.js": {"cc", "machines"},
+                      "dashboard-timeouts.js": {"cc"}}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
@@ -61,6 +62,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderGitHubIntegrations": ("integrations",),
     "renderLive": None,
     "renderDashboard": ("cc",),
+    "flowDoctorPanel": ("cc",),
     "scaleProofPanel": ("cc",),
     "dashboardProjectCounts": ("cc",),
     "providerUsageChart": ("cc",),
@@ -98,6 +100,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderKnowledge": ("knowledge",),
     "renderLearningKnowledge": ("knowledge",),
     "renderMachines": ("machines",),
+    "addMachineAccount": ("machines",),
+    "saveAccountSettings": ("machines",),
     "renderJiraIntegrations": ("integrations",),
     "renderIntegrations": ("integrations",),
     "renderLead": ("lead",),
@@ -222,6 +226,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # `HINTS` are mapped to their own screen instead.
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
+    # The changed pointer behavior lets Dashboard actions remain clickable beneath the toast area.
+    (re.compile(r"^\s*\.toasts\{"), "cc"),
     (re.compile(r"^\s+(?:release_running|release_failed|scale_proof_(?:missing|failed)): function"), "cc"),
     (re.compile(r"^\s+(?:release_running|release_failed|scale_proof_(?:missing|failed)): function"), "business"),
     (re.compile(r"Scale proof \(/v1/state scale_proof\)|value against every budget"), "cc"),
@@ -750,6 +756,7 @@ def site_dir() -> Path | None:
 # helpers they call are still discovered; response helpers such as `state.snapshot` remain tracked normally.
 API_IMPLEMENTATION_ONLY_HELPERS = {
     "aiflow/v4/control/licensing.py": frozenset({"_row", "_row_in_connection"}),
+    "aiflow/v4/control/api.py": frozenset({"audit", "audit_in", "owner_auth"}),
 }
 
 @lru_cache(maxsize=1)
@@ -871,7 +878,8 @@ def api_route_contract_spans() -> dict[str, dict[str, list[tuple[int, int]]]]:
     Derived from the running app, so a new route module is watched without editing this file."""
     found: dict[str, dict[str, list[tuple[int, int]]]] = {}
     helper_registry = _control_function_registry()
-    for route in _mounted_control_app().routes:
+    from ..control.route_registry import concrete_routes
+    for route in concrete_routes(_mounted_control_app().routes):
         endpoint = getattr(route, "endpoint", None)
         code = getattr(endpoint, "__code__", None)
         path = getattr(route, "path", "")

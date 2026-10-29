@@ -1,18 +1,19 @@
 import csv
 import io
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from conftest import add_open_escalation, add_ticket, join_node
+from conftest import add_open_escalation, add_ticket, join_node, report_account_credentials
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 
 
-def join(client, name, ip=""):
-    r = join_node(client, name, ip=ip)
+def join(client, name, ip="", *, heartbeat=True):
+    r = join_node(client, name, ip=ip, heartbeat=heartbeat)
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
@@ -577,6 +578,9 @@ def test_state_snapshot_and_watchdog(client, ctx):
     s = client.get("/v1/state").json()
     assert any(n["name"] == "cc" and n["status"] == "online" for n in s["nodes"])
     assert s["active_runs"][0]["ticket"] == "TESTWP-9"
+    assert next(n for n in s["nodes"] if n["name"] == "cc")["sessions_busy"] == 1
+    account = next(a for a in s["accounts"] if a["id"] == "claude-01")
+    assert account["runs_active"] == 1 and account["run"]["id"] == r["run_id"]
     assert any(a["id"] == "claude-01" and a["status"] == "working" for a in s["accounts"])
     # node goes silent, lease expires: watchdog marks node offline, opens an incident, requeues the ticket
     ctx.db.run("UPDATE nodes SET last_heartbeat = now() - interval '5 minutes' WHERE name='cc'")
@@ -633,10 +637,15 @@ def test_predicted_runout_alerts_owner_and_routes_account_work_to_its_provider_p
 
     notifications = []
     monkeypatch.setattr(incidents.notify, "send", lambda *args, **kwargs: notifications.append(args) or ["email"])
-    headers = join(client, "node1")
-    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=headers)
+    # Seed both accounts before joining: join starts asynchronous readiness checks, which must see the peer's
+    # credential baseline before candidate routing treats that peer as available.
     ctx.repo().accounts.append(Account(id="codex-02", provider="codex", node="node1", tier="middle", roles=["dev"]))
     client.app.state.sync_accounts()
+    headers = join(client, "node1")
+    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=headers)
+    for thread in list(threading.enumerate()):
+        if thread.name == "aiflow4-heartbeat-readiness-node1":
+            thread.join(timeout=15)
     add_ticket(ctx.db, "TESTWP-QUOTA-1")
     now = datetime.now(timezone.utc)
     quota = {"windows": {"five_hour": {"utilization": .8,
@@ -694,9 +703,9 @@ def test_quota_exhaustion_routes_ticket_to_peer_and_returns_it_after_reset(clien
     from aiflow.v4.core.controlrepo import Account
 
     headers = join(client, "cc")
-    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=headers)
     ctx.repo().accounts.append(Account(id="claude-02", provider="claude", node="cc", tier="senior", roles=["dev"]))
     client.app.state.sync_accounts()
+    report_account_credentials(ctx, "cc", {"claude-02": {"present": True, "valid": True}})
     add_ticket(ctx.db, "TESTWP-QUOTA-RESET")
 
     claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-QUOTA-RESET", "account": "claude-01"},
@@ -982,6 +991,7 @@ def test_node_without_ai_accounts_is_flagged(client, ctx):
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title, detail FROM incidents WHERE kind='node_no_ai' AND subject='node3' AND closed_at IS NULL")
     assert inc["severity"] == "warning" and "no AI account" in inc["title"] and "not described" in inc["detail"]
+    assert "Machines and AI screen" in inc["detail"] and "accounts.yaml" not in inc["detail"]
     s = client.get("/v1/state").json()
     n = next(x for x in s["nodes"] if x["name"] == "node3")
     assert n["accounts_assigned"] == 0 and n["in_control_repo"] is False
@@ -1020,7 +1030,7 @@ def test_role_with_one_ready_account_is_reported(client, ctx):
     ctx.db.run("UPDATE accounts SET status='signed_out' WHERE id='codex-01'")
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title FROM incidents WHERE kind='role_coverage' AND subject='verify' AND closed_at IS NULL")
-    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account"
+    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account(s) from 1 provider(s)"
 
 
 def test_state_reports_registration_and_last_seen_for_an_offline_node(client, ctx):

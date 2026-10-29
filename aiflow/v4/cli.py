@@ -100,8 +100,9 @@ def build_ctx(s: Settings):
     ctx = Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
               events=events, repo=repo_cache, jira=jira, github=github,
               refresh_repo=repo_cache.refresh, jira_auth=jira_auth)
-    from .control import shared_accounts
-    ctx.repo = lambda: shared_accounts.overlay(repo_cache(), db)  # accounts managed in Command Center
+    from .control import inventory, shared_accounts
+    # Accounts and machines come from the database (docs/v4/inventory-in-database.md); the repo only adds policy.
+    ctx.repo = lambda: shared_accounts.overlay(inventory.apply(repo_cache(), db), db)
     ctx._shared_accounts = True
     events.bind_incident_context(ctx)
     jira_auth.bind(ctx)
@@ -193,6 +194,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("version")
     sub.add_parser("migrate")
+    sub.add_parser("import-inventory", help="one-time import of machines and AI accounts from the control repo into "
+                                            "the database (docs/v4/inventory-in-database.md); developers and CI only")
     p = sub.add_parser("control-api")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8080)
@@ -341,10 +344,30 @@ def main(argv: list[str] | None = None) -> int:
         db = DB(s.database_url)
         print("applied:", db.migrate() or "nothing")
         return 0
+    if a.cmd == "import-inventory":
+        from .control import inventory
+        from .control.github import GitHubApp
+        from .control.db import DB
+        db = DB(s.database_url)
+        try:
+            db.migrate()
+            cache = RepoCache(s.control_repo, pull_every=0)
+            cache.refresh()  # the import and the remote cleanup both work from the latest pulled revision
+            repo = cache()
+            app_dir = Path(s.github_app_dir)
+            has_app = (app_dir / "app.json").is_file() and (app_dir / "app.pem").is_file()
+            factory = (lambda: GitHubApp(s.github_app_dir, s.github_org)) if has_app else None
+            result = inventory.import_and_clean(db, repo, factory, Path(s.control_repo).name if has_app else "")
+        finally:
+            db.close()
+        print("imported" if result["imported"] else "already imported; nothing changed",
+              f"({result['machines']} machines, {result['accounts']} AI accounts)")
+        return 0
     if a.cmd == "control-api":
         import uvicorn
         from .control.api import create_app
         from .control.ui import mount_ui
+        wait_for_control_stores(s)
         ctx = build_ctx(s)
         ctx.db.migrate()
         ctx.events.start()
@@ -354,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "control-loops":
         from .control.loops import run_loops
+        wait_for_control_stores(s)
         ctx = build_ctx(s)
         ctx.db.migrate()
         run_loops(ctx)
@@ -465,6 +489,25 @@ def main(argv: list[str] | None = None) -> int:
                heartbeat_s=s.heartbeat_s, poll_s=s.poll_s).run_forever()
         return 0
     return 2
+
+
+def wait_for_control_stores(settings) -> None:
+    """Wait for PostgreSQL and Redis on boot so the control plane starts after its durable stores."""
+    import time
+
+    import psycopg
+    import redis
+
+    while True:
+        try:
+            with psycopg.connect(settings.database_url, connect_timeout=5) as connection:
+                connection.execute("SELECT 1")
+            redis.Redis.from_url(settings.redis_url, socket_connect_timeout=5, socket_timeout=5).ping()
+            return
+        except (psycopg.Error, redis.exceptions.RedisError, OSError) as exc:
+            logging.getLogger("aiflow4.startup").warning(
+                "control stores are not ready (%s); retrying automatically", type(exc).__name__)
+            time.sleep(2)
 
 
 if __name__ == "__main__":

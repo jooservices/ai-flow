@@ -20,12 +20,14 @@ from functools import partial
 from pathlib import Path
 
 from ..adapters import RunResult, RunSpec, get_adapter
-from ..core import handover
+from ..core import commit_rules, handover, work_limits
 from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
                                parse_missing_requirements)
+from . import timeout_handover
 from .client import Conflict, ControlClient
+from . import gate_step
 from .gitops import Git
 from .notes import environment_notes, environment_status, note, project_env
 from .wordpress import declares_wordpress, start_site as start_wordpress_site
@@ -195,7 +197,11 @@ def run_with_inbox(adapter, spec: RunSpec, heartbeat: Heartbeat, on_progress=Non
             aggregate.duration_s = (float(getattr(aggregate, "duration_s", 0.0) or 0.0)
                                      + float(getattr(response, "duration_s", 0.0) or 0.0))
             aggregate.command_results.extend(response.command_results)
-            aggregate.quota = response.quota or aggregate.quota
+            if response.quota:  # the newest quota reading carries its own observation time
+                aggregate.quota = response.quota
+                aggregate.quota_observed_at = getattr(response, "quota_observed_at", None)
+            aggregate.token_usage_reported = bool(getattr(aggregate, "token_usage_reported", False)
+                                                  or getattr(response, "token_usage_reported", False))
             aggregate.error_kind = response.error_kind
             aggregate.error_message = response.error_message
             aggregate.exit_code = response.exit_code
@@ -223,6 +229,8 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci
     checks = "\n".join(f"  - {x}" for x in c.project.get("checks") or []) or "  - the project's test suite"
     if c.project.get("containers"):
         checks += "\n  - Docker commands go through the run's rootless, worktree-confined runtime"
+    if gate_step.enabled(c.project) and (gate_line := gate_step.prompt_check(c.project)):
+        checks += "\n  - " + gate_line
     t = c.ticket
     rework = ""
     if c.findings:
@@ -245,6 +253,7 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], repo=c.project["repo"], branch=branch,
                       base=c.project["base"], checks=checks, description=t["description"] or "(no description)",
                       rework=rework, related=related_block(c.related), machine=machine_block(c.machine_tools),
+                      test_time_slice=work_limits.FULL_SUITE_TIME_SLICE_MINUTES,
                       environment=environment_notes(
                           c.project.get("environment"), "dev",
                           project_env(t["project"], c.project.get("environment"), "dev") if env is None else env))
@@ -330,14 +339,8 @@ def related_block(hits: list[dict]) -> str:
 
 def pr_title(ticket: dict) -> str:
     """Conventional title with the ticket key; ASCII subjects keep it at the end, others start with the key."""
-    title = ticket["summary"].strip().rstrip(".")
-    title = title[0].upper() + title[1:] if title else ticket["key"]
     kind = {"Bug": "fix", "Hotfix": "fix", "Chore": "chore", "Docs": "docs", "Tech Debt": "refactor"}.get(ticket.get("type", ""), "feat")
-    if not re.match(r"^[A-Z]", title):
-        prefix = f"{kind}: {ticket['key']}: "
-        return prefix + title[:100 - len(prefix)]
-    suffix = f" ({ticket['key']})"
-    return f"{kind}: {title}"[:100 - len(suffix)] + suffix
+    return commit_rules.normalize_title(kind, ticket["key"], ticket["summary"])
 
 
 def commit_message(c: Claimed, summary: str) -> str:
@@ -407,7 +410,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         env = project_env(project["key"], project.get("environment"), "dev")
         spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log, env), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
+                       timeout_s=int(project.get("work_minutes", {}).get("hard", work_limits.HARD)) * 60,
                        control_url=control_url, run_token=c.run_token,
                        log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=env)
         adapter = get_adapter(c.provider)
@@ -567,6 +570,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             return result
         changed = git.changed(wt)
         result.setdefault("details", {})["changed_files"] = changed[:100]
+        if res.error_kind == "timeout" and timeout_handover.try_handover(
+                api, c, git, wt, branch, repo, summary, handed, result, t0, jira, branch_commit_count, tests):
+            return result
         if conflicts and any(CONFLICT_MARKER.search((wt / f).read_text(errors="ignore")) for f in conflicts if (wt / f).is_file()):
             res.error_kind = res.error_kind or "unresolved conflicts"
         failure_verdict = res.verdict == "FAIL"
@@ -634,7 +640,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                 jira("transition", to="To Do")
                 return result
 
-            result["outcome"] = "failed"
+            result["outcome"] = work_limits.run_outcome_for_error(reason)
+            if reason == "timeout":
+                result["error_kind"] = "timeout"
             result["summary"] = f"{reason}: {summary}"[:1000]
             jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",
                                       why=reason, result=(summary[:600] if summary else "no output"),
@@ -643,13 +651,43 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="To Do")
             return result
         hb.progress = {"phase": "commit", "files": len(changed)}
-        sha = git.commit_all(wt, commit_message(c, summary), c.identity)
+        message = commit_message(c, summary)
+        problems = commit_rules.message_violations(message) + commit_rules.violations(pr_title(c.ticket), pr_title=True)
+        if problems:  # the normalizer prevents this; nothing invalid may reach the commit and the push
+            reason = "invalid title or commit message: " + "; ".join(problems)
+            result.update(outcome="failed", error_kind="invalid_title", summary=reason[:1000])
+            jira("comment", body=note(c, "invalid title", what="The commit message or title breaks the repository rules",
+                                      why=reason[:400], next_="Back to To Do; nothing was committed or pushed",
+                                      t0=t0, node=api_node(api)))
+            jira("transition", to="To Do")
+            return result
+        sha = git.commit_all(wt, message, c.identity)
+        gate_note = ""
+        if gate_step.enabled(project):  # the CI checks run on the local commit; only a passing commit is pushed
+            hb.progress = {"phase": "gate"}
+            try:
+                gate = gate_step.run(wt, project, pr_title(c.ticket), env, run_as)
+                reason = gate_step.failure_text(gate) if gate.failed else ""
+                error_kind = "gate_failed"
+            except Exception as exc:  # noqa: BLE001 - a gate that cannot run must not leave an unpushed commit behind
+                gate, reason, error_kind = None, f"the gate could not run: {type(exc).__name__}: {exc}", "gate_error"
+            if gate is None or gate.failed:
+                saved = gate_step.keep_failed_work(git, wt, Path(srv_root) / "logs" / "runs" / f"{key}-{c.run_id}")
+                git.run("reset", "--soft", "HEAD~1", cwd=wt)  # the work stays uncommitted; nothing was pushed
+                result.update(outcome="failed", error_kind=error_kind, summary=reason[:1000])
+                jira("comment", body=note(c, "local gate failed", what="The CI checks fail on the local commit",
+                                          why=redact(reason)[:900],
+                                          next_=f"Back to To Do; nothing was pushed; the failed work is saved as {saved}",
+                                          t0=t0, node=api_node(api)))
+                jira("transition", to="To Do")
+                return result
+            gate_note = gate_step.pr_note(gate)
         credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
                                                               "repo": repo, "branch": branch})
         token = credential["token"]
         git.push(wt, branch, token)
         body = (f"Jira: {key}\n\n## Summary\n{summary}\n\n## Tests\n{tests or 'see the run log'}\n\n"
-                f"{handover.pr_sections(handed)}"
+                f"{handover.pr_sections(handed)}{gate_note}"
                 f"## Run\n- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
                 f"- run: {c.run_id}, fence {c.fence}\n- files changed: {len(changed)}\n\n"
                 "Opened as a draft by AI Flow v4; verification runs next (In Verify).")

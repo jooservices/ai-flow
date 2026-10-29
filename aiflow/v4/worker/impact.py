@@ -18,6 +18,7 @@ import re
 import time
 from pathlib import Path
 
+from ..core import work_limits
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
@@ -111,7 +112,7 @@ def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         logs.mkdir(parents=True, exist_ok=True)
         spec = RunSpec(prompt=build_prompt(c, read_spec(wt)), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("target", 30)) * 60, control_url=control_url,
+                       timeout_s=int(project.get("work_minutes", {}).get("target", work_limits.TARGET)) * 60, control_url=control_url,
                        run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
         adapter = get_adapter(c.provider)
         base_argv = adapter.argv

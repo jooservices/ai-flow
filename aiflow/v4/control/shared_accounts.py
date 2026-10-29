@@ -26,6 +26,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..core.controlrepo import Account, ControlRepo
+from .application_context import ApplicationContext
 from .db import J
 
 NODE_ONLINE_S = 75
@@ -463,7 +464,7 @@ class SigninCompleteBody(BaseModel):
     request_id: str = Field(min_length=1, max_length=160)
 
 
-def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
+def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_auth) -> None:
     sync_accounts = app.state.sync_accounts
 
     def sync() -> list[str]:

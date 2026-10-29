@@ -52,7 +52,8 @@ SCREEN_TOPIC_DOCS = {"settings": "docs/v4/runtime-settings.md"}
 TOPIC_DOCS = {"scale-proof": "docs/v4/scale-proof.md",
               "load-aware-scheduling": "docs/v4/load-aware-scheduling.md"}
 UI_EXTENSION_VIEWS = {"system-check.js": {"system-check", "projects"},
-                      "load-policy.js": {"cc", "machines"}}
+                      "load-policy.js": {"cc", "machines"},
+                      "dashboard-timeouts.js": {"cc"}}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
@@ -99,6 +100,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderKnowledge": ("knowledge",),
     "renderLearningKnowledge": ("knowledge",),
     "renderMachines": ("machines",),
+    "addMachineAccount": ("machines",),
+    "saveAccountSettings": ("machines",),
     "renderJiraIntegrations": ("integrations",),
     "renderIntegrations": ("integrations",),
     "renderLead": ("lead",),
@@ -873,7 +876,8 @@ def api_route_contract_spans() -> dict[str, dict[str, list[tuple[int, int]]]]:
     Derived from the running app, so a new route module is watched without editing this file."""
     found: dict[str, dict[str, list[tuple[int, int]]]] = {}
     helper_registry = _control_function_registry()
-    for route in _mounted_control_app().routes:
+    from ..control.route_registry import concrete_routes
+    for route in concrete_routes(_mounted_control_app().routes):
         endpoint = getattr(route, "endpoint", None)
         code = getattr(endpoint, "__code__", None)
         path = getattr(route, "path", "")

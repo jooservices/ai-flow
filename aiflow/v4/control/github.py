@@ -223,6 +223,22 @@ class GitHubApp:
     def comment(self, repo: str, number: int, body: str) -> None:
         self.api("POST", f"/repos/{self.org}/{repo}/issues/{number}/comments", {"body": body[:60000]}, repo=repo)
 
+    def upsert_comment(self, repo: str, number: int, kind: str, body: str) -> str:
+        """One comment per kind on a pull request, edited in place: "created" or "updated".
+
+        A hidden marker identifies the comment, so repeated verification results or answers replace the last one instead of
+        piling up (the history stays in the Jira ticket)."""
+        marker = f"<!-- aiflow:{kind} -->"
+        text = f"{marker}\n{body}"[:60000]
+        existing = self.api("GET", f"/repos/{self.org}/{repo}/issues/{number}/comments?per_page=100", repo=repo) or []
+        mine = next((c for c in existing if marker in str(c.get("body") or "")), None)
+        if mine:
+            if mine.get("body") != text:
+                self.api("PATCH", f"/repos/{self.org}/{repo}/issues/comments/{mine['id']}", {"body": text}, repo=repo)
+            return "updated"
+        self.api("POST", f"/repos/{self.org}/{repo}/issues/{number}/comments", {"body": text}, repo=repo)
+        return "created"
+
     # --- control repo knowledge and policy files -----------------------------------------------------------
     def default_branch(self, repo: str) -> str:
         data = self.api("GET", f"/repos/{self.org}/{repo}", repo=repo)
@@ -315,6 +331,25 @@ class GitHubApp:
         tree = self.api("GET", f"/repos/{self.org}/{repo}/git/trees/{sha}?recursive=1", repo=repo)
         return [str(row["path"]) for row in tree.get("tree", [])
                 if row.get("type") == "blob" and row.get("path")]
+
+    def commit_changes(self, repo: str, branch: str, expected_sha: str, writes: dict[str, str],
+                       deletions: list[str], message: str) -> str:
+        """Commit file writes and deletions as one commit on top of `expected_sha` (compare-and-swap).
+
+        The branch moves only as a fast-forward from `expected_sha`; if it advanced meanwhile GitHub rejects the
+        update and nothing changes."""
+        base = self.api("GET", f"/repos/{self.org}/{repo}/git/commits/{expected_sha}", repo=repo)
+        entries: list[dict[str, Any]] = [{"path": path, "mode": "100644", "type": "blob", "sha": None}
+                                         for path in deletions]
+        entries += [{"path": path, "mode": "100644", "type": "blob", "content": content}
+                    for path, content in writes.items()]
+        tree = self.api("POST", f"/repos/{self.org}/{repo}/git/trees",
+                        {"base_tree": base["tree"]["sha"], "tree": entries}, repo=repo)
+        commit = self.api("POST", f"/repos/{self.org}/{repo}/git/commits",
+                          {"message": message[:200], "tree": tree["sha"], "parents": [expected_sha]}, repo=repo)
+        self.api("PATCH", f"/repos/{self.org}/{repo}/git/refs/heads/{quote(branch, safe='/')}",
+                 {"sha": commit["sha"], "force": False}, repo=repo)
+        return str(commit["sha"])
 
     def delete_file(self, repo: str, branch: str, path: str, message: str) -> str:
         """Delete one control-repo file through the App, recording the removal as a bot commit."""

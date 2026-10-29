@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from pydantic import BaseModel, Field, ValidationError
 
 from . import setup_service
+from .application_context import ApplicationContext
 from .console_auth import COOKIE_NAME, has_permission, issue_session, resolve_session_user, verify_session
 from .login import SESSION_TTL_S, hash_password
 from .setup_service import STEP_IDS, SampleBody, SetupError, status, user_count, validate_public_url  # noqa: F401
@@ -249,7 +250,7 @@ def _register_public_address_middleware(app: FastAPI, ctx) -> None:
         return await call_next(request)
 
 
-def install(app: FastAPI, ctx) -> None:
+def install(app: FastAPI, ctx: ApplicationContext) -> None:
     """Mount the bootstrap, setup progress and shared public-address behavior."""
     _register_setup_pages(app, ctx)
     _register_status_route(app, ctx)

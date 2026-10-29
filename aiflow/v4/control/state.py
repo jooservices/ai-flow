@@ -36,8 +36,16 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
     for a in repo.accounts:
         for machine in a.machines:
             assigned[machine] = assigned.get(machine, 0) + 1
-    active_by_node = {row["node"]: int(row["busy"]) for row in db.all(
-        "SELECT node,count(*) AS busy FROM runs WHERE status='running' GROUP BY node")}
+    active_rows = db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
+                         " WHERE r.status='running' ORDER BY r.started_at")
+    active_by_node: dict[str, int] = {}
+    runs_per_account: dict[str, int] = {}
+    running: dict[str, dict] = {}
+    for row in active_rows:
+        active_by_node[row["node"]] = active_by_node.get(row["node"], 0) + 1
+        runs_per_account[row["account_id"]] = runs_per_account.get(row["account_id"], 0) + 1
+        # Keep the most recently started run as the account's representative run.
+        running[row["account_id"]] = row
     host_load = {row["hostname"]: row for row in db.all(
         "SELECT hostname,cpu_load_per_cpu,state FROM machine_host_load_limits")}
     for n in db.all("SELECT * FROM nodes WHERE removed_at IS NULL ORDER BY role DESC, name"):
@@ -48,7 +56,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         projects = repo.projects_for_node(n["name"], n["projects"], n["dynamic"])
         required = repo.tools_for_node(n["name"], projects)
         configured = repo.nodes.get(n["name"])
-        stack_gaps = {tool for project in (configured.projects if configured else [])
+        stack_gaps = {tool for project in (projects if repo.inventory_in_db else configured.projects if configured else [])
                       if project in repo.projects for tool in toolchain_gaps(
                           n["tools"], repo.projects[project].tools, repo.versions, repo.projects[project].stacks,
                           require_pins=bool(repo.projects[project].stacks))}
@@ -85,7 +93,9 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                                            for s in desired_services],
                       "missing_tools": sorted(set(missing_tools(n["tools"], required)) | stack_gaps),
                       "heartbeat_age_s": age,
-                      "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
+                      "accounts_assigned": assigned.get(n["name"], 0),
+                      "in_control_repo": (not bool(n["dynamic"]) if repo.inventory_in_db
+                                          else n["name"] in repo.nodes),
                       "last_heartbeat": _iso(n["last_heartbeat"]),
                       "idle_since": _iso(n["idle_since"]),
                       "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",
@@ -95,11 +105,6 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                       "version_policy": rollout.node_policy(ctx, n["name"], n["release_version"], releases),
                       "joined_at": n["created_at"]})
     node_status = {n["name"]: n["status"] for n in nodes}
-    runs_per_account: dict[str, int] = {}
-    for r in db.all("SELECT account_id FROM runs WHERE status='running'"):
-        runs_per_account[r["account_id"]] = runs_per_account.get(r["account_id"], 0) + 1
-    running = {r["account_id"]: r for r in db.all(
-        "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
     accounts = []
     account_rows = db.all("SELECT * FROM accounts ORDER BY node, provider, id")
     cooldowns = ctx.leases.cooling_many([str(row["id"]) for row in account_rows])
@@ -115,6 +120,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "GROUP BY account_id")}
     sign_in_states = {row["id"]: row["sign_in_status"] for row in db.all(
         "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
+    account_names = {row["id"]: row["name"] for row in db.all(
+        "SELECT id,name FROM managed_ai_accounts WHERE removed_at IS NULL AND name<>''")}
     shared_managed = {row["id"] for row in db.all("SELECT id FROM shared_accounts WHERE managed")}
     for a in account_rows:
         cool = cooldowns.get(str(a["id"]))
@@ -136,7 +143,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         resets = [window.get("resets_at") for window in used_windows if window.get("resets_at")]
         usage = today_by_account.get(a["id"], {})
         accounts.append({
-            "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc.machines else ""),
+            "id": a["id"], "name": account_names.get(a["id"], ""), "provider": a["provider"],
+            "node": (acc.machines[0] if acc.machines else ""),
             "tier": a["tier"], "roles": acc.roles,
             "machines": machine_views.get(a["id"], []),
             "session_limit": acc.sessions, "shared": len(acc.machines) > 1,
@@ -165,8 +173,6 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                                         "progress": r["progress"]},
         })
     active = []
-    active_rows = db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
-                         " WHERE r.status='running' ORDER BY r.started_at")
     lease_ttls = ctx.leases.ttl_ms_many([r["ticket_key"] for r in active_rows])
     for r, lease_ms in zip(active_rows, lease_ttls):
         active.append({"id": str(r["id"]), "ticket": r["ticket_key"], "project": r["project"], "summary": r["summary"],

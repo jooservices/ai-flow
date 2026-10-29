@@ -284,7 +284,8 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
         fresh.control_repo.joinpath("accounts.yaml").read_text()
         + "  - {id: grok-01, provider: grok, node: cc, tier: middle, roles: [intake_refiner]}\n")
     snap = ControlRepo.load(fresh.control_repo)
-    ctx.repo = lambda: snap
+    from aiflow.v4.control.inventory import apply as apply_inventory
+    ctx.repo = lambda: apply_inventory(snap, ctx.db)
     ctx.refresh_repo = lambda: None
     fresh.app.state.sync_accounts()
     heartbeat = fresh.heartbeat("cc", cc)

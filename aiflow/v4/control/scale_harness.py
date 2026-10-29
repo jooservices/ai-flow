@@ -827,23 +827,20 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
             if heartbeat.status_code != 200:
                 issues.append(f"/v1/runs/{run_id}/heartbeat answered HTTP {heartbeat.status_code}")
             keeper.complete(run_id)
-            result_path = f"/v1/runs/{run_id}/result"
-            result = keeper.request("post", result_path,
-                                    json={"fence": fence, "outcome": "done", "summary": "simulated session"},
-                                    headers=h)
-            if result.status_code != 200:
-                issues.append(f"{result_path} answered HTTP {result.status_code}")
-            else:
-                # The real worker transitions Jira before releasing its lease. Mirror the terminal status here
-                # while this run still owns its lease, before another poll can see the ticket as To Do.
-                db.run("UPDATE tickets SET status='Done', done_at=coalesce(done_at,now()), synced_at=now()"
-                       " WHERE key=%s", (key,))
-            release_path = f"/v1/runs/{run_id}/release"
-            released = keeper.request("post", release_path, json={"fence": fence}, headers=h)
-            if released.status_code != 200:
-                issues.append(f"{release_path} answered HTTP {released.status_code}")
+            # A real worker moves the ticket in Jira before it reports the result, so the ticket is never offered
+            # again between the release and the transition. Mirror that order: marking it Done after the release left
+            # a window in which a concurrent claim could pick the same ticket twice on a slow machine.
+            db.run("UPDATE tickets SET status='Done' WHERE key=%s", (key,))  # what Jira sync mirrors back
+            for path, body in ((f"/v1/runs/{run_id}/result", {"fence": fence, "outcome": "done",
+                                                               "summary": "simulated session"}),
+                               (f"/v1/runs/{run_id}/release", {"fence": fence})):
+                response = keeper.request("post", path, json=body, headers=h)
+                if response.status_code != 200:
+                    issues.append(f"{path} answered HTTP {response.status_code}")
         finally:
             keeper.complete(run_id)
+        if issues:
+            db.run("UPDATE tickets SET status='To Do' WHERE key=%s AND status='Done'", (key,))  # the run did not finish
         if not issues:
             # The next poll pass can run while completions are still draining. Publish a dependent ticket's
             # ready time as soon as its blocker is done so that early claim is measured from the real transition.

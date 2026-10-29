@@ -490,3 +490,16 @@ def test_write_password_file_rejects_files_that_are_not_private_regular_files(tm
     assert (tmp_path / "a").read_text() == "x"
     with pytest.raises(ValueError):
         login.write_password_file(str(tmp_path / "missing-dir" / "pw"), "secret-value")
+
+
+def test_gate_lets_a_bearer_through_to_a_token_route_served_from_an_included_router(ctx):
+    """Routes moved out of api.py are served from included routers; the gate must still see that they check the token."""
+    client = make_client(ctx, gate=True)
+    body = {"fields": {}, "run_id": "00000000-0000-0000-0000-000000000000", "fence": 1}
+    no_header = client.post("/v1/jira/TESTWP-1/comment", json={"run_id": body["run_id"], "fence": 1, "body": "x"})
+    assert no_header.status_code == 401 and no_header.json() == {"detail": "sign in required"}
+    joined = join_node(client, "node-included")
+    headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+    through = client.post("/v1/jira/TESTWP-1/comment", json={"run_id": body["run_id"], "fence": 1, "body": "x"},
+                          headers=headers)
+    assert through.json() != {"detail": "sign in required"}  # the handler answered (here: unknown run), not the gate

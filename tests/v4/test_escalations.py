@@ -52,8 +52,8 @@ def put_ticket(ctx, key: str, description: str, status: str = "Needs owner") -> 
 
 
 # --- AC1: every escalation is classified when it is raised; only two classes reach a person --------------------
-def test_there_are_seven_classes_and_only_two_reach_a_person():
-    assert len(esc.CLASSES) == 7
+def test_there_are_eight_classes_and_only_two_reach_a_person():
+    assert len(esc.CLASSES) == 8
     assert set(esc.PERSON_CLASSES) == {esc.BUSINESS, esc.IRREVERSIBLE}
     assert all(esc.FIXES[c] and esc.LABELS[c] for c in esc.CLASSES)
 
@@ -66,7 +66,7 @@ def test_every_recorded_escalation_gets_its_class(ctx, item):
 
 
 def test_each_of_the_seven_classes_is_covered_by_the_recorded_escalations():
-    assert {i["expected_class"] for i in FIXTURE["escalations"]} == set(esc.CLASSES)
+    assert {i["expected_class"] for i in FIXTURE["escalations"]} == set(esc.CLASSES) - {esc.TECHNICAL}
 
 
 @pytest.mark.parametrize("question", [
@@ -168,7 +168,12 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
         ctx.db.run("UPDATE escalations SET created_at=%s WHERE id=%s", (created_at, row["id"]))
     rows = ctx.db.all("SELECT * FROM escalations ORDER BY id")
     assert len(rows) == len(FIXTURE["escalations"])
-    assert {r["class"] for r in rows} == set(esc.CLASSES)  # every one is classified
+    # Keep the database rows aligned with the historical replay dates in this fixture.
+    for item, row in zip(FIXTURE["escalations"], rows, strict=True):
+        ctx.db.run("UPDATE escalations SET created_at=%s WHERE id=%s",
+                   (datetime.fromisoformat(item["at"].replace("Z", "+00:00")), row["id"]))
+    rows = ctx.db.all("SELECT * FROM escalations ORDER BY id")
+    assert {r["class"] for r in rows} == set(esc.CLASSES) - {esc.TECHNICAL}  # every one is classified; the recorded fixtures predate the technical class
     person_rows = [r for r in rows if r["reached_person"]]
     assert sorted(r["ticket_key"] for r in person_rows) == sorted(reached) == ["JOOWP-320", "JOOWP-322"]
     assert all(r["class"] in esc.PERSON_CLASSES for r in person_rows)

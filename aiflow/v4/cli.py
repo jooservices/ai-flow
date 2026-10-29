@@ -100,8 +100,9 @@ def build_ctx(s: Settings):
     ctx = Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
               events=events, repo=repo_cache, jira=jira, github=github,
               refresh_repo=repo_cache.refresh, jira_auth=jira_auth)
-    from .control import shared_accounts
-    ctx.repo = lambda: shared_accounts.overlay(repo_cache(), db)  # accounts managed in Command Center
+    from .control import inventory, shared_accounts
+    # Accounts and machines come from the database (docs/v4/inventory-in-database.md); the repo only adds policy.
+    ctx.repo = lambda: shared_accounts.overlay(inventory.apply(repo_cache(), db), db)
     ctx._shared_accounts = True
     events.bind_incident_context(ctx)
     jira_auth.bind(ctx)
@@ -193,6 +194,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("version")
     sub.add_parser("migrate")
+    sub.add_parser("import-inventory", help="one-time import of machines and AI accounts from the control repo into "
+                                            "the database (docs/v4/inventory-in-database.md); developers and CI only")
     p = sub.add_parser("control-api")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8080)
@@ -340,6 +343,25 @@ def main(argv: list[str] | None = None) -> int:
         from .control.db import DB
         db = DB(s.database_url)
         print("applied:", db.migrate() or "nothing")
+        return 0
+    if a.cmd == "import-inventory":
+        from .control import inventory
+        from .control.github import GitHubApp
+        from .control.db import DB
+        db = DB(s.database_url)
+        try:
+            db.migrate()
+            cache = RepoCache(s.control_repo, pull_every=0)
+            cache.refresh()  # the import and the remote cleanup both work from the latest pulled revision
+            repo = cache()
+            app_dir = Path(s.github_app_dir)
+            has_app = (app_dir / "app.json").is_file() and (app_dir / "app.pem").is_file()
+            factory = (lambda: GitHubApp(s.github_app_dir, s.github_org)) if has_app else None
+            result = inventory.import_and_clean(db, repo, factory, Path(s.control_repo).name if has_app else "")
+        finally:
+            db.close()
+        print("imported" if result["imported"] else "already imported; nothing changed",
+              f"({result['machines']} machines, {result['accounts']} AI accounts)")
         return 0
     if a.cmd == "control-api":
         import uvicorn

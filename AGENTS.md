@@ -18,3 +18,8 @@ This repository holds two generations of AI Flow. The current work is **v4**, a 
 - Do not commit, push or change branches: AI Flow commits your work (a resolved merge included) and opens the
   pull request. Finishing with uncommitted changes is expected.
 - Never print secrets, tokens or the contents of `/etc/aiflow`.
+- Commit and pull request titles are `type: Subject`, normally ending with the ticket key `(KEY-1)` (a non-ASCII subject
+  starts with the key instead: `type: KEY-1: subject`): type is feat, fix, docs, style, refactor, perf, test, build,
+  ci, chore or revert; a commit subject does not start with a lower-case letter (a pull request title starts with a
+  capital letter), has no full stop at the end, and the header is 10 to 120 characters. Run `python3 -m aiflow.v4.core.local_gate install-hooks` once per clone: the `commit-msg` hook rejects a bad
+  message when you commit, and the `pre-push` hook runs the CI checks before anything is pushed (`docs/v4/local-gate.md`).

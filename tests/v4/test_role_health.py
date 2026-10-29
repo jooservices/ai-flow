@@ -115,6 +115,7 @@ def ready_enabled_count(ctx, role):
     ({"step": "dev", "outcome": "timeout"}, "stopped", 0.25),
     ({"step": "dev", "outcome": "lost"}, "stopped", 0.25),
     ({"step": "intake", "outcome": "refined"}, "finished", 0.0),
+    ({"step": "intake", "outcome": "split_plan"}, "finished", 0.0),
     ({"step": "triage", "outcome": "answered"}, "finished", 0.0),
     ({"step": "verify", "outcome": "rework"}, "finished", 0.0),
     ({"step": "dev", "outcome": "quota"}, "excluded", None),

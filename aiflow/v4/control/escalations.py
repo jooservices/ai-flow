@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..core import blocker_kind
 from ..core.environment import is_server_question
 from ..core.text import slug
 from . import tooling
@@ -175,6 +176,10 @@ def classify(db, text: str, project: str = "") -> Classification:
         requirement = missing[0]
         return Classification(MISSING, f"the run explicitly reported missing tool or service {requirement.replace('_', ' ')}",
                               environment=requirement)
+    inferred = blocker_kind.missing_tools(text)
+    if inferred:  # a tool the run calls absent, in its own words: a machine problem, never the owner's
+        return Classification(MISSING, f"the run reported {', '.join(inferred)} as missing on the machine",
+                              environment=inferred[0], requirements=inferred)
     if environment and NEED_RE.search(text):
         return Classification(MISSING, f"the machine lacks or cannot reach {environment.replace('_', ' ')}",
                               environment=environment)

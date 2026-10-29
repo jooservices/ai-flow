@@ -1082,7 +1082,7 @@ console.log(JSON.stringify({{head: head.innerHTML, body: body.innerHTML}}));
 
 @pytest.mark.parametrize(
     ("work_minutes", "expected_hard_seconds"),
-    [(None, 3600), ({"hard": 90}, 5400)],
+    [(None, 2700), ({"hard": 90}, 5400)],
 )
 def test_delivery_card_with_active_run_uses_project_hard_limit(work_minutes, expected_hard_seconds):
     project = {"key": "TESTFLOW", "repo": "jooservices/testflow", "work_minutes": work_minutes}

@@ -7,6 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from ..core import work_limits
 from ..adapters.base import RunSpec
 from .client import ControlClient
 from .dev import Claimed, Heartbeat, LeaseLost
@@ -51,7 +52,7 @@ def run_post_merge(api: ControlClient, c: Claimed, srv_root: str, heartbeat_s: i
         report["head_sha"] = head
         command_env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
                        "HOME": str(Path(srv_root) / "cache"), "LANG": "C.UTF-8", **env}
-        timeout_s = max(60, int((project.get("work_minutes") or {}).get("hard", 60)) * 60)
+        timeout_s = max(60, int((project.get("work_minutes") or {}).get("hard", work_limits.HARD)) * 60)
         for index, command in enumerate(commands, start=1):
             if hb.lost.is_set():
                 raise LeaseLost()

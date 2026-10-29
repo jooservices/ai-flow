@@ -10,12 +10,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import work_limits
+
 MIN_CHILDREN = 2
 MAX_CHILDREN = 8
 SUMMARY_MIN = 5
 SUMMARY_MAX = 240
 DESCRIPTION_MAX = 10_000
-DEFAULT_TARGET_MINUTES = 30
+DEFAULT_TARGET_MINUTES = work_limits.TARGET
 _AC1_PREFIXES = ("AC1:", "- AC1:", "* AC1:")
 # What the Team Lead gives the developer in every child: where to work, the shape of the code, the tests to write.
 REQUIRED_SECTIONS = ("Files", "Skeleton", "Test cases")

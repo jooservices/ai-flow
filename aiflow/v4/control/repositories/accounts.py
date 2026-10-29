@@ -1,6 +1,8 @@
 """AI accounts: `managed_ai_accounts`, `accounts`, `shared_accounts` and `account_machines` queries."""
 from __future__ import annotations
 
+from typing import Any
+
 
 def _all(queryable, sql: str, params: tuple = ()) -> list[dict]:
     if hasattr(queryable, "all"):
@@ -35,3 +37,21 @@ def import_account(conn, account) -> None:
     for extra in account.extra_machines:
         conn.execute("INSERT INTO account_machines (account_id,node,status,enabled_by)"
                      " VALUES (%s,%s,'signed_in','import') ON CONFLICT DO NOTHING", (account.id, extra))
+
+
+class AccountRepository:
+    """Own account aggregate reads needed outside account management."""
+
+    def __init__(self, db):
+        self.db = db
+
+    def quota_routing_rows(self, providers: list[str]) -> list[dict[str, Any]]:
+        return self.db.all("SELECT id, provider, quota, quota_at_risk FROM accounts WHERE provider=ANY(%s)"
+                           " ORDER BY id", (providers,))
+
+    def capacity_routing_rows(self) -> list[dict[str, Any]]:
+        return self.db.all("SELECT id, provider, tier, quota_forecast FROM accounts ORDER BY id")
+
+    def ready_ids(self) -> set[str]:
+        return {row["id"] for row in self.db.all(
+            "SELECT id FROM accounts WHERE status IN ('idle','working','probing')")}

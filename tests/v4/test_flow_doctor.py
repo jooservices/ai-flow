@@ -388,7 +388,7 @@ def test_the_failed_route_is_excluded_from_candidates_after_the_doctor_moves_the
     cc = {"Authorization": "Bearer " + join_node(client, "cc").json()["node_token"]}
     node1 = {"Authorization": "Bearer " + join_node(client, "node1").json()["node_token"]}
     ctx.db.run("UPDATE nodes SET status='online',last_heartbeat=now()")
-    add_ticket(ctx.db, "TESTWP-272")
+    add_ticket(ctx.db, "TESTWP-272", labels=("aiflow-ready", "ai-claude"))  # claude is named, so provider headroom does not defer it
     account_state(ctx, "claude-01", "idle")
     account_state(ctx, "codex-01", "idle")
 

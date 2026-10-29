@@ -55,6 +55,9 @@ def sign_in(client, ctx, role="owner", subject="owner@example.test"):
 def cc_headers(client, ctx):
     r = join_node(client, "cc")
     ctx.db.run("UPDATE nodes SET status='online',last_heartbeat=now() WHERE name='cc'")
+    # these tests are about claude-01's role health, not provider order (docs/v4/provider-routing.md)
+    ctx.db.run("INSERT INTO provider_routing_settings (id, provider_order) VALUES (true, ARRAY['claude','codex'])"
+               " ON CONFLICT (id) DO UPDATE SET provider_order=EXCLUDED.provider_order")
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
 

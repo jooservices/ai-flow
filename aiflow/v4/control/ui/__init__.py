@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from ..console_auth import COOKIE_NAME, resolve_session_user, role_satisfies, verify_session
 
@@ -74,6 +74,19 @@ def mount_ui(app: FastAPI, ctx) -> None:
     user_form_state_script = HERE / "user-form-state.js"
     quota_refresh_script = HERE / "quota_refresh_settings.js"
 
+    provider_routing_script = HERE / "provider-routing.js"
+
+    @app.get("/console-assets/provider-routing.js", include_in_schema=False)
+    def provider_routing_asset() -> FileResponse:
+        return FileResponse(provider_routing_script, media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/console-assets/console-features.js", include_in_schema=False)
+    def console_features_asset() -> Response:
+        scripts = licensing_notice_script.read_text(encoding="utf-8") + "\n" + provider_routing_script.read_text(
+            encoding="utf-8")
+        return Response(scripts, media_type="application/javascript", headers={"Cache-Control": "no-cache"})
+
     @app.get("/console-assets/licensing-notice.js", include_in_schema=False)
     def licensing_notice() -> FileResponse:
         return FileResponse(licensing_notice_script, media_type="application/javascript",
@@ -116,7 +129,10 @@ def mount_ui(app: FastAPI, ctx) -> None:
         return RedirectResponse("/dashboard")
 
     def console() -> HTMLResponse:
-        return HTMLResponse(console_page(), headers={"Cache-Control": "no-store"})
+        markup = console_page().replace(
+            '<script src="/console-assets/licensing-notice.js"></script>',
+            '<script src="/console-assets/console-features.js"></script>', 1)
+        return HTMLResponse(markup, headers={"Cache-Control": "no-store"})
 
     for path in CONSOLE_PAGE_PATHS:
         if path not in {"/", "/help", "/notifications", "/settings", "/logs"}:
@@ -154,7 +170,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
         return FileResponse(target, headers={"Cache-Control": "no-cache"})
 
     @app.get("/notifications", include_in_schema=False)
-    def notifications(request: Request) -> FileResponse:
+    def notifications(request: Request) -> HTMLResponse:
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
         user = resolve_session_user(ctx.db, claims) if claims else None
         if not user:
@@ -164,7 +180,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
         return console()
 
     @app.get("/settings", include_in_schema=False)
-    def settings_page(request: Request) -> FileResponse:
+    def settings_page(request: Request) -> HTMLResponse:
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
         user = resolve_session_user(ctx.db, claims) if claims else None
         if not user:

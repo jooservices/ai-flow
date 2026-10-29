@@ -20,6 +20,11 @@ def sharded_files(root: Path = Path(".")) -> list[Path]:
     return sorted(p for p in (root / TESTS).rglob("test_*.py") if p.relative_to(root / TESTS).as_posix() not in OWN_JOB)
 
 
+# Test files that fail when they share one pytest process (a known order dependency, see JAIF-437): the sharder puts
+# them in different shards until the cause is fixed.
+KEEP_APART = (("test_fleet_install.py", "test_system_check.py"),)
+
+
 def partition(files: list[Path], total: int = SHARDS) -> list[list[Path]]:
     shards: list[list[Path]] = [[] for _ in range(total)]
     loads = [0] * total
@@ -27,7 +32,22 @@ def partition(files: list[Path], total: int = SHARDS) -> list[list[Path]]:
         lightest = loads.index(min(loads))
         shards[lightest].append(path)
         loads[lightest] += path.stat().st_size
+    for first, second in KEEP_APART:
+        _keep_apart(shards, loads, first, second)
     return [sorted(s) for s in shards]
+
+
+def _keep_apart(shards: list[list[Path]], loads: list[int], first: str, second: str) -> None:
+    home = {path.name: index for index, shard in enumerate(shards) for path in shard}
+    if first not in home or second not in home or home[first] != home[second] or len(shards) < 2:
+        return
+    source = home[second]
+    moved = next(path for path in shards[source] if path.name == second)
+    target = min((i for i in range(len(shards)) if i != source), key=lambda i: loads[i])
+    shards[source].remove(moved)
+    shards[target].append(moved)
+    loads[source] -= moved.stat().st_size
+    loads[target] += moved.stat().st_size
 
 
 def main(argv: list[str] | None = None) -> int:

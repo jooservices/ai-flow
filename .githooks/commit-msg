@@ -1,0 +1,3 @@
+#!/bin/sh
+# Rejects a commit message the repository would reject later (commitlint rules), before the commit exists.
+exec python3 -m aiflow.v4.core.commit_rules check-message "$1"

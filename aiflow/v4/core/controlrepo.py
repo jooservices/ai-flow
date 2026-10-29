@@ -81,6 +81,7 @@ class Project:
     databases: list[str] = field(default_factory=list)
     services: list[str] | str = field(default_factory=list)  # test services every node prepares: postgres, redis
     checks: list[str] = field(default_factory=list)
+    local_gate: Any = ""  # "ai-flow" or a list of commands run before a push (docs/v4/local-gate.md)
     containers: bool = False
     release_check: list[str] = field(default_factory=list)
     tag_prefix: str = ""
@@ -99,6 +100,10 @@ class Project:
     default_repo: str = ""  # retained on repository-specific project views
 
     def __post_init__(self) -> None:
+        gate = self.local_gate
+        if gate not in ("", None, "ai-flow") and not (isinstance(gate, list) and gate
+                                                      and all(isinstance(c, str) and c.strip() for c in gate)):
+            raise ValueError(f"project {self.key}: local_gate must be 'ai-flow' or a non-empty list of commands")
         # `databases` is the old name of `services`: both are read as one setting, so a project file can never name
         # a database that no machine prepares (docs/v4/test-services.md). Reject unsupported legacy names instead of
         # silently keeping a declaration that nodes cannot prepare.

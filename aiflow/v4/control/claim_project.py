@@ -23,7 +23,7 @@ def payload(project, selected_repo: dict, node: str, step: str, db, ticket_key: 
     if step in ("intake", "dev", "verify", "post_merge"):
         environment = [item.public() for item in project.environment_items]
     merge = project.merge or {}
-    return {"key": project.key, **selected_repo, "hotfix_base": project.hotfix_base,
+    return {"key": project.key, **selected_repo, "hotfix_base": project.hotfix_base, "local_gate": project.local_gate,
             "work_minutes": limits, "environment": environment,
             "merge": {"method": merge.get("method", "squash"),
                       "auto": bool(merge.get("auto", True)),

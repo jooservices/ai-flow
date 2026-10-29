@@ -14,6 +14,7 @@ HARD = 45
 DEFAULTS: dict[str, int] = {"target": TARGET, "warn": WARN, "hard": HARD}
 SIZE_MINUTES: dict[str, int] = {"XS": 5, "S": 15, "M": 30, "L": 60, "XL": 120}
 TIMEOUT_RETRY_INCREMENT_MINUTES = 30
+FULL_SUITE_TIME_SLICE_MINUTES = 15
 
 
 def from_setting(setting: Any) -> dict[str, int]:

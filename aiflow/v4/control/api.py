@@ -7567,6 +7567,5 @@ def create_app(ctx: Ctx) -> FastAPI:
     runtime_settings.install(app, ctx, console_user, audit)
     from .login import install_login
     install_login(app, ctx)
-    system_check_api.register_routes(app, ctx, console_user, optional_console_user)
-    dashboard_timeout_routes.install(app, ctx, console_user, optional_console_user)
+    system_check_api.register_routes(app, ctx, console_user, optional_console_user); dashboard_timeout_routes.install(app, ctx, console_user, optional_console_user)
     return app

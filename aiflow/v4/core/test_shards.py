@@ -17,13 +17,13 @@ SHARDS = 4
 
 
 def sharded_files(root: Path = Path(".")) -> list[Path]:
-    return sorted(p for p in (root / TESTS).glob("test_*.py") if p.name not in OWN_JOB)
+    return sorted(p for p in (root / TESTS).rglob("test_*.py") if p.relative_to(root / TESTS).as_posix() not in OWN_JOB)
 
 
 def partition(files: list[Path], total: int = SHARDS) -> list[list[Path]]:
     shards: list[list[Path]] = [[] for _ in range(total)]
     loads = [0] * total
-    for path in sorted(files, key=lambda p: (-p.stat().st_size, p.name)):
+    for path in sorted(files, key=lambda p: (-p.stat().st_size, p.as_posix())):
         lightest = loads.index(min(loads))
         shards[lightest].append(path)
         loads[lightest] += path.stat().st_size

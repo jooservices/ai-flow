@@ -94,6 +94,7 @@ class _Project:
     hotfix_base = "master"
     environment_items: list = []
     merge: dict = {}
+    local_gate = ""
 
     def work_minutes(self) -> dict[str, int]:
         return {"target": 30, "warn": 45, "hard": 60}

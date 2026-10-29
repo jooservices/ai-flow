@@ -3,6 +3,7 @@ disk, and fakes for Jira and GitHub so API flows run without the network."""
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 import re
 import uuid
@@ -24,6 +25,37 @@ from aiflow.v4.core.fencing import Leases
 from aiflow.v4.core.settings import Settings
 from aiflow.v4.core import secretbox
 from aiflow.v4.core.text import normalize_adf_text
+
+# Tests that need Linux-only tools or /proc. Without the tool they are skipped (with the reason) instead of failing,
+# so the local gate can pass on a developer Mac. CI runs Linux, where every tool exists and nothing is skipped.
+LINUX_ONLY_TOOLS = {
+    "flock": ("test_release.py::test_autodeploy", "test_release.py::test_develop_autodeploy",
+              "test_clean_install_acceptance.py::test_a_failed_state_health_check_rolls_the_deploy_back",
+              "test_clean_install_acceptance.py::test_deploy_and_canary_scripts_read_the_state"),
+    "dpkg-deb": ("test_offline_bundle.py::test_generated_agent_package", "test_offline_bundle.py::test_deb_packages"),
+}
+LINUX_ONLY_PROC = ("test_containers.py::test_broker_builds_and_runs_through_rootless_podman",
+                   "test_containers.py::test_broker_rejects_checkout_replacement",
+                   "test_containers.py::test_pinned_descendant_stays_inside",
+                   "test_containers.py::test_acl_cleanup_uses_the_pinned_worktree")
+LOCAL_SKIP_WITHOUT_PLAYWRIGHT = ("test_log_viewer_browser.py::", "test_console_browser.py::")
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        short = item.nodeid.split("tests/v4/")[-1]
+        if (not os.environ.get("CI") and shutil.which("playwright") is None
+                and short.startswith(LOCAL_SKIP_WITHOUT_PLAYWRIGHT)):
+            item.add_marker(pytest.mark.skip(reason="needs the playwright CLI (CI always runs it)"))
+            continue
+        missing = [tool for tool, names in LINUX_ONLY_TOOLS.items()
+                   if shutil.which(tool) is None and any(item.nodeid.split("tests/v4/")[-1].startswith(n) for n in names)]
+        if missing:
+            item.add_marker(pytest.mark.skip(reason=f"needs {', '.join(missing)}, which this machine does not have"))
+        elif not Path("/proc/self/fd").exists() and any(
+                item.nodeid.split("tests/v4/")[-1].startswith(n) for n in LINUX_ONLY_PROC):
+            item.add_marker(pytest.mark.skip(reason="needs Linux /proc"))
+
 
 REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "")
 DATABASE_URL = os.environ.get("AIFLOW4_TEST_DATABASE_URL", "")

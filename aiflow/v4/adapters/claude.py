@@ -10,7 +10,7 @@ import json
 import os
 from pathlib import Path
 
-from .base import Adapter, RunResult, RunSpec, ts
+from .base import Adapter, RunResult, RunSpec, record_quota_observation, ts
 
 HOOK_TOOLS = "Bash|Read|Glob|Grep|WebFetch|WebSearch|Edit|Write|MultiEdit|NotebookEdit"
 
@@ -93,10 +93,11 @@ class ClaudeAdapter(Adapter):
         elif t == "rate_limit_event":
             info = ev.get("rate_limit_info") or {}
             windows = info.get("unifiedWindows") or {}
-            res.quota = {"provider": "claude", "status": info.get("status"), "type": info.get("rateLimitType"),
-                         "resets_at": info.get("resetsAt"),
-                         "windows": {k: {"utilization": v.get("utilization"), "resets_at": v.get("resetsAt")}
-                                     for k, v in windows.items()}}
+            quota = {"provider": "claude", "status": info.get("status"), "type": info.get("rateLimitType"),
+                     "resets_at": info.get("resetsAt"),
+                     "windows": {k: {"utilization": v.get("utilization"), "resets_at": v.get("resetsAt")}
+                                 for k, v in windows.items()}}
+            record_quota_observation(res, quota)
             if info.get("status") not in (None, "allowed", "allowed_warning"):
                 res.error_kind = "quota"
                 res.reset_at = ts(info.get("resetsAt"))
@@ -108,5 +109,7 @@ class ClaudeAdapter(Adapter):
             res.tokens_in = int(u.get("input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0) + \
                 int(u.get("cache_read_input_tokens") or 0)
             res.tokens_out = int(u.get("output_tokens") or 0)
+            if u.get("input_tokens") is not None and u.get("output_tokens") is not None:
+                res.token_usage_reported = True
             if ev.get("is_error") and not res.error_kind:
                 res.error_kind = "provider"

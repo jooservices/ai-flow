@@ -468,7 +468,7 @@ def watchdog(ctx: ApplicationContext) -> None:
         else:
             close_incident(ctx, "role_coverage", role, f"{len(ok)} accounts ready")
     # quota windows reported by the provider (Claude: five_hour and seven_day utilization with reset times)
-    for a in ctx.db.all("SELECT id, provider, quota FROM accounts WHERE quota ? 'windows'"):
+    for a in ctx.db.all("SELECT id,provider,quota FROM accounts WHERE quota_source<>'' AND quota ? 'windows'"):
         for wname, w in (a["quota"].get("windows") or {}).items():
             u = w.get("utilization")
             if u is None:
@@ -489,7 +489,7 @@ def watchdog(ctx: ApplicationContext) -> None:
             elif u < 0.85:
                 close_incident(ctx, "quota_high", subject, f"{label} usage back to {round(u * 100)}%")
 
-    account_rows = ctx.db.all("SELECT id, provider, quota FROM accounts ORDER BY id")
+    account_rows = ctx.db.all("SELECT id,provider,quota,quota_source,quota_observed_at FROM accounts ORDER BY id")
     account_providers = {str(row["id"]): str(row["provider"]) for row in account_rows}
     for account_id, awareness in quota_assessments(ctx.db, account_rows).items():
         at_risk = [w for w in awareness["windows"]

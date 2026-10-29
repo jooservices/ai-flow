@@ -7,6 +7,7 @@ import threading
 import re
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import pytest
@@ -521,10 +522,12 @@ def join_node(client, name: str, ip: str = "", role: str = "worker", project: st
     issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
                                                          "role": role, "project": project})
     assert issued.status_code == 200, issued.text
-    joined = client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    # This helper models a connected agent and seeds its healthy readiness baseline below. Suppress the
+    # provider-backed join probe so it cannot race with that deterministic fixture state under slow CI.
+    with patch.object(system_check_api, "schedule_join_readiness"):
+        joined = client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
     if joined.status_code == 200:
-        # A machine join starts a provider-backed readiness thread. Finish it before this helper seeds the
-        # connected-agent baseline so its older join snapshot cannot overwrite that baseline afterwards.
+        # Finish any prior probe for this node before the fixture writes its deterministic readiness baseline.
         for thread in list(threading.enumerate()):
             if thread.name == f"aiflow4-join-readiness-{name}":
                 thread.join(timeout=15)

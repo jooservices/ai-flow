@@ -252,6 +252,15 @@ def _outline_section(section: str) -> str:
     return f"{section} {prompts[section]}"
 
 
+def _provider_result(res) -> dict:
+    """What the provider run reported: usage, the quota reading with its observation time, errors and the log."""
+    observed = getattr(res, "quota_observed_at", None)
+    return {"tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd, "quota": res.quota,
+            "quota_observed_at": observed.isoformat() if observed else None, "error_kind": res.error_kind,
+            "reset_at": res.reset_at.isoformat() if res.reset_at else None,
+            "details": {"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path}}
+
+
 def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,
                run_as: list[str]) -> dict:
     key, project = c.ticket["key"], c.project
@@ -289,9 +298,7 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             hb.progress = {"phase": "intake-ai", "events": events["n"], "elapsed_s": int(time.time() - t0)}
 
         res = run_with_inbox(adapter, spec, hb, on_progress)
-        result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
-                      error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
-                      details={"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})
+        result.update(_provider_result(res))
         if hb.lost.is_set():
             raise LeaseLost()
         if res.error_kind in ("quota", "auth"):

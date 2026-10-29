@@ -107,9 +107,11 @@ def version_claim_capacity(ctx: Any, node: str) -> dict:
     return capacity
 
 
-def claim_run(ctx: Any, account: Any, values: tuple, capacity: dict) -> bool:
+def claim_run(ctx: Any, account: Any, values: tuple, capacity: dict, *, run_details: dict | None = None,
+              quota_reservation_tokens: int | None = None) -> bool:
     """Use the same node and shared-host bounds when an atomic run claim is inserted."""
     from . import shared_accounts
 
     return shared_accounts.claim_run(ctx.db, account, values, max_node_runs=capacity["max_node_runs"],
-                                     hostname=capacity["hostname"], max_host_runs=capacity["max_host_runs"])
+                                     hostname=capacity["hostname"], max_host_runs=capacity["max_host_runs"],
+                                     run_details=run_details, quota_reservation_tokens=quota_reservation_tokens)

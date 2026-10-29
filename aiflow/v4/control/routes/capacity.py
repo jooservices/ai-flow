@@ -17,7 +17,8 @@ def capacity_plan(request: Request) -> dict:
             else route_deps.optional_console_user(ctx, request))
     if user and not has_permission(user.effective_roles, "view.machines_ai"):
         raise HTTPException(403, "not available for your role")
-    accounts = ctx.db.all("SELECT id,provider,tier,roles,quota,quota_forecast FROM accounts ORDER BY id")
+    accounts = ctx.db.all("SELECT id,provider,tier,roles,quota,quota_source,quota_observed_at,quota_forecast"
+                          " FROM accounts ORDER BY id")
     forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in accounts}
     # Forecasts normally come from the watchdog. On a fresh install, derive only the
     # accounts that already reported quota; accounts with no quota data cannot improve

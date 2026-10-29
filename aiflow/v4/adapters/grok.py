@@ -1,7 +1,7 @@
 """Grok Build: `grok -p` with streaming-json. Spike S4: an empty balance is an error event with HTTP 402."""
 from __future__ import annotations
 
-from .base import AUTH_PATTERN, QUOTA_PATTERN, Adapter, RunResult, RunSpec, quota_from_event
+from .base import AUTH_PATTERN, QUOTA_PATTERN, Adapter, RunResult, RunSpec, quota_from_event, record_quota_observation
 
 
 def _token_count(value: object) -> int:
@@ -9,6 +9,13 @@ def _token_count(value: object) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _has_token_count(value: object) -> bool:
+    try:
+        return value is not None and int(value) >= 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _usage_counts(usage: dict) -> tuple[int, int]:
@@ -24,6 +31,13 @@ def _record_usage(event: dict, res: RunResult, *, replace: bool = False) -> None
     if not isinstance(usage, dict):
         return
     tokens_in, tokens_out = _usage_counts(usage)
+    input_keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    has_input = any(_has_token_count(usage.get(key)) for key in input_keys)
+    complete_usage = has_input and _has_token_count(usage.get("output_tokens"))
+    if complete_usage:
+        res.token_usage_reported = True
+    elif replace:
+        return
     if replace:
         # The terminal end event contains the aggregate for the complete run; it supersedes the
         # per-response usage events above it.
@@ -45,7 +59,7 @@ class GrokAdapter(Adapter):
     def parse_event(self, ev: dict, res: RunResult) -> None:
         quota = quota_from_event(ev, self.provider)
         if quota:
-            res.quota = quota
+            record_quota_observation(res, quota)
         t = ev.get("type")
         if t == "text":
             # streaming-json text.data is a delta, so keep appending chunks in arrival order.

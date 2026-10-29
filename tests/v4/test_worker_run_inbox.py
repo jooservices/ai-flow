@@ -308,3 +308,20 @@ def test_heartbeat_receipt_is_retryable_and_inclusion_happens_only_after_provide
     heartbeat.include(batch)
     assert api.messages[0]["status"] == "included"
     assert api.calls[-1]["inbox_included"] == [1]
+
+
+def test_continuation_keeps_the_newest_quota_reading_with_its_observation_time_and_usage_flag():
+    first_seen = datetime(2026, 10, 28, 12, tzinfo=timezone.utc)
+    latest_seen = datetime(2026, 10, 28, 13, tzinfo=timezone.utc)
+    adapter = FakeAdapter([
+        RunResult(final_text="First", quota={"windows": {"five_hour": {"utilization": 0.1}}}, quota_observed_at=first_seen),
+        RunResult(final_text="Second", quota={"windows": {"five_hour": {"utilization": 0.4}}},
+                  quota_observed_at=latest_seen, token_usage_reported=True),
+    ])
+    heartbeat = FakeHeartbeat([{"id": 8, "kind": "context", "author": "owner", "body": "Go on."}])
+
+    result = run_with_inbox(adapter, RunSpec(prompt="Original", cwd="/tmp", account_home="/tmp"), heartbeat)
+
+    assert result.quota["windows"]["five_hour"]["utilization"] == 0.4
+    assert result.quota_observed_at == latest_seen
+    assert result.token_usage_reported is True

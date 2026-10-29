@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from .. import quota as quota_reporting
 from .. import merge_flow, route_deps
 
 router = APIRouter()
@@ -41,8 +42,11 @@ def dashboard_quota(request: Request) -> dict:
     repo = ctx.repo()
     nodes = {node["name"]: node for node in ctx.db.all(
         "SELECT name,projects,dynamic FROM nodes WHERE removed_at IS NULL")}
-    account_rows = ctx.db.all("SELECT id,provider,quota,quota_forecast FROM accounts ORDER BY node,provider,id")
+    account_rows = ctx.db.all("SELECT id,provider,CASE WHEN quota_source<>'' THEN quota ELSE '{}'::jsonb END AS quota,"
+                              "quota_source,quota_observed_at,quota_forecast FROM accounts ORDER BY node,provider,id")
     quota_by_account = {str(row["id"]): row.get("quota_forecast") or {} for row in account_rows}
+    missing = [row for row in account_rows if not quota_by_account[str(row["id"])] and row.get("quota_source")]
+    quota_by_account.update(quota_reporting.assessments(ctx.db, missing) if missing else {})
 
     labels = {"five_hour": "5 hours", "seven_day": "Weekly", "seven_day_opus": "Weekly Opus",
               "seven_day_sonnet": "Weekly Sonnet", "estimated_week": "Estimated weekly"}
@@ -73,7 +77,7 @@ def dashboard_quota(request: Request) -> dict:
 
         awareness_windows = (quota_by_account.get(account["id"]) or {}).get("windows") or []
         windows = [{
-            "label": str(window.get("label") or labels.get(str(window.get("name")), "Quota window")),
+            "label": labels.get(str(window.get("name")), str(window.get("label") or "Quota window")),
             "used_pct": percent(window.get("used_pct")),
             "reset_at": window.get("reset_at"),
             "estimated": window.get("source") == "estimate",

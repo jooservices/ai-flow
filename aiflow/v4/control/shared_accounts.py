@@ -6,8 +6,8 @@ Design (docs/v4/shared-accounts.md):
   `account_machine_exclusions` records a machine detached from a control-repo account. `overlay` merges these into
   the `ControlRepo` every caller already uses, so `repo.account(id).machines` is the one answer.
 - The account has ONE total session limit (`Account.sessions`). Running sessions, quota and cooldown are counted per
-  account id across machines. `claim_run` checks the total, per-machine share and free worker slots under account and
-  machine advisory locks, so simultaneous workers cannot exceed the limit or take another machine's capacity.
+  account id across machines. `claim_run` checks the total, per-machine share, free worker slots and concurrent quota
+  reservations under account and machine advisory locks, so simultaneous workers cannot exceed capacity.
 - Work is spread across online machines in proportion to their free worker slots, capped by each machine's free
   capacity; when a machine goes offline or runs out of capacity the others can take its share.
 - Credentials stay on the machines that signed in. Control stores only the sign-in prompt a machine reports (a
@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .capacity import reported_run_tokens, reservation_tokens, unresolved_run_reservation_tokens
 from ..core.controlrepo import Account, ControlRepo
 from .application_context import ApplicationContext
 from .db import J
@@ -262,9 +263,42 @@ def may_take(db, acc: Account, node: str, *, as_peer: bool = False) -> tuple[boo
     return True, ""
 
 
+def _quota_reservation_short(conn, acc: Account, quota_reservation_tokens: int) -> bool:
+    """True when the tokens already reserved by running, unresolved and newly reported runs leave too little quota."""
+    account = conn.execute("SELECT quota_forecast,quota_observed_at FROM accounts WHERE id=%s",
+                           (acc.id,)).fetchone()
+    forecast = (account or {}).get("quota_forecast") or {}
+    observed_at = (account or {}).get("quota_observed_at")
+    windows = forecast.get("windows") if isinstance(forecast, dict) else []
+    balances = [int(window["left_tokens"]) for window in windows or []
+                if isinstance(window, dict) and window.get("left_tokens") is not None]
+    if balances:
+        reserved = 0
+        for active in conn.execute("SELECT details FROM runs WHERE account_id=%s AND status='running'",
+                                   (acc.id,)):
+            detail = active.get("details") if isinstance(active.get("details"), dict) else {}
+            reserved += reservation_tokens(detail)
+        for unresolved in conn.execute(
+                "SELECT details,started_at,ended_at FROM runs WHERE account_id=%s"
+                " AND status IN ('lost','released')",
+                (acc.id,)):
+            reserved += unresolved_run_reservation_tokens(unresolved, observed_at)
+        reported = 0
+        if forecast.get("source") == "reported" and observed_at:
+            for completed in conn.execute(
+                    "SELECT details,tokens_in,tokens_out FROM runs WHERE account_id=%s"
+                    " AND status='finished' AND ended_at>%s", (acc.id, observed_at)):
+                reported += reported_run_tokens(completed)
+        reserved += reported
+        if reserved and min(balances) - reserved < quota_reservation_tokens:
+            return True
+    return False
+
+
 def claim_run(db, acc: Account, values: tuple, *, max_node_runs: int | None = None,
-              hostname: str = "", max_host_runs: int | None = None) -> bool:
-    """Atomically enforce account and machine capacity limits before inserting a running session."""
+              hostname: str = "", max_host_runs: int | None = None,
+              run_details: dict | None = None, quota_reservation_tokens: int | None = None) -> bool:
+    """Atomically enforce account, machine, host-load and concurrent quota limits before inserting a run."""
     node = str(values[7])
     if not acc.runs_on(node):
         return False
@@ -326,8 +360,17 @@ def claim_run(db, acc: Account, values: tuple, *, max_node_runs: int | None = No
                 share = capacity_shares(acc.sessions, eligible_capacities).get(node, 0)
                 if counts.get(node, 0) >= share:
                     return False
+            if quota_reservation_tokens and quota_reservation_tokens > 0:
+                if _quota_reservation_short(conn, acc, quota_reservation_tokens):
+                    return False
+            else:
+                quota_reservation_tokens = None
+            details = dict(run_details or {})
+            if quota_reservation_tokens:
+                details["quota_reservation"] = {"tokens": int(quota_reservation_tokens)}
             conn.execute("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence,"
-                         " token_hash) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", values)
+                         " token_hash,details) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                         (*values, J(details)))
     return True
 
 
@@ -688,4 +731,8 @@ def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_aut
                 ctx.events.emit("account.machine_signed_in", account=acc.id, node=node, outcome="completed")
         elif row["status"] != "signed_in":
             raise HTTPException(409, f"{acc.id} is not waiting for sign-in on {node}")
+        # Provider-owned login establishes auth health on this machine, without creating quota data.
+        ctx.db.run("UPDATE accounts SET last_probe_at=now(),status=CASE WHEN status='signed_out' THEN 'idle'"
+                   " ELSE status END,last_error=CASE WHEN status='signed_out' THEN '' ELSE last_error END,"
+                   "updated_at=now() WHERE id=%s", (acc.id,))
         return {"completed": True, "account": acc.id, "node": node}

@@ -279,7 +279,7 @@ def test_machines_screen_uses_assignment_state_and_shared_actions():
     assert "total limit 2 sessions" in rendered_signed_in
     assert 'data-act="acc-remove-machine"' in rendered_signed_in
     assert 'data-act="account-pause"' not in rendered_signed_in
-    assert 'data-act="account-edit"' not in rendered_signed_in
+    assert 'data-act="account-edit" data-id="shared-01">Jobs</button>' in rendered_signed_in  # roles stay editable
     assert 'data-act="account-signin"' not in rendered_signed_in
     assert 'data-act="account-remove"' not in rendered_signed_in
 
@@ -289,7 +289,7 @@ def test_machines_screen_uses_assignment_state_and_shared_actions():
     rendered_assignment = render_machines({"nodes": [machine], "accounts": [assignment_only]})
     assert 'data-act="acc-remove-machine"' in rendered_assignment
     assert 'data-act="account-pause"' not in rendered_assignment
-    assert 'data-act="account-edit"' not in rendered_assignment
+    assert 'data-act="account-edit" data-id="shared-01">Jobs</button>' in rendered_assignment
     assert 'data-act="account-signin"' not in rendered_assignment
 
 
@@ -1082,7 +1082,7 @@ console.log(JSON.stringify({{head: head.innerHTML, body: body.innerHTML}}));
 
 @pytest.mark.parametrize(
     ("work_minutes", "expected_hard_seconds"),
-    [(None, 3600), ({"hard": 90}, 5400)],
+    [(None, 2700), ({"hard": 90}, 5400)],
 )
 def test_delivery_card_with_active_run_uses_project_hard_limit(work_minutes, expected_hard_seconds):
     project = {"key": "TESTFLOW", "repo": "jooservices/testflow", "work_minutes": work_minutes}

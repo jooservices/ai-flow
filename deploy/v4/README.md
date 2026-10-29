@@ -81,6 +81,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with token-authorized fenced approve and rework actions
 - [Support routes](../../docs/v4/route-module-support.md): the support routes are served from their own router module
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
+- [Install script routes](../../docs/v4/route-module-install_script.md): the install script routes are served from their own router module
 - [Join a node](../../docs/v4/node-join.md): Command Center issues a five-minute one-use token and the pinned server-installer CLI bootstraps a node
 - [Dashboard read routes](../../docs/v4/route-module-dashboard.md): the Dashboard read models are served from their own router module
 - [Fleet installation](../../docs/v4/fleet-install.md): cloud-init samples and Ansible roles prepare hosts and enroll a node fleet

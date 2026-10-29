@@ -579,13 +579,18 @@ def add_open_escalation(db, key: str, question: str = "Which option should be us
     escalations.record(db, key, key.split("-")[0], "dev", "", escalations.AMBIGUITY, question)
 
 
+_JOIN_PATCH_LOCK = threading.Lock()
+
+
 def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP", *, heartbeat: bool = True):
     issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
                                                          "role": role, "project": project})
     assert issued.status_code == 200, issued.text
     # This helper models a connected agent and seeds its healthy readiness baseline below. Suppress the
     # provider-backed join probe so it cannot race with that deterministic fixture state under slow CI.
-    with patch.object(system_check_api, "schedule_join_readiness"):
+    # patch.object is not thread safe: ten concurrent joins could each save another's mock as "the original" and leave
+    # it in place for every later test (JAIF-437). One lock keeps the patch and its restore in order.
+    with _JOIN_PATCH_LOCK, patch.object(system_check_api, "schedule_join_readiness"):
         joined = client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
     if joined.status_code == 200:
         # Finish any prior probe for this node before the fixture writes its deterministic readiness baseline.

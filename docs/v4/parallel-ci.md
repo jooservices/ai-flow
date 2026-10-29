@@ -34,6 +34,7 @@ hit (JAIF-434).
 
 ## Files kept apart
 
-`KEEP_APART` in `aiflow/v4/core/test_shards.py` lists test files that fail when they run in one process
-(`test_fleet_install.py` and `test_system_check.py`, JAIF-437). The sharder never puts them in the same shard.
-Remove an entry when its ticket is fixed.
+`KEEP_APART` in `aiflow/v4/core/test_shards.py` lists test files that fail when they run in one process; the sharder never
+puts two of them in the same shard. It is empty: the one entry (`test_fleet_install.py` with `test_system_check.py`,
+JAIF-437) came from `join_node` patching a module attribute from ten threads at once, which could leave a mock behind.
+The patch is now taken under a lock. Add an entry only with a ticket that fixes the cause.

@@ -254,3 +254,12 @@ def test_the_pre_push_hook_refuses_a_dirty_working_tree(tmp_path):
     out = subprocess.run([str(ROOT / ".githooks" / "pre-push")], cwd=repo, input=f"refs/heads/x {head} refs/heads/x {'0' * 40}\n",
                          text=True, capture_output=True, env={**os.environ, "PYTHONPATH": str(ROOT)})
     assert out.returncode == 1 and "uncommitted changes" in out.stderr
+
+
+def test_a_step_never_inherits_the_repository_variables_a_git_hook_sets(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/elsewhere/index")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Kept")
+    probe = Step("probe", py("import os, sys; sys.exit(3 if 'GIT_DIR' in os.environ or 'GIT_INDEX_FILE' in os.environ "
+                             "or os.environ.get('GIT_AUTHOR_NAME') != 'Kept' else 0)"))
+    assert gate.run_step(probe, ctx(tmp_path)).status == gate.PASSED

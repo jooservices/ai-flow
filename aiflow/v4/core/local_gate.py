@@ -170,7 +170,8 @@ def run_command(step: Step, ctx: Context, env: dict[str, str]) -> StepResult:
 
 
 def run_step(step: Step, ctx: Context, env: dict[str, str] | None = None) -> StepResult:
-    env = dict(os.environ if env is None else env)
+    env = {k: v for k, v in (os.environ if env is None else env).items()
+           if not k.startswith("GIT_") or k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}  # a hook runs with GIT_DIR set: a check that makes its own repository would write into this one
     missing = [name for name in step.needs_env if not env.get(name)]
     if missing:
         return StepResult(step.name, MISSING_ENV, 0.0, "not provided: " + ", ".join(missing))

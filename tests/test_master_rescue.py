@@ -202,6 +202,19 @@ Use the existing list endpoint.
                 self.assertEqual((found.mode, found.topic), ("owner", topic))
                 self.assertIn("Owner-only work identified", found.trigger)
 
+    def test_policy_text_in_acceptance_criteria_does_not_make_a_ticket_owner_only(self):
+        description = ("Business requirements\n\nA long Blocked ticket should be taken over by Claude.\n\n"
+                       "Acceptance criteria\n\n7. Owner-only work (money, credentials, deleting data, release, requirements) "
+                       "is never rescued by Claude.\n\nScope\n\nNo payment code is changed.")
+        item = ticket("JAIF-92", "Blocked", 40, blocked_kind="Config", description=description)
+        found = evaluate(item, SETTINGS, 40)
+        self.assertEqual((found.mode, found.topic), ("rescue", ""))
+        owner = ticket("JAIF-93", "Blocked", 40, blocked_kind="Config",
+                       description="Business requirements\n\nRotate the API key.\n\nAcceptance criteria\n\nDone.")
+        self.assertEqual(evaluate(owner, SETTINGS, 40).topic, "credentials, tokens or secrets")
+        plain = ticket("JAIF-94", "Blocked", 40, blocked_kind="Config", description="Rotate the API key")
+        self.assertEqual(evaluate(plain, SETTINGS, 40).mode, "owner")
+
     def test_incident_replaces_the_generic_blocked_incident(self):
         found = find_incidents(state([ticket("A-1", "Blocked", 40, blocked_kind="Config")], master=SETTINGS))
         self.assertEqual([(i.id, i.kind) for i in found], [("rescue:A-1", "rescue")])

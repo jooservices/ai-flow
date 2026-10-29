@@ -126,6 +126,34 @@ def check_line(settings: MasterSettings) -> str:
             f"{settings.master_minutes} min, total cap {settings.total_cap_minutes} min")
 
 
+_TEMPLATE_HEADINGS = ("business requirements", "acceptance criteria", "scope", "tests", "technical notes",
+                      "definition of done")
+
+
+def request_context(description: Any) -> str:
+    """The part of a ticket description that asks for work.
+
+    A ticket written in the AI Flow template states its acceptance criteria and scope as policy text, which names
+    topics (money, credentials, releases) without asking for them. Only the business requirements and any text before
+    the first template heading are scanned; a description without the template headings is scanned whole."""
+    text = str(description or "")
+    preamble: list[str] = []
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for line in text.splitlines():
+        heading = re.sub(r"^[#*\s]*(?:h\d\.\s*)?|[*:\s]*$", "", line.strip()).casefold()
+        if heading in _TEMPLATE_HEADINGS:
+            current = heading
+            sections.setdefault(current, [])
+        elif current:
+            sections[current].append(line)
+        else:
+            preamble.append(line)
+    if not sections:
+        return text
+    return "\n".join(preamble + sections.get("business requirements", []))
+
+
 def owner_only_topic(*texts: Any) -> str:
     """The first owner-only topic the texts mention, or an empty string."""
     text = "\n".join(str(item) for item in texts if item)
@@ -174,7 +202,8 @@ def evaluate(ticket: dict[str, Any], settings: MasterSettings | None, minutes_in
     if not isinstance(comments, list):
         comments = []
     comment_texts = [comment.get("body", "") for comment in comments if isinstance(comment, dict)]
-    topic = owner_only_topic(ticket.get("summary", ""), ticket.get("reason", ""), ticket.get("description", ""), *comment_texts)
+    topic = owner_only_topic(ticket.get("summary", ""), ticket.get("reason", ""), request_context(ticket.get("description", "")),
+                             *comment_texts)
     if topic:
         return Verdict("owner", trigger or f"Owner-only work identified: {topic}", topic)
     if not trigger:

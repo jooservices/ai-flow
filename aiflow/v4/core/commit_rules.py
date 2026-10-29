@@ -16,8 +16,12 @@ TITLE_TARGET = 100  # normalized titles stay below the hard limit so a suffix ad
 _HEADER = re.compile(r"^(?P<type>\w*)(?:\((?P<scope>[^)]*)\))?!?: (?P<subject>.*)$")
 _PR_SUBJECT = re.compile(r"^[A-Z].+$")
 _TRAILING = " .,;:!?-–—"
-_DANGLING = frozenset(("a an the to of and or for in on by with from at as is are that which into than its their this "
-                      "these those each every any some your our such be been not no").split())
+_DANGLING = frozenset((
+    "a", "an", "the", "to", "of", "and", "or", "for", "in", "on",
+    "by", "with", "from", "at", "as", "is", "are", "that", "which", "into",
+    "than", "its", "their", "this", "these", "those", "each", "every", "any", "some",
+    "your", "our", "such", "be", "been", "not", "no",
+))
 
 
 def violations(header: str, *, pr_title: bool = False) -> list[str]:
@@ -68,9 +72,11 @@ def normalize_title(kind: str, key: str, summary: str, limit: int = TITLE_TARGET
     if re.match(r"^[A-Z]", text):
         suffix = f" ({key})"
         room = limit - len(f"{kind}: ") - len(suffix)
-        return _checked(f"{kind}: {_cut(text, room)}{suffix}", kind, key)
+        cut = _cut(text, room)
+        return _checked(f"{kind}: {cut}{suffix}", kind, key) if cut else f"{kind}: Change {key}"
     prefix = f"{kind}: {key}: "
-    return _checked(prefix + _cut(text, limit - len(prefix)), kind, key)
+    cut = _cut(text, limit - len(prefix))
+    return _checked(prefix + cut, kind, key) if cut else f"{kind}: Change {key}"
 
 
 def _cut(text: str, room: int) -> str:
@@ -79,13 +85,38 @@ def _cut(text: str, room: int) -> str:
     if len(text) <= room:
         return text
     head = text[:room + 1]
-    head = head.rsplit(" ", 1)[0] if " " in head[1:] else text[:room]
-    head = head[:room].rstrip(_TRAILING)
+    if " " not in head[1:]:
+        return ""  # one overlong word (an identifier, a URL): never cut inside it, the caller falls back to a plain title
+    head = head.rsplit(" ", 1)[0][:room].rstrip(_TRAILING)
     words = head.split(" ")
     while len(words) > 1 and words[-1].lower().rstrip(_TRAILING) in _DANGLING:
         words.pop()
-    return " ".join(words).rstrip(_TRAILING) or text[:room]
+    return " ".join(words).rstrip(_TRAILING)
 
 
 def _checked(title: str, kind: str, key: str) -> str:
     return title if not violations(title, pr_title=True) else f"{kind}: Change {key}"
+
+
+def check_message_file(path: str) -> int:
+    """Hook entry: 0 when the first line of the commit message file is accepted (merges and comments are skipped)."""
+    with open(path, encoding="utf-8") as handle:
+        lines = [line for line in handle.read().splitlines() if not line.startswith("#")]
+    header = next((line for line in lines if line.strip()), "")
+    if header.startswith(("Merge ", "Revert \"", "fixup! ", "squash! ")):
+        return 0
+    problems = violations(header)
+    if not problems:
+        return 0
+    print(f"Commit message rejected: {header!r}")
+    for problem in problems:
+        print(f"  - {problem}")
+    print("Format: `type: Subject` or `type(scope): Subject (KEY-1)`; type is one of " + ", ".join(TYPES) +
+          "; the subject starts with a capital letter, has no full stop at the end and the header stays within "
+          f"{HEADER_MAX} characters.")
+    return 1
+
+
+if __name__ == "__main__":
+    import sys
+    raise SystemExit(check_message_file(sys.argv[2]) if len(sys.argv) == 3 and sys.argv[1] == "check-message" else 2)

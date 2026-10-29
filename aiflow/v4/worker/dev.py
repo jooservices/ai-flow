@@ -27,6 +27,7 @@ from ..core.toolchains import (has_missing_marker, parse_command_not_found_requi
                                parse_missing_requirements)
 from . import timeout_handover
 from .client import Conflict, ControlClient
+from . import gate_step
 from .gitops import Git
 from .notes import environment_notes, environment_status, note, project_env
 from .wordpress import declares_wordpress, start_site as start_wordpress_site
@@ -224,6 +225,8 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci
     checks = "\n".join(f"  - {x}" for x in c.project.get("checks") or []) or "  - the project's test suite"
     if c.project.get("containers"):
         checks += "\n  - Docker commands go through the run's rootless, worktree-confined runtime"
+    if gate_step.enabled(c.project) and (gate_line := gate_step.prompt_check(c.project)):
+        checks += "\n  - " + gate_line
     t = c.ticket
     rework = ""
     if c.findings:
@@ -246,6 +249,7 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], repo=c.project["repo"], branch=branch,
                       base=c.project["base"], checks=checks, description=t["description"] or "(no description)",
                       rework=rework, related=related_block(c.related), machine=machine_block(c.machine_tools),
+                      test_time_slice=work_limits.FULL_SUITE_TIME_SLICE_MINUTES,
                       environment=environment_notes(
                           c.project.get("environment"), "dev",
                           project_env(t["project"], c.project.get("environment"), "dev") if env is None else env))
@@ -651,12 +655,32 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="To Do")
             return result
         sha = git.commit_all(wt, message, c.identity)
+        gate_note = ""
+        if gate_step.enabled(project):  # the CI checks run on the local commit; only a passing commit is pushed
+            hb.progress = {"phase": "gate"}
+            try:
+                gate = gate_step.run(wt, project, pr_title(c.ticket), env, run_as)
+                reason = gate_step.failure_text(gate) if gate.failed else ""
+                error_kind = "gate_failed"
+            except Exception as exc:  # noqa: BLE001 - a gate that cannot run must not leave an unpushed commit behind
+                gate, reason, error_kind = None, f"the gate could not run: {type(exc).__name__}: {exc}", "gate_error"
+            if gate is None or gate.failed:
+                saved = gate_step.keep_failed_work(git, wt, Path(srv_root) / "logs" / "runs" / f"{key}-{c.run_id}")
+                git.run("reset", "--soft", "HEAD~1", cwd=wt)  # the work stays uncommitted; nothing was pushed
+                result.update(outcome="failed", error_kind=error_kind, summary=reason[:1000])
+                jira("comment", body=note(c, "local gate failed", what="The CI checks fail on the local commit",
+                                          why=redact(reason)[:900],
+                                          next_=f"Back to To Do; nothing was pushed; the failed work is saved as {saved}",
+                                          t0=t0, node=api_node(api)))
+                jira("transition", to="To Do")
+                return result
+            gate_note = gate_step.pr_note(gate)
         credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
                                                               "repo": repo, "branch": branch})
         token = credential["token"]
         git.push(wt, branch, token)
         body = (f"Jira: {key}\n\n## Summary\n{summary}\n\n## Tests\n{tests or 'see the run log'}\n\n"
-                f"{handover.pr_sections(handed)}"
+                f"{handover.pr_sections(handed)}{gate_note}"
                 f"## Run\n- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
                 f"- run: {c.run_id}, fence {c.fence}\n- files changed: {len(changed)}\n\n"
                 "Opened as a draft by AI Flow v4; verification runs next (In Verify).")

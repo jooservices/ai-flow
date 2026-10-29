@@ -196,6 +196,11 @@ def classify(db, text: str, project: str = "") -> Classification:
         return Classification(AMBIGUITY, "the repository (ticket, spec or code) can answer this")
     if IRREVERSIBLE_RE.search(text):
         return Classification(IRREVERSIBLE, "an irreversible or production action")
+    return _classify_by_topic(text)
+
+
+def _classify_by_topic(text: str) -> Classification:
+    """The questions no source or marker answered: a server question, an engineering choice, a business choice."""
     if is_server_question(text):  # where and how something runs is never a question for the owner
         return Classification(MISSING, "a server, host, network or access question: the project configuration and the "
                                        "run environment answer it", environment="server")

@@ -101,6 +101,20 @@ def notify_systemd(message: str) -> bool:
         return False
 
 
+def _audit_actor(text: bytes) -> str | None:
+    """The login name behind an audit event, or None for an unset loginuid (systemd services are not operators)."""
+    auid = _AUDIT_AUID.search(text)
+    if not auid:
+        return None
+    uid = int(auid.group(1))
+    if uid >= 4_294_967_295:
+        return None
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return str(uid)
+
+
 def _audit_interventions(raw: bytes) -> list[dict]:
     """Extract human commands and changed files, retaining only secret-redacted arguments and safe names."""
     groups: dict[bytes, list[bytes]] = {}
@@ -117,16 +131,9 @@ def _audit_interventions(raw: bytes) -> list[dict]:
     results = []
     for event_id, lines in groups.items():
         text = b"\n".join(lines)
-        auid = _AUDIT_AUID.search(text)
-        if not auid:
+        actor = _audit_actor(text)
+        if actor is None:
             continue
-        uid = int(auid.group(1))
-        if uid >= 4_294_967_295:
-            continue  # unset loginuid: systemd services are not operator sessions
-        try:
-            actor = pwd.getpwuid(uid).pw_name
-        except KeyError:
-            actor = str(uid)
         stamp = _AUDIT_EVENT_ID.search(event_id)
         if not stamp:
             continue

@@ -124,3 +124,13 @@ and inject one fault every six hours, rotating through worker kill, missing/brok
 impossible dependency, and machine restart. Capture the intervention Dashboard counts at start and end, every idle
 interval, each fault and recovery action, and the resulting ticket/run IDs. Attach the timestamped report to the pull
 request. A completed report is intentionally not claimed by the implementation run; the fleet drill runs after merge.
+
+## Product API writes are not operator interventions
+
+Writes made through the signed-in control API are product actions with their own audit trail; only out-of-band database,
+host, direct-configuration and non-flow Jira actions count as operator interventions. The product routes that record
+their change this way include `PUT /v1/notifications/channels`, `DELETE /v1/notifications/channels/{channel_id}`,
+`PUT /v1/notifications/preferences`, `POST /v1/knowledge/items`, `POST /v1/knowledge/items/{item_id}/{action}`,
+`POST /v1/knowledge/proposals/{proposal_id}/approve`, `POST /v1/knowledge/resources`,
+`POST /v1/knowledge/resources/{kind}/{resource_id}/restore`, `POST /v1/licensing/activate`,
+`POST /v1/licensing/offline` and `PUT /v1/licensing/limits`.

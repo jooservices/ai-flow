@@ -61,33 +61,29 @@ def _close_finding(ctx, subject: str, cause: str) -> None:
                " WHERE subject=%s AND cause=%s AND resolved_at IS NULL", (subject, cause))
 
 
+def _has(*words: str):
+    return lambda value: any(word in value for word in words)
+
+
+_CAUSE_RULES = (  # the first rule that matches wins
+    (_has("no specific cause was observed", "no cause found"), "unknown"),
+    (_has("no ai account is ready", "no ready account"), "no_ready_account"),
+    (_has("parked tickets", "waiting for"), "parked_ticket"),
+    (_has("quota", "cooldown"), "quota"),
+    (_has("backoff"), "backoff"),
+    (_has("licence", "license"), "licence"),
+    (_has("version skew", "compatible release"), "version_skew"),
+    (_has("paused"), "project_pause"),
+    (lambda v: "role" in v and _has("off", "disabled", "coverage")(v), "role_switched_off"),
+    (_has("block", "depend"), "impossible_dependency"),
+    (_has("node", "machine"), "machine_error"),
+    (_has("account", "signed out"), "account_error"),
+)
+
+
 def _cause(reason: str) -> str:
     value = reason.casefold()
-    if "no specific cause was observed" in value or "no cause found" in value:
-        return "unknown"
-    if "no ai account is ready" in value or "no ready account" in value:
-        return "no_ready_account"
-    if "parked tickets" in value or "waiting for" in value:
-        return "parked_ticket"
-    if "quota" in value or "cooldown" in value:
-        return "quota"
-    if "backoff" in value:
-        return "backoff"
-    if "licence" in value or "license" in value:
-        return "licence"
-    if "version skew" in value or "compatible release" in value:
-        return "version_skew"
-    if "paused" in value:
-        return "project_pause"
-    if "role" in value and ("off" in value or "disabled" in value or "coverage" in value):
-        return "role_switched_off"
-    if "block" in value or "depend" in value:
-        return "impossible_dependency"
-    if "node" in value or "machine" in value:
-        return "machine_error"
-    if "account" in value or "signed out" in value:
-        return "account_error"
-    return "unknown"
+    return next((cause for matches, cause in _CAUSE_RULES if matches(value)), "unknown")
 
 
 def _comment(ctx, ticket: str, text: str) -> bool:
@@ -194,7 +190,7 @@ def _fix_impossible_dependencies(ctx) -> None:
         if not impossible:
             continue
         try:
-            read_links = getattr(ctx.jira, "get_issue_links", None) or getattr(ctx.jira, "issue_links")
+            read_links = getattr(ctx.jira, "get_issue_links", None) or ctx.jira.issue_links
             links = read_links(ticket["key"])
         except Exception as exc:  # noqa: BLE001
             log.warning("doctor could not read Jira links for %s (%s)", ticket["key"], type(exc).__name__)
@@ -499,6 +495,22 @@ def _retry_signins(ctx) -> None:
                             node=row["node"], outcome="queued", reason="Flow doctor retried a failed account")
 
 
+def _ready_holders(ctx, role: str, holders: list, account_ready: dict[str, bool], disabled: set,
+                   persist: bool) -> tuple[list, list]:
+    """The accounts that can take the role now, and those whose probation wait was just removed."""
+    ready, expedited = [], []
+    for account in holders:
+        if not account_ready[account.id]:
+            continue
+        if (account.id, role) in disabled:
+            if persist and role_health.expedite_probation(ctx.db, account.id, role):
+                expedited.append(account)
+            if not role_health.probation_slot_open(ctx.db, account.id, role):
+                continue
+        ready.append(account)
+    return ready, expedited
+
+
 def role_coverage(ctx, *, persist: bool = True) -> list[dict[str, Any]]:
     """Current ready-account count by role, requiring two separate providers."""
     repo = ctx.repo()
@@ -521,18 +533,8 @@ def role_coverage(ctx, *, persist: bool = True) -> list[dict[str, Any]]:
     }
     results = []
     for role in ROLE_COVERAGE_ROLES:
-        ready = []
-        expedited = []
         role_holders = holders_by_role[role]
-        for account in role_holders:
-            if not account_ready[account.id]:
-                continue
-            if (account.id, role) in disabled:
-                if persist and role_health.expedite_probation(ctx.db, account.id, role):
-                    expedited.append(account)
-                if not role_health.probation_slot_open(ctx.db, account.id, role):
-                    continue
-            ready.append(account)
+        ready, expedited = _ready_holders(ctx, role, role_holders, account_ready, disabled, persist)
         providers = sorted({a.provider for a in ready})
         enough = len(ready) >= 2 and len(providers) >= 2
         reason = "" if enough else (f"{role} has {len(ready)} ready account(s) from {len(providers)} provider(s); two "

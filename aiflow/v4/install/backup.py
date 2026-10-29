@@ -137,6 +137,44 @@ def _write(fd: int, database_url: str, lay: Layout) -> dict:
     return manifest
 
 
+def _restore_table(conn, tar, members: dict, t: str) -> None:
+    """Copy one table of the archive back; the append-only ledgers are merged, never truncated."""
+    if t == "audit_log":
+        conn.execute("CREATE TEMP TABLE _aiflow_restore_audit_log (LIKE public.audit_log) ON COMMIT DROP")
+        with conn.cursor().copy("COPY _aiflow_restore_audit_log FROM STDIN") as copy:
+            copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+        conn.execute(
+            "INSERT INTO audit_log (ts, actor, category, action, target, ip, detail) "
+            "SELECT source.ts, source.actor, source.category, source.action, source.target, source.ip, "
+            "source.detail FROM _aiflow_restore_audit_log AS source "
+            "WHERE NOT EXISTS (SELECT 1 FROM audit_log AS current WHERE "
+            "current.ts=source.ts AND current.actor=source.actor AND current.category=source.category "
+            "AND current.action=source.action AND current.target=source.target AND current.ip=source.ip "
+            "AND current.detail=source.detail) ORDER BY source.id"
+        )
+        return
+    if t == "audit_product_roles":
+        # Keep the roles registered on the destination database; they determine product-vs-human audit.
+        return
+    if t == "operator_interventions":
+        # Preserve destination evidence and append archived events idempotently by their stable source key.
+        # The id is deliberately omitted so the destination sequence remains authoritative.
+        conn.execute("CREATE TEMP TABLE _aiflow_restore_operator_interventions "
+                     "(LIKE public.operator_interventions INCLUDING DEFAULTS) ON COMMIT DROP")
+        with conn.cursor().copy("COPY _aiflow_restore_operator_interventions FROM STDIN") as copy:
+            copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+        conn.execute(
+            "INSERT INTO operator_interventions "
+            "(source_key,happened_at,source,actor,action,target,reason,details,bug_ticket_key,created_at,session_id) "
+            "SELECT source_key,happened_at,source,actor,action,target,reason,details,bug_ticket_key,created_at,session_id "
+            "FROM _aiflow_restore_operator_interventions ORDER BY id "
+            "ON CONFLICT (source_key) DO NOTHING"
+        )
+        return
+    with conn.cursor().copy(f'COPY "{t}" FROM STDIN') as copy:
+        copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+
+
 def restore(database_url: str, archive: Path, layout: Layout | None = None) -> dict:
     lay = layout or Layout()
     with tarfile.open(archive, "r:gz") as tar:
@@ -169,40 +207,7 @@ def restore(database_url: str, archive: Path, layout: Layout | None = None) -> d
             if mutable:
                 conn.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in mutable) + " CASCADE")
             for t in manifest["tables"]:
-                if t == "audit_log":
-                    conn.execute("CREATE TEMP TABLE _aiflow_restore_audit_log (LIKE public.audit_log) ON COMMIT DROP")
-                    with conn.cursor().copy("COPY _aiflow_restore_audit_log FROM STDIN") as copy:
-                        copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
-                    conn.execute(
-                        "INSERT INTO audit_log (ts, actor, category, action, target, ip, detail) "
-                        "SELECT source.ts, source.actor, source.category, source.action, source.target, source.ip, "
-                        "source.detail FROM _aiflow_restore_audit_log AS source "
-                        "WHERE NOT EXISTS (SELECT 1 FROM audit_log AS current WHERE "
-                        "current.ts=source.ts AND current.actor=source.actor AND current.category=source.category "
-                        "AND current.action=source.action AND current.target=source.target AND current.ip=source.ip "
-                        "AND current.detail=source.detail) ORDER BY source.id"
-                    )
-                    continue
-                if t == "audit_product_roles":
-                    # Keep the roles registered on the destination database; they determine product-vs-human audit.
-                    continue
-                if t == "operator_interventions":
-                    # Preserve destination evidence and append archived events idempotently by their stable source key.
-                    # The id is deliberately omitted so the destination sequence remains authoritative.
-                    conn.execute("CREATE TEMP TABLE _aiflow_restore_operator_interventions "
-                                 "(LIKE public.operator_interventions INCLUDING DEFAULTS) ON COMMIT DROP")
-                    with conn.cursor().copy("COPY _aiflow_restore_operator_interventions FROM STDIN") as copy:
-                        copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
-                    conn.execute(
-                        "INSERT INTO operator_interventions "
-                        "(source_key,happened_at,source,actor,action,target,reason,details,bug_ticket_key,created_at,session_id) "
-                        "SELECT source_key,happened_at,source,actor,action,target,reason,details,bug_ticket_key,created_at,session_id "
-                        "FROM _aiflow_restore_operator_interventions ORDER BY id "
-                        "ON CONFLICT (source_key) DO NOTHING"
-                    )
-                    continue
-                with conn.cursor().copy(f'COPY "{t}" FROM STDIN') as copy:
-                    copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+                _restore_table(conn, tar, members, t)
             _reset_owned_sequences(conn, manifest["tables"])
         for name, m in members.items():
             if name.startswith("secrets/"):

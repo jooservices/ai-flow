@@ -46,7 +46,7 @@ latest provider snapshot. A provider snapshot newer than a lost run reconciles a
 result replaces it with reported usage. Existing lost runs without an end time are anchored at upgrade time so an
 older snapshot cannot release their reservation. Single-session accounts keep their existing serialized claim path.
 
-The console API is `GET` and `PUT /v1/quota-refresh/settings`. Both return `settings` (including the interval and
+The console API is `GET /v1/quota-refresh/settings` and `PUT /v1/quota-refresh/settings`. Both return `settings` (including the interval and
 update metadata) plus the per-account `jobs` status list. `PUT` accepts `{"interval_minutes": 15}`; the allowed range
 is 1–1440 minutes. These endpoints require `console.manage`.
 

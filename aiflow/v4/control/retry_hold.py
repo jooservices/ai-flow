@@ -38,15 +38,15 @@ GROUP BY w.ticket
 """
 
 
-def streaks(db) -> dict[str, tuple[int, str]]:
-    """Ticket key -> (streak length, step with the longest run streak) for every ticket with a running streak."""
-    found: dict[str, tuple[int, str]] = {}
+def streaks(db) -> dict[str, tuple[int, str, int]]:
+    """Ticket key -> (streak length, step with the longest run streak, watchdog requeues in the streak)."""
+    found: dict[str, tuple[int, str, int]] = {}
     for row in db.all(RUN_STREAK_SQL, {"steps": list(STEPS), "bad": list(UNSUCCESSFUL)}):
-        if row["fails"] > found.get(row["ticket_key"], (0, ""))[0]:
-            found[row["ticket_key"]] = (int(row["fails"]), row["step"])
+        if row["fails"] > found.get(row["ticket_key"], (0, "", 0))[0]:
+            found[row["ticket_key"]] = (int(row["fails"]), row["step"], 0)
     for row in db.all(ORPHAN_SQL, {"bad": list(UNSUCCESSFUL)}):
-        fails, step = found.get(row["ticket_key"], (0, "dev"))
-        found[row["ticket_key"]] = (fails + int(row["requeues"]), step)
+        fails, step, _ = found.get(row["ticket_key"], (0, "dev", 0))
+        found[row["ticket_key"]] = (fails + int(row["requeues"]), step, int(row["requeues"]))
     return found
 
 
@@ -68,8 +68,10 @@ def _last_runs(db, key: str, step: str) -> list[dict]:
                   (key, step, key))
 
 
-def comment_text(fails: int, step: str, runs: list[dict]) -> str:
-    lines = [f"AI Flow · retry hold\nWhat: {fails} unsuccessful {step} runs in a row; the ticket is on hold ({HOLD_LABEL}).",
+def comment_text(fails: int, step: str, runs: list[dict], requeues: int = 0) -> str:
+    what = ", ".join(part for part in (f"{fails - requeues} unsuccessful {step} runs" if fails > requeues else "",
+                                       f"{requeues} watchdog requeues" if requeues else "") if part)
+    lines = [f"AI Flow · retry hold\nWhat: {what} in a row; the ticket is on hold ({HOLD_LABEL}).",
              "Why: another unchanged attempt would repeat the same result and only use worker time."]
     for run in runs:
         seconds = int((run["ended_at"] - run["started_at"]).total_seconds()) if run.get("ended_at") else 0
@@ -79,7 +81,7 @@ def comment_text(fails: int, step: str, runs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def hold(ctx, key: str, fails: int, step: str) -> bool:
+def hold(ctx, key: str, fails: int, step: str, requeues: int = 0) -> bool:
     """Hold one ticket: label in Jira and in the registry, one comment, one hold row. False when it could not be held."""
     runs = _last_runs(ctx.db, key, step)
     try:
@@ -88,21 +90,24 @@ def hold(ctx, key: str, fails: int, step: str) -> bool:
         log.warning("could not hold %s: %s", key, exc)
         return False
     # The label is the hold. From here the hold exists, so the row is recorded even when the comment cannot be written.
-    record_hold(ctx, key, fails, step, [str(r["id"]) for r in runs])
+    if not record_hold(ctx, key, fails, step, [str(r["id"]) for r in runs]):
+        return True  # another pass already recorded this hold and commented: no second comment or event
     try:
-        ctx.jira.comment(key, comment_text(fails, step, runs))
+        ctx.jira.comment(key, comment_text(fails, step, runs, requeues))
     except Exception as exc:  # noqa: BLE001 - the comment is information; the hold does not depend on it
         log.warning("held %s but could not comment: %s", key, exc)
     ctx.events.emit("ticket.held", ticket=key, reason=f"{fails} unsuccessful {step} runs in a row")
     return True
 
 
-def record_hold(ctx, key: str, fails: int, step: str, run_ids: list[str]) -> None:
-    """Remember a hold locally: the label in the registry and one active row, so releasing it resets the streak."""
+def record_hold(ctx, key: str, fails: int, step: str, run_ids: list[str]) -> bool:
+    """Remember a hold locally: the label in the registry and one active row, so releasing it resets the streak.
+
+    True when this call inserted the row, False when the hold was already recorded."""
     ctx.db.run("UPDATE tickets SET labels = array_append(labels, %s) WHERE key = %s AND NOT (%s = ANY(labels))",
                (HOLD_LABEL, key, HOLD_LABEL))
-    ctx.db.run("INSERT INTO retry_holds (ticket_key, step, fails, run_ids) VALUES (%s,%s,%s,%s)"
-               " ON CONFLICT DO NOTHING", (key, step, fails, run_ids))
+    return bool(ctx.db.all("INSERT INTO retry_holds (ticket_key, step, fails, run_ids) VALUES (%s,%s,%s,%s)"
+                           " ON CONFLICT DO NOTHING RETURNING id", (key, step, fails, run_ids)))
 
 
 def apply(ctx) -> list[str]:
@@ -110,8 +115,8 @@ def apply(ctx) -> list[str]:
     release_removed_holds(ctx)
     active = {r["ticket_key"] for r in ctx.db.all("SELECT ticket_key FROM retry_holds WHERE released_at IS NULL")}
     held = []
-    for key, (fails, step) in streaks(ctx.db).items():
-        if fails < THRESHOLD or key in active:
+    for key, (fails, step, requeues) in streaks(ctx.db).items():
+        if key in active:
             continue
         ticket = ctx.db.one("SELECT status, labels FROM tickets WHERE key = %s", (key,))
         if not ticket or ticket["status"] in ("Done", "Declined"):
@@ -121,6 +126,6 @@ def apply(ctx) -> list[str]:
             # that removing the label resets the streak. No Jira write: the label is already there.
             record_hold(ctx, key, fails, step, [str(r["id"]) for r in _last_runs(ctx.db, key, step)])
             continue
-        if hold(ctx, key, fails, step):
+        if fails >= THRESHOLD and hold(ctx, key, fails, step, requeues):
             held.append(key)
     return held

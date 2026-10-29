@@ -150,3 +150,31 @@ def test_a_label_without_a_row_gets_its_row_and_no_second_jira_write(db, ctx):
     assert retry_hold.apply(ctx) == []
     assert ctx.jira.labels == [] and ctx.jira.comments == []
     assert db.one("SELECT count(*) AS n FROM retry_holds WHERE ticket_key='TESTWP-11' AND released_at IS NULL")["n"] == 1
+
+
+def test_the_comment_names_watchdog_requeues_instead_of_calling_them_dev_runs():
+    text = retry_hold.comment_text(3, "dev", [], requeues=3)
+    assert "3 watchdog requeues" in text and "unsuccessful dev runs" not in text
+    mixed = retry_hold.comment_text(3, "dev", [], requeues=1)
+    assert "2 unsuccessful dev runs, 1 watchdog requeues" in mixed
+
+
+def test_a_hold_already_recorded_by_another_pass_adds_no_second_comment_or_event(db, ctx):
+    add_ticket(db, "TESTWP-20")
+    for minutes in (30, 20, 10):
+        run(db, "TESTWP-20", "failed", minutes)
+    assert retry_hold.record_hold(ctx, "TESTWP-20", 3, "dev", []) is True
+    assert retry_hold.record_hold(ctx, "TESTWP-20", 3, "dev", []) is False
+    assert retry_hold.hold(ctx, "TESTWP-20", 3, "dev") is True
+    assert ctx.jira.comments == [] and ctx.events.seen == []
+
+
+def test_a_hold_label_put_by_a_person_below_the_threshold_is_recorded_so_removing_it_resets(db, ctx):
+    add_ticket(db, "TESTWP-21")
+    run(db, "TESTWP-21", "failed", 20)
+    db.run("UPDATE tickets SET labels = array_append(labels, 'aiflow-hold') WHERE key = 'TESTWP-21'")
+    assert retry_hold.apply(ctx) == []
+    assert db.one("SELECT count(*) AS n FROM retry_holds WHERE ticket_key = 'TESTWP-21' AND released_at IS NULL")["n"] == 1
+    db.run("UPDATE tickets SET labels = array_remove(labels, 'aiflow-hold') WHERE key = 'TESTWP-21'")
+    retry_hold.apply(ctx)
+    assert retry_hold.streaks(db).get("TESTWP-21", (0, "", 0))[0] == 0

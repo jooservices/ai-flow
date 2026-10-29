@@ -64,6 +64,7 @@ from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from . import route_deps
+from .human_review_notice import notify_human_review
 from .db import DB, J
 from .route_deps import github_connection_used, h
 from .events import Events
@@ -699,28 +700,6 @@ def _github_git_upstream(repository: str, suffix: str, method: str, params: list
                               headers=headers, content=body, auth=("x-access-token", token))
 
 
-def notify_human_review(ctx: Ctx, key: str, ticket: dict | None = None) -> list[str]:
-    """Notify the Jira assignee, or the configured owner, when a required human review starts."""
-    ticket = ticket or ctx.db.one("SELECT key, project, labels, summary, fields FROM tickets WHERE key=%s", (key,))
-    if not ticket or "require-human" not in (ticket.get("labels") or []):
-        return []
-    fields = ticket.get("fields") or {}
-    assignee = ticket.get("assignee") or fields.get("assignee") or {}
-    email = assignee.get("email") if isinstance(assignee, dict) else ""
-    title = f"{key} is ready for human review"
-    detail = ticket.get("summary") or key
-    link = ctx.settings.public_url.rstrip("/") + "/review"
-    sent = notify.send("info", title, detail, link, recipient=email or "", ctx=ctx,
-                       alert_kind="review_before_merge", project=ticket.get("project", ""), ticket=key,
-                       needed="Review the ticket before merge.")
-    ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
-               " VALUES ('notify','human-review',%s,'control',true,%s,%s)",
-               (key, ",".join(sent) or "no channel configured", J({"assignee": bool(email)})))
-    ctx.events.emit("notify.human_review", ticket=key, project=ticket.get("project", ""), account="control",
-                    outcome="sent" if sent else "no_channel", reason="require-human")
-    return sent
-
-
 # --- request bodies ---------------------------------------------------------------------------------------
 class JoinBody(BaseModel):
     join_token: str
@@ -874,16 +853,6 @@ class ResultBody(BaseModel):
     summary: str = ""
     quota: dict[str, Any] = Field(default_factory=dict)
     details: dict[str, Any] = Field(default_factory=dict)
-
-
-class JiraWrite(BaseModel):
-    run_id: str
-    fence: int
-    to: str = ""
-    body: str = ""
-    fields: dict[str, Any] = Field(default_factory=dict)
-    add_labels: list[str] = Field(default_factory=list)
-    remove_labels: list[str] = Field(default_factory=list)
 
 
 class GitHubTokenBody(BaseModel):
@@ -5798,64 +5767,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"ok": True, "result": result, "escalated": False}
 
     # --- Jira writes (fenced) ---------------------------------------------------------------------------------
-    @app.post("/v1/jira/{key}/transition")
-    def jira_transition(key: str, body: JiraWrite, node: str = Depends(node_auth)) -> dict:
-        run = fenced(body.run_id, body.fence, "jira", "transition", {"to": body.to})
-        if run["ticket_key"] != key:
-            raise HTTPException(403, "run is for another ticket")
-        if run["step"] == "impact":
-            audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], False,
-                  "an impact run only comments", {"to": body.to})
-            raise HTTPException(403, "an impact run only comments; the owner moves the ticket")
-        previous = ctx.db.one("SELECT project, type, status, labels, summary, fields FROM tickets WHERE key=%s", (key,))
-        status = ctx.jira.transition_to(key, body.to)
-        ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done'"
-                   " THEN now() ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, key))
-        audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], True, status, {"to": body.to})
-        ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
-                        node=node, outcome=status)
-        if previous and previous["status"] != status:
-            merged_by_verify = run["step"] == "verify" and status == "Done"
-            merge_flow.record_move(ctx, key, previous["status"], status,
-                                   merge_flow.FLOW_MERGE if merged_by_verify else merge_flow.FLOW,
-                                   f"{run['step']} run by {run['account_id']}")
-        if previous and previous["type"] == "Epic" and previous["status"] != "Done" and status == "Done":
-            try:
-                project_lifecycle.report_done_epic(ctx, previous["project"], key)
-            except Exception as e:  # noqa: BLE001
-                log.warning("could not generate completion report for epic %s: %s", key, e)
-        if previous and previous["status"] != "Human review" and status == "Human review":
-            notify_human_review(ctx, key, {**previous, "key": key})
-        return {"status": status}
 
-    @app.post("/v1/jira/{key}/comment")
-    def jira_comment(key: str, body: JiraWrite, node: str = Depends(node_auth)) -> dict:
-        run = fenced(body.run_id, body.fence, "jira", "comment", {"chars": len(body.body)})
-        if run["ticket_key"] != key:
-            raise HTTPException(403, "run is for another ticket")
-        cid = ctx.jira.comment(key, body.body)
-        audit("jira", "comment", key, body.run_id, body.fence, run["account_id"], True, cid, {"chars": len(body.body)})
-        return {"comment_id": cid}
-
-    @app.post("/v1/jira/{key}/fields")
-    def jira_fields(key: str, body: JiraWrite, node: str = Depends(node_auth)) -> dict:
-        run = fenced(body.run_id, body.fence, "jira", "fields", {"fields": list(body.fields), "add": body.add_labels})
-        if run["ticket_key"] != key:
-            raise HTTPException(403, "run is for another ticket")
-        if run["step"] == "impact":
-            raise HTTPException(403, "an impact run only comments")
-        if body.fields:
-            ctx.jira.set_fields(key, body.fields)
-        for lab in body.add_labels:
-            ctx.jira.add_label(key, lab)
-            ctx.db.run("UPDATE tickets SET labels=CASE WHEN %s = ANY(labels) THEN labels ELSE array_append(labels,%s) END"
-                       " WHERE key=%s", (lab, lab, key))
-        for lab in body.remove_labels:
-            ctx.jira.remove_label(key, lab)
-            ctx.db.run("UPDATE tickets SET labels=array_remove(labels,%s) WHERE key=%s", (lab, key))
-        audit("jira", "fields", key, body.run_id, body.fence, run["account_id"], True, "ok",
-              {"fields": list(body.fields), "add": body.add_labels, "remove": body.remove_labels})
-        return {"ok": True}
 
     # --- escalation classes and the owner decision register (docs/v4/escalations.md) --------------------------
 
@@ -5927,22 +5839,6 @@ def create_app(ctx: Ctx) -> FastAPI:
               ",".join(sent) or "no channel configured", {"severity": severity})
         return {"ok": True, "severity": severity, "sent": sent}
 
-    @app.post("/v1/jira/{key}/description")
-    def jira_description(key: str, body: JiraWrite, node: str = Depends(node_auth)) -> dict:
-        run = fenced(body.run_id, body.fence, "jira", "description", {"chars": len(body.body)})
-        if run["ticket_key"] != key:
-            raise HTTPException(403, "run is for another ticket")
-        if run["step"] != "intake":
-            raise HTTPException(403, "only an intake run replaces the description")
-        if not body.body.strip():
-            raise HTTPException(400, "the new description is empty")
-        ctx.jira.set_description(key, body.body)
-        ctx.db.run("UPDATE tickets SET description=%s, synced_at=now() WHERE key=%s", (body.body, key))
-        audit("jira", "description", key, body.run_id, body.fence, run["account_id"], True, "replaced",
-              {"chars": len(body.body)})
-        ctx.events.emit("jira.description", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
-                        node=node, outcome="replaced")
-        return {"ok": True}
 
     # --- GitHub (fenced) --------------------------------------------------------------------------------------
     @app.post("/v1/github/token")

@@ -4162,7 +4162,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                                          PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
             out += dev_rows
         # Routes the Flow doctor moved a ticket away from (failed account or machine) are not offered again.
-        out = flow_doctor.exclude_failed_routes(ctx, account_id, node, out)
+        out = flow_doctor.exclude_failed_routes(ctx, account_id, node, [t for t in out if t.get("type") != "Epic"])
         # Keep the normal workflow order stable, but put a generated flow bug first whenever it is eligible.
         out.sort(key=lambda t: "flow-bug" not in (t.get("labels") or []))
         if routing and ticket_key is None and out:  # spend the provider with the most quota left first (docs/v4/provider-routing.md)

@@ -25,6 +25,7 @@ from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
                                parse_missing_requirements)
+from . import timeout_handover
 from .client import Conflict, ControlClient
 from .gitops import Git
 from .notes import environment_notes, environment_status, note, project_env
@@ -558,6 +559,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             return result
         changed = git.changed(wt)
         result.setdefault("details", {})["changed_files"] = changed[:100]
+        if res.error_kind == "timeout" and timeout_handover.try_handover(
+                api, c, git, wt, branch, repo, summary, handed, result, t0, jira, branch_commit_count, tests):
+            return result
         if conflicts and any(CONFLICT_MARKER.search((wt / f).read_text(errors="ignore")) for f in conflicts if (wt / f).is_file()):
             res.error_kind = res.error_kind or "unresolved conflicts"
         failure_verdict = res.verdict == "FAIL"
@@ -626,6 +630,8 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                 return result
 
             result["outcome"] = work_limits.run_outcome_for_error(reason)
+            if reason == "timeout":
+                result["error_kind"] = "timeout"
             result["summary"] = f"{reason}: {summary}"[:1000]
             jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",
                                       why=reason, result=(summary[:600] if summary else "no output"),

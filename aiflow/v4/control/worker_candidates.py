@@ -54,6 +54,41 @@ def _project_offset(account_id: str, worker_id: str, rank: tuple[Any, ...], size
     return (start + ordinal) % size
 
 
+SPLIT_PARENT = "aiflow-split-parent"
+
+
+def is_split_child(labels: Any) -> bool:
+    return any(str(label).startswith("aiflow-split-") and str(label) != SPLIT_PARENT
+               for label in (labels or ()))
+
+
+DEV_TICKET_SQL = (
+    " AND NOT ('aiflow-hold' = ANY(labels))"
+    " AND NOT ('aiflow-split-parent' = ANY(labels))"
+    " AND ((status = 'To Do' AND 'aiflow-ready' = ANY(labels))"
+    "      OR (status IN ('To Do', 'Backlog')"
+    "          AND EXISTS (SELECT 1 FROM unnest(labels) AS label"
+    "                      WHERE starts_with(label, 'aiflow-split-') AND label <> 'aiflow-split-parent')))"
+)
+
+
+def may_offer_dev(ticket: Mapping[str, Any], done: set[str],
+                  held: set[str] | None = None, cooling: set[str] | None = None,
+                  parked: set[str] | None = None) -> bool:
+    """True when a ticket may be a developer-run candidate after hold, lease and split rules."""
+    key = str(ticket.get("key") or "")
+    labels = set(ticket.get("labels") or ())
+    if not key or key in (held or ()) or key in (cooling or ()) or key in (parked or ()):
+        return False
+    if SPLIT_PARENT in labels or "aiflow-hold" in labels:
+        return False
+    if any(str(blocker) not in done for blocker in ticket.get("blocked_by") or []):
+        return False
+    if "aiflow-ready" in labels:
+        return True
+    return is_split_child(labels)
+
+
 def diversify_dev_candidates(candidates: list[dict[str, Any]], account_id: str, worker_id: str,
                              project_priorities: Mapping[str, int],
                              ticket_priorities: Mapping[str, int]) -> list[dict[str, Any]]:

@@ -4668,9 +4668,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             footprints: dict[str, dict] = {}
             footprint_history: dict[str, bool] = {}
             epics: dict[str, str] = {}
-            dev_tickets = ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
-                                     " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))"
-                                     + scoped_key, (projects, *scoped_ticket))
+            dev_tickets = ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s)"
+                                     + worker_candidates.DEV_TICKET_SQL + scoped_key,
+                                     (projects, *scoped_ticket))
             blocker_keys = sorted({str(blocker) for ticket in dev_tickets
                                    for blocker in ticket.get("blocked_by") or []})
             done = ({row["key"] for row in ctx.db.all(
@@ -4701,8 +4701,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             for t in dev_tickets:
                 if ticket_needs_missing_container_runtime(t, "dev"):
                     continue
-                if (t["key"] in held or t["key"] in cooling or t["key"] in parked
-                        or any(b not in done for b in t["blocked_by"])):
+                if not worker_candidates.may_offer_dev(t, done, held=held, cooling=cooling, parked=parked):
                     continue
                 labels = set(t["labels"])
                 if "tier-senior" in labels and acc.tier != "senior":

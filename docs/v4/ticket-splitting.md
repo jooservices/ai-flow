@@ -34,4 +34,10 @@ issues. Each child Relates to the parent; child N+1 is Blocked by child N. The p
 gains `aiflow-split-parent`. Children do not receive `aiflow-ready` here. `after_intake_result` runs from
 `run_inbox.finish` after a successful intake `split_plan` on `POST /v1/runs/{run_id}/result`.
 
+## Claim gate
+
+`POST /v1/work/claim` never offers a ticket labelled `aiflow-split-parent`. A child with an unfinished
+`blocked_by` entry is not offered. An unblocked split child can be claimed like any other ready ticket.
+Existing hold, lease and `aiflow-hold` rules still apply (`aiflow/v4/control/worker_candidates.py`).
+
 **Console screens:** none (library contract; no UI in this ticket).

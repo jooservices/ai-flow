@@ -70,3 +70,10 @@ need the tool wait as described above.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `AIFLOW4_MAINTENANCE_PROJECT` | `JAIF` | Jira project that receives the `tooling` maintenance tickets |
+
+A stop in free text counts too (JAIF-368): when a run says in its own words that a catalog tool is absent (for example
+"uv is absent" or "`uv: command not found`"), `core/blocker_kind.py` recognizes it and the escalation classifier treats it
+as `missing_tool_or_environment`, never as a business decision. Only tools AI Flow knows by name are recognized.
+
+`POST /v1/escalations/raise` applies the same rule: a question whose text reports a catalog tool as absent is classified as a
+missing tool and answered on the machine path.

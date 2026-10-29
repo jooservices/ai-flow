@@ -1,0 +1,1 @@
+- [Timeout retry limit](../../../docs/v4/timeout-retry-limit.md): after a developer timeout, `POST /v1/work/claim` raises hard by 30 minutes per previous timeout

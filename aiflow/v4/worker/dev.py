@@ -20,7 +20,7 @@ from functools import partial
 from pathlib import Path
 
 from ..adapters import RunResult, RunSpec, get_adapter
-from ..core import handover
+from ..core import handover, work_limits
 from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
@@ -631,7 +631,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                 jira("transition", to="To Do")
                 return result
 
-            result["outcome"] = "failed"
+            result["outcome"] = work_limits.run_outcome_for_error(reason)
             result["summary"] = f"{reason}: {summary}"[:1000]
             jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",
                                       why=reason, result=(summary[:600] if summary else "no output"),

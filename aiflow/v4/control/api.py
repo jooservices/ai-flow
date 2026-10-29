@@ -58,7 +58,7 @@ from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
-from . import capacity, conflict_loss, hotfiles, merge_queue, review_queue_api, worker_candidates
+from . import capacity, claim_project, conflict_loss, hotfiles, merge_queue, review_queue_api, worker_candidates
 from . import merge_flow
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
@@ -5147,19 +5147,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
             log.warning("knowledge context pack for %s failed: %s", t["key"], type(exc).__name__)
             extra["context_pack"] = {"project": t.get("project", ""), "ticket": t["key"], "items": []}
-        project_data = ({"key": "", "repo": "", "base": "", "hotfix_base": "", "checks": [], "stack": "",
-                         "node": node,
-                         "work_minutes": {"target": 30, "warn": 45, "hard": 60},
-                         "merge": {"method": "squash", "auto": False, "require_human": True}}
-                        if body.step == "master" else
-                        {"key": p.key, **selected_repo, "hotfix_base": p.hotfix_base,
-                         "work_minutes": p.work_minutes(),
-                         "environment": ([item.public() for item in p.environment_items]
-                                         if body.step in ("intake", "dev", "verify", "post_merge") else []),
-                         "merge": {"method": (p.merge or {}).get("method", "squash"),
-                                   "auto": bool((p.merge or {}).get("auto", True)),
-                                   "require_human": bool((p.merge or {}).get("require_human", False))}}
-                        if p else {})
+        project_data = claim_project.payload(p, selected_repo, node, body.step, ctx.db, t["key"])
         return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
                 "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,
                 "account": acc.id, "identity": bot_identity(),

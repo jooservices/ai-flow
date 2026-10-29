@@ -31,11 +31,12 @@ fails `validate_plan` is rejected and Jira is not written. A ticket that does no
 `apply_plan` in `aiflow/v4/control/ticket_split_apply.py` creates Story children from a valid plan. Each child
 gets a stable `aiflow-split-<parent>-<index>` label so a second apply returns the same keys and does not duplicate
 issues. Each child Relates to the parent; child N+1 is Blocked by child N. The parent loses `aiflow-ready` and
-gains `aiflow-split-parent`. Children do not receive `aiflow-ready` here.
+gains `aiflow-split-parent`. Children do not receive `aiflow-ready` here. `after_intake_result` runs from
+`run_inbox.finish` after a successful intake `split_plan` on `POST /v1/runs/{run_id}/result`.
 
 ## Claim gate
 
-A ticket labelled `aiflow-split-parent` is never a developer-run candidate. A child with an unfinished
+`POST /v1/work/claim` never offers a ticket labelled `aiflow-split-parent`. A child with an unfinished
 `blocked_by` entry is not offered. An unblocked split child can be claimed like any other ready ticket.
 Existing hold, lease and `aiflow-hold` rules still apply (`aiflow/v4/control/worker_candidates.py`).
 

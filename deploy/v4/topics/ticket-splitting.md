@@ -1,1 +1,1 @@
-- [Ticket split-plan contract](../../../docs/v4/ticket-splitting.md): validate_plan accepts 2 to 8 children with summary, description and an AC1 line before any Jira write
+- [Ticket splitting](../../../docs/v4/ticket-splitting.md): validate_plan accepts 2 to 8 children; decide_split sets needs_split from capacity.estimate high minutes versus the project target

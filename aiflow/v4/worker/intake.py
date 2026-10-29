@@ -199,10 +199,15 @@ def _split_instructions(needs_split: bool) -> str:
         return "This ticket does not need splitting. Use the DESCRIPTION / INTAKE: REWRITE form only."
     return (
         "This ticket needs splitting. Do not rewrite it as one description. Return 2 to 8 child tickets. "
-        "Each child is an object with only summary and description; description must include an AC1: line.\n"
+        "Each child is an object with only summary and description. You are the Team Lead: the developer gets an exact "
+        "job that one short AI run (15 minutes) can finish, so the description must have an AC1: line and these sections, "
+        "each with content: Files: (the files to create or change; put the feature in a module that owns it), "
+        "Skeleton: (the classes and functions to write, one line each), Test cases: (the tests to write, one line each).\n"
         "When you split:\nSPLIT:\n<<<\n"
-        '[{"summary":"First child title here","description":"AC1: First observable behaviour."},'
-        '{"summary":"Second child title here","description":"AC1: Second observable behaviour."}]\n'
+        '[{"summary":"First child title here","description":"AC1: First observable behaviour.\\nFiles: aiflow/v4/x.py, '
+        'tests/v4/test_x.py\\nSkeleton: class X with run(); function y()\\nTest cases: run returns the value; y rejects empty input"},'
+        '{"summary":"Second child title here","description":"AC1: Second observable behaviour.\\nFiles: aiflow/v4/z.py\\n'
+        'Skeleton: function z()\\nTest cases: z handles the empty case"}]\n'
         ">>>\nINTAKE: SPLIT"
     )
 

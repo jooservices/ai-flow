@@ -148,11 +148,17 @@ $$ LANGUAGE plpgsql;
 
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = 'aiflow4_operator_ddl') THEN
-        CREATE EVENT TRIGGER aiflow4_operator_ddl ON ddl_command_end EXECUTE FUNCTION aiflow4_capture_ddl_intervention();
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = 'aiflow4_operator_drop') THEN
-        CREATE EVENT TRIGGER aiflow4_operator_drop ON sql_drop EXECUTE FUNCTION aiflow4_capture_drop_intervention();
+    -- PostgreSQL event triggers are database-wide, not schema-scoped. Scratch schemas used by isolated tests must
+    -- not install a global trigger whose audit tables disappear when that scratch schema is removed.
+    IF current_schema() = 'public' THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = 'aiflow4_operator_ddl') THEN
+            CREATE EVENT TRIGGER aiflow4_operator_ddl ON ddl_command_end
+                EXECUTE FUNCTION aiflow4_capture_ddl_intervention();
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = 'aiflow4_operator_drop') THEN
+            CREATE EVENT TRIGGER aiflow4_operator_drop ON sql_drop
+                EXECUTE FUNCTION aiflow4_capture_drop_intervention();
+        END IF;
     END IF;
 EXCEPTION WHEN insufficient_privilege THEN
     RAISE EXCEPTION 'Flow doctor audit requires a migration role that can create PostgreSQL event triggers; refusing to mark the migration applied without DDL auditing'

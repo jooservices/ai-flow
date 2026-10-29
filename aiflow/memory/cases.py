@@ -37,7 +37,7 @@ def handover(comments: list[dict[str, Any]]) -> dict[str, str]:
 
 def build_case(key: str, summary: str, company: str, repo: str, change_type: str, developer: str, pr_url: str, comments: list[dict[str, Any]],
                rework_rounds: int, rework_text: str = "") -> dict[str, Any] | None:
-    """A `case` from a ticket that is merged and Done; None when the developer left no hand-over to learn from."""
+    """A case from a completed ticket, using the hand-over where available and ticket context otherwise."""
     parts = handover(comments)
 
     def pick(*names: str) -> str:
@@ -46,8 +46,6 @@ def build_case(key: str, summary: str, company: str, repo: str, change_type: str
                 return text
         return ""
     changed, why, study = pick("what's changed", "whats changed"), pick("why changed"), pick("study case")
-    if not (changed or why or study):
-        return None
     body = [f"Ticket {key}: {summary}", ""]
     if changed:
         body += ["What changed:", changed[:2200], ""]
@@ -59,6 +57,8 @@ def build_case(key: str, summary: str, company: str, repo: str, change_type: str
         body += [f"Rework rounds: {rework_rounds}." + (f" Last reasons: {rework_text[:900]}" if rework_text else ""), ""]
     if pr_url:
         body.append(f"Pull request: {pr_url}")
+    if not (changed or why or study or pr_url):
+        body.append("Completion: AI Flow reported this ticket Done; no additional completion notes were available.")
     tags = [t for t in (key.rsplit("-", 1)[0].lower(), repo.lower(), change_type.lower(), developer.lower()) if t]
     return dict(kind="case", scope="project", namespace=company, project=key.rsplit("-", 1)[0], repo=repo, jira_key=key, title=summary[:200],
                 body="\n".join(body).strip()[:7900], tags=tags, source={"jira": key, "pr": pr_url}, created_by="supervisor", status="verified", confidence=0.7)

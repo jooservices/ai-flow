@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from aiflow import events as legacy_events
-from aiflow.supervisor import Supervisor
+from aiflow.memory.workflow import MemoryWorkflow
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCS = ROOT / "docs" / "OBSERVABILITY.md"
@@ -151,12 +151,14 @@ def test_memory_recall_event_identifies_recalled_study_cases(monkeypatch):
         def set(self, *_args):
             return None
 
-    supervisor = object.__new__(Supervisor)
-    supervisor.memory = Memory()
-    supervisor.cfg = SimpleNamespace(project=lambda _key: SimpleNamespace(company="JOO", jira_key="JAIF"))
-    supervisor.redis = Redis()
+    workflow = object.__new__(MemoryWorkflow)
+    workflow.default = Memory()
+    workflow.default_url = ""
+    workflow.clients = {}
+    workflow.cfg = SimpleNamespace(memory={}, project=lambda _key: SimpleNamespace(company="JOO", jira_key="JAIF"))
+    workflow.redis = Redis()
 
-    supervisor.recall("JAIF-14", {"summary": "Example", "description": ""}, SimpleNamespace(name="ai-flow"))
+    workflow.recall("JAIF-14", {"summary": "Example", "description": ""}, SimpleNamespace(name="ai-flow"))
 
     assert emitted == [("memory.recall", {"ticket": "JAIF-14", "found": 2,
                                           "ids": "case-123,lesson-a", "case_ids": "case-123"})]

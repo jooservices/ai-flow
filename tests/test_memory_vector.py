@@ -1,22 +1,19 @@
-"""Search by meaning: the Ollama client against a fake server, and the store against a real PostgreSQL with pgvector (database
-`ai_memory_test`, skipped when it is not there). Run: uv run --with pg8000 python -m unittest tests.test_memory_vector"""
+"""Search by meaning: the Ollama client against a fake server, and the store against real PostgreSQL with pgvector."""
 import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 
 try:
-    import pg8000.dbapi
+    import psycopg  # noqa: F401
 except ImportError:
-    pg8000 = None
+    psycopg = None
 
-from aiflow import config
 from aiflow.memory.embed import DIMENSIONS, Embedder, literal
 from aiflow.memory.scoped import Scoped
 from aiflow.memory.store import Store
+from tests.memory_pg_support import MemoryTestDatabase, database_url
 
-ROOT = Path(__file__).resolve().parents[4]
 CONCEPTS = [("car", "automobile", "vehicle"), ("cache", "memoized"), ("bird", "sparrow")]  # words of one concept share one axis
 
 
@@ -86,27 +83,17 @@ class EmbedderTests(unittest.TestCase):
         self.assertEqual(literal([1.0, 0.25, 0.0]), "[1,0.25,0]")
 
 
-def connect_factory():
-    env = config.read_env_file(ROOT / ".env")
-    if not env.get("WORKSPACES_POSTGRES_USER"):
-        return None
-    port = int(env.get("WORKSPACES_POSTGRES_PORT", "15435"))
-    return lambda: pg8000.dbapi.connect(user=env["WORKSPACES_POSTGRES_USER"], password=env["WORKSPACES_POSTGRES_PASSWORD"], host="127.0.0.1",
-                                        port=port, database="ai_memory_test")  # never any other database: the tests empty the tables
-
-
-@unittest.skipIf(pg8000 is None, "pg8000 is not installed")
+@unittest.skipIf(psycopg is None, "psycopg is not installed")
 class VectorSearchTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        connect = connect_factory()
-        if connect is None:
-            raise unittest.SkipTest("no root .env")
-        cls.connect = staticmethod(connect)
-        try:
-            Store(connect).migrate()
-        except Exception as error:
-            raise unittest.SkipTest(f"no PostgreSQL database with pgvector: {type(error).__name__}")
+        cls.database = MemoryTestDatabase(database_url())
+        cls.connect = staticmethod(cls.database.connect)
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "database"):
+            cls.database.close()
 
     def setUp(self):
         self.ollama = OllamaServer().__enter__()

@@ -231,6 +231,93 @@ def test_doctor_fences_and_restarts_a_stale_worker_session(ctx):
     assert any(key == "TESTWP-267" and "worker recovered" in body for key, body in ctx.jira.comments)
 
 
+def test_stale_run_jira_requeue_retries_after_a_transient_failure(ctx):
+    add_ticket(ctx.db, "TESTWP-2671", status="In Progress")
+    online_node(ctx, "cc")
+    account_state(ctx, "claude-01", "working")
+    run_id = str(uuid.uuid4())
+    claim = ctx.leases.claim("TESTWP-2671", run_id, 300_000)
+    assert claim.ok
+    old = datetime.now(timezone.utc) - timedelta(minutes=3)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+               "started_at,heartbeat_at) VALUES (%s,'TESTWP-2671','TESTWP','dev','claude-01','claude','cc',%s,"
+               "'running','',%s,%s)", (run_id, claim.fence, old, old))
+    transition = ctx.jira.transition_to
+    ctx.jira.transition_to = lambda *_: (_ for _ in ()).throw(RuntimeError("Jira unavailable"))
+
+    flow_doctor._restart_stale_runs(ctx)
+
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "lost"
+    assert ctx.db.one("SELECT outcome FROM flow_doctor_actions WHERE action_key=%s",
+                      (f"fence-stale-run:{run_id}",))["outcome"] == "requeue_pending"
+    ctx.jira.transition_to = transition
+    flow_doctor._restart_stale_runs(ctx)
+    assert ctx.db.one("SELECT outcome FROM flow_doctor_actions WHERE action_key=%s",
+                      (f"fence-stale-run:{run_id}",))["outcome"] == "requeued"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-2671'")["status"] == "To Do"
+    assert any(key == "TESTWP-2671" and "worker recovered" in body for key, body in ctx.jira.comments)
+
+
+def test_stale_run_without_a_configured_account_is_still_fenced_and_requeued(ctx):
+    add_ticket(ctx.db, "TESTWP-2672", status="In Progress")
+    online_node(ctx, "cc")
+    run_id = str(uuid.uuid4())
+    claim = ctx.leases.claim("TESTWP-2672", run_id, 300_000)
+    assert claim.ok
+    old = datetime.now(timezone.utc) - timedelta(minutes=3)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+               "started_at,heartbeat_at) VALUES (%s,'TESTWP-2672','TESTWP','dev','removed-account','codex','cc',%s,"
+               "'running','',%s,%s)", (run_id, claim.fence, old, old))
+    flow_doctor._restart_stale_runs(ctx)
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "lost"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-2672'")["status"] == "To Do"
+    assert ctx.db.one("SELECT count(*) AS n FROM node_operations")["n"] == 0
+
+
+def test_stale_run_is_fenced_and_queued_for_recovery_while_jira_is_unavailable(ctx):
+    add_ticket(ctx.db, "TESTWP-2673", status="In Progress")
+    online_node(ctx, "cc")
+    account_state(ctx, "claude-01", "working")
+    run_id = str(uuid.uuid4())
+    claim = ctx.leases.claim("TESTWP-2673", run_id, 300_000)
+    assert claim.ok
+    old = datetime.now(timezone.utc) - timedelta(minutes=3)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+               "started_at,heartbeat_at) VALUES (%s,'TESTWP-2673','TESTWP','dev','claude-01','claude','cc',%s,"
+               "'running','',%s,%s)", (run_id, claim.fence, old, old))
+    ctx.jira = None
+
+    flow_doctor._restart_stale_runs(ctx)
+
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "lost"
+    assert ctx.db.one("SELECT outcome FROM flow_doctor_actions WHERE action_key=%s",
+                      (f"fence-stale-run:{run_id}",))["outcome"] == "requeue_pending"
+    assert ctx.db.one("SELECT count(*) AS n FROM node_operations")["n"] == 1
+
+
+@pytest.mark.parametrize("status", ["Backlog", "Done"])
+def test_stale_run_recovery_does_not_reopen_a_parked_or_terminal_ticket(ctx, status):
+    ticket = "TESTWP-2674"
+    add_ticket(ctx.db, ticket, status=status)
+    ctx.jira.status_of[ticket] = status
+    online_node(ctx, "cc")
+    account_state(ctx, "claude-01", "working")
+    run_id = str(uuid.uuid4())
+    claim = ctx.leases.claim(ticket, run_id, 300_000)
+    assert claim.ok
+    old = datetime.now(timezone.utc) - timedelta(minutes=3)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+               "started_at,heartbeat_at) VALUES (%s,%s,'TESTWP','dev','claude-01','claude','cc',%s,'running','',%s,%s)",
+               (run_id, ticket, claim.fence, old, old))
+
+    flow_doctor._restart_stale_runs(ctx)
+
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "lost"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (ticket,))["status"] == status
+    assert ctx.db.one("SELECT outcome FROM flow_doctor_actions WHERE action_key=%s",
+                      (f"fence-stale-run:{run_id}",))["outcome"] == "ticket_not_actionable"
+
+
 def test_doctor_routes_around_an_account_or_machine_failure(ctx):
     add_ticket(ctx.db, "TESTWP-268")
     online_node(ctx, "cc")
@@ -246,6 +333,23 @@ def test_doctor_routes_around_an_account_or_machine_failure(ctx):
     action = ctx.db.one("SELECT action,account_id,node,outcome FROM flow_doctor_actions WHERE ticket_key='TESTWP-268'")
     assert action == {"action": "move_ticket_to_ready_account", "account_id": "codex-01", "node": "node1",
                       "outcome": "released"}
+
+
+def test_doctor_does_not_choose_a_machine_that_does_not_serve_the_ticket_project(ctx):
+    add_ticket(ctx.db, "TESTWP-2680")
+    online_node(ctx, "cc")
+    online_node(ctx, "node1")
+    ctx.repo().nodes["node1"].projects = []
+    account_state(ctx, "claude-01", "error")
+    account_state(ctx, "codex-01", "idle")
+    old = datetime.now(timezone.utc) - timedelta(minutes=5)
+    run_id = str(uuid.uuid4())
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,error_kind,"
+               "started_at,heartbeat_at,ended_at) VALUES (%s,'TESTWP-2680','TESTWP','dev','claude-01','claude','cc',1,"
+               "'failed','failed','machine',%s,%s,%s)", (run_id, old, old, old))
+    flow_doctor._route_around_failed_assignment(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM flow_doctor_actions WHERE ticket_key='TESTWP-2680'")["n"] == 0
+    assert ctx.db.one("SELECT count(*) AS n FROM flow_doctor_route_exclusions WHERE ticket_key='TESTWP-2680'")["n"] == 0
 
 
 @pytest.mark.parametrize("error_kind", ["machine", "tool"])
@@ -665,6 +769,35 @@ def test_node_audit_keeps_actions_redacts_credentials_and_does_not_truncate_chan
     assert {event["target"] for event in file_events} == {f"file-{n}.conf" for n in range(21)}
 
 
+def test_operator_audit_forwarder_restarts_after_same_inode_log_truncation(tmp_path):
+    from aiflow.v4.node.agent import forward_operator_audit
+
+    class Recorder:
+        def __init__(self):
+            self.events = []
+
+        def call(self, method, path, payload, retries=1):
+            self.events.append(payload)
+            return {"recorded": True}
+
+    audit_log = tmp_path / "audit.log"
+    cursor = tmp_path / "operator-audit.cursor"
+    first = (b'type=SYSCALL msg=audit(1790000100.123:88): auid=1000 exe="/usr/bin/long-command-name-for-audit-fixture"\n'
+             b'type=EXECVE msg=audit(1790000100.123:88): argc=4 a0="long-command-name-for-audit-fixture" '
+             b'a1="first" a2="second" a3="third"\n')
+    second = (b'type=SYSCALL msg=audit(1790000200.123:89): auid=1000 exe="/usr/bin/id"\n'
+              b'type=EXECVE msg=audit(1790000200.123:89): argc=1 a0="id"\n')
+    assert len(second) < len(first)
+    audit_log.write_bytes(first)
+    inode = audit_log.stat().st_ino
+    api = Recorder()
+    assert forward_operator_audit(api, "cc", str(audit_log), str(cursor)) == 1
+    audit_log.write_bytes(second)  # copy-truncate preserves the inode but moves the file size behind the cursor
+    assert audit_log.stat().st_ino == inode
+    assert forward_operator_audit(api, "cc", str(audit_log), str(cursor)) == 1
+    assert [event["target"] for event in api.events] == ["long-command-name-for-audit-fixture", "id"]
+
+
 def test_operator_intervention_evidence_includes_secret_safe_arguments(ctx):
     start = datetime.now(timezone.utc)
     flow_doctor.record_operator_intervention(
@@ -691,6 +824,15 @@ def test_operator_intervention_ledger_rejects_human_edits_but_allows_product_boo
             connection.execute("TRUNCATE operator_interventions")
     assert ctx.db.one("SELECT target,bug_ticket_key FROM operator_interventions WHERE id=%s", (intervention_id,)) == {
         "target": "systemctl", "bug_ticket_key": "TESTWP-900"}
+
+
+def test_operator_cannot_drop_the_intervention_ledger(ctx):
+    as_operator(ctx)
+    with psycopg.connect(ctx.db.url, autocommit=True, application_name="psql") as connection:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="append-only audit ledger"):
+            connection.execute("DROP TABLE operator_interventions")
+    assert ctx.db.one("SELECT to_regclass('operator_interventions') AS table_name") == {
+        "table_name": "operator_interventions"}
 
 
 def as_operator(ctx) -> None:

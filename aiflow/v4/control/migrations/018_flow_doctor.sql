@@ -126,6 +126,12 @@ BEGIN
     IF EXISTS (SELECT 1 FROM audit_product_roles WHERE role_name = session_user) THEN
         RETURN;
     END IF;
+    IF EXISTS (SELECT 1 FROM pg_event_trigger_dropped_objects()
+               WHERE original AND NOT is_temporary AND object_type = 'table'
+               AND object_identity IN ('operator_interventions', 'public.operator_interventions')) THEN
+        RAISE EXCEPTION 'operator_interventions is the append-only audit ledger and cannot be dropped by an operator'
+            USING ERRCODE = '42501';
+    END IF;
     FOR r IN SELECT tg_tag AS command_tag, object_type, object_identity FROM pg_event_trigger_dropped_objects()
              WHERE original AND NOT is_temporary AND object_identity IS NOT NULL
     LOOP
@@ -137,8 +143,6 @@ BEGIN
                 jsonb_build_object('command', r.command_tag, 'object_type', r.object_type))
         ON CONFLICT (source_key) DO NOTHING;
     END LOOP;
-EXCEPTION WHEN undefined_table THEN
-    NULL;
 END;
 $$ LANGUAGE plpgsql;
 

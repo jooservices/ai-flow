@@ -242,18 +242,62 @@ def _queue_node_operation(ctx, node: str, action: str, payload: dict, action_key
     return True
 
 
-def _restart_stale_runs(ctx) -> None:
-    """Fence a session with no heartbeat on a live machine, requeue its ticket and restart its worker unit."""
+def _retry_stale_run_requeues(ctx) -> None:
+    """Retry Jira transitions for runs already fenced locally but not yet returned to To Do."""
     if not ctx.jira:
         return
+    pending = ctx.db.all("SELECT action_key,ticket_key,node,account_id FROM flow_doctor_actions"
+                         " WHERE action='fence_stale_run' AND outcome='requeue_pending'"
+                         " ORDER BY created_at LIMIT 100")
+    comments = []
+    for row in pending:
+        try:
+            current = str(ctx.jira.status(row["ticket_key"]) or "").strip().casefold()
+            if current in IMPOSSIBLE_STATUSES or current in {"done", "closed"}:
+                changed = ctx.db.run("UPDATE flow_doctor_actions SET outcome='ticket_not_actionable'"
+                                     " WHERE action_key=%s AND outcome='requeue_pending'", (row["action_key"],))
+                if changed:
+                    ctx.events.emit("flow_doctor.action", ticket=row["ticket_key"], node=row["node"],
+                                    account=row["account_id"], outcome="ticket_not_actionable",
+                                    reason=f"stale run was fenced, but Jira status is {current!r}")
+                continue
+            status = ctx.jira.transition_to(row["ticket_key"], "To Do")
+            if status != "To Do":
+                raise RuntimeError("ticket did not reach To Do")
+            ctx.db.run("UPDATE tickets SET status=%s,synced_at=now() WHERE key=%s", (status, row["ticket_key"]))
+            changed = ctx.db.run("UPDATE flow_doctor_actions SET outcome='requeued'"
+                                 " WHERE action_key=%s AND outcome='requeue_pending'", (row["action_key"],))
+            if changed:
+                ctx.events.emit("flow_doctor.action", ticket=row["ticket_key"], node=row["node"],
+                                account=row["account_id"], outcome="requeued",
+                                reason="Jira transition retried after the stale run was fenced")
+                body = ("AI Flow · Flow doctor · worker recovered\n"
+                        f"What: Fenced the silent run on {row['node']}.\n"
+                        "Why: The run stopped sending heartbeats for at least 45 seconds. Its old fencing token "
+                        "was retired, so it cannot write after recovery.\nNext: The ticket is back in To Do and "
+                        "will be offered to a ready account.")
+                comment_key = f"{row['action_key']}:comment"
+                ctx.db.run("INSERT INTO flow_doctor_comment_outbox (action_key,ticket_key,body)"
+                           " VALUES (%s,%s,%s) ON CONFLICT (action_key) DO NOTHING",
+                           (comment_key, row["ticket_key"], body))
+                comments.append(comment_key)
+        except Exception as exc:  # noqa: BLE001 - pending rows remain retryable on the next minute pass
+            log.warning("doctor could not requeue stale run ticket %s (%s)", row["ticket_key"], type(exc).__name__)
+    if comments:
+        _retry_pending_comments(ctx, comments)
+
+
+def _restart_stale_runs(ctx) -> None:
+    """Fence a session with no heartbeat on a live machine, requeue its ticket and restart its worker unit."""
+    _retry_stale_run_requeues(ctx)
     stale = ctx.db.all("SELECT r.*,n.status AS node_status FROM runs r JOIN nodes n ON n.name=r.node"
                        " WHERE r.status='running' AND n.status='online'"
                        " AND r.heartbeat_at < now() - interval '45 seconds'")
     for run in stale:
         key = str(run["id"])
+        account_id = str(run["account_id"])
         account = ctx.repo().account(run["account_id"])
-        if not account or not _SAFE_ACCOUNT.fullmatch(account.id) or not account.runs_on(run["node"]):
-            continue
+        restart_worker = bool(account and _SAFE_ACCOUNT.fullmatch(account.id) and account.runs_on(run["node"]))
         ticket = run["ticket_key"]
         old_holder = ctx.leases.holder(ticket)
         if old_holder == f"{key}:{int(run['fence'])}" and not ctx.leases.release(ticket, key, int(run["fence"])):
@@ -272,32 +316,24 @@ def _restart_stale_runs(ctx) -> None:
                 continue
             ctx.db.run("UPDATE accounts SET status='idle',updated_at=now() WHERE id=%s AND status='working'"
                        " AND NOT EXISTS (SELECT 1 FROM runs WHERE account_id=%s AND status='running')",
-                       (account.id, account.id))
-            record_action(ctx, f"fence-stale-run:{key}", "fence_stale_run", ticket=ticket, node=run["node"],
-                          account=account.id, outcome="requeued", detail="fencing token retired after heartbeat stopped")
+                       (account_id, account_id))
             has_active = ctx.db.one("SELECT 1 AS active FROM runs WHERE account_id=%s AND status='running' LIMIT 1",
-                                    (account.id,))
-            if not has_active:
+                                    (account_id,))
+            if not has_active and restart_worker:
                 payload = {"action": "restart_worker", "account": account.id, "run_id": key,
                            "reason": "the run heartbeat was absent for at least 45 seconds"}
                 _queue_node_operation(ctx, run["node"], "restart-worker", payload, f"restart-worker:{key}",
                                       ticket=ticket, account=account.id,
-                                      detail="old run fenced and ticket requeued")
-            try:
-                status = ctx.jira.transition_to(ticket, "To Do")
-                ctx.jira.comment(ticket,
-                                 f"AI Flow · Flow doctor · worker recovered\nWhat: Fenced the silent run on {run['node']}.\n"
-                                 "Why: The run stopped sending heartbeats for at least 45 seconds. Its old fencing token"
-                                 " was retired, so it cannot write after recovery.\nNext: The ticket is back in To Do and"
-                                 " will be offered to a ready account.")
-                ctx.db.run("UPDATE tickets SET status=%s,synced_at=now() WHERE key=%s", (status, ticket))
-            except Exception as exc:  # noqa: BLE001 - keep the fenced run safe; Jira sync retries the transition
-                log.warning("doctor could not requeue stale run %s (%s)", key, type(exc).__name__)
+                                      detail="old run fenced; Jira requeue will be retried until confirmed")
+            record_action(ctx, f"fence-stale-run:{key}", "fence_stale_run", ticket=ticket, node=run["node"],
+                          account=account_id, outcome="requeue_pending",
+                          detail="run fenced; retry Jira transition until the ticket returns to To Do")
             ctx.events.emit("run.restarted", ticket=ticket, run_id=key, fence=run["fence"],
-                            account=account.id, node=run["node"], outcome="requeued",
-                            reason="worker heartbeat absent for at least 45 seconds")
+                            account=run["account_id"], node=run["node"], outcome="requeue_pending",
+                            reason="worker fenced; Jira transition will retry until the ticket is requeued")
         finally:
             ctx.leases.release(ticket, recovery_id, recovery.fence)
+    _retry_stale_run_requeues(ctx)
 
 
 def _release_backoff(ctx) -> None:
@@ -350,9 +386,14 @@ def _route_around_failed_assignment(ctx) -> None:
     """Release tickets from failed account/machine assignments when another ready route exists."""
     repo = ctx.repo()
     online = _routing_ready_nodes(ctx)
-    queue = ctx.db.all("SELECT key,status FROM tickets WHERE (status='In Verify' OR"
+    queue = ctx.db.all("SELECT key,status,project FROM tickets WHERE (status='In Verify' OR"
                        " (status='To Do' AND 'aiflow-ready'=ANY(labels)))"
                        " AND NOT ('aiflow-hold'=ANY(labels))")
+    serving_by_project = {}
+    for ticket in queue:
+        project = ticket["project"]
+        if project not in serving_by_project:
+            serving_by_project[project] = {row["name"] for row in _serving_online_nodes(ctx, project)}
     roles = {"dev": "dev", "verify": "verify", "intake": "intake_refiner", "impact": "intake_refiner"}
     for ticket in queue:
         last = ctx.db.one("SELECT id,step,account_id,node,provider,error_kind,outcome FROM runs WHERE ticket_key=%s"
@@ -371,7 +412,8 @@ def _route_around_failed_assignment(ctx) -> None:
             state = ctx.db.one("SELECT status FROM accounts WHERE id=%s", (a.id,))
             if not state or state["status"] not in ("idle", "working", "probing"):
                 continue
-            node = next((name for name in routable_machines(ctx, a, online) if name != bad_node), "")
+            node = next((name for name in routable_machines(ctx, a, online)
+                         if name != bad_node and name in serving_by_project[ticket["project"]]), "")
             if node:
                 routes.append((a, node))
         if not routes:

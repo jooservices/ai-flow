@@ -162,7 +162,10 @@ def restore(database_url: str, archive: Path, layout: Layout | None = None) -> d
             # Security migration 013 makes the audit log append-only, including at the database level. Restore
             # replaces mutable registry tables, but must preserve destination audit history and append the archived
             # history without issuing UPDATE, DELETE or TRUNCATE against that table.
-            mutable = sorted(existing - {"audit_log"})
+            # Product identity and intervention evidence are control metadata, not replaceable registry state.
+            # Truncating audit_product_roles would make subsequent TRUNCATEs look like human actions, and
+            # truncating the append-only ledger would erase evidence during restore.
+            mutable = sorted(existing - {"audit_log", "audit_product_roles", "operator_interventions"})
             if mutable:
                 conn.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in mutable) + " CASCADE")
             for t in manifest["tables"]:
@@ -178,6 +181,24 @@ def restore(database_url: str, archive: Path, layout: Layout | None = None) -> d
                         "current.ts=source.ts AND current.actor=source.actor AND current.category=source.category "
                         "AND current.action=source.action AND current.target=source.target AND current.ip=source.ip "
                         "AND current.detail=source.detail) ORDER BY source.id"
+                    )
+                    continue
+                if t == "audit_product_roles":
+                    # Keep the roles registered on the destination database; they determine product-vs-human audit.
+                    continue
+                if t == "operator_interventions":
+                    # Preserve destination evidence and append archived events idempotently by their stable source key.
+                    # The id is deliberately omitted so the destination sequence remains authoritative.
+                    conn.execute("CREATE TEMP TABLE _aiflow_restore_operator_interventions "
+                                 "(LIKE public.operator_interventions INCLUDING DEFAULTS) ON COMMIT DROP")
+                    with conn.cursor().copy("COPY _aiflow_restore_operator_interventions FROM STDIN") as copy:
+                        copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+                    conn.execute(
+                        "INSERT INTO operator_interventions "
+                        "(source_key,happened_at,source,actor,action,target,reason,details,bug_ticket_key,created_at,session_id) "
+                        "SELECT source_key,happened_at,source,actor,action,target,reason,details,bug_ticket_key,created_at,session_id "
+                        "FROM _aiflow_restore_operator_interventions ORDER BY id "
+                        "ON CONFLICT (source_key) DO NOTHING"
                     )
                     continue
                 with conn.cursor().copy(f'COPY "{t}" FROM STDIN') as copy:

@@ -234,10 +234,11 @@ def forward_operator_audit(api: ControlClient, node: str, audit_path: str = "/va
         state = {}
     stat = path.stat()
     offset = int(state.get("offset", 0)) if int(state.get("inode", -1)) == stat.st_ino else 0
+    if offset > stat.st_size:  # copy-truncate rotation can keep the inode while shortening the log
+        offset = 0
     with path.open("rb") as stream:
-        stream.seek(min(offset, stat.st_size))
+        stream.seek(offset)
         data = stream.read()
-        end = stream.tell()
     complete_length = data.rfind(b"\n") + 1
     complete = data[:complete_length]
     events = _audit_interventions(complete)

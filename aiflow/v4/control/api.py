@@ -41,13 +41,13 @@ from pydantic import BaseModel, Field
 
 from .. import VERSION
 from ..core.controlrepo import Account, ControlRepo
-from ..core import backups as control_backups, handover, log_sources as log_sources_core, work_limits
+from ..core import backups as control_backups, handover, work_limits
 from ..core.services import normalize_services, service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from .audit import record_console_user_change as audit_user, record_console_user_roles_change as audit_user_roles
-from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
+from . import (business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
                dashboard_timeout_routes, load_policy, load_policy_api, role_health, rollout, runtime_settings, scale_proof, setup_wizard,
                shared_accounts, support_bundle, system_check, system_check_api, tooling, version_release, work_steps)
 from . import run_inbox as run_inbox_control
@@ -67,7 +67,7 @@ from .github import GitHubApp, GitHubError
 from .github_connect import GitHubSecretStore, app_metadata
 from .github_registry import github_connections as _github_registry
 from .github_connections import DEFAULT_ID, Connection, GitHubConnections, GitHubTokenApp, verify_token
-from .policy import Decision, decide, decide_master_action, decide_read_only, explain
+from .policy import decide_master_action
 from .report import ReportNotFound, build_report, render_csv, render_html, render_markdown
 from . import inventory, notify, pr_comments
 from .pr_comments import PRCommentBody
@@ -388,43 +388,6 @@ STATE_RESPONSE_SCHEMA = _state_object({
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def valid_control_host(value: str) -> bool:
-    """Accept only a DNS name or IP literal, optionally followed by a TCP port."""
-    if not value or any(char.isspace() or ord(char) < 0x21 or ord(char) > 0x7e for char in value):
-        return False
-
-    port_text = ""
-    if value.startswith("["):
-        match = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\](?::([0-9]{1,5}))?", value)
-        if not match:
-            return False
-        try:
-            if ipaddress.ip_address(match.group(1)).version != 6:
-                return False
-        except ValueError:
-            return False
-        port_text = match.group(2) or ""
-    else:
-        if value.count(":") > 1:
-            return False
-        hostname, separator, port_text = value.partition(":")
-        if separator and not re.fullmatch(r"[0-9]{1,5}", port_text):
-            return False
-        try:
-            address = ipaddress.ip_address(hostname)
-        except ValueError:
-            if not re.fullmatch(
-                r"(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?",
-                hostname,
-            ):
-                return False
-        else:
-            if address.version != 4:
-                return False
-
-    return not port_text or 1 <= int(port_text) <= 65535
 
 
 def validated_join_control_url(value: str) -> str:
@@ -788,10 +751,6 @@ class EnvironmentRemovalBody(BaseModel):
     needs: list[str] = Field(default_factory=list, max_length=20)
 
 
-class SupportBundleBody(BaseModel):
-    ticket_key: str = Field(default="", max_length=40)
-
-
 class GitHubConnectionTokenBody(BaseModel):
     token: str = Field(min_length=20, max_length=600, repr=False)
     label: str = Field(default="", max_length=80)
@@ -858,11 +817,6 @@ class PRBody(BaseModel):
     draft: bool = True
 
 
-class RoleHealthSettingsBody(BaseModel):
-    window_runs: int
-    failure_percent: int
-
-
 class ProbeBody(BaseModel):
     ok: bool
     error_kind: str = ""
@@ -890,12 +844,6 @@ class BranchCleanupBody(BaseModel):
     run_id: str
     fence: int
     branch: str
-
-
-class TriageAlertBody(BaseModel):
-    run_id: str
-    fence: int
-    detail: str
 
 
 class ReviewerBody(BaseModel):
@@ -998,13 +946,6 @@ class ViewAsBody(BaseModel):
     role: str
 
 
-class BaChatResultBody(BaseModel):
-    account: str = ""
-    claim_token: str = ""
-    output: dict[str, Any] = Field(default_factory=dict)
-    error_kind: str = ""
-
-
 class BackupConfigBody(BaseModel):
     schedule: Literal["daily", "weekly"] = "daily"
     destination_kind: Literal["local", "mounted", "s3"] = "local"
@@ -1049,10 +990,6 @@ class StakeholderVerdictBody(BaseModel):
     screenshot_filename: str = Field(default="screenshot.png", max_length=255)
 
 
-class EventsBody(BaseModel):
-    events: list[dict[str, Any]]
-
-
 class WorktreeSweepBody(BaseModel):
     dirs: list[str] = []   # "<project>/<directory>" entries found under /srv/aiflow/work on the node
 
@@ -1066,11 +1003,6 @@ class NodeOperationBody(BaseModel):
     model_config = {"extra": "forbid"}
     action: Literal["install", "repair"]
     component: str = ""
-
-
-class LogReadBody(BaseModel):
-    model_config = {"extra": "forbid"}
-    source_id: str = Field(min_length=1, max_length=256)
 
 
 class NodeOperationResultBody(BaseModel):
@@ -2012,48 +1944,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         app.state.set_session_cookies(response, token, SESSION_TTL_S)
         return response
 
-    @app.post("/v1/support/bundles")
-    def create_support_bundle(body: SupportBundleBody, request: Request) -> dict:
-        creator = console_user(request, {"console.manage"}, target="support_bundle", action="create")
-        ticket_key = body.ticket_key.strip().upper() or None
-        try:
-            archive, inventory = support_bundle.build_support_bundle(ctx, ticket_key)
-        except KeyError as exc:
-            raise HTTPException(404, "unknown ticket") from exc
-        except ValueError as exc:
-            log.warning("support bundle scan blocked; sensitive content remained after sanitization")
-            raise HTTPException(422, "bundle scan failed; no bundle was offered") from exc
-        bundle_id = secrets.token_urlsafe(24)
-        key = ctx.leases._k("support_bundle", bundle_id)
-        payload = json.dumps({"archive": base64.b64encode(archive).decode("ascii"), "inventory": inventory,
-                              "creator": creator.subject}, separators=(",", ":"))
-        try:
-            ctx.leases.r.set(key, payload, ex=600)
-        except Exception as exc:  # noqa: BLE001 - do not return an unreviewable or non-shared in-memory bundle
-            log.warning("temporary support bundle storage is unavailable: %s", type(exc).__name__)
-            raise HTTPException(503, "temporary bundle storage is unavailable") from exc
-        return {"bundle_id": bundle_id, "inventory": inventory, "download_url": f"/v1/support/bundles/{bundle_id}/download"}
-
-    @app.get("/v1/support/bundles/{bundle_id}/download")
-    def download_support_bundle(bundle_id: str, request: Request) -> Response:
-        user = console_user(request, {"console.manage"})
-        key = ctx.leases._k("support_bundle", bundle_id)
-        try:
-            stored = ctx.leases.r.get(key)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("temporary support bundle storage is unavailable: %s", type(exc).__name__)
-            raise HTTPException(503, "temporary bundle storage is unavailable") from exc
-        if not stored:
-            raise HTTPException(404, "bundle expired or unknown")
-        item = json.loads(stored)
-        if not item.get("creator") or not secrets.compare_digest(str(item["creator"]), user.subject):
-            raise HTTPException(403, "bundle belongs to the user who created it")
-        ticket_key = item["inventory"].get("ticket_key")
-        filename = f"support-bundle-{ticket_key}.zip" if ticket_key else "support-bundle.zip"
-        archive = base64.b64decode(item["archive"], validate=True)
-        return Response(archive, media_type="application/zip",
-                        headers={"Content-Disposition": f'attachment; filename="{filename}"',
-                                 "Cache-Control": "no-store"})
 
     # --- per-person console layouts (layouts.py, docs/v4/console-layouts.md) ---------------------------------
     def layout_page(page: str) -> str:
@@ -2161,11 +2051,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         except ValueError:
             raise HTTPException(404, "notification channel was not found") from None
 
-    @app.get("/healthz")
-    def healthz() -> dict:
-        ctx.db.one("SELECT 1 AS ok")
-        ctx.leases.r.ping()
-        return {"ok": True, "version": VERSION}
 
     # --- licence and metered usage ---------------------------------------------------------------------------
     @app.get("/v1/licensing")
@@ -3287,19 +3172,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"removed": True, "project": key, "commit": commit}
 
     # --- nodes ----------------------------------------------------------------------------------------------
-    @app.get("/v1/install.sh", response_class=PlainTextResponse)
-    def node_install_script(request: Request) -> PlainTextResponse:
-        script = Path(__file__).resolve().parents[3] / "deploy" / "v4" / "bin" / "aiflow4-bootstrap"
-        if not script.is_file():
-            raise HTTPException(404, "node bootstrap installer is unavailable")
-        forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
-        forwarded_host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
-        scheme = (forwarded_proto or request.url.scheme).lower()
-        host = forwarded_host or request.headers.get("host", "") or request.url.netloc
-        if scheme not in ("http", "https") or not valid_control_host(host):
-            raise HTTPException(400, "invalid public control URL")
-        base_url = f"{scheme}://{host}"
-        return PlainTextResponse(script.read_text(encoding="utf-8").replace("__AIFLOW4_CONTROL_URL__", shlex.quote(base_url)))
 
     def create_join_grant(name: str, role: str, project: str) -> tuple[str, datetime]:
         """Create the shared five-minute grant used by both Command Center entry points."""
@@ -3991,57 +3863,6 @@ def create_app(ctx: Ctx) -> FastAPI:
             row["id"] = str(row["id"])
         return {"node": name, "operations": rows}
 
-    @app.get("/v1/log-sources")
-    def log_sources(request: Request) -> JSONResponse:
-        console_user(request, "view.logs")
-        return JSONResponse({"sources": log_viewer.source_catalog(ctx)},
-                            headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
-
-    @app.post("/v1/logs", status_code=202)
-    def request_log_read(body: LogReadBody, request: Request) -> JSONResponse:
-        user = console_user(request, "view.logs")
-        source = log_viewer.find_source(ctx, body.source_id)
-        if source is None:
-            raise HTTPException(404, "unknown log source")
-        if not source["available"]:
-            raise HTTPException(409, "log source is unavailable")
-        operation_id = str(uuid.uuid4())
-        payload = {"action": "read_logs", "source": source["id"], "kind": source["kind"],
-                   "target": source["target"], "lines": log_sources_core.MAX_LOG_LINES}
-        with ctx.db.pool.connection() as connection:
-            connection.execute("DELETE FROM node_operations WHERE action='read_logs'"
-                               " AND status IN ('completed','failed') AND created_at < now() - interval '15 minutes'")
-            connection.execute("INSERT INTO node_operations (id,node,action,actor,payload)"
-                               " VALUES (%s,%s,'read_logs',%s,%s)",
-                               (operation_id, source["node"], user.subject, J(payload)))
-        return JSONResponse({"id": operation_id, "source": source["id"], "status": "queued"}, status_code=202,
-                            headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
-
-    @app.get("/v1/logs/requests/{operation_id}")
-    def log_read_status(operation_id: str, request: Request) -> JSONResponse:
-        console_user(request, "view.logs")
-        try:
-            parsed_id = str(uuid.UUID(operation_id))
-        except ValueError as exc:
-            raise HTTPException(404, "unknown log request") from exc
-        row = ctx.db.one("SELECT id,payload,status,result FROM node_operations"
-                         " WHERE id=%s AND action='read_logs'"
-                         " AND created_at >= now() - interval '15 minutes'", (parsed_id,))
-        if not row:
-            raise HTTPException(404, "unknown log request")
-        status = str(row["status"])
-        result = row.get("result") or {}
-        if status == "completed" and result.get("available"):
-            lines = log_viewer.redact_log_lines(result.get("lines"))
-            available = True
-            message = "" if lines else "No recent log lines for this source."
-        elif status in {"failed", "completed"}:
-            lines, available, message = [], False, "This log source is unavailable right now."
-        else:
-            lines, available, message = [], None, "Waiting for the node agent to read this source."
-        return JSONResponse({"id": str(row["id"]), "source": (row.get("payload") or {}).get("source", ""),
-                             "status": status, "available": available, "lines": lines, "message": message},
-                            headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
     def probe_project(name: str, key: str):
         """The project when this machine serves it (a probe of anything else is refused)."""
@@ -4729,28 +4550,6 @@ def create_app(ctx: Ctx) -> FastAPI:
     load_policy_api.register_worker_candidate_routes(app, ctx, node_auth, RELEASES, entitled_candidates,
                                                      master_candidate)
 
-    @app.get("/v1/ba-chat/candidate")
-    def ba_chat_candidate(account: str, node: str = Depends(node_auth)) -> dict:
-        try:
-            licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
-        except licensing.LicenseError as exc:
-            return {"job": None, "reason": str(exc)}
-        try:
-            return {"job": ba_chat.claim_job(ctx, account, node)}
-        except Exception as exc:  # noqa: BLE001 - poll failures must not expose chat text
-            log.warning("BA chat claim failed account=%s error=%s", account, type(exc).__name__)
-            return {"job": None}
-
-    @app.post("/v1/ba-chat/{job_id}/result")
-    def ba_chat_result(job_id: str, body: BaChatResultBody, node: str = Depends(node_auth)) -> dict:
-        try:
-            parsed_id = str(uuid.UUID(job_id))
-        except ValueError:
-            raise HTTPException(404, "chat turn was not found") from None
-        if not ba_chat.complete_job(ctx, parsed_id, body.claim_token, body.account, node,
-                                    body.output, body.error_kind):
-            raise HTTPException(409, "chat turn is no longer assigned to this worker")
-        return {"accepted": True}
 
     def related_hits(t: dict) -> list[dict]:
         """Up to 3 past entries related to the ticket summary; memory is advice, so an error gives none."""
@@ -5798,22 +5597,6 @@ def create_app(ctx: Ctx) -> FastAPI:
               log_tail.get("job") or "no failing job", {"sha": sha[:12], "lines": lines})
         return {"sha": sha, **log_tail}
 
-    @app.post("/v1/notify/triage")
-    def triage_alert(body: TriageAlertBody, node: str = Depends(node_auth)) -> dict:
-        run = fenced(body.run_id, body.fence, "notify", "triage-alert", {"chars": len(body.detail)})
-        if run["step"] != "triage":
-            raise HTTPException(403, "only a triage run can alert the owner")
-        blocks = ctx.db.one("SELECT 1 FROM tickets WHERE status <> 'Done' AND %s::text = ANY(blocked_by) LIMIT 1",
-                            (run["ticket_key"],))
-        severity = "critical" if blocks else "warning"
-        sent = notify.send(severity, f"{run['ticket_key']} needs owner decision", body.detail[:3000],
-                           ctx.settings.jira_site.rstrip("/") + f"/browse/{run['ticket_key']}"
-                           if ctx.settings.jira_site else "", ctx=ctx, alert_kind="ticket_needs_person",
-                           ticket=run["ticket_key"], needed="Review the question and provide an owner decision.")
-        audit("notify", "triage-alert", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
-              ",".join(sent) or "no channel configured", {"severity": severity})
-        return {"ok": True, "severity": severity, "sent": sent}
-
 
     # --- GitHub (fenced) --------------------------------------------------------------------------------------
     @app.post("/v1/github/token")
@@ -6332,39 +6115,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"ok": True, "deleted": deleted}
 
     # --- policy hook ------------------------------------------------------------------------------------------
-    @app.post("/v1/policy/decide")
-    async def policy_decide(request: Request, authorization: str = Header(default="")) -> dict:
-        payload = await request.json()
-        token = authorization.removeprefix("Bearer ").strip()
-        run = ctx.db.one("SELECT * FROM runs WHERE token_hash=%s AND status='running'", (h(token),)) if token else None
-        tool = str(payload.get("tool_name", ""))
-        if not run:
-            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                           "permissionDecisionReason": "no active AI Flow run for this token"}}
-        if run["step"] == "master":
-            d = Decision("deny", "master runs return an action plan; all effects go through the fenced master API")
-        elif run["step"] == "triage":
-            d = decide_read_only(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
-                                 str(payload.get("cwd") or ""),
-                                 "a triage run reads the base branch and cannot edit files")
-        elif run["step"] == "verify" and tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-            d = Decision("deny", "a verify run reviews and tests; it does not edit code")
-        elif run["step"] == "intake":
-            d = decide_read_only(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
-                                 str(payload.get("cwd") or ""), "an intake run rewrites the ticket text; it does not change files")
-        elif run["step"] == "impact":
-            d = decide_read_only(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
-                                 str(payload.get("cwd") or ""), "an impact run assesses a change request; it does not change files")
-        else:
-            details = run.get("details") or {}
-            selected = details.get("repository_settings") or {}
-            d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
-                       str(payload.get("cwd") or ""), containers=bool(selected.get("containers")))
-        d = explain(d, tool, payload.get("tool_input") or {})  # every refusal names the allowed alternative
-        ctx.events.emit("policy.decision", ticket=run["ticket_key"], run_id=str(run["id"]), account=run["account_id"],
-                        node=run["node"], outcome=d.decision, reason=d.reason[:200], tool=tool,
-                        command=str((payload.get("tool_input") or {}).get("command", ""))[:300])
-        return d.hook_output()
 
     # --- shared accounts: enable an account on machines, remove it, report the sign-in prompt ----------------------
     shared_accounts.install(app, ctx, console_user, audit, node_auth)
@@ -6422,16 +6172,6 @@ def create_app(ctx: Ctx) -> FastAPI:
                         cost_usd=body.cost_usd)
         return {"ok": True}
 
-    @app.post("/v1/events")
-    def events_in(body: EventsBody, node: str = Depends(node_auth)) -> dict:
-        n = 0
-        for e in body.events[:500]:
-            e = dict(e)
-            t = str(e.pop("type", "node.event"))
-            e["node"] = node
-            ctx.events.emit(t, **e)
-            n += 1
-        return {"accepted": n}
 
     # --- state for dashboards ---------------------------------------------------------------------------------
     @app.get("/v1/projects/{key}/versions")
@@ -6770,80 +6510,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"run_id": run_id, "release": run["release"], "passed": run["passed"], "blocked": not run["passed"],
                 "failures": run["report"]["failures"], "tickets": tickets}
 
-    @app.get("/v1/tickets/{key}/timeline")
-    def ticket_timeline(key: str) -> dict:
-        from .timeline import timeline
-        tl = timeline(ctx.db, key)
-        if tl is None:
-            raise HTTPException(404, "unknown ticket")
-        return tl
-
-    @app.get("/v1/capacity")
-    def capacity_plan(request: Request) -> dict:
-        """Next-week quota capacity, recorded assignment reasons and completed estimate errors."""
-        user = (console_user(request, "view.machines_ai") if ctx.settings.console_login
-                else optional_console_user(request))
-        if user and not has_permission(user.effective_roles, "view.machines_ai"):
-            raise HTTPException(403, "not available for your role")
-        accounts = ctx.db.all("SELECT id,provider,tier,roles,quota,quota_forecast FROM accounts ORDER BY id")
-        forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in accounts}
-        # Forecasts normally come from the watchdog. On a fresh install, derive only the
-        # accounts that already reported quota; accounts with no quota data cannot improve
-        # this plan and should not trigger historical scans per console request.
-        missing = [row for row in accounts if not forecasts[str(row["id"])] and row.get("quota")]
-        forecasts.update(quota_reporting.assessments(ctx.db, missing) if missing else {})
-        project_keys = user.project_keys if user and user.project_keys is not None else None
-        return capacity.dashboard(ctx.db, accounts, forecasts, project_keys)
-
-    @app.get("/v1/role-health")
-    def role_health_state() -> dict:
-        return role_health.summary(ctx)
-
-    @app.put("/v1/role-health/settings")
-    def role_health_settings(body: RoleHealthSettingsBody, request: Request) -> dict:
-        user = console_user(request, {"console.manage"}, target="aiflow-control", action="role_health_settings")
-        try:
-            role_health.set_settings(ctx.db, body.window_runs, body.failure_percent, user.subject)
-        except ValueError as e:
-            audit("aiflow-control", "role_health_settings", "", "", None, user.subject, False, str(e), body.model_dump())
-            raise HTTPException(422, str(e)) from e
-        audit("aiflow-control", "role_health_settings", "", "", None, user.subject, True, "saved", body.model_dump())
-        ctx.events.emit("role.settings", account=user.subject, outcome="saved",
-                        reason=f"window {body.window_runs} runs, failure score above {body.failure_percent}%")
-        role_health.evaluate(ctx)
-        return role_health.summary(ctx)
-
 
     # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
-    @app.get("/v1/memory/search")
-    def memory_search(request: Request, q: str = "", project: str = "", limit: int = 10) -> dict:
-        user = (console_user(request, "view.knowledge") if ctx.settings.console_login
-                else optional_console_user(request))
-        if user and user.project_keys is not None:
-            if project:
-                if project not in user.project_keys:
-                    raise HTTPException(403, "not available for your role")
-                keys = [project]
-            else:
-                keys = list(user.project_keys)
-            hits = [hit for key in keys for hit in memory.search(ctx.db, key, q, limit)]
-            return {"project": project, "q": q, "hits": hits[:limit]}
-        return {"project": project, "q": q, "hits": memory.search(ctx.db, project, q, limit)}
 
-    @app.get("/v1/memory/study-cases")
-    def memory_study_cases(request: Request, project: str = "", limit: int = Query(50, ge=1, le=100)) -> dict:
-        user = (console_user(request, "view.knowledge") if ctx.settings.console_login
-                else optional_console_user(request))
-        if user and user.project_keys is not None:
-            if project:
-                if project not in user.project_keys:
-                    raise HTTPException(403, "not available for your role")
-                keys = [project]
-            else:
-                keys = list(user.project_keys)
-            cases = [case for key in keys for case in project_lifecycle.study_cases(ctx.db, key, limit)]
-            return {"project": project, "study_cases": cases[:limit]}
-        return {"project": project, "study_cases": project_lifecycle.study_cases(ctx.db, project, limit)}
 
     # --- learned knowledge: automatic capture, isolated context packs, and Knowledge screen data --------------
     @app.get("/v1/knowledge/items")

@@ -42,7 +42,9 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Environment of the runs](../../docs/v4/environment.md): tickets carry requirements only; test services, base URLs, databases, browsers and secrets by name live in the project configuration and reach runs as environment variables; server wording is rejected at intake, removed with a record, and found by a scan of open tickets; missing environment items are reported by name
 - [Small tickets](../../docs/v4/small-tickets.md): developer limits of 15, 30 and 45 minutes (configurable) and the size rule that splits larger tickets
 - [Validated parked requirements](../../docs/v4/parked-requirements.md): validate missing-tool reports, install supported tools from heartbeat requests, show parked-ticket status, and name idle and stalled-wait causes
+- [Events routes](../../docs/v4/route-module-events.md): the events routes are served from their own router module
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright, Chromium, Firefox and WebKit, and report an unavailable browser by name
+- [Policy routes](../../docs/v4/route-module-policy.md): the policy routes are served from their own router module
 - [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, browser binaries go into the shared `playwright-browser` folder, and each browser is launched as the AI user
 - [Pull request comments](../../docs/v4/pr-comments.md): one verification comment edited in place, one bot identity, quiet CodeRabbit configuration
 - [Isolated WordPress test sites](../../docs/v4/wordpress-runs.md): WordPress dev and verify runs get a seeded PHP 8.3 site on a per-run Podman network, with browser environment and cleanup
@@ -52,26 +54,37 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Control API audit against the HTTP standard](../../docs/v4/api-rest-audit.md): every route with its findings and a proposed resource-oriented design, kept complete by a test
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
 - [Master autonomy](../../docs/v4/master.md): budgeted fenced monitoring, safe actions, owner escalations, invalid-plan recovery and a weekly Command Center report
+- [Ticket timeline routes](../../docs/v4/route-module-tickets.md): the ticket timeline routes are served from their own router module
 - [Rework loop limit](../../docs/v4/rework-loop-limit.md): allow three rework returns by default, block the fourth with per-round reasons, and honor project overrides
 - [Owner question deadline](../../docs/v4/escalation-deadline.md): an unanswered question with a reversible recommendation is applied after 12 hours
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
+- [Capacity routes](../../docs/v4/route-module-capacity.md): the capacity routes are served from their own router module
 - [Automatic Jira version releases](../../docs/v4/version-release.md): check, document, PR, merge, tag and publish configured Jira versions without owner approval
+- [Notify routes](../../docs/v4/route-module-notify.md): the notify routes are served from their own router module
 - [Release installation smoke test](../../docs/v4/install.md): tagged releases install control and two nodes in Ubuntu systemd CI before publication
+- [Health routes](../../docs/v4/route-module-healthz.md): the health routes are served from their own router module
 - [Canary auto-deploy](../../docs/v4/canary-autodeploy.md): signed releases and develop commits are measured on one node before fleet promotion, with automatic rollback on elevated infrastructure failures
+- [Log sources routes](../../docs/v4/route-module-log_sources.md): the log sources routes are served from their own router module
 - [SA system health](../../docs/v4/sa-health.md): node and account health, capacity recommendations, credential expiry, blocked AI and network diagnostics
 - [Shared route helpers](../../docs/v4/route-dependencies.md): audit, console and node authentication and fencing as functions of the application context, usable by any router
 - [Team Lead requirement coverage and progress reports](../../docs/v4/team-lead-report.md): inspect epic AC coverage and export Markdown, CSV or printable HTML progress reports
 - [Automatic epic completion](../../docs/v4/epic-auto-close.md): close an epic when every child is Done, reopen it when work returns, and suggest project closure in the report
 - [Team Lead tickets](../../docs/v4/team-lead-tickets.md): every split child carries files, a skeleton and test cases for the developer
 - [Worktree cleanup](../../docs/v4/worktree-cleanup.md): nodes delete the worktrees of Done tickets and spent per-run checkouts
+- [Role health routes](../../docs/v4/route-module-role_health.md): the role health routes are served from their own router module
 - [Typed control application context](../../docs/v4/application-context.md): shared typed settings, database, repositories, leases, events, repo configuration and clock for control modules
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
+- [Memory routes](../../docs/v4/route-module-memory.md): the memory routes are served from their own router module
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
 - [Shared route helpers](../../docs/v4/route-dependencies.md): audit, console and node authentication and fencing as functions of the application context, usable by any router
 - [Command Center node operations](../../docs/v4/node-operations.md): `nodes.manage` install, desired-state repair and one-time join actions for `owner` and `super_admin`, with audited operation logs
+- [BA chat routes](../../docs/v4/route-module-ba_chat.md): the ba chat routes are served from their own router module
 - [Project close reports and study cases](../../docs/v4/project-study-cases.md): close projects, email versioned reports, and find saved reports in memory
+- [Log viewer routes](../../docs/v4/route-module-logs.md): the log viewer routes are served from their own router module
 - [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with token-authorized fenced approve and rework actions
+- [Support routes](../../docs/v4/route-module-support.md): the support routes are served from their own router module
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
+- [Install script routes](../../docs/v4/route-module-install_script.md): the install script routes are served from their own router module
 - [Join a node](../../docs/v4/node-join.md): Command Center issues a five-minute one-use token and the pinned server-installer CLI bootstraps a node
 - [Dashboard read routes](../../docs/v4/route-module-dashboard.md): the Dashboard read models are served from their own router module
 - [Fleet installation](../../docs/v4/fleet-install.md): cloud-init samples and Ansible roles prepare hosts and enroll a node fleet

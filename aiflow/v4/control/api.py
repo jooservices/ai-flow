@@ -3932,12 +3932,6 @@ def create_app(ctx: Ctx) -> FastAPI:
             row["id"] = str(row["id"])
         return {"node": name, "operations": rows}
 
-    @app.get("/v1/log-sources")
-    def log_sources(request: Request) -> JSONResponse:
-        console_user(request, "view.logs")
-        return JSONResponse({"sources": log_viewer.source_catalog(ctx)},
-                            headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
-
 
     def probe_project(name: str, key: str):
         """The project when this machine serves it (a probe of anything else is refused)."""

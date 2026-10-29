@@ -54,6 +54,8 @@ class ApplicationContext:
     # the original (settings, db, leases, events, repo, jira, ...) ordering.
     repo_configuration: str = ""
     clock: Clock = field(default_factory=SystemClock)
+    provider_routing: object | None = None  # set by create_app (docs/v4/provider-routing.md)
+    provider_eligibility: object | None = None
 
     def __post_init__(self) -> None:
         if not callable(self.repo):

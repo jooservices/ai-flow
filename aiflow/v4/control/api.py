@@ -47,10 +47,11 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from .audit import record_console_user_change as audit_user, record_console_user_roles_change as audit_user_roles
-from . import (business, dashboard_timeout_routes, escalations, flow_doctor, flow_doctor_api, jira_connect, knowledge,
-               layouts, licensing, load_policy, load_policy_api, log_viewer, memory, quota_refresh, role_health, rollout,
-               runtime_settings, scale_proof, setup_wizard, shared_accounts, state_schema, support_bundle, system_check,
-               system_check_api, tooling, version_release, work_steps)
+from . import (business, capacity_routing as capacity_routing_service, dashboard_timeout_routes, eligibility, escalations,
+               flow_doctor, flow_doctor_api, jira_connect, knowledge, layouts, licensing, load_policy, load_policy_api,
+               log_viewer, memory, quota_refresh, role_health, rollout, runtime_settings, scale_proof, setup_wizard,
+               shared_accounts, state_schema, support_bundle, system_check, system_check_api, tooling, version_release,
+               work_steps)
 from . import run_inbox as run_inbox_control
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
@@ -1320,9 +1321,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         for peer in peers:
             account = ctx.repo().account(peer["id"])
             peer["nodes"] = ([machine for machine in account.machines if machine in online
+                               and rollout.node_compatible(ctx, machine, RELEASES)["compatible"]
                                and shared_accounts.may_take(ctx.db, account, machine, as_peer=True)[0]]
                               if account else [])
-            if not peer["nodes"]:
+            if not account or account.paused or not peer["nodes"]:
                 continue
             peer_roles = set(peer.get("roles") or ["dev", "verify"])
             if roles and not roles.intersection(peer_roles):
@@ -3881,8 +3883,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         return ctx.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
                           + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
 
-    def eligible(account_id: str, node: str, *, capacity_routing: bool = True, ticket_key: str | None = None,
-                 lease_checked: bool = False, step_filter: str | None = None) -> list[dict]:
+    def eligible(account_id: str, node: str, *, routing: bool = True, capacity_routing: bool = True,
+                 ticket_key: str | None = None, lease_checked: bool = False,
+                 step_filter: str | None = None) -> list[dict]:
         """Tickets this account may take now; claims can scope revalidation to their requested ticket and step."""
         repo = ctx.repo()
         acc = repo.account(account_id)
@@ -4161,7 +4164,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         out = flow_doctor.exclude_failed_routes(ctx, account_id, node, out)
         # Keep the normal workflow order stable, but put a generated flow bug first whenever it is eligible.
         out.sort(key=lambda t: "flow-bug" not in (t.get("labels") or []))
-        if quota_at_risk and out:
+        if routing and ticket_key is None and out:  # spend the provider with the most quota left first (docs/v4/provider-routing.md)
+            out = ctx.provider_eligibility.filter_headroom(acc, out)
+        if routing and quota_at_risk and out:
             # Prefer peers only for tickets they can actually claim. A peer on another node, with different
             # project access or roles, must not leave this account's otherwise-routable tickets waiting.
             available_elsewhere: set[tuple[str, str]] = set()
@@ -4170,8 +4175,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                     if not rollout.node_compatible(ctx, peer_node, RELEASES)["compatible"]:
                         continue
                     available_elsewhere.update((ticket["key"], ticket["step"])
-                                               for ticket in eligible(peer["id"], peer_node,
-                                                                      capacity_routing=False,
+                                               for ticket in eligible(peer["id"], peer_node, routing=False,
+                                                                      capacity_routing=True,
                                                                       ticket_key=ticket_key))
             out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
         if capacity_routing and out:
@@ -4213,11 +4218,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                 continue
             machines = [node] if account.id == account_id else account.machines
             for machine in dict.fromkeys(machines):
-                if account.id != account_id and machine not in shared_accounts.online_nodes(ctx.db):
+                if account.id != account_id and (machine not in shared_accounts.online_nodes(ctx.db)
+                                                 or not rollout.node_compatible(ctx, machine, RELEASES)["compatible"]):
                     continue
                 try:
                     peer_offers = offered if account.id == account_id and machine == node else eligible(
-                        account.id, machine, capacity_routing=False, ticket_key=ticket_key)
+                        account.id, machine, routing=False, capacity_routing=False, ticket_key=ticket_key)
                 except HTTPException:
                     continue
                 for item in peer_offers:
@@ -4226,19 +4232,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                             **accounts_by_id[account.id], "tier": account.tier}
         if not eligible_by_key:
             return offered
-        selected: dict[tuple[str, str], str] = {}
-        for ticket in development:
-            key = (ticket["key"], ticket["step"])
-            candidates = list(eligible_by_key.get(key, {}).values())
-            if len(candidates) < 2:
-                continue
-            prediction = capacity.estimate(ticket, samples)
-            account, _fits = capacity.choose_account(candidates, ticket, prediction, forecasts)
-            if account:
-                selected[key] = account
+        selected = capacity_routing_service.select_accounts(development, eligible_by_key, samples, forecasts,
+                                                            ctx.provider_eligibility.state(persist=False))
         return [ticket for ticket in offered
                 if ticket.get("step") != "dev" or (ticket["key"], ticket["step"]) not in selected
-                or selected[(ticket["key"], ticket["step"])] == account_id]
+                or account_id in selected[(ticket["key"], ticket["step"])]]
 
     def master_ready(account_id: str, node: str) -> bool:
         if ctx.leases.cooling(account_id) or account_master_paused(account_id):
@@ -4476,6 +4474,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             hotfiles.unreserve(ctx.db, run_id)
             return JSONResponse({"claimed": False, "reason": f"account {acc.id} is at its limit of {acc.sessions}"
                                  " concurrent sessions or machine load capacity is full"}, status_code=409)
+        ctx.provider_eligibility.record_assignment(t, acc, body.step)
         if run_details:
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
         if body.step == "dev" and prior_dev and prior_dev.get("pr_url") and prior_dev.get("branch"):
@@ -6510,5 +6509,6 @@ def create_app(ctx: Ctx) -> FastAPI:
                                   "mark_machine_auth_failure": mark_machine_auth_failure}
     from .login import install_login
     install_login(app, ctx)
+    eligibility.install(ctx, RELEASES, eligible, quota_forecast_at_risk, quota_peer_accounts)
     system_check_api.register_routes(app, ctx, console_user, optional_console_user); dashboard_timeout_routes.install(app, ctx, console_user, optional_console_user)
     return app

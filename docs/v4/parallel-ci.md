@@ -31,3 +31,9 @@ still runs it (once more on failure). The budgets are not loosened; the slow cal
 The jobs that install the dependencies (Documentation, Code quality, the shards, the browser journeys and the scale
 proof) restore `~/.cache/uv` before the install step, keyed by `uv.lock`. A cold cache still works: no job depends on a
 hit (JAIF-434).
+
+## Files kept apart
+
+`KEEP_APART` in `aiflow/v4/core/test_shards.py` lists test files that fail when they run in one process
+(`test_fleet_install.py` and `test_system_check.py`, JAIF-437). The sharder never puts them in the same shard.
+Remove an entry when its ticket is fixed.

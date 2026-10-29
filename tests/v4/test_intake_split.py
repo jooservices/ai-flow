@@ -123,7 +123,7 @@ def test_parse_rejects_non_json_split_payload():
     assert kind == "invalid" and "not JSON" in why
 
 
-def test_needs_split_returns_plan_and_does_not_write_jira(iclient, ctx, tmp_path, monkeypatch):
+def test_needs_split_returns_plan_and_result_applies_children(iclient, ctx, tmp_path, monkeypatch):
     add_ticket(ctx.db, "TESTWP-40", status="Intake", labels=())
     monkeypatch.setattr(intake, "_ticket_needs_split", lambda ticket: True)
     res, adapter = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-40", _split_answer())
@@ -131,7 +131,11 @@ def test_needs_split_returns_plan_and_does_not_write_jira(iclient, ctx, tmp_path
     assert res["outcome"] == "split_plan"
     assert res["details"]["split_plan"] == PLAN
     assert "This ticket needs splitting" in adapter.prompts[0]
-    assert getattr(ctx.jira, "created", []) == []
+    assert [row["key"] for row in ctx.jira.created] == ["TESTWP-900", "TESTWP-901"]
+    assert [row["labels"] for row in ctx.jira.created] == [["aiflow-split-testwp-40-1"], ["aiflow-split-testwp-40-2"]]
+    assert "aiflow-ready" not in {label for row in ctx.jira.created for label in row["labels"]}
+    assert ("remove", "TESTWP-40", "aiflow-ready") in ctx.jira.labels
+    assert ("add", "TESTWP-40", "aiflow-split-parent") in ctx.jira.labels
     assert not getattr(ctx.jira, "descriptions", [])
     assert "TESTWP-40" not in ctx.jira.status_of
     assert ("add", "TESTWP-40", "aiflow-ready") not in ctx.jira.labels

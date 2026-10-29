@@ -279,7 +279,7 @@ def test_machines_screen_uses_assignment_state_and_shared_actions():
     assert "total limit 2 sessions" in rendered_signed_in
     assert 'data-act="acc-remove-machine"' in rendered_signed_in
     assert 'data-act="account-pause"' not in rendered_signed_in
-    assert 'data-act="account-edit"' not in rendered_signed_in
+    assert 'data-act="account-edit" data-id="shared-01">Jobs</button>' in rendered_signed_in  # roles stay editable
     assert 'data-act="account-signin"' not in rendered_signed_in
     assert 'data-act="account-remove"' not in rendered_signed_in
 
@@ -289,7 +289,7 @@ def test_machines_screen_uses_assignment_state_and_shared_actions():
     rendered_assignment = render_machines({"nodes": [machine], "accounts": [assignment_only]})
     assert 'data-act="acc-remove-machine"' in rendered_assignment
     assert 'data-act="account-pause"' not in rendered_assignment
-    assert 'data-act="account-edit"' not in rendered_assignment
+    assert 'data-act="account-edit" data-id="shared-01">Jobs</button>' in rendered_assignment
     assert 'data-act="account-signin"' not in rendered_assignment
 
 

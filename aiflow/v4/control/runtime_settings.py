@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from ..install.secrets import read_env, read_env_timestamps
 from ..core.runtime_settings_crypto import encrypt_value
+from .application_context import ApplicationContext
 from .db import J
 
 KEY = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
@@ -457,7 +458,7 @@ def _resume_change_nodes(connection, applies: list[dict]) -> None:
                            " WHERE name=%s", (accepting, accepting, name))
 
 
-def install(app: FastAPI, ctx, console_user, audit) -> None:
+def install(app: FastAPI, ctx: ApplicationContext, console_user, audit) -> None:
     @app.get("/v1/runtime-settings")
     def runtime_settings_list(request: Request) -> dict:
         console_user(request, "console.manage")

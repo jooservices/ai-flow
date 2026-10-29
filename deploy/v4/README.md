@@ -55,6 +55,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Master autonomy](../../docs/v4/master.md): budgeted fenced monitoring, safe actions, owner escalations, invalid-plan recovery and a weekly Command Center report
 - [Ticket timeline routes](../../docs/v4/route-module-tickets.md): the ticket timeline routes are served from their own router module
 - [Rework loop limit](../../docs/v4/rework-loop-limit.md): allow three rework returns by default, block the fourth with per-round reasons, and honor project overrides
+- [Owner question deadline](../../docs/v4/escalation-deadline.md): an unanswered question with a reversible recommendation is applied after 12 hours
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
 - [Capacity routes](../../docs/v4/route-module-capacity.md): the capacity routes are served from their own router module
 - [Automatic Jira version releases](../../docs/v4/version-release.md): check, document, PR, merge, tag and publish configured Jira versions without owner approval
@@ -70,6 +71,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Team Lead tickets](../../docs/v4/team-lead-tickets.md): every split child carries files, a skeleton and test cases for the developer
 - [Worktree cleanup](../../docs/v4/worktree-cleanup.md): nodes delete the worktrees of Done tickets and spent per-run checkouts
 - [Role health routes](../../docs/v4/route-module-role_health.md): the role health routes are served from their own router module
+- [Typed control application context](../../docs/v4/application-context.md): shared typed settings, database, repositories, leases, events, repo configuration and clock for control modules
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
 - [Memory routes](../../docs/v4/route-module-memory.md): the memory routes are served from their own router module
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
@@ -92,6 +94,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Analytics routes](../../docs/v4/route-module-analytics.md): the analytics routes are served from their own router module
 - [Persistent learning and run context](../../docs/v4/knowledge-learning.md): automatically capture run, ticket and incident learning, then hand scoped semantic context to each run
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
+- [Machines and accounts in the database](../../docs/v4/inventory-in-database.md): machines, AI accounts, roles and worker counts are managed on screen, stored in the control database, backed up with it and imported once from the control repository
 - [Machines and AI management](../../docs/v4/machines-and-ai.md): enroll machines and add, pause, resume, sign in, edit and remove AI accounts on screen
 - [Repositories by Jira epic](../../docs/v4/epic-repositories.md): map Jira epics to connected GitHub App repositories with per-repository defaults in Projects
 - [Connect GitHub from the console](../../docs/v4/github-connect.md): manage several Apps or access tokens and assign each repository a connection
@@ -219,8 +222,8 @@ time starts at the first known event or run.
 
 ## Intake refinement
 
-Tickets written by people go to the **Intake** status first. Accounts with the `intake_refiner` role in
-`aiflow-control/accounts.yaml` see them as step `intake` (after verify work, before development); `aiflow-hold`
+Tickets written by people go to the **Intake** status first. Accounts with the `intake_refiner` role (set on the
+Machines and AI screen, not in a file) see them as step `intake` (after verify work, before development); `aiflow-hold`
 and `explicit_only` work as for the other steps. The worker checks out the project's base branch and runs
 `prompts/v4/intake.md` with the ticket text and the repository's `docs/SPEC.md` (when present). An intake run
 may read files but never change them: the policy hook denies the editor tools and allows only inspection

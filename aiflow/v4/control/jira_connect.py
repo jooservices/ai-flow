@@ -41,6 +41,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from ..core import secretbox
+from .application_context import ApplicationContext
 from .console_auth import COOKIE_NAME, checks_bearer, resolve_session_user, role_satisfies, verify_session
 from .db import J
 from . import licensing
@@ -528,7 +529,7 @@ def _site(value: str) -> str | None:
     return f"https://{parts.netloc}"
 
 
-def mount(app: FastAPI, ctx) -> None:
+def mount(app: FastAPI, ctx: ApplicationContext) -> None:
     def auth() -> JiraAuth:
         a = getattr(ctx, "jira_auth", None)
         if a is None:

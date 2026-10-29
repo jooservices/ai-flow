@@ -42,6 +42,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy
 - [Only real business decisions reach a person](../../docs/v4/escalations.md): every escalation is classified, an owner decision register is applied and cited, a new decision is asked once with options, unreachable criteria are amended, refusals explain the allowed alternative, the failing CI log tail is available, and Command Center shows the weekly numbers
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
+- [Control API audit against the HTTP standard](../../docs/v4/api-rest-audit.md): every route with its findings and a proposed resource-oriented design, kept complete by a test
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
 - [Master autonomy](../../docs/v4/master.md): budgeted fenced monitoring, safe actions, owner escalations, invalid-plan recovery and a weekly Command Center report
 - [Rework loop limit](../../docs/v4/rework-loop-limit.md): allow three rework returns by default, block the fourth with per-round reasons, and honor project overrides

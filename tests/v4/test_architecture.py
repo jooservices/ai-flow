@@ -58,6 +58,25 @@ def _create_app_registrations(path: Path) -> set[tuple[str | None, str]]:
     return calls
 
 
+def _complexity(function: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    score = 1
+
+    def visit(node):
+        nonlocal score
+        if node is not function and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return
+        if isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.ExceptHandler, ast.IfExp,
+                             ast.comprehension, ast.Match, ast.match_case)):
+            score += 1
+        if isinstance(node, ast.BoolOp):
+            score += len(node.values) - 1
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    visit(function)
+    return score
+
+
 def test_control_and_core_keep_the_documented_dependency_direction():
     control = ROOT / "aiflow/v4/control"
     core = ROOT / "aiflow/v4/core"
@@ -114,3 +133,24 @@ def test_developer_and_verify_prompts_use_architecture_document():
     assert "Before changing code on every developer run, read `docs/v4/architecture.md`" in developer
     assert "Include the architecture document in" in developer and "run notes" in developer
     assert "Use `docs/v4/architecture.md` as the architecture checklist" in verify
+
+
+def test_resume_waiting_stays_within_architecture_budgets():
+    module = ast.parse((ROOT / "aiflow/v4/control/escalations.py").read_text(encoding="utf-8"))
+    function = next(node for node in ast.walk(module)
+                    if isinstance(node, ast.FunctionDef) and node.name == "resume_waiting")
+    assert function.end_lineno - function.lineno + 1 <= 80
+    assert _complexity(function) <= 12
+
+
+def test_owner_question_formatter_and_jira_gateway_stay_within_complexity_budget():
+    core = ast.parse((ROOT / "aiflow/v4/core/owner_escalation.py").read_text(encoding="utf-8"))
+    formatter = next(node for node in core.body if isinstance(node, ast.FunctionDef)
+                     and node.name == "owner_question_comment")
+    jira = ast.parse((ROOT / "aiflow/v4/control/jira.py").read_text(encoding="utf-8"))
+    gateway = next(node for node in jira.body if isinstance(node, ast.ClassDef) and node.name == "Jira")
+    call = next(node for node in gateway.body if isinstance(node, ast.FunctionDef) and node.name == "call")
+
+    violations = [f"{function.name}: complexity {_complexity(function)}"
+                  for function in (formatter, call) if _complexity(function) > 12]
+    assert not violations, "owner escalation functions exceed the complexity budget: " + "; ".join(violations)

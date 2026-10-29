@@ -52,3 +52,7 @@ def assign_project(conn, key: str, nodes: list[str]) -> None:
             f"UPDATE nodes SET {column}=CASE WHEN %s=ANY({column}) THEN {column}"
             f" ELSE array_append({column},%s) END WHERE name=ANY(%s) AND removed_at IS NULL",
             (key, key, nodes))
+
+
+def tools_and_metrics(db, node: str) -> dict:
+    return db.one("SELECT tools,metrics FROM nodes WHERE name=%s", (node,)) or {}

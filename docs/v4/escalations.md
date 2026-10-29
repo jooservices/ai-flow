@@ -57,16 +57,19 @@ Triage output cannot relabel a question to bypass that boundary. The control pla
 1. applies a **decided** register entry that matches (nothing is asked);
 2. otherwise, if the same normalized question is already **asked**, adds the ticket to that wait (no second alert;
    the match does not depend on triage-generated keywords);
-3. otherwise stores a pending entry (`status asked`, options, recommended default), comments with the options on the
-   ticket, labels it `owner-escalated` and alerts the owner once.
+3. otherwise stores a pending entry (`status asked`, options, recommended default), comments on the ticket with the
+   question first, followed by the options and recommendation, adds `needs-owner` (and the compatibility label
+   `owner-escalated`), and keeps the ticket in **Needs owner**, the configured blocked state. An optional notification
+   contains only the question and Jira ticket link; messages are grouped under the shared one-hour delivery limit.
 
-The owner picks an option (or the recommended default) on screen. The entry becomes **decided**, and every waiting
-ticket loses the label and returns to To Do with the decision cited. If the owner answers in a Jira comment and moves
-the ticket back instead, the next developer claim reads a comment posted after the ask only when its stable Jira
-`accountId` matches the account connected in Integrations (the authorized owner identity). Display names are not used
-for authorization. The actual answer is stored in the register and passed with the question to the developer prompt.
-The recommended default is never substituted for a missing or unauthorized comment; the ask stays pending until an
-authorized answer is available. Other waiting tickets resume with the captured answer.
+The owner answers a ticket-linked question in Jira with a comment after the question comment, then moves the ticket to
+**To Do**. Before creating a development run, the next claim verifies that the comment was written by the Jira account
+connected in Integrations (the authorized owner identity); display names are not used for authorization. Moving the
+ticket without that verified comment does not resume it: the claim is refused and the ticket remains blocked in
+**Needs owner**. The verified answer is stored in the register and passed with the question to development; waiting
+tickets for the same decision resume with that answer. The recommended option is never substituted for a missing or
+unauthorized answer. The Command Center cannot answer or resume a ticket-linked question; it can answer register
+entries that are not linked to Jira tickets.
 
 ## Unreachable criteria are amended (AC4)
 

@@ -14,11 +14,13 @@ import pytest
 
 from conftest import add_ticket, join_node
 from aiflow.v4.control import escalations as esc
-from aiflow.v4.control.api import notify
+from aiflow.v4.control import owner_notifications
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.github import GitHubApp
 from aiflow.v4.control.jira import Jira
 from aiflow.v4.control.policy import decide, decide_read_only
+from aiflow.v4.core.owner_escalation import MAX_OWNER_QUESTION_COMMENT_CHARS
+from aiflow.v4.core.text import adf_to_text, text_to_adf
 from aiflow.v4.worker import dev, triage
 from aiflow.v4.worker.dev import Claimed, build_prompt, fetch_ci_log
 
@@ -49,6 +51,13 @@ def run_of(ticket: str, node: str = "node1") -> dict:
 def put_ticket(ctx, key: str, description: str, status: str = "Needs owner") -> None:
     add_ticket(ctx.db, key, status=status)
     ctx.db.run("UPDATE tickets SET description=%s WHERE key=%s", (description, key))
+
+
+def _apply_legacy_question_comment_upgrade(ctx) -> None:
+    migration = Path(__file__).parents[2] / "aiflow/v4/control/migrations/027_owner_question_legacy_recovery.sql"
+    with ctx.db.pool.connection() as connection:
+        with connection.transaction():
+            connection.execute(migration.read_text(encoding="utf-8"))
 
 
 # --- AC1: every escalation is classified when it is raised; only two classes reach a person --------------------
@@ -135,9 +144,7 @@ def test_customer_facing_decision_still_reaches_owner(ctx):
 
 
 # --- AC8: replay of 2026-10-22 and 23 ---------------------------------------------------------------------------
-def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_families_to_a_person(client, ctx, monkeypatch):
-    alerts = []
-    monkeypatch.setattr(notify, "send", lambda *a, **k: alerts.append(a) or ["fake"])
+def _replay_recorded_escalations(ctx):
     ctx.db.run("INSERT INTO nodes (name, role, status, tools) VALUES ('node1','worker','online',%s)"
                " ON CONFLICT (name) DO UPDATE SET tools=EXCLUDED.tools", (json.dumps(FIXTURE["node_tools"]),))
     reached = []
@@ -163,9 +170,13 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
             assert answered["action"] == "answered" and answered["class"] == esc.AMBIGUITY
     row_ids = ctx.db.all("SELECT id FROM escalations ORDER BY id")
     assert len(row_ids) == len(FIXTURE["escalations"])
-    for row, item in zip(row_ids, FIXTURE["escalations"]):
+    for row, item in zip(row_ids, FIXTURE["escalations"], strict=True):
         created_at = datetime.fromisoformat(item["at"].replace("Z", "+00:00"))
         ctx.db.run("UPDATE escalations SET created_at=%s WHERE id=%s", (created_at, row["id"]))
+    return reached, results
+
+
+def _assert_replay_handoffs(ctx, reached):
     rows = ctx.db.all("SELECT * FROM escalations ORDER BY id")
     assert len(rows) == len(FIXTURE["escalations"])
     # Keep the database rows aligned with the historical replay dates in this fixture.
@@ -175,14 +186,21 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
     rows = ctx.db.all("SELECT * FROM escalations ORDER BY id")
     assert {r["class"] for r in rows} == set(esc.CLASSES) - {esc.TECHNICAL}  # every one is classified; the recorded fixtures predate the technical class
     person_rows = [r for r in rows if r["reached_person"]]
-    assert sorted(r["ticket_key"] for r in person_rows) == sorted(reached) == ["JOOWP-320", "JOOWP-322"]
-    assert all(r["class"] in esc.PERSON_CLASSES for r in person_rows)
+    assert not person_rows  # triage has not completed the required Jira writes in this replay
+    assert sorted(reached) == ["JOOWP-320", "JOOWP-322"]
+    assert all(r["resolution"] == "open" and r["decision_id"] for r in rows
+               if r["ticket_key"] in reached)
     for row in rows:
         if row["class"] not in esc.PERSON_CLASSES:
             assert not row["reached_person"] and row["resolution"] != "open", row
-    assert not alerts  # nothing was sent to the owner by the replay itself
+    assert ctx.db.one("SELECT count(*) AS n FROM escalations WHERE reached_person")["n"] == 0
+    return rows
+
+
+def _assert_replay_machine_answers(ctx, results):
     # JOOWP-312 asked three times for Docker; each time the register answered
-    assert [r["class"] for r in rows if r["ticket_key"] == "JOOWP-312"] == [esc.TAKEN] * 3
+    rows = ctx.db.all("SELECT class FROM escalations WHERE ticket_key='JOOWP-312' ORDER BY id")
+    assert [row["class"] for row in rows] == [esc.TAKEN] * 3
     # what the machine has is used, what it lacks is parked, nothing is asked
     assert results[("JAIF-222", 1)]["outcome"] == "auto_answered" and "installed" in results[("JAIF-222", 1)]["answer"]
     assert results[("JAIF-130", 0)]["outcome"] == "auto_answered" and "/v1/github/ci-log" in results[("JAIF-130", 0)]["answer"]
@@ -192,6 +210,12 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
     assert ctx.db.one("SELECT count(*) AS n FROM tool_waits WHERE ticket_key='JOOWP-304'")["n"] == 0
     # the policy message of JOOWP-308 explains the allowed alternative
     assert "Edit" in results[("JOOWP-308", 3)]["answer"]
+
+
+def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_families_to_a_person(client, ctx):
+    reached, results = _replay_recorded_escalations(ctx)
+    rows = _assert_replay_handoffs(ctx, reached)
+    _assert_replay_machine_answers(ctx, results)
     # the weekly numbers count every row
     latest_fixture_time = max(datetime.fromisoformat(item["at"].replace("Z", "+00:00"))
                               for item in FIXTURE["escalations"])
@@ -329,60 +353,165 @@ NEW = {"decision": "ESCALATE", "class": esc.BUSINESS, "why": "Failed payment ema
        "topic": "Failed payment email timing", "keywords": ["failed payment", "email"]}
 
 
-def test_a_new_decision_is_asked_once_then_becomes_a_register_entry(client, ctx):
-    # Model an actual authenticated console user, not a legacy signed session without a DB account.
-    ctx.db.run("INSERT INTO console_users (email,role,roles,password_hash) VALUES (%s,'administrator',%s,'test')",
-               ("owner@example.test", ["administrator"]))
-    owner(client, ctx)
+def _ask_new_payment_email_question(ctx, question):
     put_ticket(ctx, "JOOWP-322", "Acceptance criteria:\n- AC1: x")
-    put_ticket(ctx, "JOOWP-323", "Acceptance criteria:\n- AC1: y")
     ctx.jira.status_of.update({"JOOWP-322": "Needs owner", "JOOWP-323": "Needs owner"})
-    question = "Should a failed payment email go out immediately or after 24 hours?"
     esc.dev_question(ctx, run_of("JOOWP-322"), question)
     first = esc.triage_decision(ctx, run_of("JOOWP-322"), NEW, question)
     assert first["action"] == "asked" and first["options"] == NEW["options"] + [] and first["recommended"] == NEW["recommended"]
     pending = ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (first["decision_id"],))
     assert pending["status"] == "asked" and pending["options"] == NEW["options"] and pending["decision"] == ""
-    # another ticket asks the same thing: it joins the wait, nobody is asked again
+    return first
+
+
+def _join_payment_email_question(ctx, question, first):
+    put_ticket(ctx, "JOOWP-323", "Acceptance criteria:\n- AC1: y")
     esc.dev_question(ctx, run_of("JOOWP-323"), question)
     alternate = {**NEW, "why": "The email timing needs a product choice.", "topic": "Payment follow-up",
                  "keywords": ["outbound", "message", "schedule"]}
     second = esc.triage_decision(ctx, run_of("JOOWP-323"), alternate, question)
     assert second["action"] == "waiting" and second["decision_id"] == first["decision_id"]
     waiting = ctx.db.one("SELECT resolution,reached_person,resolved_at FROM escalations WHERE ticket_key='JOOWP-323'")
-    assert waiting == {"resolution": "waiting", "reached_person": False, "resolved_at": None}
+    assert waiting == {"resolution": "open", "reached_person": False, "resolved_at": None}
     waiting_metrics = esc.weekly_metrics(ctx.db, weeks=1)["this_week"]
-    assert waiting_metrics["total"] == 2 and waiting_metrics["reached_person"] == 1
+    assert waiting_metrics["total"] == 2 and waiting_metrics["reached_person"] == 0
     assert waiting_metrics["without_person"] == 0
     assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE status='asked'")["n"] == 1
     assert set(ctx.db.one("SELECT waiting_tickets FROM owner_decisions WHERE id=%s", (first["decision_id"],))["waiting_tickets"]) == {
         "JOOWP-322", "JOOWP-323"}
-    assert ctx.db.one("SELECT count(*) AS n FROM escalations WHERE reached_person")["n"] == 1
+    assert ctx.db.one("SELECT count(*) AS n FROM escalations WHERE reached_person")["n"] == 0
+    return second
 
-    # the owner answers on screen: the choice becomes a register entry and the waiting tickets resume
-    answered = client.post(f"/v1/decisions/{first['decision_id']}/answer", json={"choice": "recommended", "note": "see support"})
-    assert answered.status_code == 200
+
+def _answer_payment_email_question(client, ctx, first):
+    answered = client.post(f"/v1/decisions/{first['decision_id']}/answer",
+                           json={"choice": "recommended", "note": "see support"})
+    assert answered.status_code == 409
     entry = ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (first["decision_id"],))
-    assert entry["status"] == "decided" and entry["decision"] == "Email after 24 hours (see support)"
-    assert entry["decided_by"] == "owner@example.test"
-    # the owner's business answer is the product working, never an operator intervention (JAIF-260 AC6)
-    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='decision-answer' AND accepted")["n"] == 1
-    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert entry["status"] == "asked" and entry["decision"] == ""
+    assert entry["decided_by"] == ""
     resolved_waiting = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key='JOOWP-323'")
-    assert resolved_waiting == {"resolution": "person", "reached_person": True,
-                                "answer": "Email after 24 hours (see support)"}
-    answered_metrics = esc.weekly_metrics(ctx.db, weeks=1)["this_week"]
-    assert answered_metrics["reached_person"] == 2 and answered_metrics["without_person"] == 0
-    assert {k for k, _ in [(t[0], 0) for t in ctx.jira.transitions]} >= {"JOOWP-322", "JOOWP-323"}
-    assert all(ctx.jira.status_of[k] == "To Do" for k in ("JOOWP-322", "JOOWP-323"))
-    assert ("remove", "JOOWP-322", "owner-escalated") in ctx.jira.labels
-    # from now on the decision is applied and cited; a person is not asked
-    esc.record(ctx.db, "JOOWP-324", "JOOWP", "dev", "run", esc.BUSINESS,
-               "Failed payment email: now or after a day?", resolution="open")
-    third = esc.triage_decision(ctx, run_of("JOOWP-324"), NEW, "Failed payment email: now or after a day?")
-    assert third["action"] == "applied" and f"D{first['decision_id']}" in third["citation"]
-    assert third["answer"].startswith("Email after 24 hours")
-    assert esc.dev_question(ctx, run_of("JOOWP-324"), "Failed payment email: now or after a day?")["class"] == esc.TAKEN
+    assert resolved_waiting == {"resolution": "open", "reached_person": False, "answer": ""}
+    assert not ctx.jira.transitions
+
+
+def test_owner_question_comment_limit_is_checked_before_pending_decision_is_saved(ctx):
+    question = "Should the default stay compatible?"
+    topic = "Owner comment size boundary"
+    base = esc.owner_question_comment(question, ["x", "Recommended"], "Recommended", grouped=True)
+    maximum_option = "x" * (MAX_OWNER_QUESTION_COMMENT_CHARS - len(base) + 1)
+    options = [maximum_option, "Recommended"]
+    maximum = esc.owner_question_comment(question, options, "Recommended", grouped=True)
+    assert len(maximum) == MAX_OWNER_QUESTION_COMMENT_CHARS
+
+    accepted = esc.ask(ctx, "TESTWP-412", "TESTWP", question, "A product decision", options, "Recommended",
+                       topic, ["default", "compatible"])
+    assert accepted["action"] == "asked"
+    assert esc.owner_question_comment(question, accepted["decision"]["options"], "Recommended", grouped=True) == maximum
+
+    key = "TESTWP-413"
+    oversized_question = "Should the marketing copy use the new claim?"
+    oversized_base = esc.owner_question_comment(oversized_question, ["x", "Recommended"], "Recommended",
+                                                grouped=True)
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: preserve the existing default")
+    run = run_of(key)
+    esc.record(ctx.db, key, "TESTWP", "dev", str(run["id"]), esc.BUSINESS, oversized_question, "A product decision")
+    too_long_option = "x" * (MAX_OWNER_QUESTION_COMMENT_CHARS - len(oversized_base) + 2)
+    rejected = esc.triage_decision(ctx, run, {**NEW, "options": [too_long_option, "Recommended"],
+                                              "recommended": "Recommended"}, oversized_question)
+
+    assert rejected["action"] == "refused" and "6000 characters" in rejected["reason"]
+    assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE status='asked'")["n"] == 1
+    assert ctx.db.one("SELECT resolution,reached_person,decision_id FROM escalations WHERE ticket_key=%s", (key,)) == {
+        "resolution": "open", "reached_person": False, "decision_id": None}
+
+
+def test_command_center_cannot_answer_a_ticket_linked_owner_question(client, ctx):
+    owner(client, ctx)
+    question = "Should a failed payment email go out immediately or after 24 hours?"
+    first = _ask_new_payment_email_question(ctx, question)
+    _join_payment_email_question(ctx, question, first)
+    assert next(item for item in esc.register(ctx.db)["asked"] if item["id"] == first["decision_id"])[
+        "jira_answer_required"] is True
+    _answer_payment_email_question(client, ctx, first)
+    assert ctx.db.one("SELECT status,decision FROM owner_decisions WHERE id=%s", (first["decision_id"],)) == {
+        "status": "asked", "decision": ""}
+
+
+def test_command_center_cannot_answer_a_live_ticket_before_handoff_link_is_saved(ctx):
+    key = "TESTWP-337"
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", "Should the default be CSV or JSON?", "Product choice",
+                    ["CSV", "JSON"], "CSV", "Export format", ["export", "format"])
+
+    with pytest.raises(esc.JiraOwnerAnswerRequired, match="answer this ticket question in Jira"):
+        esc.answer_decision(ctx, asked["decision"]["id"], "JSON", "owner choice", "owner@example.test")
+
+    assert ctx.db.one("SELECT status,decision FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],)) == {
+        "status": "asked", "decision": ""}
+
+
+def test_command_center_answer_does_not_clear_labels_or_unblock_without_jira_answer(client, ctx):
+    owner(client, ctx)
+    key = "TESTWP-335"
+    question = "Should refunds be available for 14 days or 30 days?"
+    add_ticket(ctx.db, key, status="Needs owner", labels=("needs-owner", "owner-escalated"))
+    ctx.jira.status_of[key] = "Needs owner"
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    run_id = "triage-command-center-answer"
+    esc.record(ctx.db, key, "TESTWP", "triage", run_id, esc.BUSINESS, question, "policy choice", "open",
+               asked["decision"]["id"])
+    comment = triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")
+    esc.post_owner_question_comment(ctx, key, asked["decision"]["id"], run_id, comment)
+    esc.complete_owner_handoff(ctx, key, asked["decision"]["id"], run_id)
+
+    response = client.post(f"/v1/decisions/{asked['decision']['id']}/answer",
+                           json={"choice": "14 days", "note": "command center attempt"})
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "answer this ticket question in Jira after the question comment, then move it to To Do"}
+    assert ctx.db.one("SELECT status,decision FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],)) == {
+        "status": "asked", "decision": ""}
+    assert ctx.db.one("SELECT status,labels FROM tickets WHERE key=%s", (key,)) == {
+        "status": "Needs owner", "labels": ["needs-owner", "owner-escalated"]}
+    assert ctx.jira.status_of[key] == "Needs owner"
+    assert (key, "To Do") not in ctx.jira.transitions
+    assert not [entry for entry in ctx.jira.labels if entry[0] == key]
+
+
+def test_unverified_saved_command_center_answer_stays_blocked_after_labels_are_cleared(client, ctx):
+    key = "TESTWP-336"
+    question = "Should refunds be available for 14 days or 30 days?"
+    add_ticket(ctx.db, key, status="Needs owner", labels=("aiflow-ready", "needs-owner", "owner-escalated"))
+    ctx.jira.status_of[key] = "Needs owner"
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    decision_id = asked["decision"]["id"]
+    esc.record(ctx.db, key, "TESTWP", "triage", "triage-old-command-center", esc.BUSINESS, question,
+               "policy choice", "person", decision_id, reached_person=True)
+    # Model an answer saved before the new guard, with no verified Jira comment after the question.
+    saved = esc.escalation_repository.store_owner_answer(ctx.db, decision_id, "14 days", "owner@example.test")
+    ctx.db.run("DELETE FROM escalations WHERE decision_id=%s", (decision_id,))
+
+    assert esc.retry_resumptions(ctx) == []
+    assert esc.resume_waiting(ctx, saved, saved["decision"]) == []
+
+    # Even without the escalation row, if a prior buggy answer cleared both labels and moved the mirror to To Do,
+    # the persisted decision must keep the ticket blocked.
+    ctx.db.run("UPDATE tickets SET status='To Do',labels=%s WHERE key=%s", (["aiflow-ready"], key))
+    ctx.jira.status_of[key] = "To Do"
+    response = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01", "step": "dev"},
+                           headers=node_headers(client, "cc"))
+
+    assert response.status_code == 409
+    assert response.json() == {"claimed": False, "reason": "not eligible"}
+    assert ctx.db.one("SELECT status,labels FROM tickets WHERE key=%s", (key,)) == {
+        "status": "Needs owner", "labels": ["aiflow-ready"]}
+    assert ctx.jira.status_of[key] == "Needs owner"
+    assert (key, "Needs owner") in ctx.jira.transitions
+    assert not ctx.jira.labels
 
 
 def test_concurrent_triage_for_duplicate_questions_creates_one_owner_ask(ctx):
@@ -404,17 +533,22 @@ def test_concurrent_triage_for_duplicate_questions_creates_one_owner_ask(ctx):
     assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE status='asked'")["n"] == 1
     register_row = ctx.db.one("SELECT waiting_tickets FROM owner_decisions WHERE status='asked'")
     assert set(register_row["waiting_tickets"]) == set(keys)
-    assert ctx.db.one("SELECT count(*) AS n FROM escalations WHERE reached_person")["n"] == 1
+    assert ctx.db.one("SELECT count(*) AS n FROM escalations WHERE reached_person")["n"] == 0
 
 
 def test_jira_comment_answer_is_persisted_and_passed_to_the_next_developer_run(client, ctx):
     key = "TESTWP-327"
     question = "Should refunds be available for 14 days or 30 days?"
-    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: refund window", status="To Do")
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: refund window", status="Needs owner")
+    ctx.db.run("UPDATE tickets SET labels=%s WHERE key=%s",
+               (["aiflow-ready", "needs-owner", "owner-escalated"], key))
+    ctx.jira.status_of[key] = "Needs owner"
     asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
                     "Refund period", ["refund", "period"])
     esc.record(ctx.db, key, "TESTWP", "triage", "triage-run", esc.BUSINESS, question, "policy choice", "person",
                asked["decision"]["id"], reached_person=True)
+    comment = triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")
+    esc.post_owner_question_comment(ctx, key, asked["decision"]["id"], "triage-run", comment)
     future = datetime.now(timezone.utc) + timedelta(minutes=1)
     ctx.jira.recent_comment_data[key] = [
         {"author": "AI Flow", "created": future.isoformat(),
@@ -423,6 +557,9 @@ def test_jira_comment_answer_is_persisted_and_passed_to_the_next_developer_run(c
          "created": (future + timedelta(seconds=1)).isoformat(),
          "body": "Use 14 days, not the recommended 30 days."},
     ]
+    # The owner writes the answer and moves the blocked ticket to To Do in Jira.
+    ctx.jira.status_of[key] = "To Do"
+    ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (key,))
     headers = node_headers(client, "cc")
     claim = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01"}, headers=headers).json()
     assert claim["claimed"]
@@ -430,10 +567,593 @@ def test_jira_comment_answer_is_persisted_and_passed_to_the_next_developer_run(c
     assert claim["triage_answer"] == "Use 14 days, not the recommended 30 days."
     entry = ctx.db.one("SELECT status,decision,decided_by FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],))
     assert entry == {"status": "decided", "decision": "Use 14 days, not the recommended 30 days.",
-                     "decided_by": "owner"}
+                     "decided_by": esc.triage_claim_repository.VERIFIED_JIRA_OWNER_SOURCE}
     escalation = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key=%s", (key,))
     assert escalation == {"resolution": "person", "reached_person": True,
                           "answer": "Use 14 days, not the recommended 30 days."}
+    labels = ctx.db.one("SELECT labels FROM tickets WHERE key=%s", (key,))["labels"]
+    assert not {"needs-owner", "owner-escalated"}.intersection(labels)
+
+
+def test_legacy_markerless_jira_question_answer_unblocks_ticket(client, ctx):
+    key = "TESTWP-338"
+    question = "Should refunds be available for 14 days or 30 days?"
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: refund window", status="Needs owner")
+    ctx.db.run("UPDATE tickets SET labels=%s WHERE key=%s",
+               (["aiflow-ready", "needs-owner", "owner-escalated"], key))
+    ctx.jira.status_of[key] = "Needs owner"
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    esc.record(ctx.db, key, "TESTWP", "triage", "legacy-triage-run", esc.BUSINESS, question,
+               "policy choice", "person", asked["decision"]["id"], reached_person=True)
+    _apply_legacy_question_comment_upgrade(ctx)
+    assert ctx.db.one("SELECT legacy_question_comment FROM escalations WHERE ticket_key=%s", (key,))[
+        "legacy_question_comment"] is True
+    escalation_created = ctx.db.one("SELECT created_at FROM escalations WHERE ticket_key=%s", (key,))["created_at"]
+    question_at = escalation_created + timedelta(seconds=1)
+    answer = "Use 14 days, not the recommended 30 days."
+    ctx.jira.recent_comment_data[key] = [
+        {"account_id": "aiflow-control-account", "created": question_at.isoformat(),
+         "body": triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")},
+        {"account_id": ctx.jira.jira_account_id, "created": (question_at + timedelta(seconds=1)).isoformat(),
+         "body": answer},
+    ]
+    ctx.jira.status_of[key] = "To Do"
+    ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (key,))
+
+    claim = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01"},
+                        headers=node_headers(client, "cc")).json()
+
+    assert claim["claimed"]
+    assert claim["triage_question"] == question and claim["triage_answer"] == answer
+    saved_time = ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))
+    assert saved_time["question_comment_at"] == question_at
+    decision = ctx.db.one("SELECT status,decision,decided_by FROM owner_decisions WHERE id=%s",
+                          (asked["decision"]["id"],))
+    assert decision == {"status": "decided", "decision": answer,
+                        "decided_by": esc.triage_claim_repository.VERIFIED_JIRA_OWNER_SOURCE}
+
+
+def test_legacy_question_retry_skips_matching_comment_before_escalation(ctx):
+    key = "TESTWP-345"
+    question = "Should refunds be available for 14 days or 30 days?"
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    run_id = "legacy-question-retry-after-escalation"
+    esc.record(ctx.db, key, "TESTWP", "triage", run_id, esc.BUSINESS, question, "policy choice", "person",
+               asked["decision"]["id"], reached_person=True)
+    _apply_legacy_question_comment_upgrade(ctx)
+    escalation_created = ctx.db.one("SELECT created_at FROM escalations WHERE ticket_key=%s", (key,))["created_at"]
+    old_question_at = escalation_created - timedelta(minutes=2)
+    answer_to_old_question = old_question_at + timedelta(seconds=1)
+    body = triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")
+    ctx.jira.recent_comment_data[key] = [
+        {"id": "retired-question", "account_id": "aiflow-control-account", "created": old_question_at.isoformat(),
+         "body": body},
+        {"id": "retired-answer", "account_id": ctx.jira.jira_account_id,
+         "created": answer_to_old_question.isoformat(), "body": "Use 14 days."},
+        {"id": "current-question", "account_id": "aiflow-control-account", "created": escalation_created.isoformat(),
+         "body": body},
+    ]
+
+    recovered = esc.post_owner_question_comment(ctx, key, asked["decision"]["id"], run_id, body)
+
+    assert recovered == {"comment_id": "current-question", "created": escalation_created, "already_posted": True}
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))[
+        "question_comment_at"] == escalation_created
+    assert esc.owner_answered_on_ticket(ctx, key) is None
+    assert ctx.db.one("SELECT status,decision FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],)) == {
+        "status": "asked", "decision": ""}
+
+
+def test_legacy_question_from_retired_handoff_cannot_authorize_current_decision(ctx):
+    key = "TESTWP-342"
+    question = "Should refunds be available for 14 days or 30 days?"
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    esc.record(ctx.db, key, "TESTWP", "triage", "current-handoff", esc.BUSINESS, question, "policy choice",
+               "person", asked["decision"]["id"], reached_person=True)
+    _apply_legacy_question_comment_upgrade(ctx)
+    escalation_created = ctx.db.one("SELECT created_at FROM escalations WHERE ticket_key=%s", (key,))["created_at"]
+    old_question_at = escalation_created - timedelta(minutes=2)
+    ctx.jira.recent_comment_data[key] = [
+        {"account_id": "aiflow-control-account", "created": old_question_at.isoformat(),
+         "body": triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")},
+        {"account_id": ctx.jira.jira_account_id, "created": (old_question_at + timedelta(seconds=1)).isoformat(),
+         "body": "Use 14 days."},
+    ]
+
+    assert esc.owner_answered_on_ticket(ctx, key) is None
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))[
+        "question_comment_at"] is None
+    assert ctx.db.one("SELECT status,decision FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],)) == {
+        "status": "asked", "decision": ""}
+
+
+def test_legacy_question_recovery_reads_beyond_the_newest_30_comments(ctx):
+    key = "TESTWP-343"
+    question = "Should refunds be available for 14 days or 30 days?"
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    esc.record(ctx.db, key, "TESTWP", "triage", "current-handoff", esc.BUSINESS, question, "policy choice",
+               "person", asked["decision"]["id"], reached_person=True)
+    _apply_legacy_question_comment_upgrade(ctx)
+    escalation_created = ctx.db.one("SELECT created_at FROM escalations WHERE ticket_key=%s", (key,))["created_at"]
+    question_at = escalation_created + timedelta(seconds=1)
+    noise = [{"account_id": "jira-collaborator-account",
+              "created": (question_at + timedelta(seconds=index + 2)).isoformat(), "body": f"Comment {index}"}
+             for index in range(35)]
+    ctx.jira.recent_comment_data[key] = [
+        {"account_id": ctx.jira.jira_account_id, "created": (question_at + timedelta(seconds=40)).isoformat(),
+         "body": "Use 14 days."},
+        *reversed(noise),
+        {"account_id": "aiflow-control-account", "created": question_at.isoformat(),
+         "body": triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")},
+    ]
+
+    answer = esc.owner_answered_on_ticket(ctx, key)
+
+    assert answer and answer["answer"] == "Use 14 days."
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))[
+        "question_comment_at"] == question_at
+
+
+def test_legacy_question_recovery_matches_comment_bodies_longer_than_2000_characters(ctx):
+    key = "TESTWP-344"
+    question = "What should the refund policy be? " + ("x" * 2100)
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    esc.record(ctx.db, key, "TESTWP", "triage", "current-handoff", esc.BUSINESS, question, "policy choice",
+               "person", asked["decision"]["id"], reached_person=True)
+    _apply_legacy_question_comment_upgrade(ctx)
+    escalation_created = ctx.db.one("SELECT created_at FROM escalations WHERE ticket_key=%s", (key,))["created_at"]
+    question_at = escalation_created + timedelta(seconds=1)
+    comment = triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")
+    assert len(comment) > 2000
+    ctx.jira.recent_comment_data[key] = [
+        {"account_id": ctx.jira.jira_account_id, "created": (question_at + timedelta(seconds=1)).isoformat(),
+         "body": "Use 14 days."},
+        {"account_id": "aiflow-control-account", "created": question_at.isoformat(), "body": comment},
+    ]
+
+    answer = esc.owner_answered_on_ticket(ctx, key)
+
+    assert answer and answer["answer"] == "Use 14 days."
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))[
+        "question_comment_at"] == question_at
+
+
+def test_command_center_answered_ticket_question_remains_pending_until_jira_answer(client, ctx):
+    key = "TESTWP-339"
+    question = "Should refunds be available for 14 days or 30 days?"
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: refund window", status="Needs owner")
+    ctx.jira.status_of[key] = "Needs owner"
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    esc.record(ctx.db, key, "TESTWP", "triage", "old-command-center-run", esc.BUSINESS, question,
+               "policy choice", "person", asked["decision"]["id"], reached_person=True)
+    _apply_legacy_question_comment_upgrade(ctx)
+    escalation_created = ctx.db.one("SELECT created_at FROM escalations WHERE ticket_key=%s", (key,))["created_at"]
+    question_at = escalation_created + timedelta(seconds=1)
+    ctx.jira.recent_comment_data[key] = [{
+        "account_id": "aiflow-control-account", "created": question_at.isoformat(),
+        "body": triage.owner_question_comment(question, ["14 days", "30 days"], "30 days"),
+    }]
+    # Model an older Command Center answer that cleared labels and marked the linked decision as decided.
+    ctx.db.run("UPDATE owner_decisions SET status='decided',decision='Use 30 days',decided_by='owner@example.test',"
+               "decided_at=now() WHERE id=%s", (asked["decision"]["id"],))
+    ctx.db.run("UPDATE escalations SET resolution='person',resolved_at=now() WHERE decision_id=%s",
+               (asked["decision"]["id"],))
+    ctx.jira.status_of[key] = "To Do"
+    ctx.db.run("UPDATE tickets SET status='To Do',labels=%s WHERE key=%s", (["aiflow-ready"], key))
+    headers = node_headers(client, "cc")
+
+    blocked = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01"}, headers=headers)
+
+    assert blocked.status_code == 409
+    assert ctx.jira.status_of[key] == "Needs owner"
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))["question_comment_at"] == question_at
+    stale = ctx.db.one("SELECT status,decided_by FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],))
+    assert stale == {"status": "decided", "decided_by": "owner@example.test"}
+
+    jira_answer = "Use 14 days, not the earlier Command Center choice."
+    ctx.jira.recent_comment_data[key].append({
+        "account_id": ctx.jira.jira_account_id, "created": (question_at + timedelta(seconds=1)).isoformat(),
+        "body": jira_answer,
+    })
+    ctx.jira.status_of[key] = "To Do"
+    ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (key,))
+    resumed = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01"}, headers=headers).json()
+
+    assert resumed["claimed"]
+    assert resumed["triage_answer"] == jira_answer
+    confirmed = ctx.db.one("SELECT status,decision,decided_by FROM owner_decisions WHERE id=%s",
+                           (asked["decision"]["id"],))
+    assert confirmed == {"status": "decided", "decision": jira_answer,
+                         "decided_by": esc.triage_claim_repository.VERIFIED_JIRA_OWNER_SOURCE}
+
+
+def test_migrated_command_center_answer_cannot_be_retired_to_bypass_jira_answer_gate(client, ctx):
+    key = "TESTWP-338"
+    question = "Should refunds be available for 14 days or 30 days?"
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: refund window", status="To Do")
+    ctx.jira.status_of[key] = "To Do"
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    esc.record(ctx.db, key, "TESTWP", "triage", "legacy-command-center-run", esc.BUSINESS, question,
+               "policy choice", "person", asked["decision"]["id"], reached_person=True)
+    ctx.db.run("UPDATE owner_decisions SET status='decided',decision='Use 30 days',"
+               "decided_by='owner@example.test',decided_at=now() WHERE id=%s", (asked["decision"]["id"],))
+    ctx.db.run("UPDATE escalations SET resolution='person',resolved_at=now() WHERE decision_id=%s",
+               (asked["decision"]["id"],))
+    ctx.db.run("UPDATE tickets SET status='To Do',labels=%s WHERE key=%s", (["aiflow-ready"], key))
+    owner(client, ctx)
+
+    retired = client.post(f"/v1/decisions/{asked['decision']['id']}/retire")
+
+    assert retired.status_code == 409
+    assert "in Jira" in retired.json()["detail"]
+    assert ctx.db.one("SELECT status,decided_by FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],)) == {
+        "status": "decided", "decided_by": "owner@example.test"}
+
+    blocked = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01", "step": "dev"},
+                          headers=node_headers(client, "cc"))
+
+    assert blocked.status_code == 409
+    assert ctx.jira.status_of[key] == "Needs owner"
+    assert ctx.db.one("SELECT status,labels FROM tickets WHERE key=%s", (key,)) == {
+        "status": "Needs owner", "labels": ["aiflow-ready"]}
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE ticket_key=%s AND step='dev'", (key,))["n"] == 0
+
+
+def test_owner_comment_between_decision_row_and_question_comment_does_not_answer(ctx):
+    key = "TESTWP-330"
+    question = "Should refunds be available for 14 days or 30 days?"
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    run_id = "triage-question-gap"
+    esc.record(ctx.db, key, "TESTWP", "triage", run_id, esc.BUSINESS, question, "policy choice", "person",
+               asked["decision"]["id"], reached_person=True)
+    decision_created = datetime.now(timezone.utc) - timedelta(minutes=1)
+    escalation_created = ctx.db.one("SELECT created_at FROM escalations WHERE ticket_key=%s", (key,))["created_at"]
+    question_created = escalation_created + timedelta(seconds=2)
+    ctx.db.run("UPDATE owner_decisions SET created_at=%s WHERE id=%s",
+               (decision_created, asked["decision"]["id"]))
+    comment = triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")
+    question_comment = f"{comment}\n\nAI Flow hand-off: D{asked['decision']['id']}"
+    ctx.jira.recent_comment_data[key] = [{
+        "account_id": "aiflow-control-account",
+        "created": question_created.isoformat(),
+        "body": question_comment,
+    }, {
+        "account_id": ctx.jira.jira_account_id,
+        "created": (decision_created + timedelta(seconds=1)).isoformat(),
+        "body": "Unrelated owner comment posted before the actual question.",
+    }]
+    assert esc.owner_answered_on_ticket(ctx, key) is None
+    recorded = ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))
+    assert recorded["question_comment_at"] == question_created
+    pending = ctx.db.one("SELECT status,decision FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],))
+    assert pending == {"status": "asked", "decision": ""}
+
+    ctx.jira.recent_comment_data[key].append({
+        "account_id": ctx.jira.jira_account_id,
+        "created": (question_created + timedelta(seconds=1)).isoformat(),
+        "body": "Use 14 days.",
+    })
+    answer = esc.owner_answered_on_ticket(ctx, key)
+    assert answer and answer["answer"] == "Use 14 days."
+
+
+def test_grouped_owner_answer_recovers_full_emitted_question_after_timestamp_gap(ctx):
+    source_key, key = "TESTWP-336", "TESTWP-337"
+    question = "Should refunds be available for 14 days or 30 days?"
+    why, options, recommended = "Refund policy choice", ["14 days", "30 days"], "30 days"
+    add_ticket(ctx.db, source_key, status="Needs owner")
+    add_ticket(ctx.db, key, status="Needs owner")
+    original = esc.ask(ctx, source_key, "TESTWP", question, why, options, recommended,
+                       "Refund period", ["refund", "period"])
+    joined = esc.ask(ctx, key, "TESTWP", question, why, options, recommended,
+                     "Refund period", ["refund", "period"])
+    assert joined["action"] == "waiting"
+    decision_id = original["decision"]["id"]
+    run_id = "triage-grouped-question-timestamp-gap"
+    esc.record(ctx.db, key, "TESTWP", "triage", run_id, esc.BUSINESS, question, "policy choice", "person",
+               decision_id, reached_person=True)
+    escalation_created = ctx.db.one("SELECT created_at FROM escalations WHERE ticket_key=%s", (key,))["created_at"]
+
+    row = esc.escalation_repository.pending_owner_decisions(ctx.db, key)[0]
+    assert row["grouped"] is True
+    comment = triage.owner_question_comment(question, options, recommended, grouped=True)
+    assert esc._owner_question_body(row) == comment
+    question_at = escalation_created + timedelta(seconds=1)
+    correlation = esc._correlate_owner_question_body(comment, decision_id)
+    ctx.jira.recent_comment_data[key] = [{
+        "id": "owner-question", "author": "AI Flow", "account_id": "aiflow-control-account",
+        "created": question_at.isoformat(), "body": adf_to_text(text_to_adf(correlation)),
+    }, {
+        "id": "owner-answer", "author": "Owner", "account_id": ctx.jira.jira_account_id,
+        "created": (question_at + timedelta(seconds=1)).isoformat(), "body": "Use 14 days.",
+    }]
+    ctx.jira.status_of[key] = "To Do"
+    ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (key,))
+
+    answer = esc.owner_answered_on_ticket(ctx, key)
+
+    assert answer and answer["answer"] == "Use 14 days."
+    saved = ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))
+    assert saved["question_comment_at"] == question_at
+
+
+def test_missing_jira_question_timestamp_cannot_authorize_an_owner_comment(ctx, monkeypatch):
+    key = "TESTWP-332"
+    question = "Should refunds be available for 14 days or 30 days?"
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    run_id = "triage-missing-question-time"
+    esc.record(ctx.db, key, "TESTWP", "triage", run_id, esc.BUSINESS, question, "policy choice", "person",
+               asked["decision"]["id"], reached_person=True)
+    monkeypatch.setattr(ctx.jira, "comment_with_metadata", lambda _key, _body: {"id": "", "created": ""})
+    comment = triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")
+    with pytest.raises(RuntimeError, match="Jira did not return an owner question comment timestamp"):
+        esc.post_owner_question_comment(ctx, key, asked["decision"]["id"], run_id, comment)
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))[
+        "question_comment_at"] is None
+    ctx.jira.recent_comment_data[key] = [{
+        "account_id": ctx.jira.jira_account_id,
+        "created": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
+        "body": "Owner replied before a timestamp could be recorded.",
+    }]
+    assert esc.owner_answered_on_ticket(ctx, key) is None
+
+
+def test_question_comment_recovers_after_timestamp_failure_with_adf_paragraphs(ctx, monkeypatch):
+    key = "TESTWP-333"
+    question = "Should refunds be available for 14 days or 30 days?"
+    comment = triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    run_id = "triage-comment-timestamp-retry"
+    esc.record(ctx.db, key, "TESTWP", "triage", run_id, esc.BUSINESS, question, "policy choice", "open",
+               asked["decision"]["id"])
+    save = esc.escalation_repository.record_owner_question_comment
+    calls = 0
+
+    def fail_once(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("simulated timestamp persistence failure")
+        return save(*args)
+
+    monkeypatch.setattr(esc.escalation_repository, "record_owner_question_comment", fail_once)
+    with pytest.raises(RuntimeError, match="simulated timestamp persistence failure"):
+        esc.post_owner_question_comment(ctx, key, asked["decision"]["id"], run_id, comment)
+
+    decision_id = asked["decision"]["id"]
+    correlation_body = f"{comment}\n\nAI Flow hand-off: D{decision_id}"
+    ctx.jira.recent_comment_data[key][0]["body"] = adf_to_text(text_to_adf(correlation_body))
+    saved_time = datetime.fromisoformat(ctx.jira.recent_comment_data[key][0]["created"])
+    ctx.jira.recent_comment_data[key].append({
+        "author": "Owner", "account_id": ctx.jira.jira_account_id,
+        "created": (saved_time + timedelta(seconds=1)).isoformat(),
+        "body": adf_to_text(text_to_adf("Use 14 days.")),
+    })
+    retry_run_id = "triage-comment-timestamp-retry-2"
+    ctx.db.run("UPDATE escalations SET run_id=%s WHERE ticket_key=%s AND decision_id=%s",
+               (retry_run_id, key, decision_id))
+    recovered = esc.post_owner_question_comment(ctx, key, decision_id, retry_run_id, comment)
+
+    assert recovered["already_posted"] is True
+    assert len([body for ticket, body in ctx.jira.comments
+                if ticket == key and body == correlation_body]) == 1
+    recorded_time = ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))[
+        "question_comment_at"]
+    assert recorded_time == saved_time
+    answer = esc.owner_answered_on_ticket(ctx, key)
+    assert answer and answer["answer"] == "Use 14 days."
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))[
+        "question_comment_at"] == saved_time
+
+
+def test_question_lookup_failure_never_posts_a_duplicate_comment(ctx, monkeypatch):
+    key = "TESTWP-335"
+    question = "Should refunds be available for 14 days or 30 days?"
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    run_id = "triage-comment-lookup-failure"
+    esc.record(ctx.db, key, "TESTWP", "triage", run_id, esc.BUSINESS, question, "policy choice", "open",
+               asked["decision"]["id"])
+    comment = triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")
+    existing = esc._correlate_owner_question_body(comment, asked["decision"]["id"])
+    original = ctx.jira.comment_with_metadata(key, existing)
+    before = len(ctx.jira.comments)
+
+    def failed_lookup(*_args, **_kwargs):
+        raise OSError("temporary Jira lookup failure")
+
+    monkeypatch.setattr(ctx.jira, "find_comment", failed_lookup)
+    with pytest.raises(RuntimeError, match="Jira owner question lookup failed; retry before posting"):
+        esc.post_owner_question_comment(ctx, key, asked["decision"]["id"], run_id, comment)
+
+    assert len(ctx.jira.comments) == before
+    assert original["id"] == ctx.jira.recent_comment_data[key][0]["id"]
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))[
+        "question_comment_at"] is None
+
+
+def test_question_lookup_with_incomplete_match_metadata_never_posts(ctx, monkeypatch):
+    key = "TESTWP-338"
+    question = "Should refunds be available for 14 days or 30 days?"
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    run_id = "triage-comment-incomplete-lookup"
+    esc.record(ctx.db, key, "TESTWP", "triage", run_id, esc.BUSINESS, question, "policy choice", "open",
+               asked["decision"]["id"])
+    monkeypatch.setattr(ctx.jira, "find_comment", lambda *_args, **_kwargs: {"id": "existing", "created": ""})
+    before = len(ctx.jira.comments)
+
+    with pytest.raises(RuntimeError, match="Jira found the owner question but returned incomplete comment metadata"):
+        esc.post_owner_question_comment(
+            ctx, key, asked["decision"]["id"], run_id,
+            triage.owner_question_comment(question, ["14 days", "30 days"], "30 days"))
+
+    assert len(ctx.jira.comments) == before
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))[
+        "question_comment_at"] is None
+
+
+def test_mismatched_owner_question_is_rejected_before_jira_write_or_timestamp_save(ctx):
+    key = "TESTWP-339"
+    question = "Should refunds be available for 14 days or 30 days?"
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    run_id = "triage-mismatched-question"
+    esc.record(ctx.db, key, "TESTWP", "triage", run_id, esc.BUSINESS, question, "policy choice", "open",
+               asked["decision"]["id"])
+
+    with pytest.raises(LookupError, match="does not match the registered decision"):
+        esc.post_owner_question_comment(ctx, key, asked["decision"]["id"], run_id,
+                                        "AI Flow · owner decision required")
+
+    assert not [body for ticket, body in ctx.jira.comments if ticket == key]
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))[
+        "question_comment_at"] is None
+
+
+def test_jira_find_comment_accepts_the_inclusive_creation_boundary(monkeypatch):
+    jira = object.__new__(Jira)
+    boundary = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(jira, "all_comments", lambda *_args, **_kwargs: [
+        {"id": "old", "created": (boundary - timedelta(seconds=1)).isoformat(), "body": "question"},
+        {"id": "at-boundary", "created": boundary.isoformat(), "body": "question"},
+    ])
+
+    found = jira.find_comment("TESTWP-346", "question", created_after=boundary)
+
+    assert found == {"id": "at-boundary", "created": boundary.isoformat()}
+
+
+def test_older_identical_owner_question_comment_cannot_authorize_current_handoff(ctx):
+    key = "TESTWP-334"
+    question = "Should refunds be available for 14 days or 30 days?"
+    base_comment = triage.owner_question_comment(question, ["14 days", "30 days"], "30 days")
+    add_ticket(ctx.db, key, status="Needs owner")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    run_id = "triage-current-handoff"
+    esc.record(ctx.db, key, "TESTWP", "triage", "retired-handoff", esc.BUSINESS, question,
+               "older policy choice", "retired", asked["decision"]["id"], reached_person=True)
+    esc.record(ctx.db, key, "TESTWP", "triage", run_id, esc.BUSINESS, question, "policy choice", "person",
+               asked["decision"]["id"], reached_person=True)
+    now = datetime.now(timezone.utc)
+    old_question_at = now - timedelta(minutes=3)
+    old_answer_at = now - timedelta(minutes=2)
+    escalation_created = ctx.db.one("SELECT created_at FROM escalations WHERE ticket_key=%s", (key,))["created_at"]
+    current_question_at = escalation_created + timedelta(seconds=1)
+    ctx.jira.recent_comment_data[key] = [{
+        "account_id": ctx.jira.jira_account_id,
+        "created": old_answer_at.isoformat(),
+        "body": "Use 14 days.",
+    }, {
+        "account_id": "aiflow-control-account",
+        "created": old_question_at.isoformat(),
+        "body": base_comment,
+    }, {
+        "account_id": "aiflow-control-account",
+        "created": old_question_at.isoformat(),
+        "body": f"{base_comment}\n\nAI Flow hand-off: D999999",
+    }]
+
+    assert esc.owner_answered_on_ticket(ctx, key) is None
+    assert ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))["question_comment_at"] is None
+    assert ctx.db.one("SELECT status,decision FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],)) == {
+        "status": "asked", "decision": ""}
+
+    ctx.jira.recent_comment_data[key].insert(0, {
+        "account_id": "aiflow-control-account",
+        "created": current_question_at.isoformat(),
+        "body": f"{base_comment}\n\nAI Flow hand-off: D{asked['decision']['id']}",
+    })
+    assert esc.owner_answered_on_ticket(ctx, key) is None
+    saved = ctx.db.one("SELECT question_comment_at FROM escalations WHERE ticket_key=%s", (key,))
+    assert saved["question_comment_at"] == current_question_at
+    assert ctx.db.one("SELECT status,decision FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],)) == {
+        "status": "asked", "decision": ""}
+
+    ctx.jira.recent_comment_data[key].insert(0, {
+        "account_id": ctx.jira.jira_account_id,
+        "created": (current_question_at + timedelta(seconds=1)).isoformat(),
+        "body": "Use 30 days.",
+    })
+    answer = esc.owner_answered_on_ticket(ctx, key)
+    assert answer and answer["answer"] == "Use 30 days."
+
+
+def test_only_triage_run_can_post_an_owner_question_comment(client, ctx):
+    key = "TESTWP-331"
+    add_ticket(ctx.db, key, status="To Do", labels=("aiflow-ready",))
+    headers = node_headers(client, "cc")
+    claim = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01", "step": "dev"},
+                        headers=headers).json()
+    assert claim.get("claimed"), claim
+    response = client.post(f"/v1/escalations/{key}/question-comment", json={
+        "run_id": claim["run_id"], "fence": claim["fence"], "decision_id": 1, "body": "question"},
+        headers=headers)
+    assert response.status_code == 403
+    assert not ctx.jira.comments
+
+
+@pytest.mark.parametrize("comment_kind", ["missing", "collaborator", "aiflow"])
+def test_development_claim_keeps_owner_escalation_blocked_without_verified_owner_comment(client, ctx, comment_kind):
+    key = "TESTWP-329"
+    question = "Should refunds be available for 14 days or 30 days?"
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: refund window", status="Needs owner")
+    ctx.db.run("UPDATE tickets SET labels=%s WHERE key=%s",
+               (["aiflow-ready", "needs-owner", "owner-escalated"], key))
+    ctx.jira.status_of[key] = "Needs owner"
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    esc.record(ctx.db, key, "TESTWP", "triage", "triage-run", esc.BUSINESS, question, "policy choice", "person",
+               asked["decision"]["id"], reached_person=True)
+    esc.post_owner_question_comment(ctx, key, asked["decision"]["id"], "triage-run",
+                                   triage.owner_question_comment(question, ["14 days", "30 days"], "30 days"))
+    comment_time = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    if comment_kind == "collaborator":
+        ctx.jira.recent_comment_data[key] = [{"account_id": "collaborator-account", "created": comment_time,
+                                               "body": "Use 14 days."}]
+    elif comment_kind == "aiflow":
+        ctx.jira.recent_comment_data[key] = [{"account_id": ctx.jira.jira_account_id, "created": comment_time,
+                                               "body": "AI Flow · owner decision required"}]
+
+    # Moving the ticket alone must not let a developer claim the unanswered question.
+    ctx.jira.status_of[key] = "To Do"
+    ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (key,))
+    response = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01", "step": "dev"},
+                           headers=node_headers(client, "cc"))
+
+    assert response.status_code == 409
+    assert response.json() == {"claimed": False, "reason": "not eligible"}
+    assert ctx.jira.status_of[key] == "Needs owner"
+    assert (key, "Needs owner") in ctx.jira.transitions
+    assert ctx.db.one("SELECT status,labels FROM tickets WHERE key=%s", (key,)) == {
+        "status": "Needs owner", "labels": ["aiflow-ready", "needs-owner", "owner-escalated"]}
+    transition = ctx.db.one("SELECT outcome,reason FROM events WHERE ticket=%s AND type='jira.transition'"
+                            " ORDER BY ts DESC LIMIT 1", (key,))
+    assert transition == {"outcome": "Needs owner", "reason": "owner answer required before development"}
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE ticket_key=%s AND step='dev'", (key,))["n"] == 0
+    decision = ctx.db.one("SELECT status,decision FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],))
+    assert decision == {"status": "asked", "decision": ""}
 
 
 def test_non_owner_jira_comment_does_not_answer_an_owner_only_question(ctx):
@@ -477,7 +1197,12 @@ def test_jira_comment_reader_preserves_stable_account_ids_for_owner_checks():
 def test_the_triage_worker_asks_once_with_options_and_does_not_alert_a_second_time(client, ctx, tmp_path, monkeypatch):
     headers = node_headers(client, "node1")
     alerts = []
-    monkeypatch.setattr(notify, "send", lambda severity, title, detail, link, **k: alerts.append(detail) or ["fake"])
+
+    class CaptureSender:
+        def send(self, message):
+            alerts.append(message)
+
+    monkeypatch.setattr(owner_notifications, "sender_for", lambda _settings: CaptureSender())
     answer = ("DECISION: ESCALATE\nCLASS: new_business_decision\nWHY: The refund window is a product decision.\n"
               "OPTIONS:\n- 14 days\n- 30 days\nRECOMMENDED: 30 days\nTOPIC: Refund window\nKEYWORDS: refund, window\n")
     for index, key in enumerate(("TESTWP-80", "TESTWP-81")):
@@ -498,13 +1223,17 @@ def test_the_triage_worker_asks_once_with_options_and_does_not_alert_a_second_ti
         result = triage.run_triage(ApiHarness(client, headers), claimed, str(tmp_path), "http://control.test", 30, [])
         assert result["outcome"] == "escalated"
         comment = ctx.jira.comments[-1][1]
-        assert "Options: 14 days; 30 days" in comment and "Recommended default: 30 days" in comment
+        assert comment.startswith("What is the refund window for customers?")
+        assert "Options:\n- 14 days\n- 30 days" in comment and "Recommended option: 30 days" in comment
+        assert "Answer in a Jira comment, then move the ticket to To Do." in comment
         client.post(f"/v1/runs/{claim['run_id']}/result", json=result, headers=headers)
         client.post(f"/v1/runs/{claim['run_id']}/release", json={"fence": claim["fence"]}, headers=headers)
         if index == 0:
-            assert len(alerts) == 1 and "Options: 14 days" in alerts[0] and "Recommended default: 30 days" in alerts[0]
+            assert len(alerts) == 1
+            assert alerts[0] == (f"What is the refund window for customers?\n"
+                                 f"{ctx.settings.jira_site.rstrip('/')}/browse/TESTWP-80")
     assert len(alerts) == 1  # the second ticket joined the question that was already asked
-    assert "already asked once" in ctx.jira.comments[-1][1]
+    assert "grouped with an existing owner decision" in ctx.jira.comments[-1][1]
     assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE status='asked'")["n"] == 1
 
 
@@ -630,7 +1359,7 @@ def test_failed_jira_amendment_can_be_retried(ctx, monkeypatch):
     assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE kind='amendment' AND ticket_key=%s", (key,))["n"] == 1
 
 
-def test_saved_owner_decision_retries_a_failed_ticket_resume(ctx, monkeypatch):
+def test_persisted_owner_answer_retries_a_failed_ticket_resume(ctx, monkeypatch):
     first_key, second_key = "JOOWP-329", "JOOWP-330"
     export_decision = {**NEW, "topic": "Export format", "keywords": ["export", "format"]}
     for key in (first_key, second_key):
@@ -653,11 +1382,10 @@ def test_saved_owner_decision_retries_a_failed_ticket_resume(ctx, monkeypatch):
         return real_transition(key, target)
 
     monkeypatch.setattr(ctx.jira, "transition_to", fail_second_transition_once)
-    monkeypatch.setattr(ctx.jira, "recent_comments", lambda key, limit=10: [
-        {"body": body} for comment_key, body in ctx.jira.comments if comment_key == key
-    ])
-    answer = esc.answer_decision(ctx, decision_id, "CSV", "owner selected CSV", "owner")
+    answer = esc._store_owner_answer(ctx.db, decision_id, "CSV (owner selected CSV)",
+                                     esc.triage_claim_repository.VERIFIED_JIRA_OWNER_SOURCE)
     assert answer["status"] == "decided" and answer["decision"] == "CSV (owner selected CSV)"
+    esc.resume_waiting(ctx, answer, answer["decision"])
     waiting = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key=%s", (second_key,))
     assert waiting == {"resolution": "resuming", "reached_person": True, "answer": answer["decision"]}
     assert esc.register(ctx.db)["resuming"][0]["resuming_tickets"] == [second_key]
@@ -667,8 +1395,51 @@ def test_saved_owner_decision_retries_a_failed_ticket_resume(ctx, monkeypatch):
     resumed = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key=%s", (second_key,))
     assert resumed == {"resolution": "person", "reached_person": True, "answer": answer["decision"]}
     assert ctx.jira.status_of[second_key] == "To Do"
+    for key in (first_key, second_key):
+        assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (key,))["status"] == "To Do"
+        assert ctx.jira.transitions.count((key, "To Do")) == 1
+        transition = ctx.db.one("SELECT outcome,reason FROM events WHERE ticket=%s AND type='jira.transition'"
+                                " AND outcome='To Do' ORDER BY ts DESC LIMIT 1", (key,))
+        assert transition == {"outcome": "To Do", "reason": "owner answered in Jira after the question comment"}
     assert [body for key, body in ctx.jira.comments if key == second_key].count(
         f"AI Flow · owner decision\nWhat: {export_decision['topic']}\nResult: {answer['decision']}\n"
+        f"Next: back to To Do; the developer continues with {esc.citation(answer)}") == 1
+
+
+def test_owner_resume_repairs_mirror_and_event_after_partial_jira_success(ctx, monkeypatch):
+    key = "JOOWP-333"
+    question = "Should the export default be CSV or JSON?"
+    add_ticket(ctx.db, key, status="Needs owner", labels=("needs-owner", "owner-escalated"))
+    ctx.jira.status_of[key] = "Needs owner"
+    asked = esc.ask(ctx, key, "JOOWP", question, "Choose the default export format.",
+                    ["CSV", "JSON"], "CSV", "Export format", ["export", "format"])
+    esc.record(ctx.db, key, "JOOWP", "triage", "triage-run", esc.BUSINESS, question,
+               "Choose the default export format.", "person", asked["decision"]["id"], reached_person=True)
+    answer = esc._store_owner_answer(ctx.db, asked["decision"]["id"], "CSV",
+                                     esc.triage_claim_repository.VERIFIED_JIRA_OWNER_SOURCE)
+    update_status = esc.ticket_repository.update_status
+    failed = {"once": False}
+
+    def fail_mirror_once(db, ticket, status):
+        if ticket == key and status == "To Do" and not failed["once"]:
+            failed["once"] = True
+            raise RuntimeError("mirror write unavailable")
+        update_status(db, ticket, status)
+
+    monkeypatch.setattr(esc.ticket_repository, "update_status", fail_mirror_once)
+
+    assert esc.resume_waiting(ctx, answer, answer["decision"]) == []
+    assert ctx.jira.status_of[key] == "To Do"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (key,))["status"] == "Needs owner"
+    assert ctx.db.one("SELECT count(*) AS n FROM events WHERE ticket=%s AND type='jira.transition'", (key,))["n"] == 0
+
+    assert esc.retry_resumptions(ctx) == [key]
+    assert ctx.jira.status_of[key] == "To Do"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (key,))["status"] == "To Do"
+    event = ctx.db.one("SELECT outcome,reason FROM events WHERE ticket=%s AND type='jira.transition'", (key,))
+    assert event == {"outcome": "To Do", "reason": "owner answered in Jira after the question comment"}
+    assert [body for ticket, body in ctx.jira.comments if ticket == key].count(
+        "AI Flow · owner decision\nWhat: Export format\nResult: CSV\n"
         f"Next: back to To Do; the developer continues with {esc.citation(answer)}") == 1
 
 
@@ -898,8 +1669,11 @@ def test_command_center_and_weekly_report_show_the_escalation_numbers(client, ct
     report = client.get("/v1/master/report").json()["escalations"]
     assert report["top_causes"][0]["fix"] and report["this_week"]["share_without_person_pct"] == 66.7
     from aiflow.v4.control.ui import __file__ as ui_init
-    page = (Path(ui_init).parent / "console.html").read_text()
-    assert "Escalations and owner decisions" in page and "/v1/escalations" in page and "/v1/decisions/" in page
+    ui_dir = Path(ui_init).parent
+    page = (ui_dir / "console.html").read_text()
+    renderer = (ui_dir / "owner_escalation.js").read_text()
+    assert "Escalations and owner decisions" in renderer and "/console-assets/owner-escalation.js" in page
+    assert "/v1/escalations" in page and "/v1/decisions/" in page
     client.cookies.clear()
     assert client.get("/v1/escalations").status_code == 401
 

@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 from . import environment as environment_reports
-from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
+from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, owner_notifications, role_health, tooling
 from . import flow_doctor
 from . import run_inbox as run_inbox_lifecycle
 from . import system_check
@@ -563,6 +563,7 @@ def run_loops(ctx: ApplicationContext, stop: threading.Event | None = None) -> N
             if now - last_wd >= 15 and ctx.leases.leader("watchdog", OWNER, 45_000):
                 watchdog(ctx)
                 escalations.retry_resumptions(ctx)
+                owner_notifications.process_pending(ctx)
                 notify.process_retries(ctx)
                 notify.send_scheduled_summaries(ctx)
                 last_wd = now

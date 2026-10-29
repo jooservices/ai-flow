@@ -44,6 +44,8 @@ def decision_answer(decision_id: int, body: OwnerDecisionAnswerBody, request: Re
     user = route_deps.console_user_for(request, "console.write", target="escalations", action="decision-answer")
     try:
         row = escalations.answer_decision(ctx, decision_id, body.choice, body.note, user.subject)
+    except escalations.JiraOwnerAnswerRequired as exc:
+        raise HTTPException(409, str(exc)) from None
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from None
     route_deps.audit(ctx, "escalation", "decision-answer", row["ticket_key"], "", None, user.subject, True,
@@ -55,7 +57,10 @@ def decision_answer(decision_id: int, body: OwnerDecisionAnswerBody, request: Re
 def decision_retire(decision_id: int, request: Request) -> dict:
     ctx = route_deps.context(request)
     user = route_deps.console_user_for(request, "console.write", target="escalations", action="decision-retire")
-    row = escalations.retire_decision(ctx.db, decision_id)
+    try:
+        row = escalations.retire_decision(ctx.db, decision_id)
+    except escalations.JiraOwnerAnswerRequired as exc:
+        raise HTTPException(409, str(exc)) from None
     if not row:
         raise HTTPException(404, "unknown decision")
     route_deps.audit(ctx, "escalation", "decision-retire", "", "", None, user.subject, True, f"D{row['id']} {row['title']}",

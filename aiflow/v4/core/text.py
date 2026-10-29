@@ -81,6 +81,11 @@ def text_to_adf(text: str) -> dict:
     return {"type": "doc", "version": 1, "content": content or [{"type": "paragraph", "content": []}]}
 
 
+def normalize_adf_text(text: str) -> str:
+    """Normalize plain text to the same paragraph boundaries Jira returns after an ADF round trip."""
+    return adf_to_text(text_to_adf(str(text or "")))
+
+
 def slug(text: str, max_len: int = 40) -> str:
     """ASCII kebab-case for branch names: 'Thêm trang Portfolio!' -> 'them-trang-portfolio'."""
     norm = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()

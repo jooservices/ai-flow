@@ -47,7 +47,8 @@ def ids(blocks: list[dict]) -> list[str]:
 def test_every_block_of_the_registry_is_marked_in_the_console_and_the_other_way_round():
     html = PAGE.read_text()
     doctor_asset = (PAGE.parent / "flow-doctor.js").read_text()
-    marked = set(re.findall(r'data-block="([a-z-]+)"', html + doctor_asset))
+    escalation_asset = (PAGE.parent / "owner_escalation.js").read_text()
+    marked = set(re.findall(r'data-block="([a-z-]+)"', html + doctor_asset + escalation_asset))
     registered = {block for _, blocks in layouts.PAGES.values() for block, _, _ in blocks}
     # Work board reuses the Delivery board markup; it has no layout of its own.
     assert marked == registered

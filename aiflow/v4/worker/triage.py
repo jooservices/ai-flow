@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..core import work_limits
 from ..adapters import RunSpec, get_adapter
+from ..core.owner_escalation import owner_question_comment
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
 from .gitops import Git
@@ -31,7 +32,8 @@ def build_prompt(c: Claimed) -> str:
             comments.append(f"- {item}")
     prompt = tpl.format(key=c.ticket["key"], project=c.ticket["project"], summary=c.ticket["summary"],
                       description=c.ticket.get("description") or "(no description)", base=c.project["base"],
-                      repo=c.project["repo"], question=c.last_dev_summary or "(no summary recorded)",
+                      repo=c.project["repo"],
+                      question=c.triage_question or c.last_dev_summary or "(no summary recorded)",
                       verify_findings=c.verify_findings or "(none)",
                       register="\n".join(f"- D{d['id']} {d['title']}: {d['decision']}" for d in c.owner_register)
                       or "(empty)", escalation_class=c.escalation_class or "not classified",
@@ -90,6 +92,124 @@ def safe_directory_env(path: Path) -> dict[str, str]:
     return {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": str(path)}
 
 
+def _jira(api: ControlClient, c: Claimed, key: str, path: str, **body) -> dict:
+    return api.call("POST", f"/v1/jira/{key}/{path}", {"run_id": c.run_id, "fence": c.fence, **body})
+
+
+def _post_comment(api: ControlClient, c: Claimed, key: str, text: str, owner_decision_id: int | None = None) -> None:
+    if owner_decision_id is None:
+        _jira(api, c, key, "comment", body=text)
+    else:
+        api.call("POST", f"/v1/escalations/{key}/question-comment", {
+            "run_id": c.run_id, "fence": c.fence, "decision_id": owner_decision_id, "body": text})
+    if c.pr and c.pr.get("number"):
+        try:
+            api.call("POST", "/v1/github/comment", {"run_id": c.run_id, "fence": c.fence,
+                                                      "number": c.pr["number"], "body": text})
+        except Exception as exc:  # noqa: BLE001 - the Jira hand-off must survive an optional PR comment failure
+            log.warning("optional triage PR comment failed error=%s", type(exc).__name__)
+
+
+def _apply_decision(api: ControlClient, c: Claimed, decision: dict, head: str, t0: float,
+                    result: dict) -> dict:
+    key, question = c.ticket["key"], c.triage_question or c.last_dev_summary or "See the last dev run"
+    reviewer_question = c.last_dev_summary.startswith("Reviewer question:")
+    result["details"] = {"decision": decision["decision"], "answer": decision["answer"],
+                         "why": decision["why"], "exit_code": result.get("exit_code"),
+                         "duration_s": result.get("duration_s"), "log": result.get("log"),
+                         "base": c.project["base"], "head_sha": head, "class": decision["class"]}
+    if reviewer_question and decision["decision"] == "ANSWER":
+        answer_note = note(c, "answered reviewer question", what=f"The question was: {question}",
+                           why=decision["why"], result=decision["answer"],
+                           next_="Back to Human review; the reviewer can continue with the answer",
+                           t0=t0, node=api_node(api))
+        _post_comment(api, c, key, answer_note)
+        _jira(api, c, key, "transition", to="Human review")
+        result.update(outcome="answered", summary=decision["answer"][:1000])
+        return result
+
+    verdict = api.call("POST", "/v1/escalations/triage", {
+        "run_id": c.run_id, "fence": c.fence, "decision": decision["decision"], "question": question,
+        "answer": decision["answer"], "why": decision["why"], "escalation_class": decision["class"],
+        "options": decision["options"], "recommended": decision["recommended"], "topic": decision["topic"],
+        "keywords": decision["keywords"], "criterion": decision["criterion"], "narrowed": decision["narrowed"]})
+    action = verdict["action"]
+    result["details"].update(action=action, escalation_class=verdict.get("class", ""))
+    if action == "refused":
+        result["summary"] = f"triage decision refused: {verdict.get('reason', '')}"[:1000]
+        return result
+    if action == "answered":
+        comment = note(c, "answered developer question", what=f"The question was: {question}",
+                       why=decision["why"], result=decision["answer"],
+                       next_="Back to To Do; development can continue with this answer", t0=t0, node=api_node(api))
+        _post_comment(api, c, key, comment)
+        _jira(api, c, key, "transition", to="To Do")
+        result.update(outcome="answered", summary=decision["answer"][:1000])
+    elif action in ("applied", "amended"):
+        if action == "applied":
+            outcome_text = verdict.get("answer", "")
+            headline, why = "answered from the owner decision register", f"{verdict['citation']} already covers this question"
+        else:
+            outcome_text = (f"{verdict['summary']}: the criterion cannot be met in this environment. "
+                            f"{decision['why']} The amendment is on the ticket and in the owner register.")
+            headline, why = "criterion amended", f"{verdict['citation']}; it appears in the weekly report for review"
+        comment = note(c, headline, what=f"The question was: {question}", why=why, result=outcome_text,
+                       next_="Back to To Do; development continues, no one is blocked", t0=t0, node=api_node(api))
+        _post_comment(api, c, key, comment)
+        _jira(api, c, key, "transition", to="To Do")
+        result.update(outcome="answered", summary=outcome_text[:1000])
+    else:
+        _post_comment(api, c, key, owner_question_comment(question, verdict.get("options") or [],
+                                                           verdict.get("recommended", ""),
+                                                           grouped=bool(verdict.get("grouped"))),
+                      owner_decision_id=verdict["decision_id"])
+        api.call("POST", "/v1/notify/triage", {
+            "run_id": c.run_id, "fence": c.fence, "decision_id": verdict["decision_id"]})
+        _jira(api, c, key, "fields", add_labels=["needs-owner", "owner-escalated"])
+        api.call("POST", f"/v1/escalations/{key}/complete-handoff", {
+            "run_id": c.run_id, "fence": c.fence, "decision_id": verdict["decision_id"]})
+        result.update(outcome="escalated", summary=decision["why"][:1000])
+    return result
+
+
+def _adapter_result(api: ControlClient, c: Claimed, heartbeat: Heartbeat, response, head: str,
+                    started_at: float, result: dict) -> dict:
+    result.update(tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
+                  quota=response.quota,
+                  quota_observed_at=(response.quota_observed_at.isoformat()
+                                     if getattr(response, "quota_observed_at", None) else None),
+                  error_kind=response.error_kind,
+                  reset_at=response.reset_at.isoformat() if response.reset_at else None, head_sha=head)
+    if heartbeat.lost.is_set():
+        raise LeaseLost()
+    if response.error_kind in ("quota", "auth"):
+        result.update(outcome="quota", summary=f"triage account {c.account} cannot work now ({response.error_kind})")
+        return result
+    if response.error_kind:
+        outcome = "timeout" if response.error_kind == "timeout" else "failed"
+        result.update(outcome=outcome, error_kind=response.error_kind,
+                      summary=f"triage stopped before a decision ({response.error_kind}): "
+                              f"{response.error_message[:400]}")
+        return result
+    decision = parse_decision(response.final_text or "")
+    if not decision:
+        result["summary"] = "triage returned no valid DECISION: ANSWER or DECISION: ESCALATE response"
+        result["details"] = {"decision": "", "output": (response.final_text or "")[-1500:],
+                             "exit_code": response.exit_code, "log": response.log_path}
+        return result
+    result.update(exit_code=response.exit_code, duration_s=int(response.duration_s), log=response.log_path)
+    return _apply_decision(api, c, decision, head, started_at, result)
+
+
+def _remove_triage_checkout(git: Git, mirror: Path | None, worktree: Path, ticket: str) -> None:
+    if mirror is None or not worktree.exists():
+        return
+    try:
+        git.remove_worktree(mirror, worktree)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not remove triage checkout %s: %s", ticket, exc)
+
+
 def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,
                run_as: list[str]) -> dict:
     key, project = c.ticket["key"], c.project
@@ -100,9 +220,6 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
     result: dict = {"fence": c.fence, "outcome": "failed"}
     mirror: Path | None = None
     wt = Path(srv_root) / "work" / project["key"] / f"{key}--triage-{c.run_id}"
-
-    def jira(path: str, **body) -> dict:
-        return api.call("POST", f"/v1/jira/{key}/{path}", {"run_id": c.run_id, "fence": c.fence, **body})
 
     try:
         credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
@@ -129,100 +246,7 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                            "elapsed_s": int(time.time() - t0)}
 
         res = run_with_inbox(adapter, spec, hb, on_progress)
-        result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
-                      quota_observed_at=(getattr(res, "quota_observed_at", None).isoformat()
-                                         if getattr(res, "quota_observed_at", None) else None),
-                      error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
-                      head_sha=head)
-        if hb.lost.is_set():
-            raise LeaseLost()
-        if res.error_kind in ("quota", "auth"):
-            result.update(outcome="quota", summary=f"triage account {c.account} cannot work now ({res.error_kind})")
-            return result
-        if res.error_kind:
-            outcome = "timeout" if res.error_kind == "timeout" else "failed"
-            result.update(outcome=outcome, error_kind=res.error_kind,
-                          summary=f"triage stopped before a decision ({res.error_kind}): {res.error_message[:400]}")
-            return result
-        decision = parse_decision(res.final_text or "")
-        if not decision:
-            result["summary"] = "triage returned no valid DECISION: ANSWER or DECISION: ESCALATE response"
-            result["details"] = {"decision": "", "output": (res.final_text or "")[-1500:],
-                                 "exit_code": res.exit_code, "log": res.log_path}
-            return result
-
-        result["details"] = {"decision": decision["decision"], "answer": decision["answer"],
-                             "why": decision["why"], "exit_code": res.exit_code,
-                             "duration_s": int(res.duration_s), "log": res.log_path,
-                             "base": project["base"], "head_sha": head, "class": decision["class"]}
-        question = c.last_dev_summary or "See the last dev run"
-        reviewer_question = c.last_dev_summary.startswith("Reviewer question:")
-
-        def post(text: str) -> None:
-            jira("comment", body=text)
-            if c.pr and c.pr.get("number"):
-                api.call("POST", "/v1/github/comment", {"run_id": c.run_id, "fence": c.fence,
-                                                          "number": c.pr["number"], "body": text, "kind": "triage"})
-
-        if reviewer_question and decision["decision"] == "ANSWER":  # a reviewer's question is not an escalation
-            answer_note = note(c, "answered reviewer question", what=f"The question was: {question}",
-                               why=decision["why"], result=decision["answer"],
-                               next_="Back to Human review; the reviewer can continue with the answer",
-                               t0=t0, node=api_node(api))
-            post(answer_note)
-            jira("transition", to="Human review")
-            result.update(outcome="answered", summary=decision["answer"][:1000])
-            return result
-
-        # the register decides what happens: a decision already taken is applied, a criterion is amended, a new
-        # kind of decision is asked once with its options, and a class that never needs a person is refused
-        verdict = api.call("POST", "/v1/escalations/triage", {
-            "run_id": c.run_id, "fence": c.fence, "decision": decision["decision"], "question": question,
-            "answer": decision["answer"], "why": decision["why"], "escalation_class": decision["class"],
-            "options": decision["options"], "recommended": decision["recommended"], "topic": decision["topic"],
-            "keywords": decision["keywords"], "criterion": decision["criterion"], "narrowed": decision["narrowed"]})
-        action = verdict["action"]
-        result["details"].update(action=action, escalation_class=verdict.get("class", ""))
-        if action == "refused":
-            result["summary"] = f"triage decision refused: {verdict.get('reason', '')}"[:1000]
-            return result
-        if action == "answered":
-            post(note(c, "answered developer question", what=f"The question was: {question}",
-                      why=decision["why"], result=decision["answer"],
-                      next_="Back to To Do; development can continue with this answer", t0=t0, node=api_node(api)))
-            jira("transition", to="To Do")
-            result.update(outcome="answered", summary=decision["answer"][:1000])
-        elif action in ("applied", "amended"):
-            if action == "applied":
-                outcome_text = verdict.get("answer", "")
-                headline, why = "answered from the owner decision register", f"{verdict['citation']} already covers this question"
-            else:
-                outcome_text = (f"{verdict['summary']}: the criterion cannot be met in this environment. "
-                                f"{decision['why']} The amendment is on the ticket and in the owner register.")
-                headline, why = "criterion amended", f"{verdict['citation']}; it appears in the weekly report for review"
-            post(note(c, headline, what=f"The question was: {question}", why=why, result=outcome_text,
-                      next_="Back to To Do; development continues, no one is blocked", t0=t0, node=api_node(api)))
-            jira("transition", to="To Do")
-            result.update(outcome="answered", summary=outcome_text[:1000])
-        else:
-            options = "; ".join(verdict.get("options") or [])
-            if action == "waiting":
-                post(note(c, "waiting for the owner decision", what=f"The question was: {question}",
-                          why=f"The same question was already asked once: {verdict['citation']}. It is not sent again.",
-                          result=f"Options: {options}. Recommended default: {verdict.get('recommended', '')}",
-                          next_="The ticket continues when the owner answers that question", t0=t0, node=api_node(api)))
-            else:
-                post(note(c, "owner decision required", what=f"The question was: {question}",
-                          why=f"{decision['why']} ({verdict['citation']})",
-                          result=f"Options: {options}. Recommended default: {verdict.get('recommended', '')}",
-                          next_="The owner decides in Command Center (or comments on the ticket); the answer becomes a "
-                                "register entry and is applied from then on", t0=t0, node=api_node(api)))
-                api.call("POST", "/v1/notify/triage", {
-                    "run_id": c.run_id, "fence": c.fence,
-                    "detail": f"{decision['why']}\nOptions: {options}\nRecommended default: {verdict.get('recommended', '')}"})
-            jira("fields", add_labels=["owner-escalated"])
-            result.update(outcome="escalated", summary=decision["why"][:1000])
-        return result
+        return _adapter_result(api, c, hb, res, head, t0, result)
     except LeaseLost:
         result.update(outcome="lost", summary="lease lost during triage; stopped without writing")
         return result
@@ -235,8 +259,4 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         return result
     finally:
         hb.stop.set()
-        if mirror is not None and wt.exists():
-            try:
-                git.remove_worktree(mirror, wt)
-            except Exception as e:  # noqa: BLE001
-                log.warning("could not remove triage checkout %s: %s", key, e)
+        _remove_triage_checkout(git, mirror, wt, key)

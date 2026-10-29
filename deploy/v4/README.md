@@ -51,6 +51,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Isolated WordPress test sites](../../docs/v4/wordpress-runs.md): WordPress dev and verify runs get a seeded PHP 8.3 site on a per-run Podman network, with browser environment and cleanup
 - [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy
 - [Only real business decisions reach a person](../../docs/v4/escalations.md): every escalation is classified, an owner decision register is applied and cited, a new decision is asked once with options, unreachable criteria are amended, refusals explain the allowed alternative, the failing CI log tail is available, and Command Center shows the weekly numbers
+- [Owner escalation messages](../../docs/v4/owner-escalation.md): question-first Jira comments, the `needs-owner` label, comment-and-move-to-To-Do answers, optional SMTP or Telegram delivery, and one grouped message per hour
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
 - [Control API audit against the HTTP standard](../../docs/v4/api-rest-audit.md): every route with its findings and a proposed resource-oriented design, kept complete by a test
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions

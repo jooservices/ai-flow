@@ -361,6 +361,29 @@ def test_gate_lets_node_tokens_through_on_token_routes(ctx):
     assert client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers).status_code != 401
 
 
+def test_owner_handoff_routes_are_node_bearer_authenticated_when_login_is_enabled(ctx):
+    client = make_client(ctx, gate=True)
+    joined = join_node(client, "node-owner-handoff")
+    assert joined.status_code == 200
+    valid_headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+    invalid_headers = {"Authorization": "Bearer invalid-node-token"}
+    run_id = "00000000-0000-0000-0000-000000000001"
+    routes = [
+        ("/v1/escalations/TESTWP-1/question-comment",
+         {"run_id": run_id, "fence": 1, "decision_id": 1, "body": "Should this remain?"}),
+        ("/v1/escalations/TESTWP-1/complete-handoff",
+         {"run_id": run_id, "fence": 1, "decision_id": 1}),
+        ("/v1/notify/triage", {"run_id": run_id, "fence": 1, "decision_id": 1}),
+    ]
+    for path, body in routes:
+        unauthenticated = client.post(path, json=body)
+        rejected = client.post(path, json=body, headers=invalid_headers)
+        authenticated = client.post(path, json=body, headers=valid_headers)
+        assert unauthenticated.status_code == 401 and unauthenticated.json()["detail"] == "sign in required"
+        assert rejected.status_code == 401 and rejected.json()["detail"] == "unknown node token"
+        assert authenticated.status_code == 404 and authenticated.json()["detail"] == "unknown run"
+
+
 def test_policy_decide_with_a_bearer_header_passes_the_gate(ctx):
     client = make_client(ctx, gate=True)
     body = {"tool_name": "Bash", "tool_input": {"command": "ls"}}

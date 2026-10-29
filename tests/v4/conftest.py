@@ -23,6 +23,7 @@ from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.fencing import Leases
 from aiflow.v4.core.settings import Settings
 from aiflow.v4.core import secretbox
+from aiflow.v4.core.text import normalize_adf_text
 
 REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "")
 DATABASE_URL = os.environ.get("AIFLOW4_TEST_DATABASE_URL", "")
@@ -216,11 +217,39 @@ class FakeJira:
         return self.status_of.get(key, "To Do")
 
     def comment(self, key: str, text: str) -> str:
+        return self.comment_with_metadata(key, text)["id"]
+
+    def comment_with_metadata(self, key: str, text: str) -> dict[str, str]:
+        from datetime import datetime, timezone
+
         self.comments.append((key, text))
-        return str(len(self.comments))
+        created = datetime.now(timezone.utc).isoformat()
+        self.recent_comment_data.setdefault(key, []).insert(
+            0, {"id": str(len(self.comments)), "account_id": "aiflow-control-account", "created": created, "body": text})
+        return {"id": str(len(self.comments)), "created": created}
 
     def recent_comments(self, key: str, limit: int = 10) -> list[dict]:
         return self.recent_comment_data.get(key, [])[:limit]
+
+    def all_comments(self, key: str, page_size: int = 100) -> list[dict]:
+        return list(self.recent_comment_data.get(key, []))
+
+    def find_comment(self, key: str, text: str, limit: int = 100, created_after=None) -> dict[str, str] | None:
+        from datetime import datetime, timezone
+
+        def matches(comment):
+            if normalize_adf_text(str(comment.get("body") or "")) != normalize_adf_text(text):
+                return False
+            if created_after is None:
+                return True
+            try:
+                created = datetime.fromisoformat(str(comment.get("created") or "").replace("Z", "+00:00"))
+                return created.astimezone(timezone.utc) >= created_after.astimezone(timezone.utc)
+            except ValueError:
+                return False
+
+        found = next((comment for comment in self.recent_comment_data.get(key, []) if matches(comment)), None)
+        return {"id": str(found.get("id") or ""), "created": str(found.get("created") or "")} if found else None
 
     def current_account_id(self) -> str:
         return self.jira_account_id

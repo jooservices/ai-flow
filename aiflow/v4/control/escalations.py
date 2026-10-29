@@ -27,9 +27,14 @@ from typing import Any
 
 from ..core import blocker_kind, technical_decision
 from ..core.environment import is_server_question
-from ..core.text import slug
+from ..core.owner_escalation import owner_question_comment
+from ..core.text import normalize_adf_text, slug
 from . import tooling
-from .db import J
+from . import ticket_lifecycle
+from .repositories import escalations as escalation_repository
+from .repositories import nodes as node_repository
+from .repositories import tickets as ticket_repository
+from .repositories import triage_claim as triage_claim_repository
 from ..core.toolchains import parse_missing_requirements
 
 log = logging.getLogger("aiflow4.escalations")
@@ -63,6 +68,10 @@ FIXES = {
     IRREVERSIBLE: "Keep releases, tags and production changes with the owner; nothing to fix.",
 }
 ACTIVE_WINDOW_WEEKS = 8
+
+
+class JiraOwnerAnswerRequired(LookupError):
+    """A ticket-linked owner question must be answered on Jira so its comment can be verified."""
 
 
 @dataclass
@@ -148,8 +157,7 @@ def _search(pattern: str, text: str) -> bool:
 
 def match_decision(db, text: str, project: str = "", status: str = "decided") -> dict | None:
     """The first register entry of the given status whose pattern matches the question text."""
-    rows = db.all("SELECT * FROM owner_decisions WHERE kind='decision' AND status=%s AND (project='' OR project=%s)"
-                  " ORDER BY id", (status, project))
+    rows = escalation_repository.decision_candidates(db, status, project)
     for row in rows:
         if any(_search(p, text) for p in row["patterns"] or []):
             return row
@@ -222,7 +230,7 @@ def citation(decision: dict) -> str:
 
 
 def cite(db, decision: dict) -> str:
-    db.run("UPDATE owner_decisions SET cited_count=cited_count+1, last_cited_at=now() WHERE id=%s", (decision["id"],))
+    escalation_repository.increment_citation(db, decision["id"])
     return citation(decision)
 
 
@@ -247,7 +255,7 @@ def normalize_question(text: str) -> str:
 def unique_topic(db, base: str) -> str:
     base = slug(base)[:36] or "decision"
     topic, n = base, 1
-    while db.one("SELECT 1 AS x FROM owner_decisions WHERE topic=%s", (topic,)):
+    while escalation_repository.topic_exists(db, topic):
         n += 1
         topic = f"{base}-{n}"
     return topic
@@ -261,9 +269,7 @@ def add_decision(db, title: str, decision: str, keywords: list[str] | None = Non
         re.compile(p)  # a bad pattern is refused with re.error, never stored
     patterns = patterns or keyword_patterns(keywords or [], title)
     topic = unique_topic(db, title)
-    return db.one("INSERT INTO owner_decisions (topic,title,question,decision,patterns,project,source,decided_by,decided_at)"
-                  " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,now()) RETURNING *",
-                  (topic, title[:200], question[:2000], decision[:3000], J(patterns), project, source, by))
+    return escalation_repository.insert_decision(db, topic, title, question, decision, patterns, project, source, by)
 
 
 def ask(ctx, ticket: str, project: str, text: str, why: str, options: list[str], recommended: str, topic: str,
@@ -274,119 +280,124 @@ def ask(ctx, ticket: str, project: str, text: str, why: str, options: list[str],
     db = ctx.db
     full = f"{text}\n{why}"
     question_key = normalize_question(text)
-    with db.pool.connection() as connection:
-        with connection.transaction():
-            # A single short critical section protects the normalized-question lookup and insert across control
-            # workers. Generated topics and keyword patterns can change between triage runs.
-            connection.execute("SELECT pg_advisory_xact_lock(255, 255)")
-            locked_db = _ConnectionQueries(connection)
-            decided_question = (locked_db.one(
-                "SELECT * FROM owner_decisions WHERE kind='decision' AND status='decided' "
-                "AND question_key=%s AND (project='' OR project=%s) ORDER BY id LIMIT 1",
-                (question_key, project)) if question_key else None)
-            if decided_question:
-                return {"action": "applied", "decision": decided_question,
-                        "citation": cite(locked_db, decided_question)}
-            decided = match_decision(locked_db, full, project)
-            if decided:
-                return {"action": "applied", "decision": decided, "citation": cite(locked_db, decided)}
-            pending = (locked_db.one("SELECT * FROM owner_decisions WHERE kind='decision' AND status='asked' "
-                                     "AND question_key=%s AND (project='' OR project=%s) ORDER BY id LIMIT 1",
-                                     (question_key, project)) if question_key else None)
-            pending = pending or match_decision(locked_db, full, project, "asked") or locked_db.one(
-                "SELECT * FROM owner_decisions WHERE status='asked' AND %s = ANY(waiting_tickets)", (ticket,))
-            if pending:
-                locked_db.run("UPDATE owner_decisions SET waiting_tickets=CASE WHEN %s = ANY(waiting_tickets) THEN waiting_tickets"
-                              " ELSE array_append(waiting_tickets,%s) END WHERE id=%s", (ticket, ticket, pending["id"]))
-                return {"action": "waiting", "decision": pending,
-                        "citation": f"Question D{pending['id']} \"{pending['title']}\""}
-            cleaned_options = [o.strip() for o in options if o.strip()]
-            if recommended and recommended not in cleaned_options:
-                cleaned_options.append(recommended)
-            row = locked_db.one(
-                "INSERT INTO owner_decisions (topic,title,question,options,recommended,patterns,project,status,source,"
-                "ticket_key,waiting_tickets,question_key) VALUES (%s,%s,%s,%s,%s,%s,%s,'asked','ask',%s,%s,%s) RETURNING *",
-                (unique_topic(locked_db, topic or why[:60]), (topic or why)[:200], f"{text}\n{why}".strip()[:3000],
-                 J(cleaned_options), recommended[:500], J(keyword_patterns(keywords, topic or why)), "", ticket, [ticket],
-                 question_key))
-            return {"action": "asked", "decision": row, "citation": f"Question D{row['id']} \"{row['title']}\""}
+    with escalation_repository.owner_decision_transaction(db) as connection:
+        return _ask_locked(connection, ticket, project, text, why, options, recommended, topic,
+                            keywords, full, question_key)
 
 
-class _ConnectionQueries:
-    """Small DB facade for queries that must participate in one psycopg transaction."""
+def _ask_locked(db, ticket: str, project: str, text: str, why: str, options: list[str],
+                recommended: str, topic: str, keywords: list[str], full: str, question_key: str) -> dict:
+    decided = _decided_question(db, full, project, question_key)
+    if decided:
+        return {"action": "applied", "decision": decided, "citation": cite(db, decided)}
+    pending = _pending_question(db, ticket, full, project, question_key)
+    if pending:
+        _validate_owner_question_handoff(text, pending.get("options") or [], pending.get("recommended") or "")
+        escalation_repository.add_waiting_ticket(db, pending["id"], ticket)
+        return {"action": "waiting", "decision": pending,
+                "citation": f"Question D{pending['id']} \"{pending['title']}\""}
+    return _insert_asked_question(db, ticket, text, why, options, recommended, topic, keywords, question_key)
 
-    def __init__(self, connection) -> None:
-        self.connection = connection
 
-    def all(self, sql: str, params: Any = None) -> list[dict]:
-        return list(self.connection.execute(sql, params).fetchall())
+def _decided_question(db, full: str, project: str, question_key: str) -> dict | None:
+    exact = escalation_repository.decision_by_question_key(db, "decided", question_key, project)
+    return exact or match_decision(db, full, project)
 
-    def one(self, sql: str, params: Any = None) -> dict | None:
-        return self.connection.execute(sql, params).fetchone()
 
-    def run(self, sql: str, params: Any = None) -> int:
-        return self.connection.execute(sql, params).rowcount
+def _pending_question(db, ticket: str, full: str, project: str, question_key: str) -> dict | None:
+    exact = escalation_repository.decision_by_question_key(db, "asked", question_key, project)
+    return (exact or match_decision(db, full, project, "asked")
+            or escalation_repository.pending_decision_for_ticket(db, ticket))
+
+
+def _validate_owner_question_handoff(question: str, options: list[str], recommended: str) -> None:
+    owner_question_comment(question, options, recommended)
+    owner_question_comment(question, options, recommended, grouped=True)
+
+
+def _insert_asked_question(db, ticket: str, text: str, why: str, options: list[str], recommended: str,
+                           topic: str, keywords: list[str], question_key: str) -> dict:
+    if not isinstance(options, list) or any(not isinstance(option, str) for option in options):
+        raise ValueError("owner question options must be a list of strings")
+    if not isinstance(recommended, str):
+        raise ValueError("owner question recommendation must be a string")
+    cleaned_options = [option.strip() for option in options if option.strip()]
+    recommended = recommended.strip()
+    if recommended and recommended not in cleaned_options:
+        cleaned_options.append(recommended)
+    _validate_owner_question_handoff(text, cleaned_options, recommended)
+    row = escalation_repository.insert_asked_decision(
+        db, unique_topic(db, topic or why[:60]), topic or why, f"{text}\n{why}".strip(), cleaned_options,
+        recommended, keyword_patterns(keywords, topic or why), ticket, question_key)
+    return {"action": "asked", "decision": row, "citation": f"Question D{row['id']} \"{row['title']}\""}
 
 
 def resume_waiting(ctx, decision: dict, text: str, skip_ticket: str = "") -> list[str]:
     """Resume persisted owner answers. A failed Jira write leaves a `resuming` escalation for the next retry."""
+    if not _verified_jira_answer_for_tickets(ctx, decision):
+        return []
+    return _resume_waiting_tickets(ctx, decision, text, skip_ticket)
+
+
+def _resume_waiting_tickets(ctx, decision: dict, text: str, skip_ticket: str) -> list[str]:
     resumed = []
-    pending = ctx.db.all("SELECT DISTINCT ticket_key FROM escalations WHERE decision_id=%s AND resolution='resuming'"
-                         " ORDER BY ticket_key", (decision["id"],))
+    pending = escalation_repository.resuming_tickets(ctx.db, decision["id"])
     keys = [row["ticket_key"] for row in pending]
     if not keys:  # compatibility for callers that have not yet persisted a resumption
         keys = list(decision.get("waiting_tickets") or [])
     for key in keys:
         try:
-            if key != skip_ticket:
-                ctx.jira.remove_label(key, "owner-escalated")
-                ctx.db.run("UPDATE tickets SET labels=array_remove(labels,'owner-escalated') WHERE key=%s", (key,))
-                comment = (f"AI Flow · owner decision\nWhat: {decision['title']}\nResult: {text}\n"
-                           f"Next: back to To Do; the developer continues with {citation(decision)}")
-                try:
-                    comments = ctx.jira.recent_comments(key, limit=100)
-                except Exception:  # noqa: BLE001 - comment history is only a duplicate guard
-                    comments = []
-                if not any(str(item.get("body") or "").strip() == comment for item in comments):
-                    ctx.jira.comment(key, comment)
-                status = ctx.jira.transition_to(key, "To Do")
-                if status != "To Do":
-                    raise RuntimeError(f"{key} did not transition back to To Do")
-                ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, key))
-            ctx.db.run("UPDATE escalations SET answer=%s, resolution='person', reached_person=true, resolved_at=now()"
-                       " WHERE ticket_key=%s AND decision_id=%s AND resolution='resuming'",
-                       (text, key, decision["id"]))
+            _resume_waiting_ticket(ctx, decision, text, key, skip_ticket)
             resumed.append(key)
         except Exception as exc:  # noqa: BLE001 - one ticket must not keep the others waiting
             log.warning("resuming %s after decision %s failed: %s", key, decision["id"], exc)
     return resumed
 
 
+def _resume_waiting_ticket(ctx, decision: dict, text: str, key: str, skip_ticket: str) -> None:
+    if key != skip_ticket:
+        ticket = ticket_repository.lifecycle_ticket(ctx.db, key)
+        if not ticket:
+            raise LookupError(f"ticket {key} is missing from the Jira mirror")
+        clear_owner_labels(ctx, key)
+        comment = (f"AI Flow · owner decision\nWhat: {decision['title']}\nResult: {text}\n"
+                   f"Next: back to To Do; the developer continues with {citation(decision)}")
+        try:
+            comments = ctx.jira.recent_comments(key, limit=100)
+        except Exception:  # noqa: BLE001 - comment history is only a duplicate guard
+            comments = []
+        if not any(str(item.get("body") or "").strip() == comment for item in comments):
+            ctx.jira.comment(key, comment)
+        ticket_lifecycle.transition(ctx, ticket, "verified-owner-answer")
+    escalation_repository.finish_resumption(ctx.db, key, decision["id"], text)
+
+
+def _verified_jira_answer_for_tickets(ctx, decision: dict) -> bool:
+    requires_jira = escalation_repository.requires_jira_owner_answer(
+        ctx.db, decision["id"], list(decision.get("waiting_tickets") or []))
+    return not requires_jira or decision.get("decided_by") in escalation_repository.ACCEPTED_ANSWER_SOURCES
+
+
+def clear_owner_labels(ctx, ticket: str) -> None:
+    """Remove the public and compatibility labels once the owner has answered."""
+    for label in ("needs-owner", "owner-escalated"):
+        ctx.jira.remove_label(ticket, label)
+        ticket_repository.remove_label(ctx.db, ticket, label)
+
+
 def _store_owner_answer(db, decision_id: int, text: str, by: str) -> dict:
     """Save the owner's choice and mark every affected escalation retryable in one transaction."""
-    with db.pool.connection() as connection:
-        with connection.transaction():
-            row = connection.execute("SELECT * FROM owner_decisions WHERE id=%s FOR UPDATE", (decision_id,)).fetchone()
-            if not row or row["status"] not in ("asked", "decided"):
-                raise LookupError("this question is not waiting for an answer")
-            was_asked = row["status"] == "asked"
-            if was_asked:
-                row = connection.execute(
-                    "UPDATE owner_decisions SET status='decided', decision=%s, decided_by=%s, decided_at=now()"
-                    " WHERE id=%s AND status='asked' RETURNING *", (text[:3000], by, decision_id)).fetchone()
-            pending = connection.execute(
-                "UPDATE escalations SET answer=%s, resolution='resuming', reached_person=true, resolved_at=NULL"
-                " WHERE decision_id=%s AND resolution IN ('person','waiting','resuming') RETURNING id",
-                (row["decision"], decision_id)).fetchall()
-            if not was_asked and not pending:
-                raise LookupError("this question is not waiting for an answer")
-            return row
+    return escalation_repository.store_owner_answer(db, decision_id, text, by)
 
 
 def answer_decision(ctx, decision_id: int, choice: str, note: str, by: str) -> dict:
-    row = ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (decision_id,))
+    row = escalation_repository.decision_by_id(ctx.db, decision_id)
     if not row or row["status"] not in ("asked", "decided"):
         raise LookupError("this question is not waiting for an answer")
+    if by != escalation_repository.DEADLINE_SOURCE and escalation_repository.requires_jira_owner_answer(
+            ctx.db, decision_id, list(row.get("waiting_tickets") or [])):  # only the deadline default may stand in
+        raise JiraOwnerAnswerRequired(
+            "answer this ticket question in Jira after the question comment, then move it to To Do")
     if row["status"] == "asked":
         chosen = row["recommended"] if choice.strip().lower() in ("", "recommended", "default") else choice.strip()
         text = chosen + (f" ({note.strip()})" if note.strip() else "")
@@ -395,25 +406,35 @@ def answer_decision(ctx, decision_id: int, choice: str, note: str, by: str) -> d
         text = row["decision"]
         row = _store_owner_answer(ctx.db, decision_id, text, row["decided_by"] or by)
     resume_waiting(ctx, row, text)
-    return ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (decision_id,))
+    return escalation_repository.decision_by_id(ctx.db, decision_id)
 
 
 def retry_resumptions(ctx) -> list[str]:
     """Retry tickets whose saved owner decision could not yet be written back to Jira."""
-    decisions = ctx.db.all(
-        "SELECT DISTINCT d.* FROM owner_decisions d JOIN escalations e ON e.decision_id=d.id"
-        " WHERE d.status='decided' AND e.resolution='resuming' ORDER BY d.id")
+    decisions = escalation_repository.resuming_decisions(ctx.db, triage_claim_repository.VERIFIED_JIRA_OWNER_SOURCE)
     resumed = []
     for decision in decisions:
-        keys = [row["ticket_key"] for row in ctx.db.all(
-            "SELECT DISTINCT ticket_key FROM escalations WHERE decision_id=%s AND resolution='resuming'"
-            " ORDER BY ticket_key", (decision["id"],))]
+        keys = [row["ticket_key"] for row in escalation_repository.resuming_tickets(ctx.db, decision["id"])]
         resumed.extend(resume_waiting(ctx, {**decision, "waiting_tickets": keys}, decision["decision"]))
     return resumed
 
 
 def retire_decision(db, decision_id: int) -> dict | None:
-    return db.one("UPDATE owner_decisions SET status='retired' WHERE id=%s RETURNING *", (decision_id,))
+    source = triage_claim_repository.VERIFIED_JIRA_OWNER_SOURCE
+    row = escalation_repository.retire_decision(db, decision_id, source)
+    if row:
+        return row
+    current = escalation_repository.decision_by_id(db, decision_id)
+    if not current:
+        return None
+    requires_answer = ((current["status"] == "asked"
+                        or (current["status"] == "decided" and current["decided_by"] != source))
+                       and escalation_repository.requires_jira_owner_answer(
+                           db, decision_id, list(current.get("waiting_tickets") or [])))
+    if requires_answer:
+        raise JiraOwnerAnswerRequired(
+            "ticket-linked decisions cannot be retired until the owner answers in Jira after the question comment")
+    return None
 
 
 def _comment_time(comment: dict) -> datetime | None:
@@ -426,53 +447,208 @@ def _comment_time(comment: dict) -> datetime | None:
         return None
 
 
+def _owner_question_body(row: dict) -> str:
+    """Render the same complete Jira question comment the worker emits for timestamp recovery."""
+    question = str(row.get("ticket_question") or "").strip()
+    options = [str(option).strip() for option in (row.get("options") or []) if str(option).strip()]
+    recommended = str(row.get("recommended") or "").strip()
+    if not question or not options or not recommended:
+        return ""
+    return owner_question_comment(question, options, recommended, grouped=bool(row.get("grouped")))
+
+
+def _owner_handoff_marker(decision_id: int) -> str:
+    if not isinstance(decision_id, int) or decision_id < 1:
+        return ""
+    return f"AI Flow hand-off: D{decision_id}"
+
+
+def _correlate_owner_question_body(body: str, decision_id: int) -> str:
+    marker = _owner_handoff_marker(decision_id)
+    if not marker:
+        raise ValueError("owner question requires a decision id")
+    return f"{body.rstrip()}\n\n{marker}"
+
+
+def _matching_question_times(comments: list[dict], expected: str, decision_id: int,
+                             allow_legacy: bool = False) -> list[datetime]:
+    times = []
+    marker = _owner_handoff_marker(decision_id)
+    if not expected or not marker:
+        return times
+    expected_comments = {normalize_adf_text(f"{expected.rstrip()}\n\n{marker}")}
+    if allow_legacy:
+        expected_comments.add(normalize_adf_text(expected))
+    for comment in comments:
+        body = normalize_adf_text(str(comment.get("body") or ""))
+        if body in expected_comments and (created := _comment_time(comment)):
+            times.append(created)
+    return times
+
+
+def _owner_question_time(comments: list[dict], row: dict) -> datetime | None:
+    """Recover a timestamp from a correlated hand-off, or from an exact legacy comment on an upgraded row."""
+    expected = _owner_question_body(row)
+    escalation_created = _comment_time({"created": row.get("escalation_created_at")})
+    if not expected or not escalation_created:
+        return None
+    matching = _matching_question_times(comments, expected, row.get("id"),
+                                        allow_legacy=bool(row.get("legacy_question_comment")))
+    return min((created for created in matching if created >= escalation_created), default=None)
+
+
+def _owner_comments(ctx, ticket: str) -> tuple[list[dict], list[tuple[datetime, str]]] | None:
+    """Read Jira comments and authorize only comments from its configured owner account."""
+    try:
+        comments = ctx.jira.all_comments(ticket)
+        account_id = str(ctx.jira.current_account_id() or "").strip()
+    except Exception as exc:  # noqa: BLE001 - a Jira read failure must not fabricate an owner decision
+        log.warning("comments of %s for owner decision failed: %s", ticket, type(exc).__name__)
+        return None
+    if not account_id:
+        log.warning("Jira did not provide an authorized owner account id for %s", ticket)
+        return None
+    eligible = []
+    for comment in comments:
+        body = str(comment.get("body") or "").strip()
+        author = str(comment.get("account_id") or "").strip()
+        created = _comment_time(comment)
+        if not body or not created or author != account_id or body.lower().startswith(("ai flow", "aiflow")):
+            continue
+        eligible.append((created, body))
+    return comments, sorted(eligible, reverse=True)
+
+
+def _question_timestamp(ctx, comments: list[dict], row: dict) -> datetime | None:
+    """Use the saved Jira timestamp, or recover and persist it from the exact hand-off comment."""
+    question_at = row.get("question_comment_at")
+    if question_at:
+        return question_at
+    question_at = _owner_question_time(comments, row)
+    escalation_id = row.get("escalation_id")
+    if not question_at or not escalation_id:
+        return None
+    saved = escalation_repository.record_recovered_question_comment(ctx.db, escalation_id, question_at)
+    return saved["question_comment_at"] if saved else None
+
+
+def _answer_after_question(eligible: list[tuple[datetime, str]], question_at: datetime) -> str:
+    question_at = question_at.astimezone(timezone.utc)
+    return next((body for created, body in eligible if created > question_at), "")
+
+
+def _record_owner_answer(ctx, ticket: str, row: dict, text: str) -> dict | None:
+    """Persist an authorized answer and hand off the shared decision to its other waiting tickets."""
+    try:
+        decided = _store_owner_answer(ctx.db, row["id"], text,
+                                      triage_claim_repository.VERIFIED_JIRA_OWNER_SOURCE)
+    except LookupError:
+        return None
+    clear_owner_labels(ctx, ticket)
+    raised = escalation_repository.latest_question_for_decision(ctx.db, ticket, row["id"])
+    answer = decided["decision"]
+    resume_waiting(ctx, {**decided, "waiting_tickets": row.get("waiting_tickets") or []}, answer, skip_ticket=ticket)
+    return {"decision": decided, "answer": answer,
+            "question": (raised or {}).get("question") or row["question"], "ticket": ticket}
+
+
 def owner_answered_on_ticket(ctx, ticket: str) -> dict | None:
     """Capture the owner's Jira comment when they move an asked ticket back to work.
 
     A question comment posted by AI Flow is not an answer. If no later human comment is available, leave the
     decision pending instead of silently applying the recommended default.
     """
-    rows = ctx.db.all("SELECT * FROM owner_decisions WHERE status='asked' AND %s = ANY(waiting_tickets) ORDER BY id",
-                      (ticket,))
+    rows = escalation_repository.pending_owner_decisions(ctx.db, ticket)
     if not rows or not ctx.jira:
         return None
-    try:
-        comments = ctx.jira.recent_comments(ticket, limit=30)
-        authorized_account_id = str(ctx.jira.current_account_id() or "").strip()
-    except Exception as exc:  # noqa: BLE001 - a Jira read failure must not fabricate an owner decision
-        log.warning("comments of %s for owner decision failed: %s", ticket, type(exc).__name__)
+    owner_comments = _owner_comments(ctx, ticket)
+    if not owner_comments:
         return None
-    if not authorized_account_id:
-        log.warning("Jira did not provide an authorized owner account id for %s", ticket)
-        return None
-    eligible = []
-    for comment in comments:
-        body = str(comment.get("body") or "").strip()
-        author_account_id = str(comment.get("account_id") or "").strip()
-        created = _comment_time(comment)
-        if (not body or not created or author_account_id != authorized_account_id
-                or body.lower().startswith(("ai flow", "aiflow"))):
-            continue
-        eligible.append((created, body))
+    comments, eligible = owner_comments
     for row in rows:
-        answer = next((body for created, body in sorted(eligible, reverse=True)
-                       if created > row["created_at"].astimezone(timezone.utc)), "")
+        question_at = _question_timestamp(ctx, comments, row)
+        if not question_at:
+            continue
+        answer = _answer_after_question(eligible, question_at)
         if not answer:
             continue
-        text = answer[:3000]
-        try:
-            decided = _store_owner_answer(ctx.db, row["id"], text, "owner")
-        except LookupError:
-            continue
-        raised = ctx.db.one("SELECT question FROM escalations WHERE ticket_key=%s AND decision_id=%s"
-                            " ORDER BY id DESC LIMIT 1", (ticket, row["id"]))
-        # The decision is shared by every ticket that joined the ask. Resume the other waiters and record the
-        # actual owner answer against each escalation; the current ticket is already being claimed for work.
-        resume_waiting(ctx, {**decided, "waiting_tickets": row.get("waiting_tickets") or []}, text,
-                       skip_ticket=ticket)
-        return {"decision": decided, "answer": text, "question": (raised or {}).get("question") or row["question"],
-                "ticket": ticket}
+        result = _record_owner_answer(ctx, ticket, row, answer[:3000])
+        if result:
+            return result
     return None
+
+
+def post_owner_question_comment(ctx, ticket: str, decision_id: int, run_id: str, body: str) -> dict:
+    """Post the registered question and persist Jira's timestamp before it can authorize an owner answer."""
+    state = escalation_repository.owner_question_comment_state(ctx.db, ticket, decision_id, run_id)
+    if not state:
+        raise LookupError("this owner question is no longer pending for the triage run")
+    expected = _owner_question_body(state)
+    if not expected or body != expected:
+        raise LookupError("submitted owner question does not match the registered decision")
+    body = expected
+    if state["question_comment_at"]:
+        return {"comment_id": "", "created": state["question_comment_at"], "already_posted": True}
+    existing = _recover_owner_question_comment(ctx, ticket, decision_id, body, state)
+    if existing is None:
+        return _post_owner_question_comment(ctx, ticket, decision_id, run_id, body)
+    created = _owner_question_comment_time(existing, already_posted=True)
+    return _save_owner_question_comment(ctx, ticket, decision_id, run_id, existing, created, already_posted=True)
+
+
+def _recover_owner_question_comment(ctx, ticket: str, decision_id: int, body: str, state: dict) -> dict | None:
+    legacy = _recover_legacy_owner_question_comment(ctx, ticket, body, state)
+    if legacy is not None:
+        return legacy
+    correlated_body = _correlate_owner_question_body(body, decision_id)
+    return _find_owner_question_comment(ctx, ticket, correlated_body)
+
+
+def _recover_legacy_owner_question_comment(ctx, ticket: str, body: str, state: dict) -> dict | None:
+    if not state.get("legacy_question_comment"):
+        return None
+    escalation_created = _comment_time({"created": state.get("escalation_created_at")})
+    if not escalation_created:
+        raise RuntimeError("cannot recover a legacy owner question without its escalation creation time")
+    return _find_owner_question_comment(ctx, ticket, body, created_after=escalation_created)
+
+
+def _post_owner_question_comment(ctx, ticket: str, decision_id: int, run_id: str, body: str) -> dict:
+    correlated_body = _correlate_owner_question_body(body, decision_id)
+    posted = ctx.jira.comment_with_metadata(ticket, correlated_body)
+    created = _owner_question_comment_time(posted)
+    return _save_owner_question_comment(ctx, ticket, decision_id, run_id, posted, created, already_posted=False)
+
+
+def _owner_question_comment_time(comment: dict | None, already_posted: bool = False) -> datetime:
+    if not comment or not str(comment.get("id") or "").strip():
+        message = ("Jira found the owner question but returned incomplete comment metadata; retry" if already_posted
+                   else "Jira did not return an owner question comment timestamp")
+        raise RuntimeError(message)
+    created = _comment_time(comment)
+    if not created:
+        message = ("Jira found the owner question but returned incomplete comment metadata; retry" if already_posted
+                   else "Jira did not return an owner question comment timestamp")
+        raise RuntimeError(message)
+    return created
+
+
+def _find_owner_question_comment(ctx, ticket: str, body: str, created_after: datetime | None = None) -> dict | None:
+    try:
+        return ctx.jira.find_comment(ticket, body, limit=100, created_after=created_after)
+    except Exception as exc:  # noqa: BLE001 - uncertain lookup results must not permit a duplicate Jira write
+        log.warning("owner question lookup for %s failed: %s", ticket, type(exc).__name__)
+        raise RuntimeError("Jira owner question lookup failed; retry before posting") from exc
+
+
+def _save_owner_question_comment(ctx, ticket: str, decision_id: int, run_id: str,
+                                 comment: dict, created: datetime, already_posted: bool) -> dict:
+    saved = escalation_repository.record_owner_question_comment(ctx.db, ticket, decision_id, run_id, created)
+    if not saved:
+        stage = "recovered" if already_posted else "posted"
+        raise LookupError(f"this owner question stopped waiting while its comment was {stage}")
+    return {"comment_id": str(comment["id"]), "created": saved["question_comment_at"],
+            "already_posted": already_posted}
 
 
 # --- ticket amendment (AC4) ---------------------------------------------------------------------------------
@@ -507,32 +683,27 @@ def amend_description(description: str, criterion: str, decision_id: int, enviro
 def amend_ticket(ctx, ticket: str, project: str, criterion: str, environment: str, reason: str, narrowed: str = "",
                  by: str = "triage") -> dict | None:
     """Amend the ticket itself and record the amendment in the register. Never blocks: the ticket goes back to work."""
-    row = ctx.db.one("SELECT description FROM tickets WHERE key=%s", (ticket,))
+    row = ticket_repository.description(ctx.db, ticket)
     if not row or not criterion:
         return None
-    existing = ctx.db.one("SELECT * FROM owner_decisions WHERE kind='amendment' AND ticket_key=%s AND title LIKE %s",
-                          (ticket, f"{criterion.upper()} %"))
+    existing = escalation_repository.amendment_for_ticket(ctx.db, ticket, criterion)
     if existing and existing["decision"] != "pending":  # the same completed criterion is amended once
         done = existing
         return {"decision": done, "summary": done["decision"], "citation": citation(done), "already": True}
-    entry = existing or ctx.db.one(
-        "INSERT INTO owner_decisions (topic,kind,title,question,decision,project,source,ticket_key,decided_by,decided_at)"
-        " VALUES (%s,'amendment',%s,%s,%s,%s,'amendment',%s,%s,now()) RETURNING *",
-        (unique_topic(ctx.db, f"amend {ticket} {criterion}"), f"{criterion.upper()} of {ticket} amended", reason[:2000],
-         "pending", project, ticket, by))
+    entry = existing or escalation_repository.insert_pending_amendment(
+        ctx.db, unique_topic(ctx.db, f"amend {ticket} {criterion}"),
+        f"{criterion.upper()} of {ticket} amended", reason, project, ticket, by)
     amended = amend_description(row["description"] or "", criterion, entry["id"], environment, narrowed)
     if not amended:
         if not existing:
-            ctx.db.run("DELETE FROM owner_decisions WHERE id=%s AND kind='amendment' AND decision='pending'",
-                       (entry["id"],))
+            escalation_repository.delete_pending_amendment(ctx.db, entry["id"])
         return None
     text, summary = amended
     # Keep the pending register row if Jira is unavailable or the process stops here. A retry finds the same row
     # and replays this ticket update instead of treating the pending entry as a completed amendment.
     ctx.jira.set_description(ticket, text)
-    ctx.db.run("UPDATE tickets SET description=%s, synced_at=now() WHERE key=%s", (text, ticket))
-    entry = ctx.db.one("UPDATE owner_decisions SET decision=%s WHERE id=%s RETURNING *",
-                       (f"{summary}: {reason}"[:3000], entry["id"]))
+    ticket_repository.update_description(ctx.db, ticket, text)
+    entry = escalation_repository.update_decision(ctx.db, entry["id"], f"{summary}: {reason}")
     return {"decision": entry, "summary": summary, "citation": citation(entry), "already": False}
 
 
@@ -540,11 +711,8 @@ def amend_ticket(ctx, ticket: str, project: str, criterion: str, environment: st
 def record(db, ticket: str, project: str, source: str, run_id: str, cls: str, question: str, reason: str = "",
            resolution: str = "open", decision_id: int | None = None, answer: str = "",
            reached_person: bool = False) -> dict:
-    return db.one("INSERT INTO escalations (ticket_key,project,source,run_id,class,question,reason,decision_id,"
-                  "resolution,reached_person,answer,resolved_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                  "CASE WHEN %s IN ('open','waiting') THEN NULL ELSE now() END) RETURNING *",
-                  (ticket, project, source, run_id, cls, question[:3000], reason[:500], decision_id, resolution,
-                   reached_person, answer[:3000], resolution))
+    return escalation_repository.record_escalation(db, ticket, project, source, run_id, cls, question, reason,
+                                                   resolution, decision_id, answer, reached_person)
 
 
 def raise_reviewer_question(db, ticket: str, project: str, run_id: str, question: str) -> dict:
@@ -553,12 +721,12 @@ def raise_reviewer_question(db, ticket: str, project: str, run_id: str, question
     current = open_escalation(db, ticket)
     if not current:
         return record(db, ticket, project, "review", run_id, AMBIGUITY, question, "reviewer asked the AI")
-    return db.one("UPDATE escalations SET question=%s, class=%s, reason=%s, run_id=%s WHERE id=%s RETURNING *",
-                  (question[:3000], AMBIGUITY, "reviewer asked the AI", run_id or current["run_id"], current["id"]))
+    return escalation_repository.update_open_question(
+        db, current["id"], run_id or current["run_id"], question, AMBIGUITY, "reviewer asked the AI")
 
 
 def open_escalation(db, ticket: str) -> dict | None:
-    return db.one("SELECT * FROM escalations WHERE ticket_key=%s AND resolution='open' ORDER BY id DESC LIMIT 1", (ticket,))
+    return triage_claim_repository.open_escalation(db, ticket)
 
 
 def settle(db, ticket: str, project: str, source: str, run_id: str, cls: str, question: str, reason: str,
@@ -568,12 +736,16 @@ def settle(db, ticket: str, project: str, source: str, run_id: str, cls: str, qu
     if not current:
         return record(db, ticket, project, source, run_id, cls, question, reason, resolution, decision_id, answer,
                       reached_person)
-    return db.one("UPDATE escalations SET class=%s, reason=%s, resolution=%s, decision_id=coalesce(%s, decision_id),"
-                  " answer=%s, reached_person=%s, run_id=%s,"
-                  " resolved_at=CASE WHEN %s IN ('open','waiting') THEN NULL ELSE now() END"
-                  " WHERE id=%s RETURNING *",
-                  (cls, reason[:500], resolution, decision_id, answer[:3000], reached_person, run_id or current["run_id"],
-                   resolution, current["id"]))
+    return escalation_repository.update_open_escalation(
+        db, current["id"], cls, reason, resolution, decision_id, answer, reached_person, run_id or current["run_id"])
+
+
+def complete_owner_handoff(ctx, ticket: str, decision_id: int, run_id: str) -> dict:
+    """Close a question escalation only after its Jira comment and required labels have been written."""
+    row = escalation_repository.complete_owner_handoff(ctx.db, ticket, decision_id, run_id)
+    if not row:
+        raise LookupError("the owner question hand-off is no longer pending for this triage run")
+    return {"ticket": ticket, "decision_id": decision_id, "resolution": row["resolution"]}
 
 
 ENVIRONMENT_ANSWERS = {
@@ -618,7 +790,7 @@ def dev_question(ctx, run: dict, question: str) -> dict:
         record(db, ticket, project, "dev", str(run["id"]), c.cls, question, c.reason)
         return base
     if c.cls == MISSING:
-        node = db.one("SELECT tools, metrics FROM nodes WHERE name=%s", (run["node"],)) or {}
+        node = node_repository.tools_and_metrics(db, run["node"])
         if c.environment in ENVIRONMENT_ANSWERS:
             text = ENVIRONMENT_ANSWERS[c.environment]
             settle(db, ticket, project, "dev", str(run["id"]), c.cls, question, c.reason, "machine", None, text)
@@ -657,7 +829,6 @@ def triage_decision(ctx, run: dict, decision: dict, question: str) -> dict:
     """Apply the triage AI's decision through the register. Returns the action for the worker:
     answered | applied | amended | asked | waiting | refused."""
     db, ticket, project, run_id = ctx.db, run["ticket_key"], run["project"], str(run["id"])
-    kind = decision["decision"]
     raised = open_escalation(db, ticket)
     if not raised:
         return {"action": "refused", "class": "", "reason": "there is no open raised escalation to decide"}
@@ -667,58 +838,75 @@ def triage_decision(ctx, run: dict, decision: dict, question: str) -> dict:
     question = raised["question"]
     if cls not in CLASSES:
         return {"action": "refused", "class": cls, "reason": "the raised escalation has an invalid class"}
-    if kind == "ANSWER":
-        if cls in PERSON_CLASSES:
-            return {"action": "refused", "class": cls,
-                    "reason": f"{LABELS[cls]} requires the owner; triage cannot answer it"}
-        settle(db, ticket, project, "triage", run_id, cls, question, decision.get("why", ""), "triage", None,
-               decision.get("answer", ""))
-        if cls == TECHNICAL and decision.get("answer"):  # the choice becomes precedent for the next such question
-            add_decision(db, (decision.get("topic") or question)[:200], decision["answer"], decision.get("keywords") or [],
-                         project=project, by="sa", question=question, source="sa")
-        return {"action": "answered", "class": cls}
-    if kind == "AMEND":
-        if cls != UNREACHABLE:
-            return {"action": "refused", "class": cls,
-                    "reason": "only an unreachable acceptance criterion can be amended"}
-        amended = amend_ticket(ctx, ticket, project, decision.get("criterion", ""), environment_of(question),
-                               decision.get("why", ""), decision.get("narrowed", ""), by="triage")
-        if not amended:
-            return {"action": "refused", "class": UNREACHABLE,
-                    "reason": f"{decision.get('criterion') or 'the criterion'} is not a line of the ticket description"}
-        settle(db, ticket, project, "triage", run_id, UNREACHABLE, question, decision.get("why", ""), "amendment",
-               amended["decision"]["id"], amended["summary"])
-        return {"action": "amended", "class": UNREACHABLE, "citation": amended["citation"], "summary": amended["summary"],
-                "decision_id": amended["decision"]["id"]}
+    if decision["decision"] == "ANSWER":
+        return _answer_triage_question(ctx, ticket, project, run_id, cls, question, decision)
+    if decision["decision"] == "AMEND":
+        return _amend_triage_question(ctx, ticket, project, run_id, cls, question, decision)
+    return _ask_owner_question(ctx, ticket, project, run_id, cls, question, decision)
+
+
+def _answer_triage_question(ctx, ticket: str, project: str, run_id: str, cls: str,
+                            question: str, decision: dict) -> dict:
+    if cls in PERSON_CLASSES:
+        return {"action": "refused", "class": cls,
+                "reason": f"{LABELS[cls]} requires the owner; triage cannot answer it"}
+    settle(ctx.db, ticket, project, "triage", run_id, cls, question, decision.get("why", ""), "triage", None,
+           decision.get("answer", ""))
+    if cls == TECHNICAL and decision.get("answer"):  # the choice becomes precedent for the next such question
+        add_decision(ctx.db, (decision.get("topic") or question)[:200], decision["answer"], decision.get("keywords") or [],
+                     project=project, by="sa", question=question, source="sa")
+    return {"action": "answered", "class": cls}
+
+
+def _amend_triage_question(ctx, ticket: str, project: str, run_id: str, cls: str,
+                           question: str, decision: dict) -> dict:
+    if cls != UNREACHABLE:
+        return {"action": "refused", "class": cls,
+                "reason": "only an unreachable acceptance criterion can be amended"}
+    amended = amend_ticket(ctx, ticket, project, decision.get("criterion", ""), environment_of(question),
+                           decision.get("why", ""), decision.get("narrowed", ""), by="triage")
+    if not amended:
+        criterion = decision.get("criterion") or "the criterion"
+        return {"action": "refused", "class": UNREACHABLE,
+                "reason": f"{criterion} is not a line of the ticket description"}
+    settle(ctx.db, ticket, project, "triage", run_id, UNREACHABLE, question, decision.get("why", ""), "amendment",
+           amended["decision"]["id"], amended["summary"])
+    return {"action": "amended", "class": UNREACHABLE, "citation": amended["citation"],
+            "summary": amended["summary"], "decision_id": amended["decision"]["id"]}
+
+
+def _ask_owner_question(ctx, ticket: str, project: str, run_id: str, cls: str,
+                        question: str, decision: dict) -> dict:
     if cls not in PERSON_CLASSES:
         return {"action": "refused", "class": cls,
                 "reason": f"{LABELS.get(cls, cls)} never reaches a person: answer it (DECISION: ANSWER) or amend the ticket"}
-    asked = ask(ctx, ticket, project, question, decision.get("why", ""), decision.get("options") or [],
-                decision.get("recommended", ""), decision.get("topic", ""), decision.get("keywords") or [])
+    try:
+        asked = ask(ctx, ticket, project, question, decision.get("why", ""), decision.get("options") or [],
+                    decision.get("recommended", ""), decision.get("topic", ""), decision.get("keywords") or [])
+    except ValueError as exc:
+        return {"action": "refused", "class": cls, "reason": str(exc)}
     row = asked["decision"]
     if asked["action"] == "applied":
-        settle(db, ticket, project, "triage", run_id, TAKEN, question, "decision already taken", "register", row["id"],
+        settle(ctx.db, ticket, project, "triage", run_id, TAKEN, question, "decision already taken", "register", row["id"],
                row["decision"])
         return {"action": "applied", "class": TAKEN, "citation": asked["citation"], "answer": row["decision"],
                 "decision_id": row["id"]}
     if asked["action"] == "waiting":
-        settle(db, ticket, project, "triage", run_id, cls, question, "already asked; waiting", "waiting", row["id"], "")
-        return {"action": "waiting", "class": cls, "citation": asked["citation"], "decision_id": row["id"],
-                "options": row["options"], "recommended": row["recommended"]}
-    settle(db, ticket, project, "triage", run_id, cls, question, decision.get("why", ""), "person", row["id"], "",
-           reached_person=True)
-    return {"action": "asked", "class": cls, "citation": asked["citation"], "decision_id": row["id"],
-            "options": row["options"], "recommended": row["recommended"]}
+        resolution, reason = "waiting", "already asked; waiting"
+    else:
+        resolution, reason = "person", decision.get("why", "")
+    prepared = escalation_repository.prepare_owner_handoff(ctx.db, ticket, run_id, cls, reason, row["id"])
+    if not prepared:
+        return {"action": "refused", "class": cls, "reason": "the open escalation changed during the owner hand-off"}
+    return {"action": asked["action"], "class": cls, "citation": asked["citation"], "decision_id": row["id"],
+            "options": row["options"], "recommended": row["recommended"], "resolution": resolution,
+            "grouped": row.get("ticket_key") != ticket}
 
 
 def pending_answer(db, ticket: str) -> dict | None:
     """The newest answer an escalation of this ticket received without a triage run (register, policy, machine,
     amendment): the next developer run gets the question and the answer in its prompt."""
-    return db.one("SELECT question, answer, created_at FROM escalations WHERE ticket_key=%s AND answer<>''"
-                  " AND resolution IN ('register','policy','machine','amendment')"
-                  " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key=escalations.ticket_key AND r.step='dev'"
-                  " AND r.started_at > escalations.created_at AND r.outcome IN ('done','blocked','auto_answered'))"
-                  " ORDER BY id DESC LIMIT 1", (ticket,))
+    return escalation_repository.pending_answer(db, ticket)
 
 
 # --- metrics (AC7) ----------------------------------------------------------------------------------------------
@@ -732,8 +920,7 @@ def weekly_metrics(db, weeks: int = ACTIVE_WINDOW_WEEKS, now: datetime | None = 
     now = now or datetime.now(timezone.utc)
     this_week = week_start(now)
     first = this_week - timedelta(weeks=weeks - 1)
-    rows = db.all("SELECT id,ticket_key,project,class,resolution,reached_person,created_at,question FROM escalations"
-                  " WHERE created_at >= %s ORDER BY created_at", (first,))
+    rows = escalation_repository.metrics_since(db, first)
     series = {first + timedelta(weeks=i): {"week_start": (first + timedelta(weeks=i)).date().isoformat(), "total": 0,
                                            "by_class": {c: 0 for c in CLASSES}, "by_project": {},
                                            "without_person": 0, "reached_person": 0} for i in range(weeks)}
@@ -764,8 +951,7 @@ def weekly_metrics(db, weeks: int = ACTIVE_WINDOW_WEEKS, now: datetime | None = 
     current = series[this_week]
     previous = series.get(this_week - timedelta(weeks=1))
     falling = bool(previous and previous["total"] and current["total"] < previous["total"])
-    amendments = db.all("SELECT id,ticket_key,project,title,decision,question,created_at FROM owner_decisions"
-                        " WHERE kind='amendment' AND created_at >= %s ORDER BY id DESC LIMIT 100", (first,))
+    amendments = escalation_repository.recent_amendments(db, first)
     return {"weeks": trend, "classes": list(CLASSES), "labels": LABELS, "person_classes": list(PERSON_CLASSES),
             "this_week": current, "falling": falling, "top_causes": top,
             "amendments": [{**a, "created_at": a["created_at"].isoformat()} for a in amendments]}
@@ -773,14 +959,14 @@ def weekly_metrics(db, weeks: int = ACTIVE_WINDOW_WEEKS, now: datetime | None = 
 
 def register(db) -> dict[str, list[dict]]:
     """The register for Command Center: decisions, open questions and amendments."""
-    rows = db.all("SELECT * FROM owner_decisions WHERE status<>'retired' ORDER BY id DESC LIMIT 500")
+    rows = escalation_repository.register_entries(db)
     def public(row: dict) -> dict:
         return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in row.items()}
-    resuming = db.all("SELECT DISTINCT d.*, ARRAY(SELECT DISTINCT pending.ticket_key FROM escalations pending"
-                      " WHERE pending.decision_id=d.id AND pending.resolution='resuming' ORDER BY pending.ticket_key)"
-                      " AS resuming_tickets FROM owner_decisions d JOIN escalations e ON e.decision_id=d.id"
-                      " WHERE d.status='decided' AND e.resolution='resuming' ORDER BY d.id DESC LIMIT 100")
+    resuming = escalation_repository.resuming_register_entries(db)
+    asked = [public({**row, "jira_answer_required": escalation_repository.requires_jira_owner_answer(
+        db, row["id"], list(row.get("waiting_tickets") or []))})
+        for row in rows if row["status"] == "asked"]
     return {"decisions": [public(r) for r in rows if r["kind"] == "decision" and r["status"] == "decided"],
-            "asked": [public(r) for r in rows if r["status"] == "asked"],
+            "asked": asked,
             "resuming": [public(r) for r in resuming],
             "amendments": [public(r) for r in rows if r["kind"] == "amendment"]}

@@ -142,6 +142,8 @@
     "POST /v1/environment/scan",
     "POST /v1/escalations/raise",
     "POST /v1/escalations/triage",
+    "POST /v1/escalations/{key}/complete-handoff",
+    "POST /v1/escalations/{key}/question-comment",
     "POST /v1/events",
     "POST /v1/github/comment",
     "POST /v1/github/delete-branch",

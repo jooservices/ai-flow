@@ -53,6 +53,7 @@ from . import (business, capacity_routing as capacity_routing_service, dashboard
                shared_accounts, state_schema, support_bundle, system_check, system_check_api, tooling, version_release,
                work_steps)
 from . import run_inbox as run_inbox_control
+from . import triage_claim as triage_claim_service
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, resolve_session_user,
@@ -4304,7 +4305,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             except licensing.LicenseError as exc:
                 refused.append(str(exc))
             else:
-                allowed.append(ticket)
+                if triage_claim_service.filter_candidates(ctx, [ticket]):  # a dev ticket waits for a verified owner answer
+                    allowed.append(ticket)
         allowed = worker_candidates.diversify_dev_candidates(allowed, account, worker_id,
                                                               project_priorities, PRIORITY)
         reason = refused[0] if candidates and not allowed and refused else ""
@@ -4359,38 +4361,17 @@ def create_app(ctx: Ctx) -> FastAPI:
                     return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
         tickets = {(t["key"], t["step"]): t for t in candidates if t}
         t = tickets.get((body.ticket, body.step))
-        if not t:
+        if not t or (body.step == "dev" and not triage_claim_service.development_eligible(ctx, t)):
             return JSONResponse({"claimed": False, "reason": "not eligible"}, status_code=409)
+        owner_answer = None
+        if body.step == "dev":
+            authorized, owner_answer = triage_claim_service.authorize_development(ctx, t)
+            if not authorized:
+                return JSONResponse({"claimed": False, "reason": "waiting for a verified owner answer"},
+                                    status_code=409)
         repo = ctx.repo()
         acc = repo.account(body.account)
-        triage_context: dict[str, Any] = {}
-        if body.step == "triage":
-            verify = ctx.db.one("SELECT summary, details FROM runs WHERE ticket_key=%s AND step='verify'"
-                                " AND status<>'running' ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            comments = ctx.jira.recent_comments(t["key"], limit=10) if ctx.jira else []
-            triage_context = {"last_dev_summary": (last_dev(t["key"]) or {}).get("summary", ""),
-                              "verify_findings": ((verify["details"] or {}).get("findings") or verify["summary"])
-                              if verify else "", "recent_comments": comments}
-            # what the owner already decided, and how the question was classified when it was raised
-            triage_context["owner_register"] = [
-                {"id": d["id"], "title": d["title"], "decision": d["decision"]} for d in ctx.db.all(
-                    "SELECT id,title,decision FROM owner_decisions WHERE kind='decision' AND status='decided'"
-                    " AND (project='' OR project=%s) ORDER BY id LIMIT 60", (t["project"],))]
-            raised = escalations.open_escalation(ctx.db, t["key"])
-            triage_context["escalation_class"] = (raised or {}).get("class", "")
-            asked =ctx.db.one("SELECT ts,data FROM events WHERE ticket=%s AND type='review.action'"
-                               " AND data->>'action'='ask-ai' ORDER BY ts DESC LIMIT 1", (t["key"],))
-            prior_triage = ctx.db.one("SELECT started_at FROM runs WHERE ticket_key=%s AND step='triage'"
-                                      " ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            if asked and (not prior_triage or asked["ts"] > prior_triage["started_at"]):
-                question = str((asked.get("data") or {}).get("text") or "").strip()
-                if question:
-                    triage_context["last_dev_summary"] = f"Reviewer question: {question}"
-            prior_pr = ctx.db.one("SELECT pr_url FROM runs WHERE ticket_key=%s AND pr_url<>''"
-                                  " ORDER BY started_at DESC LIMIT 1", (t["key"],))
-            prior_pr_match = re.search(r"/pull/(\d+)(?:/|$)", (prior_pr or {}).get("pr_url", ""))
-            if prior_pr_match:
-                triage_context["pr"] = {"url": prior_pr["pr_url"], "number": int(prior_pr_match.group(1))}
+        triage_context = triage_claim_service.context(ctx, t) if body.step == "triage" else {}
         run_id = str(uuid.uuid4())
         probation_id = None
         if t.get("probation"):  # one easy ticket at a time for a switched-off role
@@ -4525,7 +4506,6 @@ def create_app(ctx: Ctx) -> FastAPI:
             auto = escalations.pending_answer(ctx.db, t["key"])
             if auto and (not extra.get("triage_answer") or not a or auto["created_at"] > a["started_at"]):
                 extra["triage_answer"], extra["triage_question"] = auto["answer"], auto["question"]
-            owner_answer = escalations.owner_answered_on_ticket(ctx, t["key"])
             if owner_answer:
                 extra["triage_answer"] = owner_answer["answer"]
                 extra["triage_question"] = owner_answer["question"]

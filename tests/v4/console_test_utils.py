@@ -11,7 +11,7 @@ def console_script(page: Path) -> str:
     script = script[:script.index(BOOT)]
     assets = page.parent
     before_console = "".join((assets / name).read_text(encoding="utf-8") for name in
-                             ("release-readiness.js", "scale-proof.js", "flow-doctor.js"))
+                             ("release-readiness.js", "scale-proof.js", "flow-doctor.js", "owner_escalation.js"))
     extensions = "\n".join((assets / name).read_text(encoding="utf-8") for name in
                             ("csrf.js", "layout.js", "security.js", "load-policy.js"))
     return before_console + script + extensions

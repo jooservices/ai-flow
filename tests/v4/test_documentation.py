@@ -399,6 +399,16 @@ def test_changed_master_action_route_is_named_in_documentation():
                                       changed_routes={api: {"POST /v1/master/actions"}}) == []
 
 
+def test_owner_escalation_docs_name_master_candidate_route():
+    api = "aiflow/v4/control/load_policy_api.py"  # the worker candidate routes moved out of api.py
+    docs = "docs/v4/owner-escalation.md"
+    routes = docsite.api_routes_by_module()
+    assert "/v1/master/candidate" in routes[api]
+    assert "GET /v1/master/candidate" in (ROOT / docs).read_text()
+    assert docsite.documentation_gaps([api, docs], routes=routes,
+                                      changed_routes={api: {"GET /v1/master/candidate"}}) == []
+
+
 def test_route_modules_are_derived_from_the_registered_routes():
     modules = docsite.api_routes_by_module()
     assert {"aiflow/v4/control/api.py", "aiflow/v4/control/login.py",
@@ -640,8 +650,8 @@ def test_escalation_console_changes_map_to_command_center_screens(monkeypatch):
     changed_lines = [
         next(i for i, line in enumerate(source_lines, 1) if "esc: { data:" in line),
         next(i for i, line in enumerate(source_lines, 1) if line.startswith("function escalationsPanel(")),
-        next(i for i, line in enumerate(source_lines, 1) if "loadEscalations(false);" in line),
-        next(i for i, line in enumerate(source_lines, 1) if "act === \"esc-answer\"" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "state: S, reader: consoleReader" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "owner-escalation.js" in line),
     ]
 
     class Result:

@@ -87,6 +87,17 @@ class Settings:
     join_control_url: str = ""
     gatus_url: str = "/gatus/"  # Gatus status page, linked from the console footer
     support_log_dir: str = ""  # persistent, rotated service logs when the control deployment provides a shared directory
+    # Optional direct delivery for owner escalation questions. Values are loaded from AIFLOW4_* environment
+    # variables or the configured secret files; they are never returned by a settings API.
+    escalation_email: str = ""
+    escalation_smtp_host: str = ""
+    escalation_smtp_port: int = 587
+    escalation_smtp_from: str = ""
+    escalation_smtp_username: str = ""
+    escalation_smtp_password: str = ""
+    escalation_smtp_tls_mode: str = "starttls"
+    escalation_telegram_chat_id: str = ""
+    escalation_telegram_bot_token: str = ""
     # fleet upgrades (docs/v4/fleet-upgrade.md)
     control_version: str = ""  # the control plane's release (AIFLOW4_VERSION); not vX.Y.Z disables the skew policy
     rollout_batch_size: int = 2  # nodes per wave after the canary
@@ -173,4 +184,18 @@ class Settings:
         s.github_webhook_secret = (os.environ.get("AIFLOW4_GITHUB_WEBHOOK_SECRET")
                                    or secrets.get("AIFLOW4_GITHUB_WEBHOOK_SECRET", ""))
         s.o2_basic = os.environ.get("O2_BASIC") or secrets.get("O2_BASIC", "")
+        s.escalation_email = _secret("ESCALATION_EMAIL", secrets)
+        s.escalation_smtp_host = _secret("ESCALATION_SMTP_HOST", secrets)
+        s.escalation_smtp_port = int(_secret("ESCALATION_SMTP_PORT", secrets, "587"))
+        s.escalation_smtp_from = _secret("ESCALATION_SMTP_FROM", secrets)
+        s.escalation_smtp_username = _secret("ESCALATION_SMTP_USERNAME", secrets)
+        s.escalation_smtp_password = _secret("ESCALATION_SMTP_PASSWORD", secrets)
+        s.escalation_smtp_tls_mode = _secret("ESCALATION_SMTP_TLS_MODE", secrets, "starttls")
+        s.escalation_telegram_chat_id = _secret("ESCALATION_TELEGRAM_CHAT_ID", secrets)
+        s.escalation_telegram_bot_token = _secret("ESCALATION_TELEGRAM_BOT_TOKEN", secrets)
         return s
+
+
+def _secret(name: str, files: dict[str, str], default: str = "") -> str:
+    key = f"AIFLOW4_{name}"
+    return os.environ.get(key) or files.get(key, default)

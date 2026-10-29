@@ -57,7 +57,8 @@ def test_an_irreversible_question_is_never_applied_and_opens_one_reminder(ctx):
 
 
 def test_a_question_without_a_recommendation_keeps_waiting(ctx):
-    decision_id, _ = ask(ctx, "TESTWP-704", BUSINESS_Q, recommended="", topic="no recommendation")
+    # a new question must carry a recommended option (the hand-off refuses it), so the legacy case is a stored row
+    decision_id, _ = ask(ctx, "TESTWP-704", BUSINESS_Q, topic="no recommendation")
     ctx.db.run("UPDATE owner_decisions SET recommended='' WHERE id = %s", (decision_id,))
     age(ctx, decision_id, 24)
     assert deadline.apply_due(ctx) == []

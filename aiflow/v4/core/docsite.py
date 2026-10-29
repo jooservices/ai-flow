@@ -43,7 +43,10 @@ SCREEN_DOC_OVERRIDES = {"system-check": "docs/v4/system-check.md", "security": "
 # Layout controls are a cross-screen feature documented as one topic under docs/v4. Those pages may satisfy the
 # screen documentation gate for the complete set they explicitly cover; unrelated screens still need their page.
 LAYOUT_SCREEN_VIEWS = frozenset({"cc", "review", "machines", "knowledge", "delivery", "users"})
-CROSS_SCREEN_DOCS = {"docs/v4/console-layouts.md": LAYOUT_SCREEN_VIEWS}
+CROSS_SCREEN_DOCS = {
+    "docs/v4/console-layouts.md": LAYOUT_SCREEN_VIEWS,
+    "docs/v4/owner-escalation.md": frozenset({"cc", "machines"}),
+}
 # Ticket-specific v4 topics can be the canonical screen guide when the repository instructions require the
 # feature documentation to live under docs/v4. Keep the generated Help URL available without duplicating it in
 # docs/guide/screens.
@@ -254,6 +257,8 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
     (re.compile(r"addForm|data-user-(?:email|name|all|projects)|\.new-role"), "users"),
+    (re.compile(r"data-esc-(?:title|decision|keywords)"), "cc"),
+    (re.compile(r"data-esc-(?:title|decision|keywords)"), "machines"),
     (re.compile(r"reviewNoteDrafts|data-review-note|Reviewer note for"), "review"),
     # The click handler resolves the clicked element from a text node first; the phone review buttons need it.
     (re.compile(r"var target = e\.target && e\.target\.nodeType|!target \|\| !target\.closest|"

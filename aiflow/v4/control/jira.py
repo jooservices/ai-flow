@@ -1,13 +1,15 @@
 """Jira gateway: the only component that talks to Jira (REST v3).
 
 Reads keep the registry's ticket mirror fresh; writes (transition, comment, fields) are issued only after the
-control API has checked the caller's fencing token. 429 answers are retried after Retry-After.
+control API has checked the caller's fencing token. Safe Jira operations retry transient failures; state-changing
+POSTs do not retry rate-limit or server-error responses because a 5xx response can arrive after Jira has applied the
+write. A clear OAuth 401 rejection can still refresh credentials once and retry.
 
 Credentials: either a fixed (email, API token) pair against the site (basic auth), or an `auth` source
 (jira_connect.JiraAuth) asked before every request. The source returns the credential connected on the
 Integrations screen (OAuth 2.0 bearer through https://api.atlassian.com/ex/jira/<cloud id>, or basic auth with
-an API token) or the owner.env fallback; it refreshes an expiring OAuth token, and a 401 forces one refresh and a
-retry. With a source, the gateway is falsy while no credential is usable, so `if ctx.jira:` keeps meaning
+an API token) or the owner.env fallback; it refreshes an expiring OAuth token, and a 401 forces one refresh and retry.
+With a source, the gateway is falsy while no credential is usable, so `if ctx.jira:` keeps meaning
 "Jira is connected".
 """
 from __future__ import annotations
@@ -19,7 +21,7 @@ from typing import Any, Iterator
 
 import httpx
 
-from ..core.text import adf_to_text, text_to_adf
+from ..core.text import adf_to_text, normalize_adf_text, text_to_adf
 
 ORDER = ["Backlog", "Intake", "To Do", "In Progress", "In Verify", "Human review", "Done"]
 FIELDS = ["summary", "status", "issuetype", "priority", "labels", "description", "parent", "issuelinks", "assignee",
@@ -34,6 +36,39 @@ def _ts(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.strptime(value.replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S.%f%z")
+
+
+def _comment_record(comment: dict, body_limit: int | None = None) -> dict[str, str]:
+    body = adf_to_text(comment.get("body"))
+    if body_limit is not None:
+        body = body[:body_limit]
+    author = comment.get("author") or {}
+    return {"id": str(comment.get("id") or ""), "author": author.get("displayName", "unknown"),
+            "account_id": author.get("accountId", ""),
+            "created": comment.get("created", ""), "body": body}
+
+
+def _safe_to_retry(method: str, path: str) -> bool:
+    return method.upper() != "POST" or path == "/rest/api/3/search/jql"
+
+
+def _needs_oauth_refresh(response: httpx.Response, credential: Any, refreshed: bool) -> bool:
+    return (response.status_code == 401 and credential is not None and credential.kind == "oauth" and not refreshed)
+
+
+def _is_transient_retry(response: httpx.Response, safe_to_retry: bool) -> bool:
+    return safe_to_retry and (response.status_code == 429 or response.status_code >= 500)
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> int:
+    retry_after = int(response.headers.get("Retry-After", "0") or 0)
+    return min(30, retry_after or 2 ** attempt)
+
+
+def _jira_result(method: str, path: str, response: httpx.Response, ok: tuple[int, ...]) -> Any:
+    if response.status_code not in ok:
+        raise JiraError(f"{method} {path} -> {response.status_code}: {response.text[:300]}")
+    return response.json() if response.content else None
 
 
 class Jira:
@@ -53,30 +88,33 @@ class Jira:
     def __bool__(self) -> bool:
         return self.auth is None or self.auth.available()
 
+    def _request_context(self, path: str, headers: dict[str, str] | None) -> tuple[str, dict | None, Any]:
+        url, send_headers, cred = path, headers, None
+        if self.auth is not None:
+            cred = self.auth.credential()
+            if cred.base_url != self._base:  # another site or credential: custom field ids may differ
+                self._base, self.field_ids = cred.base_url, {}
+            url = cred.base_url + path
+            send_headers = {**(headers or {}), **cred.headers()}
+        return url, send_headers, cred
+
     # --- plumbing -------------------------------------------------------------------------------------------
     def call(self, method: str, path: str, json: Any = None, ok: tuple[int, ...] = (200, 201, 204),
              files: Any = None, headers: dict[str, str] | None = None) -> Any:
+        safe_to_retry = _safe_to_retry(method, path)
         refreshed = False
         for attempt in range(6):
-            url, send_headers, cred = path, headers, None
-            if self.auth is not None:
-                cred = self.auth.credential()
-                if cred.base_url != self._base:  # another site or credential: custom field ids may differ
-                    self._base, self.field_ids = cred.base_url, {}
-                url = cred.base_url + path
-                send_headers = {**(headers or {}), **cred.headers()}
-            r = self.c.request(method, url, json=json, files=files, headers=send_headers)
-            self.last_limits = {k: v for k, v in r.headers.items() if k.lower().startswith("x-ratelimit")}
-            if r.status_code == 401 and cred is not None and cred.kind == "oauth" and not refreshed:
+            url, send_headers, cred = self._request_context(path, headers)
+            response = self.c.request(method, url, json=json, files=files, headers=send_headers)
+            self.last_limits = {k: v for k, v in response.headers.items() if k.lower().startswith("x-ratelimit")}
+            if _needs_oauth_refresh(response, cred, refreshed):
                 refreshed = True  # the access token was revoked or expired early: refresh once and retry
                 self.auth.credential(force_refresh=True, stale=cred)
                 continue
-            if r.status_code == 429 or r.status_code >= 500:
-                time.sleep(min(30, int(r.headers.get("Retry-After", "0") or 0) or 2 ** attempt))
+            if _is_transient_retry(response, safe_to_retry):
+                time.sleep(_retry_delay(response, attempt))
                 continue
-            if r.status_code not in ok:
-                raise JiraError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
-            return r.json() if r.content else None
+            return _jira_result(method, path, response, ok)
         raise JiraError(f"{method} {path}: Jira kept failing")
 
     def custom_field(self, name: str) -> str | None:
@@ -262,11 +300,44 @@ class Jira:
     def recent_comments(self, key: str, limit: int = 10) -> list[dict[str, str]]:
         """Return the newest Jira comments in a compact, prompt-safe form."""
         data = self.call("GET", f"/rest/api/3/issue/{key}/comment?orderBy=-created&maxResults={limit}")
-        return [{"author": (c.get("author") or {}).get("displayName", "unknown"),
-                 "account_id": (c.get("author") or {}).get("accountId", ""),
-                 "created": c.get("created", ""),
-                 "body": adf_to_text(c.get("body"))[:2000]}
-                for c in data.get("comments", [])[:limit]]
+        return [_comment_record(comment, body_limit=2000) for comment in data.get("comments", [])[:limit]]
+
+    def all_comments(self, key: str, page_size: int = 100) -> list[dict[str, str]]:
+        """Return the full comment history with complete bodies, following Jira's startAt pagination."""
+        if not isinstance(page_size, int) or isinstance(page_size, bool) or page_size < 1:
+            raise ValueError("comment page size must be a positive integer")
+        comments: list[dict[str, str]] = []
+        start = 0
+        while True:
+            data = self.call("GET", f"/rest/api/3/issue/{key}/comment?startAt={start}&maxResults={page_size}")
+            page = data.get("comments", [])
+            comments.extend(_comment_record(comment) for comment in page)
+            next_start = int(data.get("startAt", start)) + len(page)
+            total = data.get("total")
+            if not page or (total is not None and next_start >= int(total)):
+                return comments
+            if total is None and len(page) < page_size:
+                return comments
+            if next_start <= start:
+                raise JiraError("Jira comment pagination did not advance")
+            start = next_start
+
+    def find_comment(self, key: str, text: str, limit: int = 100,
+                     created_after: datetime | None = None) -> dict[str, str] | None:
+        """Find an exact comment, optionally requiring its creation time to meet a lower bound."""
+        expected = normalize_adf_text(text)
+        for comment in self.all_comments(key, page_size=limit):
+            if normalize_adf_text(comment.get("body") or "") != expected:
+                continue
+            if created_after is not None:
+                try:
+                    created = datetime.fromisoformat(str(comment.get("created") or "").replace("Z", "+00:00"))
+                    if created.astimezone(timezone.utc) < created_after.astimezone(timezone.utc):
+                        continue
+                except ValueError:
+                    continue
+            return {"id": str(comment.get("id") or ""), "created": str(comment.get("created") or "")}
+        return None
 
     def current_account_id(self) -> str:
         """Return the stable Jira identity of the account connected by the owner.
@@ -322,7 +393,12 @@ class Jira:
         return self.status(key)
 
     def comment(self, key: str, text: str) -> str:
-        return self.call("POST", f"/rest/api/3/issue/{key}/comment", {"body": text_to_adf(text)})["id"]
+        return self.comment_with_metadata(key, text)["id"]
+
+    def comment_with_metadata(self, key: str, text: str) -> dict[str, str]:
+        """Post a Jira comment and retain its id and server-assigned creation time."""
+        result = self.call("POST", f"/rest/api/3/issue/{key}/comment", {"body": text_to_adf(text)}) or {}
+        return {"id": str(result.get("id") or ""), "created": str(result.get("created") or "")}
 
     def add_worklog(self, key: str, seconds: int, started, comment: str) -> None:
         started_txt = started.strftime("%Y-%m-%dT%H:%M:%S.000%z")

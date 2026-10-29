@@ -92,6 +92,13 @@ def mount_ui(app: FastAPI, ctx) -> None:
         return FileResponse(licensing_notice_script, media_type="application/javascript",
                             headers={"Cache-Control": "no-cache"})
 
+    owner_escalation_script = HERE / "owner_escalation.js"
+
+    @app.get("/console-assets/owner-escalation.js", include_in_schema=False)
+    def owner_escalation_asset() -> FileResponse:
+        return FileResponse(owner_escalation_script, media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
+
     @app.get("/console-assets/release-readiness.js", include_in_schema=False)
     def release_readiness_asset() -> FileResponse:
         return FileResponse(release_readiness_script, media_type="application/javascript",

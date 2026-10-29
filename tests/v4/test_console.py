@@ -157,7 +157,7 @@ ESCALATIONS = {"metrics": {"classes": ["missing_tool_or_environment", "new_busin
                            "top_causes": [{"label": "Missing tool or environment", "count": 2, "fix": "Provision the tool."}],
                            "amendments": [{"ticket_key": "JOOWP-301", "title": "AC3 of JOOWP-301 amended", "decision": "AC3 narrowed"}]},
                "register": {"decisions": [{"id": 1, "title": "No Docker for AI runs", "decision": "No.", "cited_count": 2, "decided_by": "owner"}],
-                            "asked": [{"id": 9, "title": "Default plan", "question": "q", "waiting_tickets": ["JAIF-1"],
+                            "asked": [{"id": 9, "title": "Default plan", "question": "q", "waiting_tickets": ["JAIF-1"], "jira_answer_required": True,
                                        "options": ["Free", "Team"], "recommended": "Free"}], "amendments": []}}
 
 
@@ -1509,15 +1509,14 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
     assert "Share of usage · last 14 days" in ai_tab and "Quota by AI" in ai_tab
     assert '.provider-chart text{fill:var(--muted)' in PAGE.read_text()
 
-
     # JAIF-255: escalations per week by class and project, the share without a person, the register and amendments
     for text in ("Escalations and owner decisions", "66.7% resolved without a person", "falling since last week",
                  "Top three causes", "Provision the tool.", "New business decision (person)", "JAIF",
-                 "No Docker for AI runs", "Owner decision register", "Default plan", "Free (recommended)",
-                 'data-act="esc-answer" data-id="9" data-choice="Free"', 'data-act="esc-retire" data-id="1"',
+                     "No Docker for AI runs", "Owner decision register", "Default plan",
+                     "Answer in Jira with a comment after the question, then move the ticket to To Do.", 'data-act="esc-retire" data-id="1"',
                  "AC3 of JOOWP-301 amended", "Amendments never block", 'data-act="esc-add"'):
         assert text in rendered
-    assert 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
+    assert 'data-act="esc-answer" data-id="9"' not in rendered and 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
     assert "aria-label=\"Open Work board filtered by epic ALPHA-2\"" in rendered
     assert 'id="dash-project-search"' in rendered and 'data-act="dashboard-sort" data-key="open"' in rendered
     overview = render_machine_overview(state)

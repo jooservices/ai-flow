@@ -20,7 +20,7 @@ from functools import partial
 from pathlib import Path
 
 from ..adapters import RunResult, RunSpec, get_adapter
-from ..core import handover, work_limits
+from ..core import commit_rules, handover, work_limits
 from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
@@ -330,14 +330,8 @@ def related_block(hits: list[dict]) -> str:
 
 def pr_title(ticket: dict) -> str:
     """Conventional title with the ticket key; ASCII subjects keep it at the end, others start with the key."""
-    title = ticket["summary"].strip().rstrip(".")
-    title = title[0].upper() + title[1:] if title else ticket["key"]
     kind = {"Bug": "fix", "Hotfix": "fix", "Chore": "chore", "Docs": "docs", "Tech Debt": "refactor"}.get(ticket.get("type", ""), "feat")
-    if not re.match(r"^[A-Z]", title):
-        prefix = f"{kind}: {ticket['key']}: "
-        return prefix + title[:100 - len(prefix)]
-    suffix = f" ({ticket['key']})"
-    return f"{kind}: {title}"[:100 - len(suffix)] + suffix
+    return commit_rules.normalize_title(kind, ticket["key"], ticket["summary"])
 
 
 def commit_message(c: Claimed, summary: str) -> str:
@@ -640,7 +634,17 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="To Do")
             return result
         hb.progress = {"phase": "commit", "files": len(changed)}
-        sha = git.commit_all(wt, commit_message(c, summary), c.identity)
+        message = commit_message(c, summary)
+        problems = commit_rules.message_violations(message) + commit_rules.violations(pr_title(c.ticket), pr_title=True)
+        if problems:  # the normalizer prevents this; nothing invalid may reach the commit and the push
+            reason = "invalid title or commit message: " + "; ".join(problems)
+            result.update(outcome="failed", error_kind="invalid_title", summary=reason[:1000])
+            jira("comment", body=note(c, "invalid title", what="The commit message or title breaks the repository rules",
+                                      why=reason[:400], next_="Back to To Do; nothing was committed or pushed",
+                                      t0=t0, node=api_node(api)))
+            jira("transition", to="To Do")
+            return result
+        sha = git.commit_all(wt, message, c.identity)
         credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
                                                               "repo": repo, "branch": branch})
         token = credential["token"]

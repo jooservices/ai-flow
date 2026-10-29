@@ -1,1 +1,1 @@
-- [Ticket splitting](../../../docs/v4/ticket-splitting.md): validate_plan accepts 2 to 8 children; needs_split tickets return that list from intake without creating Jira issues
+- [Ticket splitting](../../../docs/v4/ticket-splitting.md): intake returns a validate_plan list; apply_plan creates linked Story children once and marks the parent aiflow-split-parent

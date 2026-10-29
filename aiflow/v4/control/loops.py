@@ -35,7 +35,8 @@ from . import version_release
 from ..core.services import service_gaps
 from ..core.toolchains import toolchain_gaps
 from .incidents import check_idle_flow, check_stack_pins, close_incident, open_incident
-from .api import Ctx, notify_human_review
+from .api import Ctx
+from .human_review_notice import notify_human_review
 from .db import J
 from .state import NODE_OFFLINE_S
 from .quota import assessments as quota_assessments

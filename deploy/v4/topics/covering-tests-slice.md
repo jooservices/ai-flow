@@ -1,0 +1,1 @@
+- [Covering tests slice](../../../docs/v4/covering-tests-slice.md): the developer prompt runs covering tests first, then one full suite in a 15-minute slice

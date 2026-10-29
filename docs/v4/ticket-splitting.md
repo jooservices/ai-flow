@@ -20,4 +20,10 @@ JAIF-247 `capacity.estimate` and `estimate_needs_split` in core. `needs_split` i
 returns `{estimate, needs_split}`. It does not call Jira or mutate the ticket. A supplied plan is checked with
 `validate_plan`; a missing plan is allowed at this step.
 
+## Intake split list
+
+When `needs_split` is true, intake returns an `INTAKE: SPLIT` JSON list that `validate_plan` accepts. A plan that
+fails `validate_plan` is rejected and Jira is not written. A ticket that does not need splitting keeps the existing
+`INTAKE: REWRITE` path. Intake still does not create child issues.
+
 **Console screens:** none (library contract; no UI in this ticket).

@@ -1,1 +1,1 @@
-- [Ticket splitting](../../../docs/v4/ticket-splitting.md): intake returns a validate_plan list; apply_plan creates linked Story children once and marks the parent aiflow-split-parent
+- [Ticket splitting](../../../docs/v4/ticket-splitting.md): intake splits oversized tickets into linked children; split parents are never developed and children follow blocker order

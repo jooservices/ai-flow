@@ -33,4 +33,10 @@ gets a stable `aiflow-split-<parent>-<index>` label so a second apply returns th
 issues. Each child Relates to the parent; child N+1 is Blocked by child N. The parent loses `aiflow-ready` and
 gains `aiflow-split-parent`. Children do not receive `aiflow-ready` here.
 
+## Claim gate
+
+A ticket labelled `aiflow-split-parent` is never a developer-run candidate. A child with an unfinished
+`blocked_by` entry is not offered. An unblocked split child can be claimed like any other ready ticket.
+Existing hold, lease and `aiflow-hold` rules still apply (`aiflow/v4/control/worker_candidates.py`).
+
 **Console screens:** none (library contract; no UI in this ticket).

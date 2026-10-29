@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..core import work_limits
 from ..adapters import RunSpec, get_adapter
 from ..control.ticket_split_decision import decide_split
 from ..core.environment import find_server_wording, is_server_question, kinds_of, redact, rejection_message
@@ -276,7 +277,7 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         needs_split = _ticket_needs_split(c.ticket)
         spec = RunSpec(prompt=build_prompt(c, read_spec(wt), needs_split=needs_split), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("target", 30)) * 60, control_url=control_url,
+                       timeout_s=int(project.get("work_minutes", {}).get("target", work_limits.TARGET)) * 60, control_url=control_url,
                        run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
         adapter = get_adapter(c.provider)
         base_argv = adapter.argv

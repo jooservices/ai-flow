@@ -406,7 +406,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         env = project_env(project["key"], project.get("environment"), "dev")
         spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log, env), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
+                       timeout_s=int(project.get("work_minutes", {}).get("hard", work_limits.HARD)) * 60,
                        control_url=control_url, run_token=c.run_token,
                        log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=env)
         adapter = get_adapter(c.provider)

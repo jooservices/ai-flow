@@ -2825,7 +2825,7 @@ function renderDBody() {
   var devDone = runs.filter(function (r) { return r.step === 'dev' && r.outcome === 'done' && r.duration_s; }).map(function (r) { return r.duration_s; }).sort(function (a, b) { return a - b; });
   var med = devDone.length ? devDone[Math.floor(devDone.length / 2)] : null;
   var p = D().projects.filter(function (x) { return x.key === S.project; })[0] || {};
-  var wm = p.work_minutes || { target: 30, warn: 45, hard: 60 };
+  var wm = p.work_minutes || { target: 15, warn: 30, hard: 45 };
 
   var boardOnly = S.view === 'work', h = '';
   if (!boardOnly) {
@@ -4012,7 +4012,7 @@ function card(t, p) {
   if (flags) h += '<span class="c-top">' + flags + '</span>';
   if (t.run) {
     var wm = p.work_minutes || {};
-    var hard = (wm.hard || 60) * 60;
+    var hard = (wm.hard || 45) * 60;
     h += '<span class="c-run"><span class="sdot" data-tone="info"></span><span class="mono">' + esc(t.run.account) + '</span> · ' + esc(t.run.step) + ' · fence #' + t.run.fence + '</span>';
     h += '<span class="c-clock"><span class="track"><i data-clock="' + (t.run.elapsed_s || 0) + '" data-hard="' + hard + '"></i><b style="left:50%"></b><b style="left:75%"></b></span><span class="mono" data-since="' + (t.run.elapsed_s || 0) + '" data-fmt="clock"></span></span>';
   } else if (t.last_run) {

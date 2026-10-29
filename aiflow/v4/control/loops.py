@@ -32,6 +32,7 @@ from . import system_check
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
+from ..core import work_limits
 from ..core.services import service_gaps
 from ..core.toolchains import toolchain_gaps
 from .incidents import check_idle_flow, check_stack_pins, close_incident, open_incident
@@ -398,7 +399,7 @@ def watchdog(ctx: Ctx) -> None:
             continue
         # clocks: 30 target, 45 warn, 60 hard (per project)
         p = ctx.repo().projects.get(r["project"])
-        wm = p.work_minutes() if p else {"target": 30, "warn": 45, "hard": 60}
+        wm = p.work_minutes() if p else dict(work_limits.DEFAULTS)
         minutes = (now - r["started_at"]).total_seconds() / 60
         if minutes >= wm["hard"]:
             open_incident(ctx, "run_hard_limit", r["ticket_key"], "critical", f"{r['ticket_key']} passed {wm['hard']} minutes",

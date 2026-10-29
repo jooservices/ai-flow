@@ -102,6 +102,26 @@ jobs:
           BASE: ${{ github.event.pull_request.base.ref == 'develop' && github.event.pull_request.base.sha || 'origin/develop' }}
         run: python3 -m aiflow.v4.core.giant_files --base "$BASE" --head HEAD
 
+  quality:
+    name: Code quality
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install
+        run: pip install uv==0.13.4 && uv sync --frozen --group dev
+
+      - name: Lint, function size and layer rules (no third-party reviewer needed)
+        env:
+          BASE: ${{ github.event.pull_request.base.ref == 'develop' && github.event.pull_request.base.sha || 'origin/develop' }}
+        run: uv run --frozen python -m aiflow.v4.core.quality_checks check --base "$BASE"
+
   v4:
     name: Test (v4)
     if: github.event_name != 'schedule'

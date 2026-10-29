@@ -43,6 +43,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Small tickets](../../docs/v4/small-tickets.md): developer limits of 15, 30 and 45 minutes (configurable) and the size rule that splits larger tickets
 - [Validated parked requirements](../../docs/v4/parked-requirements.md): validate missing-tool reports, install supported tools from heartbeat requests, show parked-ticket status, and name idle and stalled-wait causes
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright, Chromium, Firefox and WebKit, and report an unavailable browser by name
+- [Policy routes](../../docs/v4/route-module-policy.md): the policy routes are served from their own router module
 - [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, browser binaries go into the shared `playwright-browser` folder, and each browser is launched as the AI user
 - [Pull request comments](../../docs/v4/pr-comments.md): one verification comment edited in place, one bot identity, quiet CodeRabbit configuration
 - [Isolated WordPress test sites](../../docs/v4/wordpress-runs.md): WordPress dev and verify runs get a seeded PHP 8.3 site on a per-run Podman network, with browser environment and cleanup

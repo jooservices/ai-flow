@@ -103,7 +103,10 @@ AIFLOW4_IMAGE_REPOSITORY=$IMAGE AIFLOW4_IMAGE_TAG=$VERSION AIFLOW4_VERSION=$VERS
 
 install -m 0755 "$B/deploy/v4/bin/aiflow4-node-install" "$B/deploy/v4/bin/aiflow4-deploy" \
   "$B/deploy/v4/bin/aiflow4-autodeploy" "$B/deploy/v4/bin/aiflow4-develop-install" \
-  "$B/deploy/v4/bin/aiflow4-deploy-develop" "$B/deploy/v4/bin/aiflow4-autodeploy-develop" /usr/local/sbin/
+  "$B/deploy/v4/bin/aiflow4-deploy-develop" "$B/deploy/v4/bin/aiflow4-autodeploy-develop" \
+  "$B/deploy/v4/bin/aiflow4-audit-install" /usr/local/sbin/
+install -d -m 0755 /usr/local/share/aiflow4/audit
+install -m 0640 "$B/deploy/v4/audit/aiflow4-operator.rules" /usr/local/share/aiflow4/audit/aiflow4-operator.rules
 [ ! -f "$B/deploy/v4/bin/aiflow4-control-install" ] ||
   install -m 0755 "$B/deploy/v4/bin/aiflow4-control-install" /usr/local/sbin/
 install -m 0644 "$B"/deploy/v4/control/systemd/aiflow4-autodeploy.* /etc/systemd/system/
@@ -115,6 +118,10 @@ printf '%s\n' "$VERSION" > /root/.bridge/out/release/VERSION
 # A control host set up by `aiflow4 install control` runs no node agent until it is joined as a node
 # (AIFLOW4_DEPLOY_NODE_AGENT=0 in /etc/aiflow/control.env).
 if [ "${AIFLOW4_DEPLOY_NODE_AGENT:-1}" != 0 ]; then
+  aiflow4-node-install "$RELEASES/$VERSION/$(basename "$TAR")" "$VERSION" \
+    "$RELEASES/$VERSION/$(basename "$BUNDLE")" "$(awk 'NR==1 {print $1}' "$WORK/SHA256SUMS")"
+elif systemctl list-unit-files aiflow4-node-agent.service 2>/dev/null | grep -q '^aiflow4-node-agent\.service'; then
+  # An enrolled control host keeps its node agent current; do not silently strand its accounts at an old release.
   aiflow4-node-install "$RELEASES/$VERSION/$(basename "$TAR")" "$VERSION" \
     "$RELEASES/$VERSION/$(basename "$BUNDLE")" "$(awk 'NR==1 {print $1}' "$WORK/SHA256SUMS")"
 fi

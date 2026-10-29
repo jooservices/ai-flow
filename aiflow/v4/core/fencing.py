@@ -96,6 +96,15 @@ class Leases:
     def ttl_ms(self, key: str) -> int:
         return int(self.r.pttl(self._k("lease", key)))
 
+    def ttl_ms_many(self, keys: list[str]) -> list[int]:
+        """Read multiple lease expiries in one Redis round trip, preserving the supplied key order."""
+        if not keys:
+            return []
+        pipe = self.r.pipeline(transaction=False)
+        for key in keys:
+            pipe.pttl(self._k("lease", key))
+        return [int(value) for value in pipe.execute()]
+
     def held_keys(self) -> list[str]:
         prefix = self._k("lease", "")
         return [k[len(prefix):] for k in self.r.scan_iter(match=prefix + "*", count=500)]
@@ -108,6 +117,19 @@ class Leases:
         k = self._k("cooldown", account)
         reason = self.r.get(k)
         return (reason, int(self.r.ttl(k))) if reason else None
+
+    def cooling_many(self, accounts: list[str]) -> dict[str, tuple[str, int]]:
+        """Read cooldowns for multiple accounts in one Redis round trip."""
+        if not accounts:
+            return {}
+        pipe = self.r.pipeline(transaction=False)
+        for account in accounts:
+            key = self._k("cooldown", account)
+            pipe.get(key)
+            pipe.ttl(key)
+        values = pipe.execute()
+        return {account: (str(reason), int(ttl))
+                for account, reason, ttl in zip(accounts, values[::2], values[1::2]) if reason}
 
     def uncool(self, account: str) -> None:
         self.r.delete(self._k("cooldown", account))

@@ -28,11 +28,16 @@ def _bundle(tmp_path: Path) -> Path:
     release_source = tmp_path / "release"
     (release_source / "deploy/v4/node/systemd").mkdir(parents=True)
     (release_source / "deploy/v4/bin").mkdir(parents=True)
+    (release_source / "deploy/v4/audit").mkdir(parents=True)
     (release_source / "pyproject.toml").write_text("[project]\nname = 'ai-flow'\n", encoding="utf-8")
     (release_source / "deploy/v4/node/systemd/aiflow4-node-agent.service").write_text("[Unit]\n", encoding="utf-8")
     installer = release_source / "deploy/v4/bin/aiflow4-node-install"
     installer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     installer.chmod(0o755)
+    audit_installer = release_source / "deploy/v4/bin/aiflow4-audit-install"
+    audit_installer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    audit_installer.chmod(0o755)
+    (release_source / "deploy/v4/audit/aiflow4-operator.rules").write_text("# audit\n", encoding="utf-8")
     with tarfile.open(bundle / "release/aiflow4-v4.1.0.tar.gz", "w:gz") as archive:
         archive.add(release_source / "pyproject.toml", arcname="pyproject.toml")
         archive.add(release_source / "deploy", arcname="deploy")

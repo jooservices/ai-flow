@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import re
+import json
 import shlex
 import shutil
 import subprocess
@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from conftest import add_ticket, join_node
+from console_test_utils import console_script
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 
@@ -20,6 +21,24 @@ def owner_session(client, ctx, role="owner"):
     secret = "test-console-session-secret-at-least-32-bytes"
     ctx.settings.console_session_secret = secret
     client.cookies.set(COOKIE_NAME, issue_session("owner@example.test", role, int(time.time()) + 3600, secret))
+
+
+def settle_heartbeat_readiness(ctx, node):
+    """Wait for the provider-backed readiness check before asserting worker eligibility."""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        pending = [thread for thread in threading.enumerate()
+                   if thread.name == f"aiflow4-heartbeat-readiness-{node}"]
+        if not pending:
+            break
+        for thread in pending:
+            thread.join(timeout=min(0.1, max(0, deadline - time.monotonic())))
+    else:
+        raise AssertionError(f"heartbeat readiness check for {node} did not settle")
+    from aiflow.v4.control.system_check import refresh_node
+    readiness = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,)) or {}
+    refresh_node(ctx, node, "manual", credential_checks=(readiness.get("readiness") or {}).get(
+        "credential_statuses", {}))
 
 
 def release_fixture(monkeypatch, tmp_path):
@@ -37,9 +56,7 @@ def test_machine_screen_renders_machine_specs_account_controls_machine_usage_and
     if not node_js:
         import pytest
         pytest.skip("Node.js is needed to render the console screen")
-    page = Path("aiflow/v4/control/ui/console.html").read_text()
-    script = re.search(r"<script>\n(.*?)</script>", page, re.S).group(1)
-    script = script[:script.index("/* ---------- boot ---------- */")]
+    script = console_script(Path("aiflow/v4/control/ui/console.html"))
     driver = r'''
 var machinesView = {innerHTML: ''};
 document.querySelector = function (selector) { return selector === '#view-machines' ? machinesView : null; };
@@ -136,8 +153,8 @@ def test_stopped_live_machine_cannot_be_reenrolled_with_the_same_name(client, ct
 
 def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, ctx, monkeypatch, tmp_path):
     owner_session(client, ctx)
-    node_auth = {"Authorization": f"Bearer {join_node(client, 'node1').json()['node_token']}"}
-    join_node(client, "node3")
+    node_auth = {"Authorization": f"Bearer {join_node(client, 'node1', heartbeat=False).json()['node_token']}"}
+    join_node(client, "node3", heartbeat=False)
 
     created = client.post("/v1/machines/node1/accounts", json={
         "provider": "codex", "sessions": 2, "jobs": ["develop", "verify", "intake", "master"]})
@@ -151,7 +168,10 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     machine = next(row for row in state["nodes"] if row["name"] == "node1")
     assert account["status"] == "signed_out" and account["parallel"] == 2 and account["jobs"]
     assert account["sign_in_pending"] is True
-    assert machine["sessions_busy"] == 0 and machine["metrics"] == {}
+    assert machine["sessions_busy"] == 0
+    assert machine["metrics"]["disk_free"] == 20 * 1024 ** 3
+    assert machine["metrics"]["load1"] == 0.1 and machine["metrics"]["cpus"] == 4
+    assert machine["metrics"]["mem_total"] == 100 and machine["metrics"]["mem_used"] == 20
 
     # The machine starts the provider's own device flow and relays the provider-issued code to the console.
     again = client.post(f"/v1/accounts/{account_id}/sign-in")
@@ -186,8 +206,8 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
         "windows": {"five_hour": {"utilization": 0.4, "resets_at": 1792561800},
                     "seven_day": {"utilization": 0.75, "resets_at": 1792638000}}}}, headers=node_auth)
     assert probe.status_code == 200
-    completed = client.post(f"/v1/accounts/{account_id}/sign-in/complete")
-    assert completed.status_code == 200 and completed.json()["signed_in"] is True
+    assert ctx.db.one("SELECT sign_in_status FROM managed_ai_accounts WHERE id=%s", (account_id,))["sign_in_status"] == "idle"
+    assert client.get(f"/v1/accounts/{account_id}/sign-in").status_code == 404
 
     usage_run = "89e035a2-2dcb-4791-b482-607d43883f5f"
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
@@ -199,7 +219,9 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
                 (active_run,))
     heartbeat = client.post("/v1/nodes/node1/heartbeat", json={
         "slots_total": 8, "slots_used": 2,
-        "metrics": {"mem_total": 8589934592, "mem_used": 2147483648, "cpus": 8}}, headers=node_auth)
+        "metrics": {"load1": 0.1, "cpus": 8, "mem_total": 8589934592,
+                    "mem_used": 2147483648, "disk_total": 100 * 1024 ** 3,
+                    "disk_free": 20 * 1024 ** 3}}, headers=node_auth)
     assert heartbeat.status_code == 200
     state = client.get("/v1/state").json()
     account = next(row for row in state["accounts"] if row["id"] == account_id)
@@ -243,8 +265,15 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     assert candidates.status_code == 200 and candidates.json()["tickets"] == []
     resumed_node = client.put("/v1/nodes/node1/work-acceptance?accepting_work=true", json={"confirm": False})
     assert resumed_node.status_code == 200
+    settle_heartbeat_readiness(ctx, "node1")
     candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=node_auth)
-    assert any(ticket["key"] == "TESTWP-999" for ticket in candidates.json()["tickets"])
+    assert any(ticket["key"] == "TESTWP-999" for ticket in candidates.json()["tickets"]), json.dumps({
+        "candidates": candidates.json(),
+        "node": ctx.db.one("SELECT status,accepting_work,projects,dynamic,readiness FROM nodes WHERE name=%s",
+                            ("node1",)),
+        "account": ctx.repo().account("codex-01"),
+        "ticket": ctx.db.one("SELECT key,project,status,labels FROM tickets WHERE key=%s", ("TESTWP-999",)),
+    }, default=str, sort_keys=True)
     ctx.db.run("UPDATE runs SET status='finished',outcome='done',ended_at=now() WHERE id=%s", (active_run,))
     denied_machine_remove = client.request("DELETE", "/v1/nodes/node3", json={"confirm": False})
     assert denied_machine_remove.status_code == 400
@@ -255,8 +284,8 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     actions = {(row["target"], row["action"]) for row in audit if row["accepted"]}
     assert {("ai-account", action) for action in ("add", "sign_in_again", "update", "pause", "resume", "remove")} <= actions
     assert {("node", action) for action in ("stop_taking_work", "resume_work", "remove")} <= actions
-    assert ("ai-account", "sign_in_complete") in {(row["target"], row["action"]) for row in ctx.db.all(
-        "SELECT target,action FROM write_audit")}
+    assert ctx.db.one("SELECT outcome FROM events WHERE type='account.sign_in_completed' AND account=%s",
+                      (account_id,))["outcome"] == "ready"
 
 
 def test_removing_a_control_repo_account_tombstones_it_from_worker_scheduling(client, ctx):

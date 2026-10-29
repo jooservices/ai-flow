@@ -14,8 +14,9 @@ sign-in on, and takes only the documented steps:
    ([Install the control plane](control-install.md)). The installer turns sign-in on but does not create a user or
    write a password file.
 2. Open `/login`, enter the installation ownership capability, create the first Administrator in browser setup,
-   and continue with the signed-in session. `/setup` redirects to the Dashboard afterwards; resume optional steps in
-   the Dashboard's "Finish setting up AI Flow" panel. Anonymous callers get a redirect or `401`.
+   and continue with the signed-in session. On the first sign-in, open **Security**, set up two-factor sign-in with
+   an authenticator, and save the one-time recovery codes. `/setup` redirects to the Dashboard afterwards; resume
+   optional steps in the Dashboard's "Finish setting up AI Flow" panel. Anonymous callers get a redirect or `401`.
 3. In Command Center, open **Projects**, load the connected Jira and GitHub catalogs, run preflight, and add the
    project (Jira key, repository, base branch).
 4. For each machine, copy the one-use join command from Command Center ([Join a node](node-join.md)). Machines
@@ -78,10 +79,11 @@ Backup and restore are CI-only acceptance helpers, not operator commands. The co
 backup flow yet, so the helper is intentionally not registered under `aiflow4`. The acceptance archive holds every
 registry table (users, projects, machines and their tokens, tickets, runs), the secret files in
 `/etc/aiflow/secrets/{control,console,jira,github}`, and the release (`CURRENT`) it was taken on. Restore runs after
-the release schema exists, replaces the registry contents, resets each owned sequence to the restored maximum and
-writes secret directories as `0700` with files at `0600`. The test verifies console sign-in, machine tokens, Jira OAuth
-refresh and GitHub App token issuance after restore. The archive does not contain the PostgreSQL, Redis or OpenObserve
-data directories; Redis leases and caches are rebuilt.
+the release schema exists, replaces mutable registry contents, preserves audit entries already on the target and
+appends archived audit history without truncating the append-only audit table. It resets each owned sequence to the
+restored maximum and writes secret directories as `0700` with files at `0600`. The test verifies console sign-in,
+machine tokens, Jira OAuth refresh, GitHub App token issuance and audit history after restore. The archive does not
+contain the PostgreSQL, Redis or OpenObserve data directories; Redis leases and caches are rebuilt.
 
 ## When it runs
 

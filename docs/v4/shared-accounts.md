@@ -1,7 +1,9 @@
 # Shared AI accounts
 
-An AI account exists apart from machines. The owner enables it on several machines in Command Center; the flow counts
-its sessions and quota once, across all of them, and never runs more sessions than the account's total limit.
+An AI account exists apart from machines. The owner enables it on several machines in Command Center or **Machines
+and AI**; the flow counts its sessions and quota once, across all of them, and never runs more sessions than the
+account's total limit. The control database stores accounts, roles, worker counts, and machine assignments. Legacy
+`accounts.yaml` entries are imported once; after import, manage them through the console.
 
 ## Use it (Command Center)
 
@@ -13,13 +15,14 @@ its sessions and quota once, across all of them, and never runs more sessions th
    the credential on that machine. When the login command exits successfully, the agent reports completion and
    releases the assignment so the machine's worker can start its usual credential check. An auth failure returns
    only that machine to *Sign-in needed*. Each machine signs in once, and the link and code are cleared on completion.
-4. **Total sessions** changes the limit at any time. Accounts defined in `aiflow-control/accounts.yaml` can be shared
-   the same way; their first machine stays defined in the repo and keeps its previous capacity as the limit until you
-   change it.
+4. **Total sessions** changes the limit at any time. An account imported from the legacy `aiflow-control/accounts.yaml`
+   file is stored in the control database with its imported roles and worker count. Enable it on another machine or
+   change its limit, roles, and workers through the console; the YAML definition is removed during import and is not
+   consulted again.
 5. **Remove** takes the account off one machine only; other machines keep using it. Removing the last machine, or
-   **Remove from all machines**, asks for an on-screen confirmation. For an account defined in
-   `aiflow-control/accounts.yaml`, this detaches its machine assignments while leaving the source definition in the
-   repo so it can be enabled again later.
+   **Remove from all machines**, asks for an on-screen confirmation. The change is stored in the database; a removed
+   legacy account is not restored from its old YAML definition. Add a new account through **Machines and AI** if it is
+   needed again.
 
 The account list shows the account once (quota, status, prediction, `used/total sessions`). The account panel shows a
 breakdown per machine below: online or offline, sessions now, sessions in the last 24 hours, sign-in state.
@@ -38,8 +41,9 @@ breakdown per machine below: online or offline, sessions now, sessions in the la
   account when the others are away. The worker checks the local credentials; only a passing check makes that machine
   eligible to claim work.
 - Cooldowns, quota and the credential-expiry warning belong to the account; the earliest expiry among machines is used.
-- The limit is enforced when the account has an explicit limit (created in Command Center, or shared on a second
-  machine). An account only in `accounts.yaml` keeps its old behaviour: `parallel` workers on its one machine.
+- The limit is enforced when the account has an explicit total limit (created in Command Center, or shared on another
+  machine). An imported account with no shared total limit retains its imported per-machine worker count until its
+  settings are changed in the console.
 
 ## Credentials
 
@@ -84,4 +88,5 @@ Accounts appear on Command Center (`/cc`) and Machines and AI (`/machines`): one
 machine, **Enable on**, **Total sessions**, **Retry sign-in**, **Remove** and **Remove from all machines**.
 
 Changes need the `nodes.manage` permission (owner, super administrator). The shared account tables are created by
-`011_shared_accounts.sql`; `015_shared_account_machine_detach.sql` records detached control-repo assignments.
+`011_shared_accounts.sql`; `015_shared_account_machine_detach.sql` records detached assignments from accounts that
+were imported from the legacy control repository.

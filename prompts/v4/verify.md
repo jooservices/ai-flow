@@ -12,6 +12,7 @@ Do this:
    Map each criterion to the one configured command that proves it. Do not reuse an unrelated passing check, invent
    a command, fail review for a deferred criterion, or ask about its environment. List nothing when all criteria can be
    checked in this review run.
+   Code quality does not depend on any bot reviewer: fail the review when the change grows a central file instead of adding a module, duplicates logic, swallows an error or adds a ruff, function-size or layer finding (`python3 -m aiflow.v4.core.quality_checks check`).
    Use `docs/v4/architecture.md` as the architecture checklist: verify layer ownership and dependency direction,
    registration points, the named patterns, and the principle checks for the changed code.
 3. Run the project's checks and the tests of this change:
@@ -24,8 +25,13 @@ Rules:
 - You review and test; you do not edit, create or delete files, and you do not commit or push.
 - Judge against the ticket and the spec, not personal taste. Style nits are not findings.
 - Every finding must be specific: file, what is wrong, what the fix is.
+- Report every blocking finding of this change in this one review. Read the whole diff against every acceptance
+  criterion before you write FINDINGS; do not stop at the first defect. A ticket that goes back for one defect at a
+  time costs a full development run and a full review for each. When a ticket has more than three acceptance
+  criteria and you list only one finding, add a line `CHECKED: <the criteria you checked and found fine>`.
 
-The developer's summary:
+The developer's summary, with the AC-MAP and SELF-REVIEW it handed over (check every AC-MAP entry against the code
+and the test it names; an entry that does not hold, or a criterion missing from the map, is a finding):
 {dev_summary}
 {related}{environment}
 A criterion that can only be proven in the project's configured environment is checked by AI Flow after the ticket is

@@ -12,7 +12,7 @@ from aiflow.v4.control.console_auth import (CANONICAL_ROLES, ROLE_LABELS, ROLE_P
                                              has_permission, issue_session, landing_page, normalize_roles)
 from aiflow.v4.control.db import J
 from aiflow.v4.core.controlrepo import Project
-from conftest import add_ticket
+from conftest import add_ticket, join_node
 
 
 SESSION_SECRET = "test-console-role-secret-with-at-least-32-bytes"
@@ -167,6 +167,60 @@ def test_project_restriction_filters_dashboard_and_refuses_other_project_apis(ct
                         ("limited@example.test",))
     assert {row["payload"]["path"] for row in denied} >= {
         "/v1/business/OTHER/release-readiness", "/v1/tickets/OTHER-1/timeline", "/v1/analytics/daily"}
+
+
+def test_system_check_and_support_bundle_require_node_operations_read(ctx):
+    client = role_client(ctx)
+    for role in ("reviewer", "business"):
+        client.cookies.set("aiflow4_session", issue_session(role + "@example.test", role,
+                                                             SESSION_EXPIRY, SESSION_SECRET))
+        for path in ("/v1/system-check", "/v1/support-bundle"):
+            response = client.get(path)
+            assert response.status_code == 403, (role, path, response.status_code)
+            assert response.json()["detail"] == "not available for your role"
+
+    client.cookies.set("aiflow4_session", issue_session("sa@example.test", "sa", SESSION_EXPIRY,
+                                                         SESSION_SECRET))
+    assert client.get("/v1/system-check").status_code == 200
+    assert client.get("/v1/support-bundle").status_code == 200
+
+
+def test_system_check_and_support_bundle_respect_project_scope(ctx):
+    ctx.repo().projects["OTHER"] = Project("OTHER", "jooservices/other")
+    node_app = create_app(ctx)
+    node_app.state.sync_accounts()
+    node_client = TestClient(node_app)
+    assert join_node(node_client, "cc", project="TESTWP").status_code == 200
+    assert join_node(node_client, "node-other", project="OTHER").status_code == 200
+    from aiflow.v4.control.db import J
+
+    readiness = ctx.db.one("SELECT readiness FROM nodes WHERE name='cc'")["readiness"] or {}
+    readiness.setdefault("projects", {})["OTHER"] = [{
+        "id": "hidden-project-condition", "name": "Other project condition", "result": "needs_action",
+        "detail": "Private project result.", "action": "Fix the private project condition.",
+    }]
+    ctx.db.run("UPDATE nodes SET readiness=%s WHERE name='cc'", (J(readiness),))
+
+    login.seed_user(ctx.db, "scoped-operations@example.test", "team_lead")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s",
+               (["TESTWP"], "scoped-operations@example.test"))
+    client = role_client(ctx, "team_lead", "scoped-operations@example.test")
+
+    report = client.get("/v1/system-check")
+    assert report.status_code == 200
+    assert {node["name"] for node in report.json()["nodes"]} == {"cc", "node1"}
+    assert "OTHER" not in report.json()["nodes"][0]["readiness"].get("projects", {})
+    assert all(set(node["readiness"].get("projects", {})).issubset({"TESTWP"})
+               for node in report.json()["nodes"])
+
+    bundle = client.get("/v1/support-bundle")
+    assert bundle.status_code == 200
+    payload = bundle.json()
+    assert payload["projects"] == ["TESTWP"]
+    assert {node["name"] for node in payload["system_check"]["nodes"]} == {"cc", "node1"}
+    assert "OTHER" not in payload["system_check"]["nodes"][0]["readiness"].get("projects", {})
+    assert all(set(node["readiness"].get("projects", {})).issubset({"TESTWP"})
+               for node in payload["system_check"]["nodes"])
 
 
 def test_board_reader_roles_keep_already_done_reason_and_pull_request_in_state(ctx):

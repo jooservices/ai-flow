@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import pty
+import pwd
 import re
 import shutil
 import signal
@@ -21,8 +22,10 @@ import time
 import select
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from urllib.parse import quote
 from pathlib import Path
+from urllib.parse import quote
+
+import httpx
 
 from .. import VERSION
 from ..core.settings import read_env_file
@@ -47,6 +50,7 @@ TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
          "xdebug": ["php", "-r", "echo extension_loaded('xdebug') ? 'Xdebug ' . phpversion('xdebug') : 'missing';"],
          "cosign": ["cosign", "version"], "podman": ["podman", "--version"]}
 REPORTED_TOOLS = tools_for_stacks(STACK_TOOLS)
+MIN_WORK_DISK_FREE = 5 * 1024 ** 3
 SIGN_IN_COMMANDS = {
     "claude": ["claude", "auth", "login"],
     "codex": ["codex", "login", "--device-auth"],
@@ -60,6 +64,216 @@ _SIGN_IN_CODE = re.compile(
     r"([A-Z0-9][A-Z0-9-]{3,31})\b")
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _SIGN_IN_RUN_AS = ["setpriv", "--reuid=aiflow-worker", "--regid=aiflow-worker", "--init-groups", "--"]
+_AUDIT_EVENT_ID = re.compile(rb"msg=audit\((\d+(?:\.\d+)?):(\d+)\)")
+_AUDIT_TYPE = re.compile(rb"type=([A-Z_]+)")
+_AUDIT_AUID = re.compile(rb"\bauid=(\d+)\b")
+_AUDIT_EXE = re.compile(rb'\bexe="((?:\\.|[^"\\])*)"')
+_AUDIT_PATH = re.compile(rb'\bname="((?:\\.|[^"\\])*)"')
+_AUDIT_ARG = re.compile(rb'\ba(\d+)="((?:\\.|[^"\\])*)"')
+_AUDIT_ARGC = re.compile(rb'\bargc=(\d+)\b')
+_SECRET_OPTION = re.compile(
+    r"(?i)(?:token|password|passwd|passphrase|secret|api[-_]?key|client[-_]?secret|private[-_]?key|"
+    r"credential|authorization|cookie|header|(?:^|[-_])key(?:$|[-_]))"
+)
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)^([A-Za-z0-9_.-]*(?:token|password|passwd|passphrase|secret|api[-_]?key|client[-_]?secret|"
+    r"private[-_]?key|credential|authorization|cookie|key)[A-Za-z0-9_.-]*\s*=).*$"
+)
+_SECRET_VALUE = re.compile(
+    r"(?i)(?:\b(?:bearer|basic)\s+\S+|\b(?:gh[pousr]_|github_pat_|glpat-|xox[baprs]-|sk-|AKIA)[A-Za-z0-9_-]+|"
+    r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
+)
+
+
+def notify_systemd(message: str) -> bool:
+    """Send a readiness/status message to systemd without an extra dependency."""
+    address = os.environ.get("NOTIFY_SOCKET", "")
+    if not address:
+        return False
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as connection:
+            connection.connect(address)
+            connection.sendall(message.encode("utf-8"))
+        return True
+    except OSError:
+        return False
+
+
+def _audit_actor(text: bytes) -> str | None:
+    """The login name behind an audit event, or None for an unset loginuid (systemd services are not operators)."""
+    auid = _AUDIT_AUID.search(text)
+    if not auid:
+        return None
+    uid = int(auid.group(1))
+    if uid >= 4_294_967_295:
+        return None
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return str(uid)
+
+
+def _audit_interventions(raw: bytes) -> list[dict]:
+    """Extract human commands and changed files, retaining only secret-redacted arguments and safe names."""
+    groups: dict[bytes, list[bytes]] = {}
+    current = None
+    for line in raw.splitlines():
+        match = _AUDIT_EVENT_ID.search(line)
+        if not match:
+            continue
+        event_id = match.group(0)
+        if current is not None and event_id != current:
+            groups.setdefault(current, []).append(b"")
+        groups.setdefault(event_id, []).append(line)
+        current = event_id
+    results = []
+    for event_id, lines in groups.items():
+        text = b"\n".join(lines)
+        actor = _audit_actor(text)
+        if actor is None:
+            continue
+        stamp = _AUDIT_EVENT_ID.search(event_id)
+        if not stamp:
+            continue
+        timestamp, serial = stamp.group(1).decode(), stamp.group(2).decode()
+        try:
+            happened_at = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            continue
+        types = {m.group(1) for line in lines if (m := _AUDIT_TYPE.search(line))}
+        exe = _AUDIT_EXE.search(text)
+        if b"EXECVE" in types and exe:
+            command = os.path.basename(exe.group(1).decode("utf-8", "replace").replace(r"\x22", '"'))[:120]
+            args, argument_count = _safe_audit_arguments(lines)
+            results.append({"source_key": f"{timestamp}:{serial}:shell", "source": "shell", "actor": actor,
+                            "action": "execute", "target": command, "happened_at": happened_at,
+                            "reason": f"Interactive host session invoked {command}; auditd captured secret-redacted arguments.",
+                            "details": {"arguments": args, "argument_count": argument_count}})
+        if b"PATH" in types and b"SYSCALL" in types:
+            paths = [m.group(1).decode("utf-8", "replace") for line in lines if _AUDIT_TYPE.search(line)
+                     and _AUDIT_TYPE.search(line).group(1) == b"PATH" for m in _AUDIT_PATH.finditer(line)]
+            for path in sorted(set(path for path in paths if path)):
+                filename = os.path.basename(path)
+                path_id = hashlib.sha256(path.encode("utf-8", "replace")).hexdigest()[:16]
+                results.append({"source_key": f"{timestamp}:{serial}:config:{path_id}", "source": "configuration",
+                                "actor": actor, "action": "write", "target": filename[:120],
+                                "happened_at": happened_at,
+                                "reason": f"Interactive host session changed {filename}; auditd captured the file name."})
+    return results
+
+
+def _safe_audit_arguments(lines: list[bytes]) -> tuple[list[str], int]:
+    """Return argv excluding argv[0], redacting credential options and values before persistence."""
+    values: dict[int, str] = {}
+    argc = 0
+    for line in lines:
+        count = _AUDIT_ARGC.search(line)
+        if count:
+            argc = max(argc, int(count.group(1)))
+        for match in _AUDIT_ARG.finditer(line):
+            values[int(match.group(1))] = match.group(2).decode("utf-8", "replace")
+    argument_count = max(argc - 1, max(values, default=0))
+    safe: list[str] = []
+    redact_next = False
+    for index in range(1, argument_count + 1):
+        value = values.get(index, "[unavailable]")
+        if redact_next:
+            safe.append("[REDACTED]")
+            redact_next = False
+            continue
+        option = value.split("=", 1)[0]
+        short_inline_secret = re.match(r"(?i)^-(?:p|h).+", value)
+        if short_inline_secret:
+            safe.append(value[:2] + "[REDACTED]")
+            continue
+        if value.startswith("-") and (_SECRET_OPTION.search(option) or option in {"-p", "-P", "-H"}):
+            if "=" in value:
+                safe.append(f"{option[:2000]}=[REDACTED]")
+            else:
+                safe.append(value[:2000])
+                redact_next = True
+            continue
+        safe.append(_redact_audit_argument(value))
+    return safe, argument_count
+
+
+def _redact_audit_argument(value: str) -> str:
+    """Keep useful command context while stripping credentials, URL userinfo and URL query strings."""
+    assignment = _SECRET_ASSIGNMENT.match(value)
+    if assignment:
+        return assignment.group(1) + "[REDACTED]"
+    if _SECRET_VALUE.search(value):
+        return "[REDACTED]"
+
+    def redact_url(match: re.Match[str]) -> str:
+        from urllib.parse import urlsplit, urlunsplit
+
+        raw_url = match.group(0).rstrip(",;).")
+        suffix = match.group(0)[len(raw_url):]
+        try:
+            parsed = urlsplit(raw_url)
+            host = parsed.hostname or ""
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            if parsed.port:
+                host += f":{parsed.port}"
+            query = "[REDACTED]" if parsed.query else ""
+            safe_url = urlunsplit((parsed.scheme, host, parsed.path, query, ""))
+            return safe_url + suffix
+        except ValueError:
+            return "[REDACTED_URL]" + suffix
+
+    return re.sub(r"https?://[^\s\"'<>]+", redact_url, value, flags=re.IGNORECASE)[:2000]
+
+
+def forward_operator_audit(api: ControlClient, node: str, audit_path: str = "/var/log/audit/audit.log",
+                           cursor_path: str = "/var/lib/aiflow4/operator-audit.cursor") -> int:
+    """Forward auditd records created by human login sessions, keeping only an inode and byte cursor."""
+    path, cursor = Path(audit_path), Path(cursor_path)
+    if not path.is_file():
+        return 0
+    cursor.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        state = json.loads(cursor.read_text(encoding="utf-8")) if cursor.exists() else {}
+    except (OSError, ValueError):
+        state = {}
+    stat = path.stat()
+    offset = int(state.get("offset", 0)) if int(state.get("inode", -1)) == stat.st_ino else 0
+    if offset > stat.st_size:  # copy-truncate rotation can keep the inode while shortening the log
+        offset = 0
+    with path.open("rb") as stream:
+        stream.seek(offset)
+        data = stream.read()
+    complete_length = data.rfind(b"\n") + 1
+    complete = data[:complete_length]
+    events = _audit_interventions(complete)
+    for event in events:
+        api.call("POST", f"/v1/nodes/{quote(node, safe='')}/operator-interventions", event, retries=1)
+    tmp = cursor.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"inode": stat.st_ino, "offset": offset + complete_length}), encoding="utf-8")
+    os.replace(tmp, cursor)
+    return len(events)
+
+
+_network_checked_at = 0.0
+_github_network_ok: bool | None = None
+
+
+def _github_network_available() -> bool:
+    """Verify GitHub HTTPS with certificate checks and the node's configured proxy settings."""
+    global _network_checked_at, _github_network_ok
+    if time.time() - _network_checked_at >= 600 or _github_network_ok is None:
+        try:
+            with httpx.Client(timeout=3, follow_redirects=True, trust_env=True) as client:
+                response = client.get("https://github.com")
+                response.raise_for_status()
+            _github_network_ok = True
+        except (httpx.HTTPError, OSError):
+            _github_network_ok = False
+        _network_checked_at = time.time()
+    return _github_network_ok
 
 
 def tool_versions(names: list[str] | None = None) -> dict[str, str]:
@@ -227,6 +441,125 @@ def credential_expiries(states: list[dict]) -> dict[str, str | None]:
     return out
 
 
+def _system_machine_conditions(metrics_data: dict, auto_fixed_conditions: set[str] | None = None,
+                               work_path: Path | None = None, state_path: Path | None = None) -> list[dict]:
+    """Probe host assumptions that do not depend on any one project."""
+    from ..core.system_check import condition
+
+    out = []
+    free = metrics_data.get("disk_free")
+    if isinstance(free, (int, float)):
+        gib = int(free / (1024 ** 3))
+        if free >= MIN_WORK_DISK_FREE:
+            result = "fixed_automatically" if "disk-space" in (auto_fixed_conditions or set()) else "ready"
+            detail = f"The node freed space automatically; {gib} GiB is available." if result == "fixed_automatically" \
+                else f"{gib} GiB is available."
+            out.append(condition("disk-space", "Free disk space", result, detail))
+        else:
+            out.append(condition("disk-space", "Free disk space", "needs_action",
+                                 f"Only {gib} GiB is available; work needs at least 5 GiB.",
+                                 "Free at least 5 GiB on /srv/aiflow."))
+
+    work = Path(work_path or "/srv/aiflow/work")
+    state = Path(state_path or STATE_DIR)
+    created = False
+    try:
+        import pwd
+
+        worker = pwd.getpwnam("aiflow-worker")
+        if not work.exists():
+            work.mkdir(parents=True, mode=0o770)
+            os.chown(work, worker.pw_uid, worker.pw_gid)
+            os.chmod(work, 0o770)
+            created = True
+        if not state.exists():
+            state.mkdir(parents=True, mode=0o770)
+            os.chown(state, worker.pw_uid, worker.pw_gid)
+            os.chmod(state, 0o770)
+            created = True
+        writable = _worker_can_access_directory(work, worker.pw_uid) \
+            and _worker_can_access_directory(state, worker.pw_uid)
+    except (KeyError, OSError, ImportError):
+        writable = False
+    if writable:
+        result = "fixed_automatically" if created else "ready"
+        detail = "The node created its work directory and can write its state." if created else \
+            "The node can write its work and state directories."
+        out.append(condition("workspace-permissions", "Work directory permissions", result, detail))
+    else:
+        out.append(condition("workspace-permissions", "Work directory permissions", "needs_action",
+                             "The node cannot write its work and state directories.",
+                             "Restore write access to /srv/aiflow/work and /run/aiflow4/workers for the aiflow service account."))
+    # A successful authenticated heartbeat is itself the control API network check.
+    out.append(condition("control-network", "Control API network", "ready",
+                         "The machine reached the control API and sent this heartbeat."))
+    if _github_network_available():
+        out.append(condition("repository-network", "Repository network", "ready",
+                             "The machine can reach GitHub over HTTPS."))
+    else:
+        out.append(condition("repository-network", "Repository network", "needs_action",
+                             "The machine cannot reach GitHub over HTTPS.",
+                             "Allow outbound HTTPS access to github.com on port 443 from this machine."))
+    return out
+
+
+def _worker_can_access_directory(path: Path, worker_uid: int) -> bool:
+    """Check directory write and traversal access using the same identity as the worker's setpriv commands."""
+    if os.geteuid() == worker_uid:
+        return os.access(path, os.W_OK | os.X_OK)
+    if os.geteuid() != 0:
+        return False
+    runuser = shutil.which("runuser")
+    if not runuser:
+        return False
+    try:
+        result = subprocess.run([runuser, "-u", "aiflow-worker", "--", "sh", "-c",
+                                 'test -w "$1" && test -x "$1"', "aiflow4-permission-check", str(path)],
+                                capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _credential_conditions(states: list[dict]) -> dict[str, dict]:
+    """Publish each account's primary worker probe, never provider output or display text.
+
+    Extra sessions share the account ID but deliberately do not probe credentials. They must not overwrite the
+    primary session's result with an unknown status.
+    """
+    by_account: dict[str, list[dict]] = {}
+    for worker in states:
+        account = str(worker.get("account") or "")
+        if account:
+            by_account.setdefault(account, []).append(worker)
+
+    checks: dict[str, dict] = {}
+    for account, workers in by_account.items():
+        # New workers publish their concrete instance name. Treat an unnamed state as primary only when it is the
+        # sole session, so multiple legacy states cannot make the result depend on directory iteration order.
+        primary = next((worker for worker in workers if worker.get("instance") == account), None)
+        if primary is None and len(workers) == 1 and "instance" not in workers[0]:
+            primary = workers[0]
+        if primary is None:
+            # Never infer credential validity from an extra session when the primary state is unavailable.
+            checks[account] = {"present": True, "valid": None}
+            continue
+
+        probe = primary.get("probe") or {}
+        if isinstance(probe, dict) and probe.get("ok") is True:
+            status = {"present": True, "valid": True}
+        elif primary.get("state") == "signed_out" or (isinstance(probe, dict) and
+                                                         probe.get("error_kind") == "auth"):
+            status = {"present": True, "valid": False}
+        elif not primary.get("alive", True):
+            # A stopped process cannot report on its credentials. Do not turn a crash into a sign-in request.
+            status = {"present": True, "valid": None}
+        else:
+            status = {"present": True, "valid": None}
+        checks[account] = status
+    return checks
+
+
 def systemctl(*args: str) -> int:
     return subprocess.run(["systemctl", *args], capture_output=True).returncode
 
@@ -372,7 +705,7 @@ def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: t
                 except OSError:  # Linux PTYs report EIO once the child has closed its slave.
                     break
                 if not chunk:
-                    continue
+                    break  # macOS PTYs report EOF as an empty read rather than EIO.
                 output = (output + chunk)[-16_000:]
                 clean_output = _ANSI.sub("", output)
                 if not copied_auth_url and re.search(
@@ -529,6 +862,25 @@ def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow"
 
 
 _last_testdb_sweep = 0.0
+
+
+def _disk_free_bytes() -> int:
+    """Return free space on the filesystem used for AI Flow work."""
+    return shutil.disk_usage("/srv/aiflow" if os.path.isdir("/srv/aiflow") else "/").free
+
+
+def _run_disk_cleanup(cleanup, auto_fixed_conditions: set[str]) -> int:
+    """Run cleanup and report disk-space as fixed only if it reclaims enough space to meet the minimum."""
+    before = _disk_free_bytes()
+    removed = cleanup()
+    if not removed:
+        return removed
+
+    after = _disk_free_bytes()
+    reclaimed = max(0, after - before)
+    if before < MIN_WORK_DISK_FREE and reclaimed >= MIN_WORK_DISK_FREE - before:
+        auto_fixed_conditions.add("disk-space")
+    return removed
 
 
 def _test_database_urls(projects_dir: str = "/etc/aiflow/projects") -> list[str]:
@@ -745,7 +1097,7 @@ def self_update(api: ControlClient, version: str, node: str = "unknown") -> None
 
 
 def process_node_operation(api: ControlClient, node: str) -> None:
-    """Claim and run at most one owner-approved, server-created whitelist operation."""
+    """Claim and run at most one server-created whitelist operation."""
     operation = api.call("GET", f"/v1/nodes/{node}/operations/next", retries=1).get("operation")
     if not operation:
         return
@@ -830,6 +1182,8 @@ class _AgentLoopState:
     sign_in_processes: dict[str, tuple[str, threading.Event, threading.Thread]] = field(default_factory=dict)
     probe_thread: threading.Thread | None = None
     probe_tried: dict[tuple[str, str], float] = field(default_factory=dict)
+    auto_fixed_tools: set[str] = field(default_factory=set)
+    auto_fixed_conditions: set[str] = field(default_factory=set)
 
 
 def collect_heartbeat(state: _AgentLoopState, name: str, slots: int, relay: PolicyRelay | None,
@@ -857,15 +1211,23 @@ def collect_heartbeat(state: _AgentLoopState, name: str, slots: int, relay: Poli
                     "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
         "workers": workers,
         "credential_expiries": credential_expiries(workers),
+        "system_conditions": _system_machine_conditions(node_metrics, state.auto_fixed_conditions),
+        "credential_checks": _credential_conditions(workers),
+        "auto_fixed_tools": sorted(state.auto_fixed_tools),
+        "auto_fixed_conditions": sorted(state.auto_fixed_conditions),
         "runtime_settings": runtime_settings_inventory(),
         "runtime_settings_public_key": runtime_settings_public_key,
         "environment_items": environment_items,
     }
 
 
-def send_heartbeat(api: ControlClient, name: str, heartbeat: dict) -> dict:
+def send_heartbeat(api: ControlClient, name: str, heartbeat: dict, state: _AgentLoopState | None = None) -> dict:
     """Send one collected heartbeat and return the desired node state from control."""
-    return api.call("POST", f"/v1/nodes/{name}/heartbeat", heartbeat, retries=2)["desired"]
+    desired = api.call("POST", f"/v1/nodes/{name}/heartbeat", heartbeat, retries=2)["desired"]
+    if state is not None:  # fixes are reported once, after control has received them
+        state.auto_fixed_tools.clear()
+        state.auto_fixed_conditions.clear()
+    return desired
 
 
 def _record_heartbeat_failure(state: _AgentLoopState, error: Exception) -> None:
@@ -895,6 +1257,7 @@ def _apply_toolchains(desired: dict, state: _AgentLoopState, name: str) -> None:
     stack_request = {"release": desired.get("release", ""),
                      "project_stacks": desired.get("project_stacks", {}),
                      "versions": desired.get("versions", {}),
+                     "required_tools": desired.get("tools", []),
                      "requested_tools": desired.get("tool_repairs", [])}
     signature = json.dumps(stack_request, sort_keys=True, separators=(",", ":"))
     if signature != state.toolchain_signature and (state.toolchain_thread is None or
@@ -906,9 +1269,14 @@ def _apply_toolchains(desired: dict, state: _AgentLoopState, name: str) -> None:
 
         def prepare(request=stack_request):
             try:
-                if request["requested_tools"]:
+                required_tools = request["required_tools"]
+                requested_tools = request["requested_tools"]
+                if requested_tools:
                     result = prepare_project_toolchains(request["project_stacks"], request["versions"],
-                                                        request["requested_tools"])
+                                                        required_tools, requested_tools=requested_tools)
+                elif required_tools:
+                    result = prepare_project_toolchains(request["project_stacks"], request["versions"],
+                                                        required_tools)
                 else:
                     result = prepare_project_toolchains(request["project_stacks"], request["versions"])
                 with state.toolchain_lock:
@@ -925,10 +1293,13 @@ def _apply_toolchains(desired: dict, state: _AgentLoopState, name: str) -> None:
     # The post-install probe is reported once; later heartbeats use the normal tool_versions() refresh.
     with state.toolchain_lock:
         prepared_tools = state.toolchain_result.pop("tools", None)
+        installed_tools = state.toolchain_result.pop("installed", [])
         request_gaps = state.toolchain_result.pop("request_gaps", [])
     if isinstance(prepared_tools, dict) and prepared_tools:
         state.tools.update({str(key): str(value) for key, value in prepared_tools.items()})
         state.tools_at = time.time()
+    if isinstance(installed_tools, list):
+        state.auto_fixed_tools.update(str(tool) for tool in installed_tools)
     if request_gaps:
         state.toolchain_signature = ""
 
@@ -996,8 +1367,8 @@ def _apply_worker_state(api: ControlClient, name: str, desired: dict, state: _Ag
                         manage_workers: bool) -> None:
     if manage_workers:
         reconcile(desired.get("workers") or desired.get("accounts", []))
-        clean_scratch()
-        clean_worktrees(api, name)
+        _run_disk_cleanup(clean_scratch, state.auto_fixed_conditions)
+        _run_disk_cleanup(lambda: clean_worktrees(api, name), state.auto_fixed_conditions)
         sweep_test_databases()
         if (state.tools.get(CONTAINER_RUNTIME_TOOL, "missing") != "missing"
                 and time.time() - state.container_cleanup_at >= 24 * 60 * 60
@@ -1042,15 +1413,22 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     if relay:
         relay.start()
     state = _AgentLoopState(tools=tool_versions(), tools_at=time.time())
+    ready_notified = False
     try:
         while not stop.is_set():
             try:
                 heartbeat = collect_heartbeat(state, name, slots, relay, runtime_settings_public_key)
-                desired = send_heartbeat(api, name, heartbeat)
+                desired = send_heartbeat(api, name, heartbeat, state)
+                if not ready_notified:
+                    ready_notified = notify_systemd("READY=1\nSTATUS=First control heartbeat succeeded")
             except Exception as exc:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
                 _record_heartbeat_failure(state, exc)
                 stop.wait(every_s)
                 continue
+            try:
+                forward_operator_audit(api, name)
+            except Exception as exc:  # noqa: BLE001 - retain the cursor so the next heartbeat retries delivery
+                log.warning("host audit forwarding failed (%s)", type(exc).__name__)
             if not apply_heartbeat(api, name, desired, state, manage_workers, stop, every_s):
                 continue
             stop.wait(every_s)

@@ -13,9 +13,10 @@ import pytest
 import yaml
 
 from conftest import add_ticket
+from console_test_utils import console_script
 from aiflow.v4 import VERSION
 from aiflow.v4.control.console_auth import COOKIE_NAME, ROLE_PERMISSIONS, issue_session
-from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS
+from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS, build_console_page
 from aiflow.v4.core.settings import Settings
 
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
@@ -44,8 +45,7 @@ def run_script(driver: str, prelude: str = STUBS) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to run the console script")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     result = subprocess.run([node_js, "-"], input=prelude + script + driver + "\n})();\n",
                             text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
@@ -62,8 +62,7 @@ def render_drawer(node: dict, console_user: dict | None = None, operations: list
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console drawer")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     if console_user and "permissions" not in console_user:
         console_user = {**console_user, "permissions": LEAD_PERMISSIONS if console_user.get("role") == "lead"
                         else OWNER_PERMISSIONS}
@@ -86,8 +85,7 @@ def render_sa(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the SA dashboard")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = f"""
 var saView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-sa' ? saView : null; }};
@@ -105,8 +103,7 @@ def render_knowledge(data: dict, history: dict | None = None, user: dict | None 
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Knowledge view")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = f"""
 var knowledgeView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-knowledge' ? knowledgeView : null; }};
@@ -129,8 +126,7 @@ def render_projects(projects: list[dict], catalog: dict, preflight: dict | None 
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Projects screen")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = f"""
 var projectsView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-projects' ? projectsView : null; }};
@@ -173,8 +169,7 @@ def render_dashboard(state: dict, analytics: list[dict] | None = None,
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console Dashboard")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     project_key = (state.get("projects") or [{}])[0].get("key")
     report = weekly_report or {"week_start": "2026-10-19", "trend": [], "finished_without_person": [],
                                "needed_person": [], "repeated_failures": []}
@@ -206,8 +201,7 @@ def render_machine_overview(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Command Center")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = f"""
 var machineOverview = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-machines' ? machineOverview : null; }};
@@ -229,8 +223,7 @@ def render_machines(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Machines and AI view")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = f"""
 var machines = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-machines' ? machines : null; }};
@@ -286,7 +279,7 @@ def test_machines_screen_uses_assignment_state_and_shared_actions():
     assert "total limit 2 sessions" in rendered_signed_in
     assert 'data-act="acc-remove-machine"' in rendered_signed_in
     assert 'data-act="account-pause"' not in rendered_signed_in
-    assert 'data-act="account-edit"' not in rendered_signed_in
+    assert 'data-act="account-edit" data-id="shared-01">Jobs</button>' in rendered_signed_in  # roles stay editable
     assert 'data-act="account-signin"' not in rendered_signed_in
     assert 'data-act="account-remove"' not in rendered_signed_in
 
@@ -296,7 +289,7 @@ def test_machines_screen_uses_assignment_state_and_shared_actions():
     rendered_assignment = render_machines({"nodes": [machine], "accounts": [assignment_only]})
     assert 'data-act="acc-remove-machine"' in rendered_assignment
     assert 'data-act="account-pause"' not in rendered_assignment
-    assert 'data-act="account-edit"' not in rendered_assignment
+    assert 'data-act="account-edit" data-id="shared-01">Jobs</button>' in rendered_assignment
     assert 'data-act="account-signin"' not in rendered_assignment
 
 
@@ -352,7 +345,7 @@ console.log(integrationsView.innerHTML);
 
 
 def html() -> str:
-    return PAGE.read_text()
+    return build_console_page()
 
 
 def css() -> str:
@@ -550,9 +543,9 @@ def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring
 
 def test_console_reload_selects_the_view_from_each_existing_address():
     views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
-             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications",
-             "settings", "support")
-    page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help"})
+             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "security",
+             "notifications", "settings", "support")
+    page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help", "/system-check"})
     for path in page_paths:
         expected_view = ("cc" if path in {"/cc", "/dashboard"} else
                          "work" if path == "/board" else path.removeprefix("/"))
@@ -747,11 +740,11 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
     assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
-            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']];"
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', "
+            "'notifications', 'settings', 'support']];"
             ) in page
+    assert "VIEW_GROUPS[2].push('security');" in page and "VIEW_GROUPS[2].push('system-check');" in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
-    assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
-            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']") in page
     assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
     assert "licensing: 'licensing.manage'" in page
 
@@ -867,7 +860,7 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
             pytest.skip(f"Playwright Chromium cannot launch on this node: {exc}")
 
         ctx.settings.console_login = True
-        ctx.settings.console_session_secret = "browser-test-session-secret-at-least-32-bytes"
+        ctx.settings.console_session_secret, ctx.settings.console_require_mfa = "browser-test-session-secret-at-least-32-bytes", False
         ctx.repo().projects["TESTWP"].paused = True
         password = login.seed_user(ctx.db, "browser-admin@example.test", "super_admin", "Browser Admin")
         assert password
@@ -1089,7 +1082,7 @@ console.log(JSON.stringify({{head: head.innerHTML, body: body.innerHTML}}));
 
 @pytest.mark.parametrize(
     ("work_minutes", "expected_hard_seconds"),
-    [(None, 3600), ({"hard": 90}, 5400)],
+    [(None, 2700), ({"hard": 90}, 5400)],
 )
 def test_delivery_card_with_active_run_uses_project_hard_limit(work_minutes, expected_hard_seconds):
     project = {"key": "TESTFLOW", "repo": "jooservices/testflow", "work_minutes": work_minutes}
@@ -1340,8 +1333,7 @@ def test_ticket_cards_business_change_requests_and_drawer_show_selected_reposito
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = r"""
 var ticket = {key: 'JOOWP-4', project: 'JOOWP', summary: 'MCP change', status: 'To Do', type: 'Story',
   priority: 'Medium', labels: [], blocked_by: [], repository: 'jooservices/wordpress-mcp', parent_key: 'JOOWP-306'};
@@ -1363,8 +1355,7 @@ def test_board_card_shows_already_done_reason_and_clickable_pull_request():
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = r"""
 var ticket = {key: 'TESTWP-9', project: 'TESTWP', summary: 'Already implemented', status: 'In Verify', type: 'Bug',
   priority: 'Medium', labels: [], blocked_by: [], last_run: {outcome: 'done', account: 'claude-01', duration_s: 12,
@@ -1392,14 +1383,14 @@ def test_projects_screen_is_mounted_and_uses_owner_protected_project_endpoints()
 def test_command_center_menu_order_and_role_visibility():
     page = html()
     tabs = re.findall(r'<button class="tab"[^>]*data-view="([^"]+)">([^<]+)</button>', page)
+    tabs = [item for item in tabs if item[0] != "system-check"]  # its extension owns a separate permission map
     assert tabs == [
         ("cc", "Dashboard"), ("work", "Work board"), ("delivery", "Delivery"), ("sa", "SA"),
         ("lead", "Team Lead"), ("business", "Business"), ("review", "Human review"),
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
         ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
-        ("projects", "Projects"), ("licensing", "Licence"), ("notifications", "Notifications"),
-        ("settings", "Settings"),
-        ("support", "Support"),
+        ("projects", "Projects"), ("licensing", "Licence"), ("security", "Security"),
+        ("notifications", "Notifications"), ("settings", "Settings"), ("support", "Support"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.
@@ -1409,8 +1400,7 @@ def test_command_center_menu_order_and_role_visibility():
         "stakeholder": "view.stakeholder", "machines": "view.machines_ai", "users": "console.manage",
         "knowledge": "view.knowledge", "integrations": "view.integrations", "projects": "projects.manage",
         "backup": "backup.read", "licensing": "licensing.manage", "notifications": "notifications.manage",
-        "settings": "console.manage",
-        "support": "console.manage",
+        "security": "console.read", "settings": "console.manage", "support": "console.manage",
     }
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,
@@ -1735,7 +1725,7 @@ def test_dashboard_quota_endpoint_is_safe_and_scoped_for_role_without_machines_a
     assert all("opencode-01" not in json.dumps(row) and "node1" not in json.dumps(row) for row in rows)
     for row in rows:
         assert row["label"] == "Account 1"
-        assert row["windows"] == [{"label": "Five Hour", "used_pct": 40.0, "reset_at": reset,
+        assert row["windows"] == [{"label": "5 hours", "used_pct": 40.0, "reset_at": reset,
                                    "estimated": False}]
 
     ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", ([], email))
@@ -1876,8 +1866,7 @@ def test_work_board_filters_epic_ai_state_and_ticket_text():
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Work board")
-    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
-    script = script[:script.index(BOOT)]
+    script = console_script(PAGE)
     driver = r"""
 var body = {innerHTML: ''};
 document.querySelector = function (selector) { return selector === '#work-body' ? body : null; };

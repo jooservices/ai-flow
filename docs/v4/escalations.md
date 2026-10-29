@@ -17,10 +17,15 @@ The rules are deterministic (`aiflow/v4/control/escalations.py`), so classificat
 | `missing_tool_or_environment` | a browser, Docker, a CI log, or a reportable catalogue/stack requirement | the machine's tools are checked: a tool the machine has is answered ("installed, use it"), a CI log is supplied (AC6), and a reportable missing requirement is parked ([missing tools](missing-tools.md)); Dev VM, SonarQube and devices have no heartbeat probes yet, so reports naming them fail without creating a wait | no |
 | `policy_message` | `p='src/auth/provider.ts'` refused by the command policy | the run is answered with the reason and the allowed alternative (AC5) | no |
 | `unreachable_criterion` | "AC4 needs a smoke test on the Dev VM; there is no Dev VM" | the ticket is amended (AC4 below) | no |
-| `ambiguity_repository` | "which existing helper formats dates?" | the triage AI answers from the ticket, spec and code | no |
+| `ambiguity_repository` | "which existing helper formats dates?" or an unclassified question without positive business-decision evidence | the triage AI answers from the ticket, spec and code; unresolved cases stay in flow triage | no |
 | `decision_already_taken` | "may I use Docker?", "may I tag the release?" | the register entry is applied and cited (AC2) | no |
 | `new_business_decision` | "email the customer immediately or after 24 hours?" | asked once with options and a recommended default (AC3) | yes |
 | `irreversible_or_production` | dropping a table in production, rotating production credentials | asked once, the same way | yes |
+
+An unrecognized question defaults to `ambiguity_repository`, never to a business decision. A business escalation
+needs both a customer-facing or commercial topic (for example, refunds, payments, pricing, subscriptions, or legal
+terms) and an explicit question or choice cue. Technical questions such as whether a worker should poll or push
+remain in automated triage. Triage cannot relabel an unclassified question to bypass this boundary.
 
 A question that is resolved without a person goes back to **To Do** with a comment (What, Why, Result, Next) that
 names the class and cites the register entry. The run ends with outcome `auto_answered` (or `tool_missing` when the

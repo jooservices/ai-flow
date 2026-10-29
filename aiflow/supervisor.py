@@ -21,6 +21,7 @@ from .jira import Jira, JiraError
 from .lock import Redis, RedisError
 from .memory.workflow import MemoryWorkflow
 from .project_database import ProjectDatabase, ticket_database_id
+from .worktree_sweep import cleanup_done_worktree, resolve_merged_pull_request
 
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
           "Human review": "human", "Ready to merge": "finalize"}
@@ -961,16 +962,11 @@ class Supervisor:
                 for issue in self.jira.search(f"key in ({', '.join(trees)})", 100):
                     path, branch = trees[issue["key"]]
                     if issue["status"] == "Done":
-                        merged_pr = False
-                        try:
-                            pr = GitHub(repo.github_slug()).find(branch)
-                            merged_pr = bool(pr and pr.get("state") == "MERGED")
-                        except (GitError, GitHubError) as error:
-                            log(f"{issue['key']}: cannot check pull request before cleanup ({error})")
-                        repo.cleanup(issue["key"], merged_pr=merged_pr)
-                        log(f"{issue['key']}: removed the worktree and branch of a finished ticket")
+                        merged_pr, lookup_error = resolve_merged_pull_request(repo, issue["key"], branch, self.gate_pr)
+                        cleanup_done_worktree(self.redis, repo, self.cfg.machine, issue["key"], branch, merged_pr, lookup_error, log)
                     elif issue["status"] == "Declined":
                         repo.remove_worktree(path)
+                        self.redis.delete(f"sweep-cleanup:{self.cfg.machine}:{issue['key']}:{branch}")
                         log(f"{issue['key']}: removed the worktree of a declined ticket (branch {branch} kept)")
             except (GitError, JiraError, OSError) as error:
                 log(f"sweep {project.repo}: {error}")
@@ -1816,11 +1812,9 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(desired_ids(config.registry, config.machine) if config.registry.from_files else [str(n) for n in range(1, config.workers + 1)]))
             return 0
         if "check" in args:  # the registry is loaded (and validated) above; show what was understood
-            from .projects import desired_ids
-            ids = desired_ids(config.registry, config.machine) if config.registry.from_files else [str(n) for n in range(1, config.workers + 1)]
-            cap = config.registry.max_workers.get(config.machine)
-            print(f"machine {config.machine}: {len(ids)} worker(s) ({', '.join(ids) or 'none'}), max_workers {cap or 'not set'}, "
-                  f"config {'from TOML files' if config.registry.from_files else 'legacy .env'}")
+            from .worker_scaling import configuration_summary
+            summary, ids = configuration_summary(config)
+            print(summary)
             limits = config.ai_limits
             print(f"  AI session limits: {', '.join(f'{n}={v}' for n, v in sorted(limits.items())) or 'none (all unlimited)'}; omitted AIs are unlimited")
             if not limits:
@@ -1877,7 +1871,8 @@ def main(argv: list[str] | None = None) -> int:
     (cfg.root / ".tmp").mkdir(exist_ok=True)
     if "--once" in args:
         return 0 if supervisor.tick() else 3
-    supervisor.run_forever()
+    from .worker_scaling import run_worker
+    run_worker(supervisor, redis, cfg)
     events.emit("worker.stop", retired=supervisor.retired)
     events.close()
     return 3 if supervisor.retired else 0  # 3: the unit does not restart it (RestartPreventExitStatus=2 3)

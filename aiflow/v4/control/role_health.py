@@ -39,9 +39,10 @@ STEP_ROLE = {"dev": "dev", "verify": "verify", "triage": "master", "master": "ma
              "intake": "intake_refiner", "impact": "intake_refiner", "post_merge": "release"}
 # error kinds that mean the account or its machine could not work, not that the AI did bad work
 UNSCORED_KINDS = {"quota", "auth", "infra", "network", "machine", "node", "tool", "tools", "missing_tool",
-                  "missing-tool", "offline", "toolchain", "services"}
-SUCCESS_OUTCOMES = {"merged", "human", "refined", "questions", "assessed", "answered", "escalated"}
+                  "missing-tool", "offline", "toolchain", "services", "machine_load"}
+SUCCESS_OUTCOMES = {"merged", "human", "refined", "split_plan", "questions", "assessed", "answered", "escalated"}
 STOPPED_OUTCOMES = {"timeout", "lost"}
+STOPPED_KINDS = {"timeout", "lost"}  # a timed-out run is stored as outcome failed with this error kind
 STOPPED_WEIGHT = 0.25        # share of a failure that a run stopped by the time limit or a lost lease counts
 
 RUNS_SQL = """
@@ -105,7 +106,7 @@ def classify(run: dict) -> Scored | None:
         return Scored("finished", 0.0, rework=True)
     if outcome == "done" or outcome in SUCCESS_OUTCOMES:
         return Scored("finished", 0.0)
-    if outcome in STOPPED_OUTCOMES:
+    if outcome in STOPPED_OUTCOMES or (outcome == "failed" and kind in STOPPED_KINDS):
         # Stopped by the time limit or the loss of its lease: mostly the size of the ticket or the load of the
         # machine, not the quality of the AI. It weighs a quarter of a failed run, so at the default 60% threshold a
         # busy machine alone cannot switch a role off (it did: 7 of the last 10 runs of the best account were
@@ -221,6 +222,13 @@ def assign_probation(db, account_id: str, role: str, ticket_key: str) -> int | N
                  " SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND result='')"
                  " RETURNING id", (account_id, role, ticket_key, account_id, role))
     return row["id"] if row else None
+
+
+def expedite_probation(db, account_id: str, role: str) -> bool:
+    """True when a switched-off role has a free probation slot now (no day-long wait) after a repair."""
+    return bool(db.one("SELECT 1 AS x FROM role_health WHERE account_id=%s AND role=%s AND NOT enabled"
+                       " AND NOT EXISTS (SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND result='')",
+                       (account_id, role, account_id, role)))
 
 
 def attach_probation_run(db, probation_id: int, run_id: str) -> None:
@@ -387,7 +395,8 @@ def switch_off(ctx, account_id: str, role: str, score: float, window: int, histo
             f"scored runs is above {percent}%. Its other roles stay on. {diagnostics}\n"
             "One easy probation ticket may run at a time; two in a row that succeed bring the role back.")
     ctx.db.run("INSERT INTO role_health (account_id, role, enabled, note, score, disabled_at) VALUES (%s,%s,false,%s,%s,now())"
-               " ON CONFLICT (account_id, role) DO UPDATE SET enabled=false, note=EXCLUDED.note, score=EXCLUDED.score,"
+               " ON CONFLICT (account_id, role) DO UPDATE SET enabled=false,"
+               " note=EXCLUDED.note, score=EXCLUDED.score,"
                " disabled_at=now(), updated_at=now()", (account_id, role, note, round(score, 4)))
     ctx.events.emit("role.disabled", account=account_id, step=role, outcome="disabled", reason=note,
                     score=round(score, 4))

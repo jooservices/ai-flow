@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
+from aiflow.v4.core import secretbox
 
 
 SESSION_SECRET = "github-connect-console-session-secret-over-32-bytes"
@@ -16,6 +17,11 @@ PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\n" + ("x" * 160) + "\n-----END RS
 REQUIRED_PERMISSIONS = {"contents": "write", "pull_requests": "write", "workflows": "write",
                         "actions": "read", "checks": "read", "statuses": "read", "metadata": "read",
                         "administration": "write"}
+
+
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch):
+    monkeypatch.setenv("AIFLOW4_SECRET_KEY", secretbox.generate_key())
 
 
 class FakeConnectGitHub:
@@ -33,7 +39,8 @@ class FakeConnectGitHub:
     def __init__(self, app_dir, org, client=None):
         self.app_dir = app_dir
         self.meta = json.loads(open(os.path.join(app_dir, "app.json"), encoding="utf-8").read())
-        self.key = open(os.path.join(app_dir, "app.pem"), encoding="utf-8").read()
+        self.key = secretbox.decrypt(open(os.path.join(app_dir, "app.pem"), encoding="utf-8").read(),
+                                     context="app.pem")
         self.org = self.meta.get("account_login") or org
         self._inst = self.meta.get("installation_id")
         self.repositories_by_account = {key: list(rows) for key, rows in self.repos_by_account.items()}
@@ -102,7 +109,8 @@ def test_existing_app_import_verifies_installation_persists_only_private_key_and
                      "html_url": "https://github.com/apps/aiflow-connect", "account_login": "acme",
                      "account_type": "Organization", "installation_id": 77,
                      "repository_names": ["acme/first"]}
-    assert (secret_dir / "app.pem").read_text() == PRIVATE_KEY
+    stored_key = (secret_dir / "app.pem").read_text()
+    assert secretbox.is_encrypted(stored_key) and secretbox.decrypt(stored_key, context="app.pem") == PRIVATE_KEY
     assert (secret_dir / "app.pem").stat().st_mode & 0o777 == 0o600
 
     status = client.get("/v1/integrations/github")
@@ -177,6 +185,9 @@ def test_new_app_manifest_round_trip_verifies_installation_and_audits_without_cr
     callback = client.get(f"/v1/integrations/github/manifest/callback?code=oneTimeCode&state={state}",
                           follow_redirects=False)
     assert callback.status_code == 303
+    callback_audit = ctx.db.one("SELECT actor,category FROM audit_log"
+                                " WHERE action='GET /v1/integrations/github/manifest/callback' ORDER BY id DESC LIMIT 1")
+    assert callback_audit == {"actor": "owner@example.test", "category": "credentials"}
     assert callback.headers["location"] == "https://github.com/apps/aiflow-connect/installations/new"
     setup = client.get(f"/v1/integrations/github/setup?installation_id=77&state={state}&setup_action=install",
                        follow_redirects=False)
@@ -186,7 +197,8 @@ def test_new_app_manifest_round_trip_verifies_installation_and_audits_without_cr
     saved = json.loads((secret_dir / "app.json").read_text())
     assert saved["account_login"] == "acme" and saved["installation_id"] == 77
     assert "client_secret" not in saved and "webhook_secret" not in saved
-    assert (secret_dir / "app.pem").read_text() == PRIVATE_KEY
+    stored_key = (secret_dir / "app.pem").read_text()
+    assert secretbox.is_encrypted(stored_key) and secretbox.decrypt(stored_key, context="app.pem") == PRIVATE_KEY
     audit = ctx.db.all("SELECT action, result, payload FROM write_audit WHERE target='github' ORDER BY id")
     assert {row["action"] for row in audit} >= {"manifest_start", "manifest_created", "connect"}
     encoded_audit = json.dumps(audit)
@@ -196,7 +208,7 @@ def test_new_app_manifest_round_trip_verifies_installation_and_audits_without_cr
 
 
 def test_github_app_must_have_actions_read_for_ci_job_logs():
-    from aiflow.v4.control.api import validate_github_app_permissions
+    from aiflow.v4.control.system_check_api import validate_github_app_permissions
 
     validate_github_app_permissions({"permissions": REQUIRED_PERMISSIONS})
     missing_actions = dict(REQUIRED_PERMISSIONS)
@@ -243,7 +255,7 @@ def test_integrations_ui_and_repo_refresh_controls_are_present(client, ctx):
     assert "Refresh repositories" in page.text
 
 
-def test_github_gateway_uses_stored_installation_and_mints_short_lived_repo_tokens(tmp_path):
+def test_github_gateway_uses_stored_installation_and_mints_short_lived_repo_tokens(tmp_path, monkeypatch):
     import time
 
     import httpx
@@ -251,6 +263,7 @@ def test_github_gateway_uses_stored_installation_and_mints_short_lived_repo_toke
     from cryptography.hazmat.primitives.asymmetric import rsa
 
     from aiflow.v4.control.github import GitHubApp
+    monkeypatch.setenv("AIFLOW4_SECRET_KEY", secretbox.generate_key())
 
     app_dir = tmp_path / "github-app"
     app_dir.mkdir()

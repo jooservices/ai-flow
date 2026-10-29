@@ -4,6 +4,8 @@ from pathlib import Path
 import re
 import uuid
 
+import pytest
+
 from conftest import add_ticket, join_node
 from aiflow.v4.control import capacity, quota as quota_reporting
 from aiflow.v4.control.db import J
@@ -116,6 +118,29 @@ def test_capacity_routing_avoids_account_that_will_run_out_and_saves_reason(clie
     detail = client.get("/v1/tickets/TESTWP-CAPACITY-1").json()
     assert detail["capacity_decision"]["account"] == "codex-01"
     assert detail["capacity_decision"]["reason"] == decision["reason"]
+
+
+def test_candidate_poll_skips_capacity_work_without_reliable_quota_forecasts(client, ctx, monkeypatch):
+    cc = online(client, "cc", "claude-01")
+    add_ticket(ctx.db, "TESTWP-LEGACY-CAPACITY-1")
+    queries = []
+    original_all = ctx.db.all
+
+    def record_queries(statement, params=None):
+        if "quota_forecast" in statement and "FROM accounts" in statement:
+            queries.append(statement)
+        return original_all(statement, params)
+
+    monkeypatch.setattr(ctx.db, "all", record_queries)
+    monkeypatch.setattr(capacity, "history", lambda _db: pytest.fail("unknown quotas must not estimate capacity"))
+
+    response = client.get("/v1/work/candidates?account=claude-01", headers=cc)
+
+    assert response.status_code == 200
+    assert "TESTWP-LEGACY-CAPACITY-1" in {item["key"] for item in response.json()["tickets"]}
+    assert len(queries) == 1
+    assert "quota_forecast->>'source'='reported'" in queries[0]
+    assert "quota_forecast->>'confidence' IN ('medium','high')" in queries[0]
 
 
 def test_capacity_routing_checks_exhaustion_for_window_without_token_balance(client, ctx):

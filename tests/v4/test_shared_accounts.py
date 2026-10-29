@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 
@@ -26,8 +27,36 @@ def join(client, name):
 
 
 def beat(client, node, headers):
-    r = client.post(f"/v1/nodes/{node}/heartbeat", json={"slots_total": 4}, headers=headers)
+    ctx = client.app.state.ctx
+    row = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,)) or {}
+    readiness = row.get("readiness") or {}
+    credential_checks = dict(readiness.get("credential_statuses") or {})
+    for account in ctx.repo().accounts_on(node):
+        machine = ctx.db.one("SELECT status FROM account_machines WHERE account_id=%s AND node=%s",
+                             (account.id, node))
+        if machine:
+            signed_in = machine.get("status") == "signed_in"
+            credential_checks[account.id] = {"present": signed_in, "valid": signed_in}
+    # Accounts created in Command Center are overlaid at runtime and may not be in the configured repo snapshot.
+    # Their per-machine sign-in state is still part of the node's heartbeat readiness report.
+    for machine in ctx.db.all("SELECT account_id,status FROM account_machines WHERE node=%s", (node,)):
+        signed_in = machine["status"] == "signed_in"
+        credential_checks[machine["account_id"]] = {"present": signed_in, "valid": signed_in}
+    r = client.post(f"/v1/nodes/{node}/heartbeat",
+                    json={"slots_total": 4, "credential_checks": credential_checks}, headers=headers)
     assert r.status_code == 200
+    thread_name = f"aiflow4-heartbeat-readiness-{node}"
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        threads = [thread for thread in threading.enumerate() if thread.name == thread_name]
+        if not threads:
+            break
+        for thread in threads:
+            thread.join(timeout=min(0.1, max(0, deadline - time.monotonic())))
+    else:
+        raise AssertionError(f"heartbeat readiness check for {node} did not settle")
+    from aiflow.v4.control.system_check import refresh_node
+    refresh_node(ctx, node, "manual", credential_checks=credential_checks)
     return r.json()["desired"]
 
 
@@ -38,6 +67,21 @@ def candidates(client, headers, account="shared-01"):
 
 def claim(client, headers, ticket, account="shared-01"):
     return client.post("/v1/work/claim", json={"ticket": ticket, "account": account}, headers=headers)
+
+
+def test_unshared_account_skips_capacity_aggregation(monkeypatch):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.core.controlrepo import Account
+
+    account = Account(id="claude-01", provider="claude", node="cc", parallel=2)
+    monkeypatch.setattr(shared_accounts, "pending_nodes", lambda *_args: set())
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unshared accounts do not need shared-capacity queries")
+
+    monkeypatch.setattr(shared_accounts, "machine_capacities", unexpected)
+    monkeypatch.setattr(shared_accounts, "running_by_node", unexpected)
+    assert shared_accounts.may_take(object(), account, "cc") == (True, "")
 
 
 def two_machines(client, ctx, limit=2):
@@ -158,7 +202,7 @@ def test_two_machines_share_one_session_limit_and_work_is_spread(client, ctx):
         "shared-01", "shared-01.2"]  # each machine can carry the whole limit
 
     first = claim(client, cc, "TESTWP-1")
-    assert first.status_code == 200 and first.json()["claimed"]
+    assert first.status_code == 200 and first.json()["claimed"], first.text
     # cc has its fair share (1 of 2): the other machine takes the next ticket
     assert candidates(client, cc) == []
     assert claim(client, cc, "TESTWP-2").status_code == 409
@@ -333,6 +377,7 @@ def test_account_from_the_control_repo_can_be_shared_with_another_machine(client
     beat(client, "cc", cc)
     beat(client, "node1", node1)
     assert client.post("/v1/accounts/claude-01/probe", json={"ok": True}, headers=node1).status_code == 200
+    beat(client, "node1", node1)
     add_ticket(ctx.db, "TESTWP-1")
 
     # Removing the accounts.yaml primary detaches just that assignment; the other machine can still take work.
@@ -488,6 +533,28 @@ def test_auth_failure_reported_by_a_run_does_not_cool_down_healthy_machine(clien
     assert claim(client, cc, "TESTWP-2").json()["claimed"]
     assert claim(client, cc, "TESTWP-3").json()["claimed"]
     assert beat(client, "node1", node1)["signin"][0]["account"] == "shared-01"
+
+
+def test_run_auth_and_quota_updates_are_kept_while_a_sibling_run_is_active(client, ctx):
+    cc, node1 = two_machines(client, ctx, limit=2)
+    failed_run = claim(client, node1, "TESTWP-1").json()
+    sibling_run = claim(client, cc, "TESTWP-2").json()
+    assert failed_run["claimed"] and sibling_run["claimed"]
+
+    quota = {"windows": {"five_hour": {"utilization": 0.25}}}
+    result = client.post(
+        f"/v1/runs/{failed_run['run_id']}/result",
+        json={"fence": failed_run["fence"], "outcome": "failed", "error_kind": "auth",
+              "summary": "provider rejected this machine's credentials", "quota": quota},
+        headers=node1,
+    )
+
+    assert result.status_code == 200
+    assert ctx.db.one("SELECT quota FROM accounts WHERE id='shared-01'")["quota"] == quota
+    assert ctx.db.one("SELECT status FROM account_machines WHERE account_id='shared-01' AND node='node1'")[
+        "status"] == "pending"
+    assert ctx.db.one("SELECT status FROM accounts WHERE id='shared-01'")["status"] == "working"
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (sibling_run["run_id"],))["status"] == "running"
 
 
 def test_failed_sign_in_can_be_retried_with_a_fresh_request(client, ctx):

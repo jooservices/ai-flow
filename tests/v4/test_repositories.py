@@ -93,6 +93,7 @@ def test_jira_version_membership_is_partitioned_by_repository_for_release_gates(
 
     monkeypatch.setattr(version_release, "_successful_evidence", lambda *_args: (True, True, True))
     monkeypatch.setattr(version_release, "check_commands", lambda _project: ["pytest"])
+    monkeypatch.setattr(version_release.scale_proof, "blocker", lambda *_args, **_kwargs: "")
     project = Project(key="JOOWP", repo="jooservices/wordpress-theme", checks=["pytest"],
                       repositories=[{"repo": "jooservices/wordpress-core", "checks": ["pytest"]}],
                       epic_repositories={"JOOWP-2": "jooservices/wordpress-core"})

@@ -90,7 +90,6 @@ def resolve_available(ctx, node: str, node_row: dict) -> int:
     node_config = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (node,)) or {}
     projects = set(repo.projects_for_node(node, node_config.get("projects") or [], node_config.get("dynamic", False)))
     projects.update(node_config.get("projects") or [])
-    projects.update(key for key, project in repo.projects.items() if node in project.nodes)
     resolved = 0
     for wait in ctx.db.all("SELECT ticket_key,project,requirement FROM tool_waits WHERE resolved_at IS NULL"):
         if (not requirement_is_accepted(ctx, wait["project"], wait["requirement"])
@@ -103,12 +102,19 @@ def resolve_available(ctx, node: str, node_row: dict) -> int:
     return resolved
 
 
-def parked_tickets(ctx, node_row: dict) -> set[str]:
+def parked_tickets(ctx, node_row: dict, ticket_keys: list[str] | None = None) -> set[str]:
     """Tickets waiting for a requirement this machine does not have (they are not offered to it)."""
+    if ticket_keys is not None and not ticket_keys:
+        return set()
     parked: set[str] = set()
     cache: dict[str, bool] = {}
-    for row in ctx.db.all("SELECT ticket_key, project, requirement FROM tool_waits WHERE resolved_at IS NULL"
-                          " OR resolution LIKE 'available on %'"):
+    sql = ("SELECT ticket_key, project, requirement FROM tool_waits WHERE (resolved_at IS NULL"
+           " OR resolution LIKE 'available on %%')")
+    params: tuple = ()
+    if ticket_keys is not None:
+        sql += " AND ticket_key=ANY(%s)"
+        params = (ticket_keys,)
+    for row in ctx.db.all(sql, params):
         req = row["requirement"]
         if not requirement_is_accepted(ctx, row["project"], req):
             continue

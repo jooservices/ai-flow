@@ -720,9 +720,7 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
     if api_port is None:
         served = f'*"/v1/deploy/state"*) cat {state} ;; *"/v1/deploy/ci-state"*) echo \'{{"state":"{ci}"}}\' ;; '
     else:  # the real curl, aimed at the test server instead of port 80
-        served = ('*"/v1/deploy/"*|*"/healthz"*|*"/cc"*) args=(); for a in "$@"; do '
-                  f'args+=("${{a/\\/\\/127.0.0.1\\//\\/\\/127.0.0.1:{api_port}\\/}}"); done; '
-                  f'exec {shutil.which("curl")} "${{args[@]}}" ;; ')
+        served = f'*"/v1/deploy/"*|*"/healthz"*|*"/cc"*) exec {shutil.which("curl")} "$@" ;; '
     # the script pipes the header to `curl -H @-`: read it so the writer never dies on SIGPIPE under pipefail
     drain = 'case "$*" in *"@-"*) cat >/dev/null ;; esac\n' if api_port is None else ""
     curl_stub = (f'{drain}case "$*" in *"/v1/state"*) exit 22 ;; {served}*/healthz*|*/cc*) exit {0 if healthy else 7} ;;'
@@ -744,6 +742,8 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
         "sleep": "exit 0\n",
     }
     env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret"}
+    if api_port is not None:
+        env["AIFLOW4_CONTROL_URL"] = f"http://127.0.0.1:{api_port}"
     result = subprocess.run(["bash", str(DEVELOP_AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
     canary_file = releases / "CANARY.json"
     current = (releases / "CURRENT").read_text().strip()
@@ -862,12 +862,11 @@ def test_develop_deploy_with_node_agent_off_installs_nothing(tmp_path):
     assert "not installed" in out
 
 
-def test_develop_deploy_with_node_agent_off_disables_an_earlier_agent(tmp_path):
+def test_develop_deploy_with_node_agent_off_preserves_an_earlier_agent(tmp_path):
     out, calls = _run_develop_node_agent_step(tmp_path / "a", "0", True)
-    assert "systemctl disable -q --now aiflow4-node-agent" in calls
-    assert "systemctl reset-failed aiflow4-node-agent" in calls
-    assert "install " not in calls
-    assert "node agent disabled and stopped" in out
+    assert "systemctl list-unit-files aiflow4-node-agent.service" in calls
+    assert "install x.tar.gz 0123456789" in calls
+    assert "node agent disabled and stopped" not in out
 
 
 # JAIF-244: with console sign-in on, /v1/state answers 401 (the curl stubs above refuse it). The scripts read the

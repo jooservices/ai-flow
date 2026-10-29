@@ -81,11 +81,16 @@ fi
 # Only replace the installed updater after the archive has passed verification and unpacked successfully.
 install -m 0755 "$REL/deploy/v4/bin/aiflow4-node-install" /usr/local/sbin/aiflow4-node-install.new
 mv -f /usr/local/sbin/aiflow4-node-install.new /usr/local/sbin/aiflow4-node-install
+install -m 0755 "$REL/deploy/v4/bin/aiflow4-audit-install" /usr/local/sbin/aiflow4-audit-install.new
+mv -f /usr/local/sbin/aiflow4-audit-install.new /usr/local/sbin/aiflow4-audit-install
+install -d -m 0755 /usr/local/share/aiflow4/audit
+install -m 0640 "$REL/deploy/v4/audit/aiflow4-operator.rules" /usr/local/share/aiflow4/audit/aiflow4-operator.rules
 PREV=$(readlink -f /srv/aiflow/current 2>/dev/null || true)
 ln -sfn "$REL" /srv/aiflow/current.new && mv -T /srv/aiflow/current.new /srv/aiflow/current
 install -m 0644 "$REL"/deploy/v4/node/systemd/*.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable -q aiflow4-node-agent
+/usr/local/sbin/aiflow4-audit-install
 # Worker services resolve their executable through /srv/aiflow/current when they start. Restart active workers
 # after switching the symlink so a canary's runs execute the candidate release rather than an older process.
 mapfile -t WORKERS < <(systemctl list-units --state=active --plain --no-legend 'aiflow4-worker@*.service' | awk 'NF {print $1}')

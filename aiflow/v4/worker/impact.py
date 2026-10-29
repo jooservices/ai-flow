@@ -18,9 +18,10 @@ import re
 import time
 from pathlib import Path
 
+from ..core import work_limits
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, with_knowledge_context
+from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
 from .gitops import Git
 from .intake import read_spec
 from .notes import note
@@ -111,12 +112,12 @@ def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         logs.mkdir(parents=True, exist_ok=True)
         spec = RunSpec(prompt=build_prompt(c, read_spec(wt)), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("target", 30)) * 60, control_url=control_url,
+                       timeout_s=int(project.get("work_minutes", {}).get("target", work_limits.TARGET)) * 60, control_url=control_url,
                        run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
         adapter = get_adapter(c.provider)
         base_argv = adapter.argv
         adapter.argv = lambda s: run_as + base_argv(s)
-        res = adapter.run(spec, lambda ev: None, stop=hb.lost)
+        res = run_with_inbox(adapter, spec, hb, lambda ev: None)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       details={"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})

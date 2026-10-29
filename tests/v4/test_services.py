@@ -175,6 +175,7 @@ def test_project_without_healthy_services_gets_no_work_and_command_center_shows_
     repo.projects["TESTWP"].services = ["postgres", "redis"]
     repo.projects["OTHER"] = Project(key="OTHER", repo="jooservices/other")
     repo.nodes["cc"].projects = ["TESTWP", "OTHER"]
+    ctx.github.repositories.append({"full_name": "jooservices/other", "name": "other", "default_branch": "develop"})
     cc = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-940")
     add_ticket(ctx.db, "OTHER-940")
@@ -183,14 +184,14 @@ def test_project_without_healthy_services_gets_no_work_and_command_center_shows_
         return {t["key"] for t in client.get("/v1/work/candidates", params={"account": "claude-01"},
                                              headers=cc).json()["tickets"]}
 
-    r = client.post("/v1/nodes/cc/heartbeat", json={"tools": {}}, headers=cc)
+    r = client.post("/v1/nodes/cc/heartbeat", json={"services": {}}, headers=cc)
     assert r.json()["desired"]["project_services"] == {"TESTWP": ["postgres", "redis"]}
     assert candidates() == {"OTHER-940"}  # nothing reported yet: no work for the project that needs services
 
     sick = {"postgres": {"state": "running", "healthy": True, "detail": "ok", "endpoint": "127.0.0.1:15499"},
             "redis": {"state": "unhealthy", "healthy": False, "detail": "Redis does not answer PING (started)",
                       "endpoint": "127.0.0.1:16399"}}
-    client.post("/v1/nodes/cc/heartbeat", json={"tools": {}, "services": sick}, headers=cc)
+    client.post("/v1/nodes/cc/heartbeat", json={"services": sick}, headers=cc)
     assert candidates() == {"OTHER-940"}
     watchdog(ctx)
     incident = ctx.db.one("SELECT severity, detail FROM incidents WHERE kind='node_services'"
@@ -204,7 +205,7 @@ def test_project_without_healthy_services_gets_no_work_and_command_center_shows_
     assert by_name["redis"]["projects"] == ["TESTWP"]
 
     healthy = {**sick, "redis": {**sick["redis"], "state": "started", "healthy": True, "detail": "answers PING"}}
-    client.post("/v1/nodes/cc/heartbeat", json={"tools": {}, "services": healthy}, headers=cc)
+    client.post("/v1/nodes/cc/heartbeat", json={"services": healthy}, headers=cc)
     watchdog(ctx)
     assert candidates() == {"TESTWP-940", "OTHER-940"}
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='node_services' AND closed_at IS NULL")["n"] == 0
@@ -212,22 +213,27 @@ def test_project_without_healthy_services_gets_no_work_and_command_center_shows_
 
 def test_node_health_preflight_requires_declared_services_to_be_healthy(client, ctx):
     ctx.repo().projects["TESTWP"].services = ["postgres", "redis"]
-    headers = join(client, "node1")
+    token = client.post("/v1/nodes/join-tokens", json={
+        "provision_key": "join-secret", "name": "node-service-health", "project": "TESTWP"})
+    assert token.status_code == 200
+    joined = client.post("/v1/nodes/join", json={"join_token": token.json()["token"]})
+    assert joined.status_code == 200
+    headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
     tools = {"git": "git version 2", "uv": "uv 0.1", "codex": "codex 1.0",
              "codex-code-mode-host": "present /usr/local/bin/codex-code-mode-host"}
     ok = {"state": "running", "healthy": True, "detail": "ok"}
 
-    client.post("/v1/nodes/node1/heartbeat", json={"tools": tools, "slots_total": 2}, headers=headers)
-    health = client.get("/v1/nodes/node1/health", headers=headers).json()
+    client.post("/v1/nodes/node-service-health/heartbeat", json={"tools": tools, "slots_total": 2}, headers=headers)
+    health = client.get("/v1/nodes/node-service-health/health", headers=headers).json()
     assert health["missing_tools"] == [] and health["preflight_ok"] is False
     assert set(health["missing_services"]) == {"postgres", "redis"}
 
     sick = {"postgres": ok, "redis": {"state": "absent", "healthy": False, "detail": "image not found"}}
-    client.post("/v1/nodes/node1/heartbeat", json={"tools": tools, "slots_total": 2, "services": sick}, headers=headers)
-    health = client.get("/v1/nodes/node1/health", headers=headers).json()
+    client.post("/v1/nodes/node-service-health/heartbeat", json={"tools": tools, "slots_total": 2, "services": sick}, headers=headers)
+    health = client.get("/v1/nodes/node-service-health/health", headers=headers).json()
     assert health["preflight_ok"] is False and health["missing_services"] == {"redis": "image not found"}
 
-    client.post("/v1/nodes/node1/heartbeat", json={"tools": tools, "slots_total": 2,
-                                                   "services": {"postgres": ok, "redis": ok}}, headers=headers)
-    health = client.get("/v1/nodes/node1/health", headers=headers).json()
+    client.post("/v1/nodes/node-service-health/heartbeat", json={"tools": tools, "slots_total": 2,
+                                                                  "services": {"postgres": ok, "redis": ok}}, headers=headers)
+    health = client.get("/v1/nodes/node-service-health/health", headers=headers).json()
     assert health["preflight_ok"] is True and health["missing_services"] == {}

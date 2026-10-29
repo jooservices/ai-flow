@@ -140,13 +140,13 @@ fi
 
 # AI Flow owns the userland runtimes, agent, worker, project tools and provider CLIs.
 # Keep this list in sync with tests/v4/test_api.py's bootstrap command-source check.
-BOOTSTRAP_PACKAGES="bash nodejs npm git python3 python3-venv ca-certificates curl tar coreutils passwd gawk sed findutils"
+BOOTSTRAP_PACKAGES="bash nodejs npm git python3 python3-venv ca-certificates curl tar coreutils passwd gawk sed findutils auditd"
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
   apt-get install -y -qq $BOOTSTRAP_PACKAGES >/dev/null
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y -q bash nodejs npm git python3 ca-certificates curl tar coreutils shadow-utils gawk sed findutils
+  dnf install -y -q bash nodejs npm git python3 ca-certificates curl tar coreutils shadow-utils gawk sed findutils audit
 else
   echo "AI Flow node bootstrap currently supports Ubuntu/Debian and RHEL-family package managers" >&2
   exit 1

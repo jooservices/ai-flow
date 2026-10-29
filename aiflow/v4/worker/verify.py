@@ -17,10 +17,11 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
+from ..core import work_limits
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, pr_title
-from .dev import api_node, related_block, with_knowledge_context
+from .dev import api_node, related_block, run_with_inbox, with_knowledge_context
 from .gitops import Git
 from .notes import environment_notes, note, project_env
 from .wordpress import declares_wordpress, start_site as start_wordpress_site
@@ -86,7 +87,8 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
 
     def pr_comment(text: str) -> None:
         try:
-            api.call("POST", "/v1/github/comment", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"], "body": text})
+            api.call("POST", "/v1/github/comment", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"], "body": text,
+                                                     "kind": "verify"})
         except Conflict:
             raise
         except Exception as e:  # noqa: BLE001
@@ -134,7 +136,7 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         env = project_env(project["key"], project.get("environment"), "verify")
         spec = RunSpec(prompt=build_prompt(c, pr, env), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model,
-                       effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
+                       effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", work_limits.HARD)) * 60,
                        control_url=control_url, run_token=c.run_token,
                        log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=env)
         adapter = get_adapter(c.provider)
@@ -156,7 +158,7 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
                     result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
                     next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
                     node=api_node(api)))
-            res = adapter.run(spec, on_progress, stop=hb.lost)
+            res = run_with_inbox(adapter, spec, hb, on_progress)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       head_sha=head)

@@ -79,4 +79,10 @@ The control API reads the licence state on these routes:
   in the `reason` and opens the `licence_limit` incident.
 - `GET /v1/ba-chat/candidate`, `GET /v1/master/candidate`, `GET /v1/version-releases/candidates` and
   `POST /v1/version-releases/claim` apply the same AI account entitlement to the other roles.
+- Resource-creation limits are checked by `POST /v1/console/users`, `POST /v1/auth/users` and
+  `POST /v1/setup/bootstrap` (the first Administrator), `POST /v1/machines/{name}/accounts`,
+  `POST /v1/nodes/join-tokens`, `POST /v1/nodes/{name}/join-command` and `POST /v1/projects`.
+- These eligibility and claim requests read the persisted licence state. They do not repeat first-use state setup or
+  contact the licence issuer on each poll; a `licence_limit` incident is cleared only when an open incident exists
+  and the limit condition has recovered.
 - `GET /v1/auth/users` lists console users, the count that the users limit applies to.

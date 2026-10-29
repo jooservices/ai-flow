@@ -140,6 +140,35 @@ def test_online_activation_sends_only_key_and_installation_identifier(client, ct
     assert stored == {"license_token": signed, "license_source": "online"}
 
 
+def test_successful_license_configuration_changes_are_write_audited_without_operator_bugs(client, ctx, monkeypatch):
+    from aiflow.v4.control import flow_doctor
+
+    private, public = issuer_key()
+    sign_in(client, ctx)
+    ctx.settings.license_public_key = public
+    ctx.settings.license_service_url = "https://licenses.example.test/activate"
+    installation_id = client.get("/v1/licensing").json()["installation_id"]
+    signed = token(private, installation_id, plan="team")
+    monkeypatch.setattr(licensing.httpx, "post", lambda *a, **k: FakeResponse({"license_token": signed}))
+
+    online = client.post("/v1/licensing/activate", json={"key": "customer-key"})
+    offline = client.post("/v1/licensing/offline", json={"license_file": signed})
+    limits = client.put("/v1/licensing/limits", json={
+        "plan": "team", "limits": {"machines": 4, "ai_accounts": 10, "projects": 20, "users": 20},
+    })
+    assert online.status_code == offline.status_code == limits.status_code == 200
+
+    writes = ctx.db.all("SELECT actor,action,accepted FROM write_audit WHERE target='licensing' ORDER BY id")
+    assert writes == [
+        {"actor": "owner@example.test", "action": "license_activate", "accepted": True},
+        {"actor": "owner@example.test", "action": "license_activate", "accepted": True},
+        {"actor": "owner@example.test", "action": "license_limits", "accepted": True},
+    ]
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
+
+
 def test_invalid_online_key_and_bad_offline_signature_leave_current_license_unchanged(client, ctx, monkeypatch):
     private, public = issuer_key()
     other_private, _ = issuer_key()
@@ -227,6 +256,48 @@ def test_managed_ai_account_creation_is_refused_at_the_plan_cap(client, ctx):
     assert "raise the limit in the Licence screen" in response.json()["detail"]
     assert ctx.db.one("SELECT count(*) AS count FROM managed_ai_accounts WHERE removed_at IS NULL")["count"] == before
     assert ctx.db.one("SELECT count(*) AS count FROM accounts")["count"] == current
+
+
+def test_resource_counts_uses_one_database_aggregate_for_entitlement_totals(ctx):
+    queries = []
+    original_all, original_one = ctx.db.all, ctx.db.one
+
+    def recording_all(sql, params=None):
+        queries.append(sql)
+        return original_all(sql, params)
+
+    def recording_one(sql, params=None):
+        queries.append(sql)
+        return original_one(sql, params)
+
+    ctx.db.all = recording_all
+    ctx.db.one = recording_one
+    counts = licensing.resource_counts(ctx)
+
+    [aggregate] = [sql for sql in queries if " AS ai_accounts," in sql]
+    assert "UNION SELECT unnest(%s::text[])" in aggregate
+    assert counts["ai_accounts"] == len({account.id for account in ctx.repo().accounts})
+    assert counts["machines"] == 0 and counts["users"] == 0
+
+
+def test_worker_polls_share_a_fresh_licence_resource_count_snapshot(client, ctx):
+    sign_in(client, ctx)
+    joined = join_node(client, "cc")
+    headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+    aggregate_queries = []
+    original_one = ctx.db.one
+
+    def recording_one(sql, params=None):
+        if " AS ai_accounts," in sql:
+            aggregate_queries.append(sql)
+        return original_one(sql, params)
+
+    ctx.db.one = recording_one
+    for _ in range(2):
+        response = client.get("/v1/work/candidates?account=claude-01", headers=headers)
+        assert response.status_code == 200
+
+    assert len(aggregate_queries) == 1
 
 
 def test_startup_sync_skips_configured_accounts_and_machines_over_their_limits(client, ctx):
@@ -457,7 +528,11 @@ def test_excess_machines_and_projects_cannot_start_work_but_existing_runs_can_fi
     from aiflow.v4.core.controlrepo import Project
     repo.projects["ZZZ"] = Project(key="ZZZ", repo="jooservices/another-project")
     repo.nodes["cc"].projects.append("ZZZ")
-    ctx.db.run("UPDATE nodes SET projects=%s WHERE name='cc'", (["TESTWP", "ZZZ"],))
+    ctx.db.run("UPDATE nodes SET projects=%s,status='online' WHERE name='cc'", (["TESTWP", "ZZZ"],))
+    ctx.github.repositories.append({"full_name": "jooservices/another-project", "name": "another-project",
+                                    "default_branch": "develop"})
+    from aiflow.v4.control.system_check import refresh_node
+    refresh_node(ctx, "cc", "project_added")
     add_ticket(ctx.db, "TESTWP-201")
     add_ticket(ctx.db, "ZZZ-1")
 

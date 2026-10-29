@@ -9,9 +9,44 @@ from datetime import datetime, timedelta, timezone
 from . import events
 from .config import load
 from .jira import Jira
-from .lock import Redis
+from .lock import Redis, RedisError
 
 HOUR = 3600
+
+
+def configured_worker_ids(cfg) -> list[str]:
+    """Worker ids configured for this machine, including legacy expected-slot settings."""
+    prefix = f"{cfg.machine}:"
+    ids = [slot.removeprefix(prefix) for slot in cfg.expected_slots if slot.startswith(prefix)]
+    if cfg.registry.from_files or ids:
+        return ids
+    return [str(number) for number in range(1, cfg.workers + 1)]
+
+
+def worker_counts(cfg, redis, now: int | None = None) -> tuple[int, int]:
+    """Configured workers and workers with a fresh heartbeat on this machine."""
+    current = int(time.time()) if now is None else now
+    prefix = f"hb:{cfg.machine}:"
+    names = [name for name in redis.scan(prefix + "*") if name != prefix + "control"]
+    running = 0
+    for beat in redis.get_many(names):
+        try:
+            if beat is not None and current - int(beat) <= cfg.heartbeat_stale_seconds:
+                running += 1
+        except (TypeError, ValueError):
+            continue
+    return len(configured_worker_ids(cfg)), running
+
+
+def running_worker_count(cfg) -> str:
+    """Return the live worker count for the configuration check, or a safe unavailable marker."""
+    redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
+    try:
+        return str(worker_counts(cfg, redis)[1])
+    except RedisError:
+        return "unknown (Redis unavailable)"
+    finally:
+        redis.close()
 
 
 def problems(cfg, redis, jira) -> list[tuple[str, str]]:
@@ -107,7 +142,10 @@ def main() -> int:
     jira = Jira(cfg.root)
     events.configure(cfg.obs, cfg.machine, "health", cfg.root / ".tmp" / "aiflow")
     found = problems(cfg, redis, jira)
-    events.emit("health.check", problems=len(found), kinds=",".join(kind for kind, _ in found))
+    configured, running = worker_counts(cfg, redis)
+    print(f"WORKERS {cfg.machine}: configured {configured}, running {running}")
+    events.emit("health.check", problems=len(found), kinds=",".join(kind for kind, _ in found),
+                workers_configured=configured, workers_running=running)
     for kind, message in found:
         print(f"PROBLEM {kind}: {message}")
         events.emit("health.problem", kind=kind, message=message[:500])

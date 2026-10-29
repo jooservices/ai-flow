@@ -100,6 +100,8 @@ class FakeHost(ci.Host):
                 link.unlink()
             link.symlink_to(cli_dir)
             return ok()
+        if name == "aiflow4-audit-install":
+            return ok()
         if argv[:2] == ["docker", "login"]:
             return ok("Login Succeeded")
         if argv[:3] == ["docker", "network", "inspect"]:

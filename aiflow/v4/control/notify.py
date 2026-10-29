@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from ..core import secretbox
 from .db import J
 
 log = logging.getLogger("aiflow4.notify")
@@ -71,6 +72,59 @@ def _int(value: Any, default: int, low: int, high: int) -> int:
     if not low <= result <= high:
         raise ValueError(f"enter a value from {low} to {high}")
     return result
+
+
+def _seal_config(kind: str, config: dict) -> dict:
+    """Encrypt the credential fields of a channel before they reach the database (key outside the database).
+
+    Fails closed (SecretBoxError) when no external key is configured; fields already encrypted stay as they are."""
+    sealed = dict(config)
+    for field in SECRET_FIELDS[kind]:
+        value = str(sealed.get(field) or "")
+        if value and not secretbox.is_encrypted(value):
+            sealed[field] = secretbox.seal(value, f"notification:{field}")
+    return sealed
+
+
+def _reveal_config(kind: str, config: dict | None) -> dict:
+    """The channel configuration with its credentials decrypted; refuse any legacy plaintext value."""
+    revealed = dict(config or {})
+    for field in SECRET_FIELDS.get(kind, ()):
+        value = str(revealed.get(field) or "")
+        if value:
+            if not secretbox.is_encrypted(value):
+                raise secretbox.SecretBoxError("a notification credential is still stored as plaintext")
+            revealed[field] = secretbox.decrypt(value, context=f"notification:{field}")
+    return revealed
+
+
+def migrate_plaintext_credentials(db) -> int:
+    """Encrypt credentials that older releases stored as plain text in `notification_channels.config`.
+
+    Runs at control startup. Any stored credential requires a valid external key; startup fails if it is missing or
+    cannot decrypt existing ciphertext. All migrations happen in one transaction before the control API is served."""
+    key = secretbox.load_key()
+    changed = 0
+    with db.transaction() as c:
+        for row in c.execute("SELECT id, kind, config FROM notification_channels").fetchall():
+            config = dict(row["config"] or {})
+            sealed = dict(config)
+            for field in SECRET_FIELDS.get(row["kind"], ()):
+                value = str(sealed.get(field) or "")
+                if not value:
+                    continue
+                if secretbox.is_encrypted(value):
+                    # Fail during startup for a missing/wrong key or damaged ciphertext, before delivery is attempted.
+                    secretbox.decrypt(value, key, f"notification:{field}")
+                else:
+                    if key is None:
+                        raise secretbox.SecretBoxError(
+                            "notification credentials exist but no external secret encryption key is configured")
+                    sealed[field] = secretbox.encrypt(value, key, f"notification:{field}")
+            if sealed != config:
+                c.execute("UPDATE notification_channels SET config=%s WHERE id=%s", (J(sealed), row["id"]))
+                changed += 1
+    return changed
 
 
 def _channel_config(kind: str, incoming: dict, previous: dict | None = None) -> dict:
@@ -131,8 +185,9 @@ def save_channel(db, payload: dict) -> dict:
             raise ValueError("channel was not found")
         if previous["kind"] != kind:
             raise ValueError("a saved channel kind cannot be changed")
-    config = _channel_config(kind, payload.get("config") if isinstance(payload.get("config"), dict) else {},
-                             previous.get("config") if previous else {})
+    config = _seal_config(kind, _channel_config(
+        kind, payload.get("config") if isinstance(payload.get("config"), dict) else {},
+        _reveal_config(kind, previous.get("config")) if previous else {}))
     enabled = bool(payload.get("enabled", True))
     if previous:
         row = db.one("UPDATE notification_channels SET name=%s, enabled=%s, config=%s, updated_at=now()"
@@ -317,7 +372,8 @@ def _record_result(db, channel_id: int, delivery_id: int, status: str, error: st
 
 
 def _deliver_channel(channel: dict, title: str, body: str, recipient: str = "") -> None:
-    kind, config = channel["kind"], channel.get("config") or {}
+    kind = channel["kind"]
+    config = _reveal_config(kind, channel.get("config"))
     if kind == "email":
         msg = EmailMessage()
         msg["From"] = config["from"]

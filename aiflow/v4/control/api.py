@@ -56,7 +56,7 @@ from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts,
 from . import run_inbox as run_inbox_control
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
-                           issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
+                           issue_session, landing_page, normalize_role, normalize_roles, resolve_session_user,
                            verify_session)
 from . import capacity, claim_project, conflict_loss, hotfiles, merge_queue, review_queue_api, worker_candidates
 from . import merge_flow

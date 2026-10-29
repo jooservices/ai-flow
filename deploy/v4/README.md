@@ -62,6 +62,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Automatic epic completion](../../docs/v4/epic-auto-close.md): close an epic when every child is Done, reopen it when work returns, and suggest project closure in the report
 - [Team Lead tickets](../../docs/v4/team-lead-tickets.md): every split child carries files, a skeleton and test cases for the developer
 - [Worktree cleanup](../../docs/v4/worktree-cleanup.md): nodes delete the worktrees of Done tickets and spent per-run checkouts
+- [Role health routes](../../docs/v4/route-module-role_health.md): the role health routes are served from their own router module
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
 - [Memory routes](../../docs/v4/route-module-memory.md): the memory routes are served from their own router module
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment

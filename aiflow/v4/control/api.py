@@ -2112,11 +2112,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         except ValueError:
             raise HTTPException(404, "notification channel was not found") from None
 
-    @app.get("/healthz")
-    def healthz() -> dict:
-        ctx.db.one("SELECT 1 AS ok")
-        ctx.leases.r.ping()
-        return {"ok": True, "version": VERSION}
 
     # --- licence and metered usage ---------------------------------------------------------------------------
     @app.get("/v1/licensing")

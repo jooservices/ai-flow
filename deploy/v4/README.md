@@ -60,6 +60,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Automatic Jira version releases](../../docs/v4/version-release.md): check, document, PR, merge, tag and publish configured Jira versions without owner approval
 - [Notify routes](../../docs/v4/route-module-notify.md): the notify routes are served from their own router module
 - [Release installation smoke test](../../docs/v4/install.md): tagged releases install control and two nodes in Ubuntu systemd CI before publication
+- [Health routes](../../docs/v4/route-module-healthz.md): the health routes are served from their own router module
 - [Canary auto-deploy](../../docs/v4/canary-autodeploy.md): signed releases and develop commits are measured on one node before fleet promotion, with automatic rollback on elevated infrastructure failures
 - [SA system health](../../docs/v4/sa-health.md): node and account health, capacity recommendations, credential expiry, blocked AI and network diagnostics
 - [Shared route helpers](../../docs/v4/route-dependencies.md): audit, console and node authentication and fencing as functions of the application context, usable by any router

@@ -70,6 +70,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Command Center node operations](../../docs/v4/node-operations.md): `nodes.manage` install, desired-state repair and one-time join actions for `owner` and `super_admin`, with audited operation logs
 - [BA chat routes](../../docs/v4/route-module-ba_chat.md): the ba chat routes are served from their own router module
 - [Project close reports and study cases](../../docs/v4/project-study-cases.md): close projects, email versioned reports, and find saved reports in memory
+- [Log viewer routes](../../docs/v4/route-module-logs.md): the log viewer routes are served from their own router module
 - [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with token-authorized fenced approve and rework actions
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
 - [Join a node](../../docs/v4/node-join.md): Command Center issues a five-minute one-use token and the pinned server-installer CLI bootstraps a node

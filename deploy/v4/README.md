@@ -63,6 +63,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Team Lead tickets](../../docs/v4/team-lead-tickets.md): every split child carries files, a skeleton and test cases for the developer
 - [Worktree cleanup](../../docs/v4/worktree-cleanup.md): nodes delete the worktrees of Done tickets and spent per-run checkouts
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
+- [Memory routes](../../docs/v4/route-module-memory.md): the memory routes are served from their own router module
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
 - [Shared route helpers](../../docs/v4/route-dependencies.md): audit, console and node authentication and fencing as functions of the application context, usable by any router
 - [Command Center node operations](../../docs/v4/node-operations.md): `nodes.manage` install, desired-state repair and one-time join actions for `owner` and `super_admin`, with audited operation logs

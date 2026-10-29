@@ -1,8 +1,9 @@
 """Provider-independent contract for an ordered intake split plan.
 
 Intake and control share ``validate_plan`` so a later ticket can create Jira children
-from a list that is already known to be usable. This module does not call Jira,
-HTTP, a database, an estimator or a worker.
+from a list that is already known to be usable. ``estimate_needs_split`` compares an
+existing estimate's high minutes with the project target. This module does not call
+Jira, HTTP, a database, an estimator or a worker.
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ MAX_CHILDREN = 8
 SUMMARY_MIN = 5
 SUMMARY_MAX = 240
 DESCRIPTION_MAX = 10_000
+DEFAULT_TARGET_MINUTES = 30
 _AC1_PREFIXES = ("AC1:", "- AC1:", "* AC1:")
 
 
@@ -52,3 +54,13 @@ def validate_plan(value: Any) -> list[dict[str, str]]:
             raise InvalidSplitPlan(f"split ticket {index} needs an AC1 acceptance criterion")
         plan.append({"summary": summary.strip(), "description": description.strip()})
     return plan
+
+
+def estimate_needs_split(estimate: Any, target_minutes: int = DEFAULT_TARGET_MINUTES) -> bool:
+    """Return True when the estimate's high minutes exceed the project target."""
+    if isinstance(target_minutes, bool) or not isinstance(target_minutes, int) or target_minutes < 1:
+        raise ValueError("target_minutes must be a positive integer")
+    minutes = estimate.get("time_minutes") if isinstance(estimate, dict) else None
+    if not isinstance(minutes, dict) or minutes.get("high") is None:
+        raise ValueError("estimate must include time_minutes.high")
+    return float(minutes["high"]) > target_minutes

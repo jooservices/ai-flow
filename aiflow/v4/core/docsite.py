@@ -52,7 +52,8 @@ SCREEN_TOPIC_DOCS = {"settings": "docs/v4/runtime-settings.md"}
 TOPIC_DOCS = {"scale-proof": "docs/v4/scale-proof.md",
               "load-aware-scheduling": "docs/v4/load-aware-scheduling.md"}
 UI_EXTENSION_VIEWS = {"system-check.js": {"system-check", "projects"},
-                      "load-policy.js": {"cc", "machines"}}
+                      "load-policy.js": {"cc", "machines"},
+                      "dashboard-timeouts.js": {"cc"}}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,

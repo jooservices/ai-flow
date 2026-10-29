@@ -51,7 +51,7 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from .audit import record_console_user_change as audit_user, record_console_user_roles_change as audit_user_roles
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               load_policy, load_policy_api, role_health, rollout, runtime_settings, scale_proof, setup_wizard,
+               dashboard_timeout_routes, load_policy, load_policy_api, role_health, rollout, runtime_settings, scale_proof, setup_wizard,
                shared_accounts, support_bundle, system_check, system_check_api, tooling, version_release, work_steps)
 from . import run_inbox as run_inbox_control
 from . import environment as environment_reports
@@ -7567,5 +7567,5 @@ def create_app(ctx: Ctx) -> FastAPI:
     runtime_settings.install(app, ctx, console_user, audit)
     from .login import install_login
     install_login(app, ctx)
-    system_check_api.register_routes(app, ctx, console_user, optional_console_user)
+    system_check_api.register_routes(app, ctx, console_user, optional_console_user); dashboard_timeout_routes.install(app, ctx, console_user, optional_console_user)
     return app

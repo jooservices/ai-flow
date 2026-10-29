@@ -20,7 +20,7 @@ NOW = 1_000_000.0
 def ticket(key, status, minutes, **extra):
     found = dict(key=key, status=status, status_since=NOW - minutes * 60, updated=NOW - minutes * 60, labels=[], leased=False,
                  blocked_kind="", reason="", cycles=0, last_comments=[], pull_request=None, ci_state="unknown", ci_since=None,
-                 minutes_waiting_for_ci=0)
+                 minutes_waiting_for_ci=0, context_complete=True)
     found.update(extra)
     return found
 
@@ -202,8 +202,8 @@ class OperatorTests(unittest.TestCase):
         pr = {"number": 17, "url": "https://github.com/jooservices/repo/pull/17", "state": "OPEN",
               "headRefName": "JAIF-1-branch", "statusCheckRollup": [{"__typename": "StatusContext", "context": "CI", "state": "PENDING"}]}
 
-        with mock.patch("aiflow.operator.Repo.github_slug", return_value="jooservices/repo"), \
-                mock.patch("aiflow.operator.GitHub.view", return_value=pr):
+        with mock.patch("aiflow.operator_state.Repo.github_slug", return_value="jooservices/repo"), \
+                mock.patch("aiflow.operator_state.GitHub.view", return_value=pr):
             snapshot = op.state()
 
         found = snapshot["tickets"][0]
@@ -219,6 +219,7 @@ class OperatorTests(unittest.TestCase):
         sup.jira.found = [{"key": "JAIF-1", "status": "In QA",
                            "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 3 * 3600)),
                            "labels": [], "summary": "A ticket"}]
+        sup.jira.comments = lambda key, last=3: []
         sup.online_pool = lambda: ["Claude"]
         sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
         for key, value in (("statussince:JAIF-1", now - 3 * 3600), ("pr:JAIF-1", 17),
@@ -227,8 +228,8 @@ class OperatorTests(unittest.TestCase):
         for slot in op.cfg.expected_slots:
             redis.set(f"hb:{slot}", str(int(now)), 60)
 
-        with mock.patch("aiflow.operator.Repo.github_slug", return_value="jooservices/repo"), \
-                mock.patch("aiflow.operator.GitHub.view", side_effect=subprocess.TimeoutExpired("gh pr view", 120)), \
+        with mock.patch("aiflow.operator_state.Repo.github_slug", return_value="jooservices/repo"), \
+                mock.patch("aiflow.operator_state.GitHub.view", side_effect=subprocess.TimeoutExpired("gh pr view", 120)), \
                 mock.patch.object(op, "sync_queue", wraps=op.sync_queue) as sync_queue, \
                 mock.patch.object(op, "flush_notifications") as flush_notifications, \
                 mock.patch.object(op, "run_next", return_value=True) as run_next:

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .config import ConfigError
+from .master_rescue import MasterSettings, parse as parse_master
 
 SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, "qa": str, "require_human": bool,
             "human_on_deployment": bool, "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int,
@@ -88,6 +89,7 @@ class Registry:
     ai_limits: dict[str, dict[str, int]] = field(default_factory=dict)  # machine -> AI name -> concurrent session limit
     runtime: dict[str, str] = field(default_factory=dict)  # AIFLOW_* name -> value, from [runtime] of aiflow.toml
     max_workers: dict[str, int] = field(default_factory=dict)  # machine -> most workers (shared + all projects) it may run
+    master: MasterSettings = field(default_factory=MasterSettings)  # [master] of aiflow.toml: the rescue by Claude (JAIF-92)
 
     def get(self, key: str) -> Project | None:
         return self.projects.get(key)
@@ -161,6 +163,119 @@ def legacy(keys: tuple[str, ...], base: Project) -> Registry:
     return Registry({key: replace(base, jira_key=key) for key in keys}, {}, from_files=False)
 
 
+def _validate_sections(general: dict, general_file: Path) -> None:
+    allowed = ("defaults", "machines", "runtime", "master")
+    unknown = set(general) - set(allowed)
+    if unknown:
+        raise ConfigError(f"{general_file}: unknown section `{sorted(unknown)[0]}` (known: {', '.join(allowed)}).")
+
+
+def _load_defaults(general: dict, fallback: Project, general_file: Path) -> Project:
+    where = f"{general_file} [defaults]"
+    defaults = replace(fallback, **_typed(_project_settings(general.get("defaults", {}), where), SETTINGS, where))
+    if defaults.loop_limit is not None and defaults.loop_limit < 0:
+        raise ConfigError(f"{where}: `loop_limit` must be a whole number of 0 or more.")
+    return defaults
+
+
+def _machine_count(value: object, where: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ConfigError(f"{where}: `workers` (the shared workers, any project) must be a whole number of 0 or more.")
+    return value
+
+
+def _machine_cap(value: object, where: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ConfigError(f"{where}: `max_workers` must be a whole number of at least 1.")
+    return value
+
+
+def _machine_ai_limits(value: object, where: str) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise ConfigError(f"{where}.ai_limits: must be a table.")
+    limits = _typed(value, {name: int for name in AI_LIMIT_NAMES}, f"{where}.ai_limits")
+    if any(limit < 0 for limit in limits.values()):
+        raise ConfigError(f"{where}.ai_limits: limits must be zero or greater.")
+    return dict(limits)
+
+
+def _machine_settings(machine: str, table: dict, general_file: Path) -> tuple[int, int | None, dict[str, int]]:
+    where = f"{general_file} [machines.{machine}]"
+    if not isinstance(table, dict) or set(table) - {"workers", "ai_limits", "max_workers"}:
+        raise ConfigError(f"{where}: only `workers`, `max_workers` and `ai_limits` are allowed.")
+    count = _machine_count(table.get("workers", 0), where)
+    cap = _machine_cap(table.get("max_workers"), where)
+    limits = _machine_ai_limits(table.get("ai_limits", {}), where)
+    return count, cap, limits
+
+
+def _load_machines(general: dict, general_file: Path) -> tuple[dict[str, int], dict[str, dict[str, int]], dict[str, int]]:
+    workers: dict[str, int] = {}
+    ai_limits: dict[str, dict[str, int]] = {}
+    max_workers: dict[str, int] = {}
+    for machine, table in general.get("machines", {}).items():
+        count, cap, limits = _machine_settings(machine, table, general_file)
+        workers[machine] = count
+        if cap is not None:
+            max_workers[machine] = cap
+        if limits:
+            ai_limits[machine] = limits
+    return workers, ai_limits, max_workers
+
+
+def _validate_project(path: Path, project: Project) -> None:
+    if project.loop_limit is not None and project.loop_limit < 0:
+        raise ConfigError(f"{path} [project]: `loop_limit` must be a whole number of 0 or more.")
+    if project.database and not DATABASE_NAME.fullmatch(project.database):
+        raise ConfigError(f"{path}: database must be 2-24 lowercase letters, digits, '-' or '_', starting with a letter.")
+    if project.merge_method not in MERGE_METHODS:
+        raise ConfigError(f"{path}: merge_method must be one of {', '.join(MERGE_METHODS)}.")
+    if project.deploy_timeout_minutes < 1:
+        raise ConfigError(f"{path}: deploy_timeout_minutes must be a whole number of at least 1.")
+    if project.deploy_on not in ("base", "all"):
+        raise ConfigError(f"{path}: deploy_on must be 'base' or 'all'.")
+    if project.workers < 0:
+        raise ConfigError(f"{path}: workers must be a whole number of 0 or more.")
+
+
+def _read_project(path: Path, defaults: Project) -> Project:
+    data = _read(path)
+    if set(data) != {"project"} or not isinstance(data["project"], dict):
+        raise ConfigError(f"{path}: needs one [project] table and nothing else.")
+    where = f"{path} [project]"
+    table = _typed(_project_settings(data["project"], where), {**IDENTITY, **SETTINGS}, where)
+    for needed in ("jira_key", "repo"):
+        if not table.get(needed):
+            raise ConfigError(f"{where}: `{needed}` is required.")
+    project = replace(defaults, **table)
+    _validate_project(path, project)
+    return project
+
+
+def _load_projects(config_dir: Path, defaults: Project) -> dict[str, Project]:
+    projects: dict[str, Project] = {}
+    owners: dict[str, Path] = {}
+    for path in sorted((config_dir / "aiflow").glob("*.toml")):
+        project = _read_project(path, defaults)
+        if project.jira_key in projects:
+            raise ConfigError(f"Jira project {project.jira_key} is declared in {owners[project.jira_key].name} and in {path.name}.")
+        projects[project.jira_key], owners[project.jira_key] = project, path
+    if not projects:
+        raise ConfigError(f"No project file in {config_dir / 'aiflow'}.")
+    return projects
+
+
+def _validate_worker_caps(registry: Registry, max_workers: dict[str, int], general_file: Path) -> None:
+    for machine, cap in max_workers.items():
+        total = len(desired_ids(registry, machine))
+        if total > cap:
+            shared = registry.workers.get(machine, 0)
+            raise ConfigError(f"{general_file} [machines.{machine}]: the workers add up to {total} (shared {shared} + projects "
+                              f"{total - shared}) but max_workers is {cap}.")
+
+
 def load(config_dir: Path, fallback: Project) -> Registry | None:
     """The registry of `config_dir`, or None when `aiflow.toml` does not exist (legacy mode).
     `fallback` carries the `.env` values for everything the files leave out."""
@@ -168,70 +283,13 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
     if not general_file.is_file():
         return None
     general = _read(general_file)
-    for section in general:
-        if section not in ("defaults", "machines", "runtime"):
-            raise ConfigError(f"{general_file}: unknown section `{section}` (known: defaults, machines, runtime).")
-    defaults = replace(fallback, **_typed(_project_settings(general.get("defaults", {}), f"{general_file} [defaults]"),
-                                           SETTINGS, f"{general_file} [defaults]"))
-    if defaults.loop_limit is not None and defaults.loop_limit < 0:
-        raise ConfigError(f"{general_file} [defaults]: `loop_limit` must be a whole number of 0 or more.")
-    workers: dict[str, int] = {}
-    ai_limits: dict[str, dict[str, int]] = {}
-    max_workers: dict[str, int] = {}
-    for machine, table in general.get("machines", {}).items():
-        if not isinstance(table, dict) or set(table) - {"workers", "ai_limits", "max_workers"}:
-            raise ConfigError(f"{general_file} [machines.{machine}]: only `workers`, `max_workers` and `ai_limits` are allowed.")
-        count = table.get("workers", 0)
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-            raise ConfigError(f"{general_file} [machines.{machine}]: `workers` (the shared workers, any project) must be a whole number of 0 or more.")
-        workers[machine] = count
-        if "max_workers" in table:
-            cap = table["max_workers"]
-            if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
-                raise ConfigError(f"{general_file} [machines.{machine}]: `max_workers` must be a whole number of at least 1.")
-            max_workers[machine] = cap
-        limits = table.get("ai_limits", {})
-        if not isinstance(limits, dict):
-            raise ConfigError(f"{general_file} [machines.{machine}.ai_limits]: must be a table.")
-        limits = _typed(limits, {name: int for name in AI_LIMIT_NAMES}, f"{general_file} [machines.{machine}.ai_limits]")
-        if any(value < 0 for value in limits.values()):
-            raise ConfigError(f"{general_file} [machines.{machine}.ai_limits]: limits must be zero or greater.")
-        if limits:
-            ai_limits[machine] = dict(limits)
-    projects: dict[str, Project] = {}
-    owners: dict[str, Path] = {}
-    for path in sorted((config_dir / "aiflow").glob("*.toml")):
-        data = _read(path)
-        if set(data) != {"project"} or not isinstance(data["project"], dict):
-            raise ConfigError(f"{path}: needs one [project] table and nothing else.")
-        table = _typed(_project_settings(data["project"], f"{path} [project]"), {**IDENTITY, **SETTINGS}, f"{path} [project]")
-        for needed in ("jira_key", "repo"):
-            if not table.get(needed):
-                raise ConfigError(f"{path} [project]: `{needed}` is required.")
-        project = replace(defaults, **table)
-        if project.loop_limit is not None and project.loop_limit < 0:
-            raise ConfigError(f"{path} [project]: `loop_limit` must be a whole number of 0 or more.")
-        if project.database and not DATABASE_NAME.fullmatch(project.database):
-            raise ConfigError(f"{path}: database must be 2-24 lowercase letters, digits, '-' or '_', starting with a letter.")
-        if project.merge_method not in MERGE_METHODS:
-            raise ConfigError(f"{path}: merge_method must be one of {', '.join(MERGE_METHODS)}.")
-        if project.deploy_timeout_minutes < 1:
-            raise ConfigError(f"{path}: deploy_timeout_minutes must be a whole number of at least 1.")
-        if project.deploy_on not in ("base", "all"):
-            raise ConfigError(f"{path}: deploy_on must be 'base' or 'all'.")
-        if project.jira_key in projects:
-            raise ConfigError(f"Jira project {project.jira_key} is declared in {owners[project.jira_key].name} and in {path.name}.")
-        if project.workers < 0:
-            raise ConfigError(f"{path}: workers must be a whole number of 0 or more.")
-        projects[project.jira_key], owners[project.jira_key] = project, path
-    if not projects:
-        raise ConfigError(f"No project file in {config_dir / 'aiflow'}.")
+    _validate_sections(general, general_file)
+    defaults = _load_defaults(general, fallback, general_file)
+    workers, ai_limits, max_workers = _load_machines(general, general_file)
+    projects = _load_projects(config_dir, defaults)
     runtime = _runtime(general.get("runtime", {}), f"{general_file} [runtime]")
-    registry = Registry(projects, workers, from_files=True, ai_limits=ai_limits, runtime=runtime, max_workers=max_workers)
-    for machine, cap in max_workers.items():
-        total = len(desired_ids(registry, machine))
-        if total > cap:
-            raise ConfigError(f"{general_file} [machines.{machine}]: the workers add up to {total} (shared {workers.get(machine, 0)} + projects "
-                              f"{total - workers.get(machine, 0)}) but max_workers is {cap}.")
+    registry = Registry(projects, workers, from_files=True, ai_limits=ai_limits, runtime=runtime, max_workers=max_workers,
+                        master=parse_master(general.get("master", {}), f"{general_file} [master]"))
+    _validate_worker_caps(registry, max_workers, general_file)
     return registry
 

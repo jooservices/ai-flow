@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import master_rescue
+
 WORKED = ("In Progress", "In Review", "Review passed", "In QA", "Ready to merge")  # Human review waits for the owner by design
 RETURNS_BY_ITSELF = ("Quota", "Offline")
 
@@ -14,7 +16,7 @@ RETURNS_BY_ITSELF = ("Quota", "Offline")
 @dataclass(frozen=True)
 class Incident:
     id: str
-    kind: str       # blocked | stuck | ci | worker | ai_pool | rework
+    kind: str       # blocked | stuck | ci | worker | ai_pool | rework | rescue
     subject: str    # ticket key, worker slot or `all`
     summary: str
     facts: dict[str, Any] = field(default_factory=dict)
@@ -30,61 +32,119 @@ def find_incidents(state: dict[str, Any]) -> list[Incident]:
     `state` contains `now`, `thresholds`, tickets with status times, labels, lease, comments, pull-request and CI facts,
     worker heartbeats, and each role's usable AI pool.
     """
-    now, found = state["now"], []
-    thresholds = state["thresholds"]
-    blocked_minutes = thresholds["blocked_minutes"]
-    stuck_minutes = thresholds["stuck_minutes"]
-    ci_wait_minutes = thresholds["ci_wait_minutes"]
-    rework_limit = thresholds["rework_limit"]
-    for ticket in state.get("tickets", []):
-        key, status, labels = ticket["key"], ticket["status"], ticket.get("labels", [])
-        if "aiflow-hold" in labels or "needs-owner" in labels:
-            continue
-        status_since = ticket.get("status_since", ticket.get("updated", now))
-        minutes = max(0, (now - status_since) / 60)
-        pull_request = ticket.get("pull_request")
-        facts = {
-            "ticket": key,
-            "status": status,
-            "times": {
-                "detected_at": now,
-                "status_since": status_since,
-                "minutes_in_status": int(minutes),
-                "ci_since": ticket.get("ci_since"),
-                "minutes_waiting_for_ci": ticket.get("minutes_waiting_for_ci"),
-            },
-            "labels": labels,
-            "last_comments": ticket.get("last_comments", []),
-            "pull_request": pull_request,
-            "ci_state": ticket.get("ci_state", "unknown"),
-        }
-        blocked_kind = ticket.get("blocked_kind", "")
-        pr_state = pull_request.get("state", "") if isinstance(pull_request, dict) else ""
-        ci_waiting = (status == "In QA" and not ticket.get("leased") and pull_request
-                      and pr_state in ("", "OPEN") and ticket.get("ci_state") in ("none", "pending"))
-        rounds = max(ticket.get("cycles", 0), ticket.get("rework_rounds", 0))
-        limit = ticket.get("loop_limit", rework_limit)
-        rework_over_limit = rounds > limit
-        if (status == "Blocked" and blocked_kind not in RETURNS_BY_ITSELF
-                and not (blocked_kind == "Rework" and rework_over_limit)
-                and minutes >= blocked_minutes):
-            found.append(Incident(f"blocked:{key}", "blocked", key, f"{key} is Blocked for {int(minutes)} min: {ticket.get('reason', '')}",
-                                  {**facts, "blocked_kind": blocked_kind, "reason": ticket.get("reason", "")}))
-        elif (ci_waiting
-              and ticket.get("minutes_waiting_for_ci", 0) >= ci_wait_minutes):
-            found.append(Incident(f"ci:{key}", "ci", key,
-                                  f"{key} pull request is waiting for CI for {int(ticket['minutes_waiting_for_ci'])} min", facts))
-        elif (status in WORKED and not ticket.get("leased") and minutes >= stuck_minutes and not ci_waiting):
-            found.append(Incident(f"stuck:{key}", "stuck", key, f"{key} has been in {status} for {int(minutes)} min with nobody working on it", facts))
-        if rework_over_limit:
-            found.append(Incident(f"rework:{key}", "rework", key, f"{key} went through {rounds} rework rounds",
-                                  {**facts, "rework_rounds": rounds}))
-    for slot, beat in sorted(state.get("heartbeats", {}).items()):
-        if beat is None or now - beat > state["stale_seconds"]:
-            found.append(Incident(f"worker:{slot}", "worker", slot, f"worker {slot} sends no heartbeat",
-                                  {"slot": slot, "last_heartbeat": beat, "detected_at": now, "stale_seconds": state["stale_seconds"]}))
-    for role, pool in sorted(state.get("role_pools", {}).items()):
-        if not pool:
-            found.append(Incident(f"ai_pool:{role}", "ai_pool", role, f"no AI is usable for the {role} role",
-                                  {"role": role, "pool": [], "detected_at": now}))
+    now = state["now"]
+    found = [incident for ticket in state.get("tickets", []) for incident in _ticket_incidents(ticket, state, now)]
+    found.extend(_worker_incidents(state, now))
+    found.extend(_role_pool_incidents(state, now))
     return found
+
+
+def _ticket_incidents(ticket: dict[str, Any], state: dict[str, Any], now: float) -> list[Incident]:
+    labels = ticket.get("labels", [])
+    if "aiflow-hold" in labels or "needs-owner" in labels:
+        return []
+    if ticket.get("rescue_pending"):
+        return []
+    status_since = ticket.get("status_since", ticket.get("updated", now))
+    minutes = max(0, (now - status_since) / 60)
+    facts = _ticket_facts(ticket, now, status_since, minutes)
+    rescue = _rescue_incident(ticket, state, facts, minutes)
+    return [rescue] if rescue else _standard_ticket_incidents(ticket, state, facts, minutes)
+
+
+def _ticket_facts(ticket: dict[str, Any], now: float, status_since: float, minutes: float) -> dict[str, Any]:
+    return {
+        "ticket": ticket["key"],
+        "status": ticket["status"],
+        "times": {
+            "detected_at": now,
+            "status_since": status_since,
+            "minutes_in_status": int(minutes),
+            "ci_since": ticket.get("ci_since"),
+            "minutes_waiting_for_ci": ticket.get("minutes_waiting_for_ci"),
+        },
+        "labels": ticket.get("labels", []),
+        "last_comments": ticket.get("last_comments", []),
+        "pull_request": ticket.get("pull_request"),
+        "ci_state": ticket.get("ci_state", "unknown"),
+    }
+
+
+def _rescue_incident(ticket: dict[str, Any], state: dict[str, Any], facts: dict[str, Any], minutes: float) -> Incident | None:
+    verdict = master_rescue.evaluate(ticket, state.get("master"), minutes)
+    if not verdict:
+        return None
+    key = ticket["key"]
+    return Incident(f"rescue:{key}", "rescue", key, f"{key} qualifies for a master rescue: {verdict.trigger}",
+                    {**facts, "blocked_kind": ticket.get("blocked_kind", ""), "reason": ticket.get("reason", ""),
+                     "summary": ticket.get("summary", ""), "mode": verdict.mode, "trigger": verdict.trigger,
+                     "topic": verdict.topic, "stretch_minutes": int(ticket.get("stretch_minutes", 0)),
+                     "worked_minutes": int(ticket.get("worked_minutes", 0)),
+                     "attempts": ticket.get("attempts", {}),
+                     "remaining_minutes": verdict.remaining_minutes})
+
+
+def _standard_ticket_incidents(ticket: dict[str, Any], state: dict[str, Any], facts: dict[str, Any], minutes: float) -> list[Incident]:
+    rounds = max(ticket.get("cycles", 0), ticket.get("rework_rounds", 0))
+    limit = ticket.get("loop_limit", state["thresholds"]["rework_limit"])
+    primary = (_blocked_incident(ticket, state, facts, minutes, rounds, limit),
+               _ci_incident(ticket, state, facts),
+               _stuck_incident(ticket, state, facts, minutes))
+    first = next((found for found in primary if found is not None), None)
+    rework = _rework_incident(ticket, facts, rounds, limit)
+    return [found for found in (first, rework) if found is not None]
+
+
+def _blocked_incident(ticket: dict[str, Any], state: dict[str, Any], facts: dict[str, Any],
+                      minutes: float, rounds: int, limit: int) -> Incident | None:
+    kind = ticket.get("blocked_kind", "")
+    if (ticket["status"] != "Blocked" or kind in RETURNS_BY_ITSELF
+            or (kind == "Rework" and rounds > limit) or minutes < state["thresholds"]["blocked_minutes"]):
+        return None
+    key = ticket["key"]
+    return Incident(f"blocked:{key}", "blocked", key, f"{key} is Blocked for {int(minutes)} min: {ticket.get('reason', '')}",
+                    {**facts, "blocked_kind": kind, "reason": ticket.get("reason", "")})
+
+
+def _ci_incident(ticket: dict[str, Any], state: dict[str, Any], facts: dict[str, Any]) -> Incident | None:
+    wait = ticket.get("minutes_waiting_for_ci", 0)
+    if not _ci_waiting(ticket) or wait < state["thresholds"]["ci_wait_minutes"]:
+        return None
+    key = ticket["key"]
+    return Incident(f"ci:{key}", "ci", key, f"{key} pull request is waiting for CI for {int(wait)} min", facts)
+
+
+def _stuck_incident(ticket: dict[str, Any], state: dict[str, Any], facts: dict[str, Any], minutes: float) -> Incident | None:
+    if (ticket["status"] not in WORKED or ticket.get("leased") or minutes < state["thresholds"]["stuck_minutes"]
+            or _ci_waiting(ticket)):
+        return None
+    key, status = ticket["key"], ticket["status"]
+    return Incident(f"stuck:{key}", "stuck", key, f"{key} has been in {status} for {int(minutes)} min with nobody working on it", facts)
+
+
+def _rework_incident(ticket: dict[str, Any], facts: dict[str, Any], rounds: int, limit: int) -> Incident | None:
+    if rounds <= limit:
+        return None
+    key = ticket["key"]
+    return Incident(f"rework:{key}", "rework", key, f"{key} went through {rounds} rework rounds",
+                    {**facts, "rework_rounds": rounds})
+
+
+def _ci_waiting(ticket: dict[str, Any]) -> bool:
+    pull_request = ticket.get("pull_request")
+    pr_state = pull_request.get("state", "") if isinstance(pull_request, dict) else ""
+    return bool(ticket["status"] == "In QA" and not ticket.get("leased") and pull_request
+                and pr_state in ("", "OPEN") and ticket.get("ci_state") in ("none", "pending"))
+
+
+def _worker_incidents(state: dict[str, Any], now: float) -> list[Incident]:
+    return [Incident(f"worker:{slot}", "worker", slot, f"worker {slot} sends no heartbeat",
+                     {"slot": slot, "last_heartbeat": beat, "detected_at": now, "stale_seconds": state["stale_seconds"]})
+            for slot, beat in sorted(state.get("heartbeats", {}).items())
+            if beat is None or now - beat > state["stale_seconds"]]
+
+
+def _role_pool_incidents(state: dict[str, Any], now: float) -> list[Incident]:
+    return [Incident(f"ai_pool:{role}", "ai_pool", role, f"no AI is usable for the {role} role",
+                     {"role": role, "pool": [], "detected_at": now})
+            for role, pool in sorted(state.get("role_pools", {}).items()) if not pool]

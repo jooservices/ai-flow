@@ -18,10 +18,39 @@ The owner is not in the loop. When a ticket is Blocked, a pull request is stuck,
 | `stuck` | a worked ticket has no lease and no change for `stuck_minutes` |
 | `ci` | a pull request waits in QA with no change for `ci_wait_minutes` |
 | `rework` | a ticket went through more than `rework_limit` rework rounds |
+| `rescue` | a Blocked (Config, Attempts, Rework, Unclear) ticket waited its `[master]` time, or a ticket ran over its work limits: Claude takes it, or the owner does; it replaces `blocked`/`stuck` for that ticket (see [master rescue](v4/master-rescue.md)) |
 | `worker` | a worker of this machine sends no heartbeat |
 | `ai_pool` | no AI is usable on any machine |
 
 Tickets with the label `aiflow-hold` or `needs-owner` are never incidents. Human review waits for the owner by design.
+
+Master rescue checks the summary, Blocked reason, description, and recent comments for owner-only work before waiting for a
+rescue threshold. Ordinary requests such as rotating an SSH key, deleting a production DB, adding a new requirement, removing
+production data, setting up the runtime, or updating installed software go to the owner too. If Jira cannot read the description or recent comments, the safety check is incomplete and the ticket goes to
+the owner immediately. Rescue audit comments include the status, Blocked kind, recorded failed run counts by role, rework rounds,
+and remaining budget, but omit raw Blocked reasons, comment excerpts, and Claude's run output. Rescue output is also omitted from
+the journal and run events; flow-doctor findings use a bounded, redacted summary. It records a handover in the JAIF-102 `Handover` status
+with `Taken by = Claude`. The worker picks up only a labeled Handover with a confirmed rescue record, reserves Claude, uses the
+saved rescue model, and enforces the remaining rescue budget while using the standard developer worktree and result path. Prompt,
+Jira context, and environment setup consume that budget; the worker recalculates the deadline immediately before launching Claude.
+A pending rescue record and its audit payload are stored before Jira is asked to transition to Handover, so an operator pass can
+reconcile an interruption after Jira accepted the transition. Worker reservation and operator recovery recheck global offline and
+quota state before Claude starts, including before budget expiry, and send an unstarted rescue to the owner through the usual
+incident audit path when either condition applies; a local session-capacity miss leaves it ready for retry.
+A running worker rechecks its ticket lease after execution and immediately before pushing, so a worker whose lease was cleared by
+owner routing cannot finish a development or rescue handoff. A successful result continues to review; an unsuccessful result goes through the flow doctor with a bounded, redacted summary of
+Claude's actual run findings. Rescue recovery runs before ordinary incident queue sync, and pending doctor recovery suppresses
+stale blocked/stuck incidents so they cannot be escalated to a person by the same cycle. Work time accumulated in In Progress and In Review still qualifies after the ticket moves to QA
+or another status; CI time is excluded. If a Handover response is ambiguous, the operator checks Jira status, records a confirmed
+handover, rolls back a confirmed refusal, or keeps the record pending until status can be read. If Handover succeeds and adding `master-rescue` fails, the operator retries the label from the rescue
+record. The handover audit comment also stays pending after a Jira failure and is retried; its marker prevents a duplicate when
+Jira accepted the comment but its response was lost. An unsuccessful rescue that ends early or uses its budget returns through
+the flow doctor; Jira failures leave that recovery pending for another operator pass. If a refused Handover leaves temporary
+`Taken by` or model fields that Jira will not clear immediately, those cleanup writes are retried too. If Claude becomes unavailable
+after Handover but before starting, both temporary fields are cleared before owner routing, with failed cleanup retried on a later pass.
+Committed or unignored worktree `.env` safety guards remain Blocked and are not cleared by rescue's flow doctor. If a development
+handoff returns a failed Jira response, the completing rescue reads Jira before deciding: a confirmed In Review or Ready to merge
+status finishes the rescue, and an unreadable status remains pending for reconciliation.
 
 ## What the operator may do alone
 Answer a Blocked ticket's question when the ticket, its parents or the documents answer it clearly; unblock; send a ticket back to To Do with a reason; retry CI; replace a dead AI; restart a worker; pause and resume the flow. As supervisor actions: `comment`, `transition` (To Do, Backlog or Blocked only), `label` (`needs-owner` or `rework` only), `retry_ci`, `replace_ai`, `restart_worker`, `pause`, `resume`; at most 5 per run.
@@ -30,7 +59,7 @@ Answer a Blocked ticket's question when the ticket, its parents or the documents
 Spending money; credentials, tokens or secrets; deleting data, databases, repositories or branches; force-push; changing the product direction or the requirements; a release; merging by hand; anything this policy does not cover. When unsure, escalate. The list is `[escalation] always` in `operator.toml`; the operator may only add to it.
 
 ## Escalation
-The ticket gets the label `needs-owner` and a comment that starts with the question, then the options and the recommended one. Its status is unchanged (a Blocked ticket stays Blocked). Answer in a comment and move the ticket to **To Do**. If a channel is configured in `Workspaces/.env` (`AIFLOW_NOTIFY_CHANNEL=telegram` with `AIFLOW_NOTIFY_TELEGRAM_TOKEN` and `AIFLOW_NOTIFY_TELEGRAM_CHAT`, or `smtp` with `AIFLOW_NOTIFY_SMTP_HOST`, `_FROM`, `_TO`, optional `_PORT`, `_USER`, `_PASSWORD`), the owner also gets one grouped message per `notify_interval_minutes` with the questions and the ticket links, never a secret. Without a channel nothing is sent.
+The ticket gets the label `needs-owner` and a comment that starts with the question, then the options and the recommended one. Its status is unchanged (a Blocked ticket stays Blocked). The label prevents new worker pickup; an active lease is cleared so a running worker stops on its next heartbeat. Answer in a comment and move the ticket to **To Do**. If a channel is configured in `Workspaces/.env` (`AIFLOW_NOTIFY_CHANNEL=telegram` with `AIFLOW_NOTIFY_TELEGRAM_TOKEN` and `AIFLOW_NOTIFY_TELEGRAM_CHAT`, or `smtp` with `AIFLOW_NOTIFY_SMTP_HOST`, `_FROM`, `_TO`, optional `_PORT`, `_USER`, `_PASSWORD`), the owner also gets one grouped message per `notify_interval_minutes` with the questions and the ticket links, never a secret. Without a channel nothing is sent.
 
 ## Limits and switches
 - Per ticket: `retries_per_ticket_per_day` operator runs; when reached, the incident is escalated without running an AI. Overall: `max_runs_per_hour` and `max_runs_per_day`; when either cap is reached, queued incidents are escalated instead of starting another run. Limit escalations are cooled for a day and leave a system audit comment. After an AI run the same incident waits one hour.

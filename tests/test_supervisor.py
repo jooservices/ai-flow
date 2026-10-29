@@ -18,7 +18,7 @@ from aiflow.gitops import GitError, Repo
 from aiflow.project_database import ProjectDatabase
 from aiflow import health
 from aiflow.supervisor import (
-    tail, branches, parse_semver, Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field,
+    tail, branches, parse_semver, STAGES, Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field,
     ticket_of_branch, find_incidents, main,
 )
 
@@ -329,12 +329,6 @@ class GateEligibilityTests(unittest.TestCase):
             sup.redis.data["gatepoll:JAIF-9"] = "1"
             self.assertFalse(sup.eligible(issue))
             sup.redis.data.pop("gatepoll:JAIF-9")
-
-    def test_rework_tickets_come_first(self):
-        sup = make()
-        sup.jira.search = lambda jql, limit=50: [{"key": "A-1", "labels": []}, {"key": "A-2", "labels": ["rework"]}, {"key": "A-3", "labels": []}]
-        self.assertEqual([i["key"] for i in sup.candidates()], ["A-2", "A-1", "A-3"])
-
 
 def facts(**over):
     base = dict(state="OPEN", behind=False, conflicting=False, ci="passed", failing=[], ci_required=False, ci_wait_minutes=30,

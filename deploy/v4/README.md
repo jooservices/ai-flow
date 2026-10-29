@@ -11,6 +11,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [v4 control plane architecture](../../docs/v4/architecture.md): layers, dependency direction, registration points, patterns and architectural checks
 - [Run inbox](../../docs/v4/run-inbox.md): queue guidance for active worker runs and deliver it after a provider invocation completes
 - [Control API router registry](../../docs/v4/router-registry.md): feature routers discovered and mounted by priority without a central registration list
+- [Master AI rescue](../../docs/v4/master-rescue.md): Claude takes a long Blocked or over-time ticket once, with its own budget; owner-only work and an unavailable Claude go to the owner, a failed rescue returns to development
 - [Shared worker fairness](../../docs/v4/shared-worker-fairness.md): round-robin ready tickets across projects while preserving rework preference and each project's priority and age order
 
 Feature documents live in `docs/v4/`. Normally, add one line per feature in `deploy/v4/topics/<topic>.md` (see

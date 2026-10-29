@@ -82,6 +82,22 @@ type_field = "Type"                          # Feature, Bug, Hotfix, Chore, Docs
 version_field = "Version"                    # x.y.z of a Release ticket
 
 # ---------------------------------------------------------------------------------------------------------------------------
+# [master]: the rescue by Claude of a ticket that stays Blocked too long or runs over its work limits (docs/v4/master-rescue.md).
+# Needs the operator (config/operator.toml). Quota and Offline Blocked tickets are never handed to Claude. `aiflow-work check` validates it.
+# ---------------------------------------------------------------------------------------------------------------------------
+[master]
+config_wait_minutes = 10         # Blocked (Config) this long: Claude takes the ticket
+attempts_wait_minutes = 0        # Blocked (Attempts)
+rework_wait_minutes = 0          # Blocked (Rework)
+unclear_wait_minutes = 30        # Blocked (Unclear)
+in_progress_minutes = 60         # In Progress this long in one stretch: Claude takes the ticket
+total_work_minutes = 120         # total work time of a ticket (CI time excluded): Claude takes the ticket
+master_minutes = 60              # Claude's own rescue budget
+total_cap_minutes = 180          # work limit + rescue budget (at least total_work_minutes + master_minutes)
+model = "Claude:opus:max"        # the strongest model of the rescue; empty = the model of Claude in agent_models
+taken_by_field = "Taken by"      # Jira field set to Claude on the Handover status
+
+# ---------------------------------------------------------------------------------------------------------------------------
 # [machines.<name>]: <name> is AIFLOW_MACHINE of that machine (see .env.example).
 # ---------------------------------------------------------------------------------------------------------------------------
 # The workers of a machine are kept by the control (aiflow-control.service, started with `bin/install-wsl-service --control`):

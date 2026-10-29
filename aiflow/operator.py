@@ -8,17 +8,16 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from . import agents, events, github, notify, runner, usage
+from . import agents, events, notify, operator_state, runner, usage
 from .config import PROJECT_DIR
-from .github import GitHub, GitHubError
-from .gitops import GitError, Repo
-from .incidents import WORKED, Incident, find_incidents
+from .gitops import Repo
+from .incidents import Incident, find_incidents
 from .jira import JiraError
+from .rescue import Rescue
 
 DAY = 86400
 MAX_ACTIONS = 5
@@ -50,13 +49,6 @@ def parse_output(text: str) -> tuple[tuple[str, str] | None, list[tuple[str, dic
     return result, actions, options[-1].strip() if options else "", recommend[-1].strip() if recommend else ""
 
 
-def epoch(value: str, default: float) -> float:
-    try:
-        return datetime.fromisoformat(value).timestamp()
-    except (TypeError, ValueError):
-        return default
-
-
 class Operator:
     def __init__(self, sup: Any, policy: Any, notifier: notify.Notifier | None = None,
                  run_ai: Callable[[str, str, str], tuple[str, str, bool]] | None = None) -> None:
@@ -65,6 +57,13 @@ class Operator:
         self.run_ai = run_ai or self._run_ai
         self.redis, self.jira, self.cfg = sup.redis, sup.jira, sup.cfg
         self._run_id = ""
+        self.rescue = Rescue(self)
+
+    def handle_rescue(self, incident: Incident) -> bool:
+        return self.rescue.handle(incident)
+
+    def check_rescues(self) -> None:
+        self.rescue.check_rescues()
 
     # ---- switches --------------------------------------------------------------------------------------------
     def active(self) -> bool:
@@ -74,89 +73,13 @@ class Operator:
     # ---- detection ---------------------------------------------------------------------------------------------
     def state(self) -> dict[str, Any]:
         now = time.time()
-        projects = ", ".join(self.cfg.projects)
-        statuses = ", ".join(f'"{s}"' for s in ("Blocked", *WORKED))
-        issues = self.jira.search(f"project in ({projects}) AND status in ({statuses}) AND issuetype != Epic ORDER BY created ASC", 200)
-        parents = self.sup.parents_of_open_work(issues)
-        issues = [i for i in issues if i["key"] not in parents]
-        leased = {name.split(":", 1)[1] for name in self.redis.scan("lease:*")}
-        blocked = self.redis.get_many([f"blocked:{i['key']}" for i in issues]) if issues else []
-        cycles = self.redis.get_many([f"cycles:{i['key']}" for i in issues]) if issues else []
-        status_times = self.redis.get_many([f"statussince:{i['key']}" for i in issues]) if issues else []
-        pull_request_numbers = self.redis.get_many([f"pr:{i['key']}" for i in issues]) if issues else []
-        gate_entries = self.redis.get_many([f"gateentry:{i['key']}" for i in issues]) if issues else []
-        pushed_times = self.redis.get_many([f"pushed:{i['key']}" for i in issues]) if issues else []
-        tickets = []
-        for issue, why, rounds, since, number, entry, pushed in zip(issues, blocked, cycles, status_times,
-                                                                     pull_request_numbers, gate_entries, pushed_times):
-            key, status = issue["key"], issue["status"]
-            labels = issue.get("labels", [])
-            is_leased = key in leased
-            updated = epoch(issue.get("updated", ""), now)
-            try:
-                status_since = float(since) if since else updated
-            except (TypeError, ValueError):
-                status_since = updated
-            minutes_in_status = max(0, (now - status_since) / 60)
-            gate_times = []
-            for value in (entry, pushed):
-                try:
-                    if value:
-                        gate_times.append(float(value))
-                except (TypeError, ValueError):
-                    continue
-            gate_since = max(gate_times) if gate_times else status_since
-            minutes_waiting_for_ci = max(0, (now - gate_since) / 60)
-            try:
-                blocked_data = json.loads(why) if why else {}
-            except (TypeError, ValueError):
-                blocked_data = {}
-            if not isinstance(blocked_data, dict):
-                blocked_data = {}
-            try:
-                rework_rounds = int(rounds or blocked_data.get("rework_rounds", 0) or 0)
-            except (TypeError, ValueError):
-                rework_rounds = 0
-            blocked_kind = blocked_data.get("kind", "")
-            potential = "aiflow-hold" not in labels and "needs-owner" not in labels and (
-                (status == "Blocked" and minutes_in_status >= self.policy.blocked_minutes)
-                or (status == "In QA" and not is_leased and
-                    (minutes_waiting_for_ci >= self.policy.ci_wait_minutes or minutes_in_status >= self.policy.stuck_minutes))
-                or (status in WORKED and status != "In QA" and not is_leased and minutes_in_status >= self.policy.stuck_minutes)
-                or rework_rounds > self.cfg.loop_limit_for(key)
-            )
-            last_comments = []
-            if potential:
-                try:
-                    last_comments = self.jira.comments(key, 3)
-                except (JiraError, ValueError, TypeError):
-                    pass
-            pull_request = {"number": number} if number else None
-            ci_state = "unknown"
-            inspect_ci = minutes_waiting_for_ci >= self.policy.ci_wait_minutes or minutes_in_status >= self.policy.stuck_minutes
-            if status == "In QA" and not is_leased and number and inspect_ci:
-                try:
-                    project = self.cfg.project(key)
-                    repo = Repo(self.cfg.root, project.repo, project.company)
-                    pr = GitHub(repo.github_slug()).view(int(number))
-                    ci_state, failing = github.checks_state(pr.get("statusCheckRollup"))
-                    pull_request = {"number": int(number), "url": pr.get("url", ""), "state": pr.get("state", ""),
-                                    "head": pr.get("headRefName", ""), "ci_state": ci_state, "failing_checks": failing}
-                except (GitError, GitHubError, subprocess.TimeoutExpired, ValueError, OSError):
-                    # Missing repository or GitHub data is not evidence that CI is still waiting.
-                    pass
-            tickets.append(dict(key=key, status=status, status_since=status_since, updated=updated, labels=labels,
-                                leased=is_leased, blocked_kind=blocked_kind, reason=issue.get("summary", ""),
-                                cycles=rework_rounds, rework_rounds=rework_rounds, last_comments=last_comments,
-                                loop_limit=self.cfg.loop_limit_for(key),
-                                pull_request=pull_request, ci_state=ci_state, ci_since=gate_since,
-                                minutes_waiting_for_ci=int(minutes_waiting_for_ci)))
+        tickets = operator_state.tickets(self, now)
         beats = {slot: (int(v) if (v := self.redis.get(f"hb:{slot}")) else None) for slot in self.cfg.expected_slots}
         pool = self.sup.online_pool()
         role_pools = {role: self.sup.eligible_agents(role, "", None, pool) for role in ("developer", "reviewer", "qa")}
         thresholds = {name: getattr(self.policy, name) for name in ("blocked_minutes", "stuck_minutes", "ci_wait_minutes", "rework_limit")}
         return dict(now=now, tickets=tickets, heartbeats=beats, stale_seconds=self.cfg.heartbeat_stale_seconds,
-                    role_pools=role_pools, thresholds=thresholds)
+                    role_pools=role_pools, thresholds=thresholds, master=self.cfg.registry.master)
 
     def sync_queue(self, incidents: list[Incident]) -> None:
         """Queue each new incident once; forget the ones that no longer exist."""
@@ -200,6 +123,7 @@ class Operator:
         """Called by every worker loop; True when an operator run happened."""
         if not self.active() or not self.redis.acquire("operator:cycle", self.cfg.owner, 60):
             return False
+        self.check_rescues()
         self.sync_queue(find_incidents(self.state()))
         self.flush_notifications()
         return self.run_next()
@@ -232,10 +156,15 @@ class Operator:
             if self.redis.get(f"operator:cool:{incident_id}") is not None:
                 continue
             incident = Incident(incident_id, raw["kind"], raw["subject"], raw["summary"], raw.get("facts", {}))
+            if (incident.kind != "rescue" and incident.ticket
+                    and (incident.facts.get("rescue_pending") or self.rescue.pending(incident.ticket))):
+                continue
             return self.handle(incident)
         return False
 
     def handle(self, incident: Incident) -> bool:
+        if incident.kind == "rescue":  # the master rescue has its own budget; it is not an operator AI run
+            return self.handle_rescue(incident)
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
         limit = self.global_limit()
         if limit:
@@ -396,8 +325,9 @@ class Operator:
         log(message)
 
     # ---- audit and escalation --------------------------------------------------------------------------------------
-    def audit(self, incident: Incident, agent: str, outcome: str, done: list[str], refused: list[str]) -> None:
+    def audit(self, incident: Incident, agent: str, outcome: str, done: list[str], refused: list[str], extra: list[str] | None = None) -> None:
         lines = [f"AI Flow operator ({agent}) on {self.cfg.machine} handled `{incident.id}`.", f"Saw: {incident.summary}", f"Outcome: {outcome}"]
+        lines += extra or []
         lines.append("Did: " + ("; ".join(done) if done else "nothing"))
         if refused:
             lines.append("Refused: " + "; ".join(refused))
@@ -417,6 +347,7 @@ class Operator:
         target = incident.ticket or self.cfg.health_ticket
         if incident.ticket:
             self.jira.add_label(incident.ticket, "needs-owner")
+            self.redis.delete(f"lease:{incident.ticket}")
         if target:
             self.jira.comment(target, text)
         events.emit("operator.escalate", incident=incident.id, ticket=target, question=question[:500], options=options[:300], recommend=recommend[:200])

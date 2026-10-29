@@ -23,6 +23,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Test services of a project](../../docs/v4/test-services.md): one `services` setting (the old `databases` is read as the same), unsupported names are rejected and surfaced in Projects, and the flow doctor declares a service a ticket is parked on
 - [Local gate](../../docs/v4/local-gate.md): the CI checks run locally before AI Flow commits and pushes, with a parity test against the workflow and git hooks that reject a bad commit message and gate every push
 - [Parallel CI](../../docs/v4/parallel-ci.md): the v4 suite on parallel shards, the required `Test (v4)` check and the scale proof job.
+- [Epics and verification without a verdict](../../docs/v4/verify-no-verdict.md): an epic is never offered as work; the status, retry and Dashboard parts of JAIF-271 follow in slices
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
 - [Commit and pull request title rules](../../docs/v4/commit-rules.md): one rules module and a normalizer so a title or commit message is valid before the push
 - [System readiness check](../../docs/v4/system-check.md): check machine and project assumptions after join, project addition, upgrade and hourly; safely repair supported problems, gate work, and include results in the support bundle

@@ -1635,8 +1635,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.run("UPDATE runs SET status='finished', outcome=%s, summary=%s, ended_at=now() WHERE id=%s",
                    (outcome, summary[:2000], run_id))
         try:
-            knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
-            knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
+            knowledge.capture_reviewer_run(ctx.db, run_id, ctx.settings.jira_site, ticket_key=key, outcome=outcome)
         except Exception as exc:  # noqa: BLE001 - learning must not block a review action
             log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
         ctx.leases.release(key, run_id, fence)

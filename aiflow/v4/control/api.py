@@ -26,25 +26,22 @@ import html
 import json
 import httpx
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
                                Response, StreamingResponse)
 from pydantic import BaseModel, Field
 
 from .. import VERSION
-from ..core.controlrepo import Account, ControlRepo, epic_for_ticket
+from ..core.controlrepo import Account, ControlRepo
 from ..core import backups as control_backups, handover, log_sources as log_sources_core, work_limits
-from ..core.fencing import Leases
-from ..core.settings import Settings
 from ..core.services import normalize_services, service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
@@ -64,17 +61,16 @@ from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from . import route_deps
-from .db import DB, J
+from .db import J
 from .route_deps import github_connection_used, h
-from .events import Events
 from .github import GitHubApp, GitHubError
 from .github_connect import GitHubSecretStore, app_metadata
 from .github_registry import github_connections as _github_registry
 from .github_connections import DEFAULT_ID, Connection, GitHubConnections, GitHubTokenApp, verify_token
-from .jira import Jira
 from .policy import Decision, decide, decide_master_action, decide_read_only, explain
 from .report import ReportNotFound, build_report, render_csv, render_html, render_markdown
 from . import notify
+from .application_context import Ctx
 
 log = logging.getLogger("aiflow4.api")
 
@@ -471,17 +467,6 @@ def join_bootstrap_command(token: str, control: str) -> str:
     return f"curl -fsSL {installer} | sudo sh -s -- --token {shlex.quote(token)}"
 
 
-@dataclass
-class Ctx:
-    settings: Settings
-    db: DB
-    leases: Leases
-    events: Events
-    repo: Callable[[], ControlRepo]
-    jira: Jira | None = None
-    github: GitHubApp | None = None
-    refresh_repo: Callable[[], None] | None = None
-    jira_auth: Any = None  # jira_connect.JiraAuth: the Jira credential connected on the Integrations screen
 
 
 def github_connections(ctx: Ctx) -> GitHubConnections:

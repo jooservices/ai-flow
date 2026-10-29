@@ -20,21 +20,27 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 
 - [First-run setup](../../docs/v4/first-run-setup.md): create the public address and Administrator in the browser, connect providers, add a machine and AI accounts, configure the first project, and confirm a sample ticket in Intake
 - [Test services of a project](../../docs/v4/test-services.md): one `services` setting (the old `databases` is read as the same), unsupported names are rejected and surfaced in Projects, and the flow doctor declares a service a ticket is parked on
+- [Local gate](../../docs/v4/local-gate.md): the CI checks run locally before AI Flow commits and pushes, with a parity test against the workflow and git hooks that reject a bad commit message and gate every push
+- [Parallel CI](../../docs/v4/parallel-ci.md): the v4 suite on parallel shards, the required `Test (v4)` check and the scale proof job.
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
+- [Commit and pull request title rules](../../docs/v4/commit-rules.md): one rules module and a normalizer so a title or commit message is valid before the push
 - [System readiness check](../../docs/v4/system-check.md): check machine and project assumptions after join, project addition, upgrade and hourly; safely repair supported problems, gate work, and include results in the support bundle
 - [Security hardening](../../docs/v4/security.md): two-factor sign-in and recovery codes, session length and forced sign-out, encrypted secrets, rate limits, CSRF, audit log, PR security scans, release security report and the disclosure policy
 - [Shared AI accounts](../../docs/v4/shared-accounts.md): one account enabled on several machines, signed in once per machine, with one total session limit, usage and quota counted per account and a per-machine breakdown
 - [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure
 - [Product documentation site](../../docs/v4/documentation-site.md): user guide per role, administrator guide, generated API reference and one runbook per incident kind, built into a static site that ships in every release, opened by the console Help links, with a CI check that screen and API changes carry a documentation change
 - [Console layouts](../../docs/v4/console-layouts.md): every section of a console page is a block each person can drag, resize, hide and reset, saved with the user on the server and reset to the default of their role
+- [Retry hold](../../docs/v4/retry-hold.md): the third consecutive unsuccessful run holds the ticket with the label aiflow-hold until a coordinator releases it
 - [Command Center Dashboard V2](../../docs/v4/dashboard-v2.md): Work and AI and machines tabs, linked work summaries, live usage and quota, and a per-person dark or light theme
 - [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
 - [Telegram BA chat](../../docs/v4/telegram-ba-chat.md): private-chat follow-up questions, owner-approved epic/story/task proposals, and Jira ticket creation through the configured Telegram channel
 - [Developer hand-over](../../docs/v4/dev-handover.md): the developer builds a requirements ledger, tests each criterion with failing and boundary cases, reviews its own diff, and hands over an AC-MAP and SELF-REVIEW that the reviewer checks entry by entry
 - [Role health](../../docs/v4/role-health.md): only real failures count; role capacity preserves two enabled accounts and limits switches to half the pool, with shared-cause incidents and immediate recovery when a tool or run history is fixed
+- [Code quality gate](../../docs/v4/code-quality.md): tool-independent lint, complexity, function-size and layer checks with a shrink-only baseline
 - [Already completed work](../../docs/v4/already-completed-work.md): clean developer runs reuse an open PR or open one for committed branch work, then send the ticket to verification; empty branches record a doctor-retryable failure
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
 - [Environment of the runs](../../docs/v4/environment.md): tickets carry requirements only; test services, base URLs, databases, browsers and secrets by name live in the project configuration and reach runs as environment variables; server wording is rejected at intake, removed with a record, and found by a scan of open tickets; missing environment items are reported by name
+- [Small tickets](../../docs/v4/small-tickets.md): developer limits of 15, 30 and 45 minutes (configurable) and the size rule that splits larger tickets
 - [Validated parked requirements](../../docs/v4/parked-requirements.md): validate missing-tool reports, install supported tools from heartbeat requests, show parked-ticket status, and name idle and stalled-wait causes
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright, Chromium, Firefox and WebKit, and report an unavailable browser by name
 - [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, browser binaries go into the shared `playwright-browser` folder, and each browser is launched as the AI user
@@ -51,19 +57,26 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Release installation smoke test](../../docs/v4/install.md): tagged releases install control and two nodes in Ubuntu systemd CI before publication
 - [Canary auto-deploy](../../docs/v4/canary-autodeploy.md): signed releases and develop commits are measured on one node before fleet promotion, with automatic rollback on elevated infrastructure failures
 - [SA system health](../../docs/v4/sa-health.md): node and account health, capacity recommendations, credential expiry, blocked AI and network diagnostics
+- [Shared route helpers](../../docs/v4/route-dependencies.md): audit, console and node authentication and fencing as functions of the application context, usable by any router
 - [Team Lead requirement coverage and progress reports](../../docs/v4/team-lead-report.md): inspect epic AC coverage and export Markdown, CSV or printable HTML progress reports
 - [Automatic epic completion](../../docs/v4/epic-auto-close.md): close an epic when every child is Done, reopen it when work returns, and suggest project closure in the report
+- [Team Lead tickets](../../docs/v4/team-lead-tickets.md): every split child carries files, a skeleton and test cases for the developer
 - [Worktree cleanup](../../docs/v4/worktree-cleanup.md): nodes delete the worktrees of Done tickets and spent per-run checkouts
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
+- [Shared route helpers](../../docs/v4/route-dependencies.md): audit, console and node authentication and fencing as functions of the application context, usable by any router
 - [Command Center node operations](../../docs/v4/node-operations.md): `nodes.manage` install, desired-state repair and one-time join actions for `owner` and `super_admin`, with audited operation logs
 - [Project close reports and study cases](../../docs/v4/project-study-cases.md): close projects, email versioned reports, and find saved reports in memory
 - [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with token-authorized fenced approve and rework actions
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
 - [Join a node](../../docs/v4/node-join.md): Command Center issues a five-minute one-use token and the pinned server-installer CLI bootstraps a node
+- [Dashboard read routes](../../docs/v4/route-module-dashboard.md): the Dashboard read models are served from their own router module
 - [Fleet installation](../../docs/v4/fleet-install.md): cloud-init samples and Ansible roles prepare hosts and enroll a node fleet
+- [Escalation routes](../../docs/v4/route-module-escalations.md): the escalation routes are served from their own router module
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
+- [Jira routes](../../docs/v4/route-module-jira.md): the jira routes are served from their own router module
 - [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
+- [Analytics routes](../../docs/v4/route-module-analytics.md): the analytics routes are served from their own router module
 - [Persistent learning and run context](../../docs/v4/knowledge-learning.md): automatically capture run, ticket and incident learning, then hand scoped semantic context to each run
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
 - [Machines and AI management](../../docs/v4/machines-and-ai.md): enroll machines and add, pause, resume, sign in, edit and remove AI accounts on screen

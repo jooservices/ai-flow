@@ -15,6 +15,7 @@ import yaml
 
 from .environment import EnvItem, items_of
 from .services import normalize_services
+from . import work_limits
 from .toolchains import (BASE_TOOLS, CATALOG_TOOLS, CONTAINER_RUNTIME_TOOL, NODE_TOOLS, STACK_TOOLS, missing_tools,
                          tools_for_providers, tools_for_stack,
                          tools_for_stacks, tools_for_stacks_in_project, normalize_stacks)
@@ -80,6 +81,7 @@ class Project:
     databases: list[str] = field(default_factory=list)
     services: list[str] | str = field(default_factory=list)  # test services every node prepares: postgres, redis
     checks: list[str] = field(default_factory=list)
+    local_gate: Any = ""  # "ai-flow" or a list of commands run before a push (docs/v4/local-gate.md)
     containers: bool = False
     release_check: list[str] = field(default_factory=list)
     tag_prefix: str = ""
@@ -98,6 +100,10 @@ class Project:
     default_repo: str = ""  # retained on repository-specific project views
 
     def __post_init__(self) -> None:
+        gate = self.local_gate
+        if gate not in ("", None, "ai-flow") and not (isinstance(gate, list) and gate
+                                                      and all(isinstance(c, str) and c.strip() for c in gate)):
+            raise ValueError(f"project {self.key}: local_gate must be 'ai-flow' or a non-empty list of commands")
         # `databases` is the old name of `services`: both are read as one setting, so a project file can never name
         # a database that no machine prepares (docs/v4/test-services.md). Reject unsupported legacy names instead of
         # silently keeping a declaration that nodes cannot prepare.
@@ -161,8 +167,7 @@ class Project:
                                                    if isinstance(item, dict) and item.get("repo")]))
 
     def work_minutes(self) -> dict[str, int]:
-        wm = (self.limits or {}).get("work_minutes") or {}
-        return {"target": int(wm.get("target", 30)), "warn": int(wm.get("warn", 45)), "hard": int(wm.get("hard", 60))}
+        return work_limits.from_setting((self.limits or {}).get("work_minutes"))
 
     @property
     def tools(self) -> list[str]:

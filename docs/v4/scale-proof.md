@@ -196,3 +196,11 @@ uv run --frozen aiflow4 scale-proof --release v4.0.0-local --out scale.json \
 Run duration depends on the host and database; the JSON report records `duration_s`. The test module runs the full
 100/50/200 scenario once, checks every console view with a smaller local fleet, enforces the budgets, and tests
 release blocking and ticket creation with synthetic reports.
+
+## Duplicate picks (JAIF-425)
+
+The check "every ready ticket is picked once" failed in about one CI run in three with "1 or 2 picked more than once". The harness
+marked a finished ticket `Done` after it had posted the result and the release, while a real worker moves the ticket in Jira
+before it reports the result. On a slow runner a concurrent claim could pick the ticket inside that window. The harness now marks the
+ticket first (and puts it back when the result or the release fails), so a duplicate pick is a real fencing defect again and not
+a harness race. The console page-load budget is a separate source of flakes and is still open.

@@ -32,10 +32,12 @@ from . import system_check
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
+from ..core import work_limits
 from ..core.services import service_gaps
 from ..core.toolchains import toolchain_gaps
 from .incidents import check_idle_flow, check_stack_pins, close_incident, open_incident
-from .api import Ctx, notify_human_review
+from .api import Ctx
+from .human_review_notice import notify_human_review
 from .db import J
 from .state import NODE_OFFLINE_S
 from .quota import assessments as quota_assessments
@@ -353,6 +355,12 @@ def watchdog(ctx: Ctx) -> None:
             continue  # tooling.check_stalled_waits owns the two-hour missing-requirement warning lifecycle
         if stuck.get(i["subject"], 0) < 3:
             close_incident(ctx, "ticket_stuck", i["subject"], "a run produced work again")
+    if ctx.jira:  # the third unsuccessful run in a row ends the automatic retries of that ticket
+        from . import retry_hold
+        try:
+            retry_hold.apply(ctx)
+        except Exception as e:  # noqa: BLE001 - a failing hold pass must not stop the rest of the watchdog
+            log.warning("retry hold pass failed: %s", e)
     # a flow that stands still and a configuration that keeps a project from getting work
     try:
         check_stack_pins(ctx)
@@ -391,7 +399,7 @@ def watchdog(ctx: Ctx) -> None:
             continue
         # clocks: 30 target, 45 warn, 60 hard (per project)
         p = ctx.repo().projects.get(r["project"])
-        wm = p.work_minutes() if p else {"target": 30, "warn": 45, "hard": 60}
+        wm = p.work_minutes() if p else dict(work_limits.DEFAULTS)
         minutes = (now - r["started_at"]).total_seconds() / 60
         if minutes >= wm["hard"]:
             open_incident(ctx, "run_hard_limit", r["ticket_key"], "critical", f"{r['ticket_key']} passed {wm['hard']} minutes",

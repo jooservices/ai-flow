@@ -30,6 +30,7 @@ from starlette.concurrency import run_in_threadpool
 from ..core import secretbox
 from . import audit as audit_log
 from . import mfa, notify
+from .route_registry import concrete_routes
 from .console_auth import (COOKIE_NAME, ConsoleUser, csrf_token, has_permission, issue_session, resolve_session_user,
                            verify_session)
 from .login import (CSRF_COOKIE, MFA_ROLES, OPEN_PATHS, OPEN_PREFIXES, SESSION_TTL_MAX_S, SESSION_TTL_MIN_S, client_ip, mfa_role,
@@ -110,7 +111,7 @@ def install_security(app: FastAPI, ctx) -> None:
                               or request.url.path.startswith("/v1/auth/") or request.url.path == "/logout")
             if not explicit_audit:
                 template = request.url.path
-                for route in app.routes:
+                for route in concrete_routes(app.routes):
                     match, _ = route.matches(request.scope)
                     if match.name == "FULL":
                         template = getattr(route, "path", template)

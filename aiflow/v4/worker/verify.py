@@ -86,7 +86,8 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
 
     def pr_comment(text: str) -> None:
         try:
-            api.call("POST", "/v1/github/comment", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"], "body": text})
+            api.call("POST", "/v1/github/comment", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"], "body": text,
+                                                     "kind": "verify"})
         except Conflict:
             raise
         except Exception as e:  # noqa: BLE001

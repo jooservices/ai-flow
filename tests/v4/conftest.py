@@ -422,6 +422,10 @@ class FakeGitHub:
     def comment(self, repo, number, body):
         self.comments = getattr(self, "comments", []) + [(number, body)]
 
+    def upsert_comment(self, repo, number, kind, body):
+        self.comment(repo, number, body)
+        return "created"
+
     def branch_sha(self, repo, branch):
         return self.branch_heads.get((repo, branch), f"sha-{branch}")
 

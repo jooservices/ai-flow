@@ -60,6 +60,14 @@ Ticket description:
 ---
 {description}
 ---
+Test order and time budget:
+- Run the configured checks that cover the changed code first, before the full suite.
+- Run the full configured suite exactly once at the end of implementation.
+- Reserve the final {test_time_slice}-minute test time slice for that one full-suite attempt, within the run's hard limit.
+- If the full suite does not finish in that slice or the hard limit arrives first, stop it and report it as unfinished.
+  An unfinished suite is not a reason to withhold RESULT: DONE.
+- Do not claim a full-suite pass unless the suite completed successfully. In the final response include exactly one line:
+  `FULL SUITE: FINISHED` or `FULL SUITE: UNFINISHED - <why>`.
 {related}
 
 Finish your reply with these lines, exactly:

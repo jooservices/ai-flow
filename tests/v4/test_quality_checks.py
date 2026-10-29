@@ -80,3 +80,11 @@ def test_a_missing_baseline_is_reported(tmp_path):
 def test_the_repository_passes_its_own_check():
     result = run_cli(ROOT, "check")
     assert result.returncode == 0, result.stdout
+
+
+def test_an_unresolvable_base_ref_fails_instead_of_skipping_the_growth_check(tmp_path):
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    (tmp_path / "docs" / "v4").mkdir(parents=True)
+    (tmp_path / qc.BASELINE).write_text("{}", encoding="utf-8")
+    problems = qc.check(tmp_path, "origin/does-not-exist")
+    assert any("does not resolve" in p for p in problems)

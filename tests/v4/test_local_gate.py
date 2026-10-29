@@ -26,7 +26,7 @@ def normalized_ci(jobs):
 def test_every_gated_ci_command_is_a_gate_step():
     """CI changes a check: the gate must change with it, or this test fails."""
     in_gate = {gate.normalize(s.argv, "develop") for s in gate.steps("develop") if s.argv}
-    ci = normalized_ci(("test", "giant-files", "docs", "v4"))
+    ci = normalized_ci(("test", "giant-files", "docs", "quality", "v4"))
     assert ci <= in_gate, f"CI runs commands the gate does not: {sorted(ci - in_gate)}"
 
 

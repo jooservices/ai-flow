@@ -2,7 +2,7 @@
 
     python3 -m aiflow.v4.core.local_gate run --path <worktree> --base develop [--title "<pull request title>"]
 
-The steps are the commands of the CI jobs ``Test (Unit)``, ``Giant files``, ``Documentation`` and ``Test (v4)`` plus the
+The steps are the commands of the CI jobs ``Test (Unit)``, ``Giant files``, ``Documentation``, ``Code quality`` and ``Test (v4)`` plus the
 header rules of the commit and the pull request title. ``tests/v4/test_local_gate.py`` compares them with
 ``.github/workflows/ci.yml`` so the gate cannot drift away from CI.
 
@@ -111,6 +111,8 @@ def steps(base: str) -> list[Step]:
         Step("docs-check", ("uv", "run", "--frozen", "python", "-m", "aiflow.v4.core.docsite", "check", "--base", ref),
              "docs", 300, needs_commit=True),
         Step("headers", check=check_headers, needs_commit=True),
+        Step("quality", ("uv", "run", "--frozen", "python", "-m", "aiflow.v4.core.quality_checks", "check", "--base", ref),
+             "quality", 300, needs_commit=True),
         Step("scale-proof", ("uv", "run", "--frozen", "pytest", "tests/v4/test_scale_proof.py", "-p", "no:warnings"),
              "v4", 900, TEST_SERVICES, retries=1),
         Step("v4", ("uv", "run", "--frozen", "pytest", "tests/v4", "--ignore=tests/v4/test_scale_proof.py",

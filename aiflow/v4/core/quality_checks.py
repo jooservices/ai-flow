@@ -113,6 +113,9 @@ def check(root: Path, base: str | None) -> list[str]:
     if committed is None:
         return [f"{BASELINE} is missing: run `python3 -m aiflow.v4.core.quality_checks baseline --write`"]
     problems = compare(current, committed)
+    if base and subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd=root,
+                               capture_output=True).returncode != 0:
+        return problems + [f"--base {base} does not resolve to a commit, so the baseline growth cannot be checked"]
     previous = _read(root, base) if base else None
     if previous is not None:
         problems += baseline_growth(committed, previous)

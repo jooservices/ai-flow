@@ -35,3 +35,9 @@ def test_ci_runs_every_shard_and_the_required_check_waits_for_all_jobs():
     required = CI["jobs"]["v4"]
     assert required["name"] == "Test (v4)" and set(required["needs"]) == {"v4-shard", "v4-browser"}
     assert required["if"].startswith("always()")
+
+
+def test_the_jobs_that_install_the_dependencies_restore_the_uv_cache_before_installing():
+    for name in ("docs", "quality", "v4-shard", "v4-browser", "v4-scale"):
+        steps = [step.get("name") for step in CI["jobs"][name]["steps"]]
+        assert steps.index("Cache uv downloads") < steps.index("Install"), name

@@ -142,6 +142,7 @@ def test_notify_email_targets_assignee_and_uses_saved_owner_recipient(ctx, monke
 
 def test_reviewer_approve_merges_with_fence_and_marks_ticket_done(client, ctx):
     add_review_ticket(ctx, "TESTWP-83")
+    add_ticket(ctx.db, "TESTWP-84", status="Done")
     response = client.post("/v1/reviews/TESTWP-83/approve", headers={"Authorization": "Bearer review-secret"})
 
     assert response.status_code == 200
@@ -152,6 +153,8 @@ def test_reviewer_approve_merges_with_fence_and_marks_ticket_done(client, ctx):
     assert any(number == 42 and "approved" in body for number, body in ctx.github.comments)
     assert ctx.db.one("SELECT step, outcome FROM runs WHERE ticket_key='TESTWP-83' AND account_id='reviewer-console'") == {
         "step": "qa", "outcome": "merged"}
+    captured = ctx.db.all("SELECT source_ref FROM knowledge_items WHERE source_type='ticket' ORDER BY source_ref")
+    assert [item["source_ref"] for item in captured] == ["TESTWP-83"]
     audit = ctx.db.one("SELECT target, action, accepted, fence FROM write_audit WHERE ticket='TESTWP-83'"
                        " AND action='merge' ORDER BY id DESC LIMIT 1")
     assert audit == {"target": "github", "action": "merge", "accepted": True, "fence": 1}
@@ -371,6 +374,7 @@ def test_reviewer_answer_rejects_blocked_item_before_claiming_run(client, ctx):
 def test_reviewer_skip_gate_merges_and_removes_the_gate_label(client, ctx):
     key = "TESTWP-92"
     add_review_ticket(ctx, key)
+    add_ticket(ctx.db, "TESTWP-93", status="Done")
     response = client.post(f"/v1/reviews/{key}/skip-gate", headers={"Authorization": "Bearer review-secret"})
 
     assert response.status_code == 200 and response.json()["merged"] is True
@@ -380,6 +384,8 @@ def test_reviewer_skip_gate_merges_and_removes_the_gate_label(client, ctx):
     assert any(number == 42 and "gate skipped" in body for number, body in ctx.github.comments)
     assert ctx.db.one("SELECT action,accepted FROM write_audit WHERE ticket=%s AND target='human-review'",
                       (key,)) == {"action": "skip-gate", "accepted": True}
+    captured = ctx.db.all("SELECT source_ref FROM knowledge_items WHERE source_type='ticket' ORDER BY source_ref")
+    assert [item["source_ref"] for item in captured] == [key]
 
 
 def test_review_queue_offers_actions_by_waiting_item_kind(client, ctx):

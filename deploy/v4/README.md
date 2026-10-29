@@ -56,6 +56,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Ticket timeline routes](../../docs/v4/route-module-tickets.md): the ticket timeline routes are served from their own router module
 - [Rework loop limit](../../docs/v4/rework-loop-limit.md): allow three rework returns by default, block the fourth with per-round reasons, and honor project overrides
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
+- [Capacity routes](../../docs/v4/route-module-capacity.md): the capacity routes are served from their own router module
 - [Automatic Jira version releases](../../docs/v4/version-release.md): check, document, PR, merge, tag and publish configured Jira versions without owner approval
 - [Release installation smoke test](../../docs/v4/install.md): tagged releases install control and two nodes in Ubuntu systemd CI before publication
 - [Canary auto-deploy](../../docs/v4/canary-autodeploy.md): signed releases and develop commits are measured on one node before fleet promotion, with automatic rollback on elevated infrastructure failures

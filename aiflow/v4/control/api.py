@@ -6613,24 +6613,6 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "failures": run["report"]["failures"], "tickets": tickets}
 
 
-    @app.get("/v1/capacity")
-    def capacity_plan(request: Request) -> dict:
-        """Next-week quota capacity, recorded assignment reasons and completed estimate errors."""
-        user = (console_user(request, "view.machines_ai") if ctx.settings.console_login
-                else optional_console_user(request))
-        if user and not has_permission(user.effective_roles, "view.machines_ai"):
-            raise HTTPException(403, "not available for your role")
-        accounts = ctx.db.all("SELECT id,provider,tier,roles,quota,quota_forecast FROM accounts ORDER BY id")
-        forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in accounts}
-        # Forecasts normally come from the watchdog. On a fresh install, derive only the
-        # accounts that already reported quota; accounts with no quota data cannot improve
-        # this plan and should not trigger historical scans per console request.
-        missing = [row for row in accounts if not forecasts[str(row["id"])] and row.get("quota")]
-        forecasts.update(quota_reporting.assessments(ctx.db, missing) if missing else {})
-        project_keys = user.project_keys if user and user.project_keys is not None else None
-        return capacity.dashboard(ctx.db, accounts, forecasts, project_keys)
-
-
     # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
 
 

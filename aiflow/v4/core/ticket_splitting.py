@@ -7,6 +7,7 @@ Jira, HTTP, a database, an estimator or a worker.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 MIN_CHILDREN = 2
@@ -16,6 +17,8 @@ SUMMARY_MAX = 240
 DESCRIPTION_MAX = 10_000
 DEFAULT_TARGET_MINUTES = 30
 _AC1_PREFIXES = ("AC1:", "- AC1:", "* AC1:")
+# What the Team Lead gives the developer in every child: where to work, the shape of the code, the tests to write.
+REQUIRED_SECTIONS = ("Files", "Skeleton", "Test cases")
 
 
 class InvalidSplitPlan(ValueError):
@@ -24,6 +27,18 @@ class InvalidSplitPlan(ValueError):
 
 def _has_ac1(description: str) -> bool:
     return any(line.strip().startswith(_AC1_PREFIXES) for line in description.splitlines())
+
+
+def section_gaps(description: str) -> list[str]:
+    """Names of the required sections (``Files:``, ``Skeleton:``, ``Test cases:``) that are missing or empty."""
+    gaps = []
+    for name in REQUIRED_SECTIONS:
+        match = re.search(rf"^\s*(?:[-*]\s*)?\**{re.escape(name)}\**\s*:\s*(.*?)(?=^\s*(?:[-*]\s*)?\**(?:"
+                          + "|".join(re.escape(n) for n in ("AC1", *REQUIRED_SECTIONS)) + r")\**\s*:|\Z)",
+                          description, re.I | re.M | re.S)
+        if not match or not match.group(1).strip():
+            gaps.append(name)
+    return gaps
 
 
 def validate_plan(value: Any) -> list[dict[str, str]]:
@@ -52,6 +67,8 @@ def validate_plan(value: Any) -> list[dict[str, str]]:
             )
         if not _has_ac1(description):
             raise InvalidSplitPlan(f"split ticket {index} needs an AC1 acceptance criterion")
+        if gaps := section_gaps(description):
+            raise InvalidSplitPlan(f"split ticket {index} needs these sections with content: " + ", ".join(gaps))
         plan.append({"summary": summary.strip(), "description": description.strip()})
     return plan
 

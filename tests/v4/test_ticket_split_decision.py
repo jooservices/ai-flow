@@ -31,9 +31,10 @@ def test_high_at_or_below_target_does_not_need_split():
     assert estimate_needs_split(_estimate(29.9), 30) is False
 
 
-def test_default_target_is_thirty_minutes():
-    assert DEFAULT_TARGET_MINUTES == 30
-    assert estimate_needs_split(_estimate(30.1)) is True
+def test_default_target_is_fifteen_minutes():
+    assert DEFAULT_TARGET_MINUTES == 15
+    assert estimate_needs_split(_estimate(15.1)) is True
+    assert estimate_needs_split(_estimate(15)) is False
 
 
 def test_decide_split_uses_injected_estimate_and_does_not_mutate_ticket():
@@ -90,4 +91,5 @@ def test_capacity_estimate_high_minutes_drive_needs_split():
     small = capacity.estimate({"type": "Story", "summary": "Small", "labels": ["size-XS"]}, [])
 
     assert estimate_needs_split(large) is True
-    assert estimate_needs_split(small) is False
+    assert estimate_needs_split(small) is True  # the range's high end (30 min) is above the 15-minute target
+    assert estimate_needs_split(small, 30) is False

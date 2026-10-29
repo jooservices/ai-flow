@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core import work_limits
 from ..core.work_limits import retry_hard_minutes
 from .repositories import developer_runs
 
@@ -11,7 +12,7 @@ def payload(project, selected_repo: dict, node: str, step: str, db, ticket_key: 
     """Project settings for a claimed run, with a raised hard limit after developer timeouts."""
     if step == "master":
         return {"key": "", "repo": "", "base": "", "hotfix_base": "", "checks": [], "stack": "",
-                "node": node, "work_minutes": {"target": 30, "warn": 45, "hard": 60},
+                "node": node, "work_minutes": dict(work_limits.DEFAULTS),
                 "merge": {"method": "squash", "auto": False, "require_human": True}}
     if not project:
         return {}

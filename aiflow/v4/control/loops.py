@@ -353,6 +353,12 @@ def watchdog(ctx: Ctx) -> None:
             continue  # tooling.check_stalled_waits owns the two-hour missing-requirement warning lifecycle
         if stuck.get(i["subject"], 0) < 3:
             close_incident(ctx, "ticket_stuck", i["subject"], "a run produced work again")
+    if ctx.jira:  # the third unsuccessful run in a row ends the automatic retries of that ticket
+        from . import retry_hold
+        try:
+            retry_hold.apply(ctx)
+        except Exception as e:  # noqa: BLE001 - a failing hold pass must not stop the rest of the watchdog
+            log.warning("retry hold pass failed: %s", e)
     # a flow that stands still and a configuration that keeps a project from getting work
     try:
         check_stack_pins(ctx)

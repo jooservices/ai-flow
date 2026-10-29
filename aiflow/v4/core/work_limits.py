@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 TIMEOUT_RETRY_INCREMENT_MINUTES = 30
+FULL_SUITE_TIME_SLICE_MINUTES = 15
 
 
 def retry_hard_minutes(base_minutes: int, previous_timeouts: int) -> int:

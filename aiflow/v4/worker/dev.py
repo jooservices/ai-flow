@@ -246,6 +246,7 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], repo=c.project["repo"], branch=branch,
                       base=c.project["base"], checks=checks, description=t["description"] or "(no description)",
                       rework=rework, related=related_block(c.related), machine=machine_block(c.machine_tools),
+                      test_time_slice=work_limits.FULL_SUITE_TIME_SLICE_MINUTES,
                       environment=environment_notes(
                           c.project.get("environment"), "dev",
                           project_env(t["project"], c.project.get("environment"), "dev") if env is None else env))

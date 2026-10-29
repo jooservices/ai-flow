@@ -58,7 +58,7 @@ from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, resolve_session_user,
                            verify_session)
-from . import capacity, claim_project, conflict_loss, hotfiles, merge_queue, review_queue_api, worker_candidates
+from . import capacity, claim_project, hotfiles, merge_queue, review_queue_api, worker_candidates
 from . import merge_flow
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
@@ -484,7 +484,6 @@ class Ctx:
     jira_auth: Any = None  # jira_connect.JiraAuth: the Jira credential connected on the Integrations screen
 
 
-
 def github_connections(ctx: Ctx) -> GitHubConnections:
     """The registry of the connections after the default one (see `github_registry`)."""
     return _github_registry(ctx, lambda directory, org: GitHubApp(directory, org),
@@ -700,28 +699,6 @@ def _github_git_upstream(repository: str, suffix: str, method: str, params: list
                               headers=headers, content=body, auth=("x-access-token", token))
 
 
-def notify_human_review(ctx: Ctx, key: str, ticket: dict | None = None) -> list[str]:
-    """Notify the Jira assignee, or the configured owner, when a required human review starts."""
-    ticket = ticket or ctx.db.one("SELECT key, project, labels, summary, fields FROM tickets WHERE key=%s", (key,))
-    if not ticket or "require-human" not in (ticket.get("labels") or []):
-        return []
-    fields = ticket.get("fields") or {}
-    assignee = ticket.get("assignee") or fields.get("assignee") or {}
-    email = assignee.get("email") if isinstance(assignee, dict) else ""
-    title = f"{key} is ready for human review"
-    detail = ticket.get("summary") or key
-    link = ctx.settings.public_url.rstrip("/") + "/review"
-    sent = notify.send("info", title, detail, link, recipient=email or "", ctx=ctx,
-                       alert_kind="review_before_merge", project=ticket.get("project", ""), ticket=key,
-                       needed="Review the ticket before merge.")
-    ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
-               " VALUES ('notify','human-review',%s,'control',true,%s,%s)",
-               (key, ",".join(sent) or "no channel configured", J({"assignee": bool(email)})))
-    ctx.events.emit("notify.human_review", ticket=key, project=ticket.get("project", ""), account="control",
-                    outcome="sent" if sent else "no_channel", reason="require-human")
-    return sent
-
-
 # --- request bodies ---------------------------------------------------------------------------------------
 class JoinBody(BaseModel):
     join_token: str
@@ -877,16 +854,6 @@ class ResultBody(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
-class JiraWrite(BaseModel):
-    run_id: str
-    fence: int
-    to: str = ""
-    body: str = ""
-    fields: dict[str, Any] = Field(default_factory=dict)
-    add_labels: list[str] = Field(default_factory=list)
-    remove_labels: list[str] = Field(default_factory=list)
-
-
 class GitHubTokenBody(BaseModel):
     run_id: str
     fence: int
@@ -949,41 +916,6 @@ class TriageAlertBody(BaseModel):
     run_id: str
     fence: int
     detail: str
-
-
-class EscalationRaiseBody(BaseModel):
-    run_id: str
-    fence: int
-    question: str = Field(min_length=1, max_length=6000)
-
-
-class TriageDecisionBody(BaseModel):
-    run_id: str
-    fence: int
-    decision: str
-    question: str = ""
-    answer: str = ""
-    why: str = ""
-    escalation_class: str = ""
-    options: list[str] = Field(default_factory=list)
-    recommended: str = ""
-    topic: str = ""
-    keywords: list[str] = Field(default_factory=list)
-    criterion: str = ""
-    narrowed: str = ""
-
-
-class OwnerDecisionBody(BaseModel):
-    title: str = Field(min_length=3, max_length=200)
-    decision: str = Field(min_length=3, max_length=3000)
-    keywords: list[str] = Field(default_factory=list, max_length=8)
-    patterns: list[str] = Field(default_factory=list, max_length=8)
-    project: str = Field(default="", max_length=40)
-
-
-class OwnerDecisionAnswerBody(BaseModel):
-    choice: str = Field(default="recommended", max_length=1000)
-    note: str = Field(default="", max_length=1000)
 
 
 class ReviewerBody(BaseModel):
@@ -5834,136 +5766,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"ok": True, "result": result, "escalated": False}
 
     # --- Jira writes (fenced) ---------------------------------------------------------------------------------
-    @app.post("/v1/jira/{key}/transition")
-    def jira_transition(key: str, body: JiraWrite, node: str = Depends(node_auth)) -> dict:
-        run = fenced(body.run_id, body.fence, "jira", "transition", {"to": body.to})
-        if run["ticket_key"] != key:
-            raise HTTPException(403, "run is for another ticket")
-        if run["step"] == "impact":
-            audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], False,
-                  "an impact run only comments", {"to": body.to})
-            raise HTTPException(403, "an impact run only comments; the owner moves the ticket")
-        previous = ctx.db.one("SELECT project, type, status, labels, summary, fields FROM tickets WHERE key=%s", (key,))
-        status = ctx.jira.transition_to(key, body.to)
-        ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done'"
-                   " THEN now() ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, key))
-        audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], True, status, {"to": body.to})
-        ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
-                        node=node, outcome=status)
-        if previous and previous["status"] != status:
-            merged_by_verify = run["step"] == "verify" and status == "Done"
-            merge_flow.record_move(ctx, key, previous["status"], status,
-                                   merge_flow.FLOW_MERGE if merged_by_verify else merge_flow.FLOW,
-                                   f"{run['step']} run by {run['account_id']}")
-        if previous and previous["type"] == "Epic" and previous["status"] != "Done" and status == "Done":
-            try:
-                project_lifecycle.report_done_epic(ctx, previous["project"], key)
-            except Exception as e:  # noqa: BLE001
-                log.warning("could not generate completion report for epic %s: %s", key, e)
-        if previous and previous["status"] != "Human review" and status == "Human review":
-            notify_human_review(ctx, key, {**previous, "key": key})
-        return {"status": status}
 
-    @app.post("/v1/jira/{key}/comment")
-    def jira_comment(key: str, body: JiraWrite, node: str = Depends(node_auth)) -> dict:
-        run = fenced(body.run_id, body.fence, "jira", "comment", {"chars": len(body.body)})
-        if run["ticket_key"] != key:
-            raise HTTPException(403, "run is for another ticket")
-        cid = ctx.jira.comment(key, body.body)
-        audit("jira", "comment", key, body.run_id, body.fence, run["account_id"], True, cid, {"chars": len(body.body)})
-        return {"comment_id": cid}
-
-    @app.post("/v1/jira/{key}/fields")
-    def jira_fields(key: str, body: JiraWrite, node: str = Depends(node_auth)) -> dict:
-        run = fenced(body.run_id, body.fence, "jira", "fields", {"fields": list(body.fields), "add": body.add_labels})
-        if run["ticket_key"] != key:
-            raise HTTPException(403, "run is for another ticket")
-        if run["step"] == "impact":
-            raise HTTPException(403, "an impact run only comments")
-        if body.fields:
-            ctx.jira.set_fields(key, body.fields)
-        for lab in body.add_labels:
-            ctx.jira.add_label(key, lab)
-            ctx.db.run("UPDATE tickets SET labels=CASE WHEN %s = ANY(labels) THEN labels ELSE array_append(labels,%s) END"
-                       " WHERE key=%s", (lab, lab, key))
-        for lab in body.remove_labels:
-            ctx.jira.remove_label(key, lab)
-            ctx.db.run("UPDATE tickets SET labels=array_remove(labels,%s) WHERE key=%s", (lab, key))
-        audit("jira", "fields", key, body.run_id, body.fence, run["account_id"], True, "ok",
-              {"fields": list(body.fields), "add": body.add_labels, "remove": body.remove_labels})
-        return {"ok": True}
 
     # --- escalation classes and the owner decision register (docs/v4/escalations.md) --------------------------
-    @app.post("/v1/escalations/raise")
-    def escalation_raise(body: EscalationRaiseBody, node: str = Depends(node_auth)) -> dict:
-        """A developer run stopped on a question: classify it and resolve the classes that never need a person."""
-        run = fenced(body.run_id, body.fence, "escalation", "raise", {"chars": len(body.question)})
-        if run["step"] != "dev":
-            raise HTTPException(403, "only a developer run raises an escalation here")
-        result = escalations.dev_question(ctx, run, body.question)
-        audit("escalation", "raise", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
-              result["class"], {"resolved": result["resolved"], "outcome": result["outcome"]})
-        ctx.events.emit("escalation.raised", ticket=run["ticket_key"], project=run["project"], run_id=body.run_id,
-                        account=run["account_id"], node=node, outcome=result["class"],
-                        reason=("resolved without a person: " if result["resolved"] else "goes to triage: ") + result["reason"])
-        return result
 
-    @app.post("/v1/escalations/triage")
-    def escalation_triage(body: TriageDecisionBody, node: str = Depends(node_auth)) -> dict:
-        """The triage AI's decision goes through the register: applied, amended, asked once, or refused."""
-        run = fenced(body.run_id, body.fence, "escalation", "triage", {"decision": body.decision})
-        if run["step"] != "triage":
-            raise HTTPException(403, "only a triage run decides an escalation")
-        if body.decision not in ("ANSWER", "ESCALATE", "AMEND"):
-            raise HTTPException(400, "decision must be ANSWER, ESCALATE or AMEND")
-        decision = {"decision": body.decision, "answer": body.answer, "why": body.why, "class": body.escalation_class,
-                    "options": body.options, "recommended": body.recommended, "topic": body.topic,
-                    "keywords": body.keywords, "criterion": body.criterion, "narrowed": body.narrowed}
-        result = escalations.triage_decision(ctx, run, decision, body.question)
-        audit("escalation", "triage", run["ticket_key"], body.run_id, body.fence, run["account_id"],
-              result["action"] != "refused", f"{result['action']}: {result.get('class', '')}",
-              {"decision": body.decision, "decision_id": result.get("decision_id")})
-        ctx.events.emit("escalation.triaged", ticket=run["ticket_key"], project=run["project"], run_id=body.run_id,
-                        account=run["account_id"], node=node, outcome=result["action"], reason=result.get("class", ""))
-        return result
-
-    @app.get("/v1/escalations")
-    def escalation_overview(request: Request, weeks: int = Query(8, ge=1, le=52)) -> dict:
-        console_user(request, "console.read")
-        return {"metrics": escalations.weekly_metrics(ctx.db, weeks), "register": escalations.register(ctx.db)}
-
-    @app.post("/v1/decisions")
-    def decision_add(body: OwnerDecisionBody, request: Request) -> dict:
-        user = console_user(request, "console.write", target="escalations", action="decision-add")
-        try:
-            row = escalations.add_decision(ctx.db, body.title, body.decision, body.keywords, body.patterns,
-                                           body.project, user.subject)
-        except re.error as exc:
-            raise HTTPException(400, f"a pattern is not a valid regular expression: {exc}") from None
-        audit("escalation", "decision-add", "", "", None, user.subject, True, f"D{row['id']} {row['title']}",
-              {"decision_id": row["id"]})
-        return {"id": row["id"], "register": escalations.register(ctx.db)}
-
-    @app.post("/v1/decisions/{decision_id}/answer")
-    def decision_answer(decision_id: int, body: OwnerDecisionAnswerBody, request: Request) -> dict:
-        user = console_user(request, "console.write", target="escalations", action="decision-answer")
-        try:
-            row = escalations.answer_decision(ctx, decision_id, body.choice, body.note, user.subject)
-        except LookupError as exc:
-            raise HTTPException(404, str(exc)) from None
-        audit("escalation", "decision-answer", row["ticket_key"], "", None, user.subject, True,
-              f"D{row['id']} {row['title']}", {"decision_id": row["id"]})
-        return {"id": row["id"], "register": escalations.register(ctx.db)}
-
-    @app.post("/v1/decisions/{decision_id}/retire")
-    def decision_retire(decision_id: int, request: Request) -> dict:
-        user = console_user(request, "console.write", target="escalations", action="decision-retire")
-        row = escalations.retire_decision(ctx.db, decision_id)
-        if not row:
-            raise HTTPException(404, "unknown decision")
-        audit("escalation", "decision-retire", "", "", None, user.subject, True, f"D{row['id']} {row['title']}",
-              {"decision_id": row["id"]})
-        return {"id": row["id"], "register": escalations.register(ctx.db)}
 
     @app.get("/v1/github/ci-log")
     def github_ci_log(run_id: str, fence: int, branch: str = "", sha: str = "", lines: int = Query(200, ge=1, le=1000),
@@ -6032,22 +5838,6 @@ def create_app(ctx: Ctx) -> FastAPI:
               ",".join(sent) or "no channel configured", {"severity": severity})
         return {"ok": True, "severity": severity, "sent": sent}
 
-    @app.post("/v1/jira/{key}/description")
-    def jira_description(key: str, body: JiraWrite, node: str = Depends(node_auth)) -> dict:
-        run = fenced(body.run_id, body.fence, "jira", "description", {"chars": len(body.body)})
-        if run["ticket_key"] != key:
-            raise HTTPException(403, "run is for another ticket")
-        if run["step"] != "intake":
-            raise HTTPException(403, "only an intake run replaces the description")
-        if not body.body.strip():
-            raise HTTPException(400, "the new description is empty")
-        ctx.jira.set_description(key, body.body)
-        ctx.db.run("UPDATE tickets SET description=%s, synced_at=now() WHERE key=%s", (body.body, key))
-        audit("jira", "description", key, body.run_id, body.fence, run["account_id"], True, "replaced",
-              {"chars": len(body.body)})
-        ctx.events.emit("jira.description", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
-                        node=node, outcome="replaced")
-        return {"ok": True}
 
     # --- GitHub (fenced) --------------------------------------------------------------------------------------
     @app.post("/v1/github/token")
@@ -6243,24 +6033,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     current_review_item_kind = review_queue.current_item_kind
     review_thread = review_queue.thread
     review_data = review_queue.data
-    review_queue_keys = review_queue.queue_keys
-
-    @app.get("/v1/dashboard/waiting")
-    def dashboard_waiting(request: Request) -> dict:
-        """Return dashboard-visible Human review ticket keys without exposing queue details."""
-        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
-                else optional_console_user(request))
-        scope = user.project_keys if user and user.project_keys is not None else None
-        return {"ticket_keys": review_queue_keys(project_scope=scope)}
-
-    @app.get("/v1/dashboard/disagreements")
-    def dashboard_disagreements(request: Request) -> dict:
-        """Tickets whose Jira state and pull request disagreed for more than five minutes (the flow keeps fixing them)."""
-        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
-                else optional_console_user(request))
-        scope = list(user.project_keys) if user and user.project_keys is not None else None
-        rows = merge_flow.disagreements(ctx.db, scope)
-        return {"after_s": merge_flow.DISAGREEMENT_AFTER_S, "tickets": rows}
+    app.state.review_queue = review_queue  # routers outside api.py reach the queue through the app
 
     @app.post("/v1/github/webhook", include_in_schema=False)
     async def github_webhook(request: Request) -> dict:
@@ -6284,71 +6057,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         result = await run_in_threadpool(merge_flow.reconcile, ctx, target)
         await run_in_threadpool(merge_flow.merge_ready, ctx)
         return {"reconciled": result["checked"]}
-
-    @app.get("/v1/dashboard/quota")
-    def dashboard_quota(request: Request) -> dict:
-        """Return a dashboard-safe quota summary for accounts serving the caller's visible projects."""
-        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
-                else optional_console_user(request))
-        scope = set(user.project_keys) if user and user.project_keys is not None else None
-        repo = ctx.repo()
-        nodes = {node["name"]: node for node in ctx.db.all(
-            "SELECT name,projects,dynamic FROM nodes WHERE removed_at IS NULL")}
-        account_rows = ctx.db.all("SELECT id,provider,quota,quota_forecast FROM accounts ORDER BY node,provider,id")
-        quota_by_account = {str(row["id"]): row.get("quota_forecast") or {} for row in account_rows}
-
-        labels = {"five_hour": "5 hours", "seven_day": "Weekly", "seven_day_opus": "Weekly Opus",
-                  "seven_day_sonnet": "Weekly Sonnet", "estimated_week": "Estimated weekly"}
-
-        def percent(value: Any) -> float | None:
-            if value is None:
-                return None
-            try:
-                number = float(value)
-            except (TypeError, ValueError):
-                return None
-            if number != number:
-                return None
-            if 0 <= number <= 1:
-                number *= 100
-            return round(max(0, min(100, number)), 1)
-
-        accounts = []
-        for account in account_rows:
-            configured = repo.account(account["id"])
-            if configured is None:
-                continue
-            if scope is not None and not any(
-                    machine in nodes and scope.intersection(repo.projects_for_node(
-                        machine, nodes[machine].get("projects") or [], bool(nodes[machine].get("dynamic"))))
-                    for machine in configured.machines):
-                continue
-
-            awareness_windows = (quota_by_account.get(account["id"]) or {}).get("windows") or []
-            windows = [{
-                "label": str(window.get("label") or labels.get(str(window.get("name")), "Quota window")),
-                "used_pct": percent(window.get("used_pct")),
-                "reset_at": window.get("reset_at"),
-                "estimated": window.get("source") == "estimate",
-            } for window in awareness_windows if isinstance(window, dict)]
-            if not windows:
-                raw_windows = (account.get("quota") or {}).get("windows") or {}
-                windows = [{
-                    "label": labels.get(name, "Quota window"),
-                    "used_pct": percent(window.get("utilization", window.get("used_percent"))),
-                    "reset_at": window.get("resets_at") or window.get("reset_at"),
-                    "estimated": False,
-                } for name, window in raw_windows.items() if isinstance(window, dict)]
-            accounts.append({"provider": str(account.get("provider") or "unknown"), "windows": windows})
-
-        provider_counts: dict[str, int] = {}
-        rows = []
-        for account in accounts:
-            provider = account["provider"]
-            provider_counts[provider] = provider_counts.get(provider, 0) + 1
-            rows.append({"provider": provider, "label": f"Account {provider_counts[provider]}",
-                         "windows": account["windows"]})
-        return {"rows": rows}
 
     review_queue.mount_human_reviews(app, console_user, optional_console_user)
 
@@ -7129,78 +6837,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         role_health.evaluate(ctx)
         return role_health.summary(ctx)
 
-    @app.get("/v1/analytics/daily")
-    def analytics_daily(request: Request, days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
-        from .analytics import daily
-        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
-                else optional_console_user(request))
-        if user and user.project_keys is not None:
-            if project:
-                if project not in user.project_keys:
-                    raise HTTPException(403, "not available for your role")
-                projects = [project]
-            else:
-                projects = list(user.project_keys)
-            rows = [row for key in projects for row in daily(ctx.db, days, key)]
-        else:
-            rows = daily(ctx.db, days, project)
-        return {"days": days, "project": project, "rows": rows}
-
-    @app.get("/v1/analytics/conflicts")
-    def analytics_conflicts(request: Request, days: int = Query(14, ge=1, le=90),
-                            bucket: Literal["day", "week"] = "day", project: str = "") -> dict:
-        """Share of verifications lost to merge conflicts, the time spent on them and the trend."""
-        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
-                else optional_console_user(request))
-        project_keys = user.project_keys if user and user.project_keys is not None else None
-        if project and project_keys is not None and project not in project_keys:
-            raise HTTPException(403, "not available for your role")
-        return {"project": project, **conflict_loss.summary(ctx.db, days, bucket, project_keys, project)}
-
-    @app.get("/v1/analytics/usage/daily")
-    def analytics_usage_daily(request: Request, days: int = Query(14, ge=1, le=90)) -> dict:
-        from .analytics import daily_usage
-        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
-                else optional_console_user(request))
-        project_keys = user.project_keys if user and user.project_keys is not None else None
-        return {"days": days, "group_by": "ai", "rows": daily_usage(ctx.db, days, project_keys)}
-
-    @app.get("/v1/analytics/usage")
-    def analytics_usage(request: Request, days: int = Query(7, ge=1, le=90),
-                        group_by: Literal["account", "ai", "machine", "project", "ticket"] = "account",
-                        project: str = "", ticket: str = "", account: str = "") -> dict:
-        from .analytics import usage
-        user = (console_user(request, None) if ctx.settings.console_login
-                else optional_console_user(request))
-
-        def refuse() -> None:
-            if user:
-                audit("console", "access_denied", "", "", None, user.subject, False,
-                      "not available for your role", {"path": request.url.path, "method": request.method,
-                                                       "roles": list(user.effective_roles)})
-            raise HTTPException(403, "not available for your role")
-
-        needs_machine_access = group_by in {"account", "machine"}
-        if user and needs_machine_access and not has_permission(user.effective_roles, "view.machines_ai"):
-            refuse()
-
-        project_keys = None
-        if user and user.project_keys is not None:
-            project_keys = user.project_keys
-            if project and project not in project_keys:
-                refuse()
-            if ticket:
-                ticket_row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket,))
-                projects = ({ticket_row["project"]} if ticket_row else set())
-                if not projects:
-                    projects = {row["project"] for row in ctx.db.all(
-                        "SELECT DISTINCT project FROM runs WHERE ticket_key=%s AND project<>''", (ticket,))}
-                if projects and not projects.issubset(set(project_keys)):
-                    refuse()
-
-        return {"days": days, "group_by": group_by, "filters": {"project": project, "ticket": ticket,
-                                                                     "account": account},
-                "rows": usage(ctx.db, days, group_by, project, ticket, account, project_keys=project_keys)}
 
     # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
     @app.get("/v1/memory/search")

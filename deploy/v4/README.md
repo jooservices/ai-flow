@@ -60,14 +60,19 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Worktree cleanup](../../docs/v4/worktree-cleanup.md): nodes delete the worktrees of Done tickets and spent per-run checkouts
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
+- [Shared route helpers](../../docs/v4/route-dependencies.md): audit, console and node authentication and fencing as functions of the application context, usable by any router
 - [Command Center node operations](../../docs/v4/node-operations.md): `nodes.manage` install, desired-state repair and one-time join actions for `owner` and `super_admin`, with audited operation logs
 - [Project close reports and study cases](../../docs/v4/project-study-cases.md): close projects, email versioned reports, and find saved reports in memory
 - [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with token-authorized fenced approve and rework actions
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
 - [Join a node](../../docs/v4/node-join.md): Command Center issues a five-minute one-use token and the pinned server-installer CLI bootstraps a node
+- [Dashboard read routes](../../docs/v4/route-module-dashboard.md): the Dashboard read models are served from their own router module
 - [Fleet installation](../../docs/v4/fleet-install.md): cloud-init samples and Ansible roles prepare hosts and enroll a node fleet
+- [Escalation routes](../../docs/v4/route-module-escalations.md): the escalation routes are served from their own router module
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
+- [Jira routes](../../docs/v4/route-module-jira.md): the jira routes are served from their own router module
 - [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
+- [Analytics routes](../../docs/v4/route-module-analytics.md): the analytics routes are served from their own router module
 - [Persistent learning and run context](../../docs/v4/knowledge-learning.md): automatically capture run, ticket and incident learning, then hand scoped semantic context to each run
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
 - [Machines and AI management](../../docs/v4/machines-and-ai.md): enroll machines and add, pause, resume, sign in, edit and remove AI accounts on screen

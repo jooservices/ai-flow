@@ -16,8 +16,12 @@ TITLE_TARGET = 100  # normalized titles stay below the hard limit so a suffix ad
 _HEADER = re.compile(r"^(?P<type>\w*)(?:\((?P<scope>[^)]*)\))?!?: (?P<subject>.*)$")
 _PR_SUBJECT = re.compile(r"^[A-Z].+$")
 _TRAILING = " .,;:!?-–—"
-_DANGLING = frozenset(("a an the to of and or for in on by with from at as is are that which into than its their this "
-                      "these those each every any some your our such be been not no").split())
+_DANGLING = frozenset((
+    "a", "an", "the", "to", "of", "and", "or", "for", "in", "on",
+    "by", "with", "from", "at", "as", "is", "are", "that", "which", "into",
+    "than", "its", "their", "this", "these", "those", "each", "every", "any", "some",
+    "your", "our", "such", "be", "been", "not", "no",
+))
 
 
 def violations(header: str, *, pr_title: bool = False) -> list[str]:

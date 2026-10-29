@@ -12,9 +12,9 @@ service or variable that is not provided, so CI has to complete it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
-import re
 import shlex
 import signal
 import subprocess
@@ -143,10 +143,8 @@ def _read_tail(path: Path, limit: int = 65536) -> str:
 
 
 def _kill(proc: subprocess.Popen) -> None:
-    try:
+    with contextlib.suppress(ProcessLookupError):
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
 
 
 def run_command(step: Step, ctx: Context, env: dict[str, str]) -> StepResult:
@@ -163,10 +161,8 @@ def run_command(step: Step, ctx: Context, env: dict[str, str]) -> StepResult:
                 proc.wait(timeout=step.timeout_s)
             except subprocess.TimeoutExpired:
                 _kill(proc)  # the whole process group, so a detached child cannot keep the gate waiting
-                try:
+                with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
                 return StepResult(step.name, TIMEOUT, time.monotonic() - started,
                                   f"no result after {step.timeout_s} s\n{_tail(_read_tail(log_path))}")
         return StepResult(step.name, PASSED if proc.returncode == 0 else FAILED, time.monotonic() - started,

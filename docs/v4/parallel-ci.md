@@ -25,3 +25,9 @@ automatically. When the shard count changes, change the matrix in `.github/workf
 The 100/50/200 benchmark depends on the speed of the runner (the console page-load budget has failed at 2.3 s against a
 limit of 2 s), so it no longer blocks unrelated pull requests. It still runs on every pull request, and the local gate
 still runs it (once more on failure). The budgets are not loosened; the slow call is tracked in JAIF-436.
+
+## Cache
+
+The jobs that install the dependencies (Documentation, Code quality, the shards, the browser journeys and the scale
+proof) restore `~/.cache/uv` before the install step, keyed by `uv.lock`. A cold cache still works: no job depends on a
+hit (JAIF-434).

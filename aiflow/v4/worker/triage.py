@@ -160,7 +160,7 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             jira("comment", body=text)
             if c.pr and c.pr.get("number"):
                 api.call("POST", "/v1/github/comment", {"run_id": c.run_id, "fence": c.fence,
-                                                          "number": c.pr["number"], "body": text})
+                                                          "number": c.pr["number"], "body": text, "kind": "triage"})
 
         if reviewer_question and decision["decision"] == "ANSWER":  # a reviewer's question is not an escalation
             answer_note = note(c, "answered reviewer question", what=f"The question was: {question}",

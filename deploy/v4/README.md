@@ -44,6 +44,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Validated parked requirements](../../docs/v4/parked-requirements.md): validate missing-tool reports, install supported tools from heartbeat requests, show parked-ticket status, and name idle and stalled-wait causes
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright, Chromium, Firefox and WebKit, and report an unavailable browser by name
 - [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, browser binaries go into the shared `playwright-browser` folder, and each browser is launched as the AI user
+- [Pull request comments](../../docs/v4/pr-comments.md): one verification comment edited in place, one bot identity, quiet CodeRabbit configuration
 - [Isolated WordPress test sites](../../docs/v4/wordpress-runs.md): WordPress dev and verify runs get a seeded PHP 8.3 site on a per-run Podman network, with browser environment and cleanup
 - [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy
 - [Only real business decisions reach a person](../../docs/v4/escalations.md): every escalation is classified, an owner decision register is applied and cited, a new decision is asked once with options, unreachable criteria are amended, refusals explain the allowed alternative, the failing CI log tail is available, and Command Center shows the weekly numbers
@@ -51,6 +52,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
 - [Master autonomy](../../docs/v4/master.md): budgeted fenced monitoring, safe actions, owner escalations, invalid-plan recovery and a weekly Command Center report
 - [Rework loop limit](../../docs/v4/rework-loop-limit.md): allow three rework returns by default, block the fourth with per-round reasons, and honor project overrides
+- [Owner question deadline](../../docs/v4/escalation-deadline.md): an unanswered question with a reversible recommendation is applied after 12 hours
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
 - [Automatic Jira version releases](../../docs/v4/version-release.md): check, document, PR, merge, tag and publish configured Jira versions without owner approval
 - [Release installation smoke test](../../docs/v4/install.md): tagged releases install control and two nodes in Ubuntu systemd CI before publication
@@ -79,6 +81,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Analytics routes](../../docs/v4/route-module-analytics.md): the analytics routes are served from their own router module
 - [Persistent learning and run context](../../docs/v4/knowledge-learning.md): automatically capture run, ticket and incident learning, then hand scoped semantic context to each run
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
+- [Machines and accounts in the database](../../docs/v4/inventory-in-database.md): machines, AI accounts, roles and worker counts are managed on screen, stored in the control database, backed up with it and imported once from the control repository
 - [Machines and AI management](../../docs/v4/machines-and-ai.md): enroll machines and add, pause, resume, sign in, edit and remove AI accounts on screen
 - [Repositories by Jira epic](../../docs/v4/epic-repositories.md): map Jira epics to connected GitHub App repositories with per-repository defaults in Projects
 - [Connect GitHub from the console](../../docs/v4/github-connect.md): manage several Apps or access tokens and assign each repository a connection
@@ -206,8 +209,8 @@ time starts at the first known event or run.
 
 ## Intake refinement
 
-Tickets written by people go to the **Intake** status first. Accounts with the `intake_refiner` role in
-`aiflow-control/accounts.yaml` see them as step `intake` (after verify work, before development); `aiflow-hold`
+Tickets written by people go to the **Intake** status first. Accounts with the `intake_refiner` role (set on the
+Machines and AI screen, not in a file) see them as step `intake` (after verify work, before development); `aiflow-hold`
 and `explicit_only` work as for the other steps. The worker checks out the project's base branch and runs
 `prompts/v4/intake.md` with the ticket text and the repository's `docs/SPEC.md` (when present). An intake run
 may read files but never change them: the policy hook denies the editor tools and allows only inspection

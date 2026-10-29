@@ -1,8 +1,10 @@
 # Master autonomy
 
-The master account runs one fenced control-wide review cycle at a time. When `accounts.yaml` has no explicit master
-role, the first configured `senior` account receives `master` by default. Explicit role assignments remain
-authoritative. The owner can view and change the master's daily model-time budget in the Command Center at `/cc`.
+The master account runs one fenced control-wide review cycle at a time. Legacy account roles are imported into the
+control database once; thereafter the `master` role is managed for each account in **Machines and AI**. On initial
+load, if no account has an explicit master role, the first configured `senior` account receives `master` by default.
+Explicit role assignments remain authoritative. The owner can view and change the master's daily model-time budget in
+the Command Center at `/cc`.
 The default budget is 60 minutes per UTC day; setting it to zero disables master cycles. The control plane refuses
 new cycles after the budget is used. A cycle with nothing to review does not make a model call or consume the
 budget.

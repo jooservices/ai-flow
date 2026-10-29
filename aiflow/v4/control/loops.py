@@ -304,10 +304,10 @@ def watchdog(ctx: ApplicationContext) -> None:
     with_accounts = {m for a in repo.accounts for m in a.machines}
     for n in ctx.db.all("SELECT name, status FROM nodes"):
         if n["status"] == "online" and n["name"] not in with_accounts:
-            where = "" if n["name"] in repo.nodes else " and is not described in aiflow-control/nodes/"
+            where = "" if n["name"] in repo.nodes or repo.inventory_in_db else " and is not described in aiflow-control/nodes/"
             open_incident(ctx, "node_no_ai", n["name"], "warning", f"node {n['name']} has no AI account",
                           f"{n['name']} is online{where}, but no AI account is assigned to it, so it cannot take any ticket."
-                          " Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.")
+                          " Add and sign in to an AI account for this machine on the Machines and AI screen.")
         elif n["name"] in with_accounts or n["status"] != "online":
             close_incident(ctx, "node_no_ai", n["name"], "accounts assigned" if n["name"] in with_accounts else "node left")
     # orphans: Jira says In Progress but no run is working on it (a worker died between writes, a deploy, a manual
@@ -361,6 +361,12 @@ def watchdog(ctx: ApplicationContext) -> None:
             retry_hold.apply(ctx)
         except Exception as e:  # noqa: BLE001 - a failing hold pass must not stop the rest of the watchdog
             log.warning("retry hold pass failed: %s", e)
+
+    try:  # an unanswered owner question with a reversible recommendation is applied after its deadline
+        from . import escalation_deadline
+        escalation_deadline.apply_due(ctx)
+    except Exception as e:  # noqa: BLE001 - a failing deadline pass must not stop the rest of the watchdog
+        log.warning("escalation deadline pass failed: %s", e)
     # a flow that stands still and a configuration that keeps a project from getting work
     try:
         check_stack_pins(ctx)

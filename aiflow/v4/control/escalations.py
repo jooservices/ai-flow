@@ -135,6 +135,7 @@ REPOSITORY_FACT_RE = re.compile(
 BUSINESS_TOPIC_RE = re.compile(
     r"\b(?:customer(?:s|-facing)?|refund|payment|pricing|billing|subscription|marketing|brand|legal|contract|"
     r"privacy|data retention)\b", re.I)
+REQUIREMENT_CONFLICT_RE = re.compile(r"\b(?:conflicts?|contradicts?|contradicting)\s+with\s+(?:the\s+)?AC\s?\d+\b", re.I)
 BUSINESS_DECISION_CUE_RE = re.compile(r"\b(?:should|whether|choose|choice|decision|decide|option|or)\b|\?", re.I)
 
 
@@ -206,6 +207,8 @@ def _classify_by_topic(text: str) -> Classification:
                                        "run environment answer it", environment="server")
     if technical_decision.is_technical(text):
         return Classification(TECHNICAL, "an engineering choice: the SA decides it and records the reason")
+    if REQUIREMENT_CONFLICT_RE.search(text):  # the ticket contradicts its own acceptance criteria: only the owner can say which wins
+        return Classification(BUSINESS, "the ticket conflicts with its own acceptance criteria")
     if BUSINESS_TOPIC_RE.search(text) and BUSINESS_DECISION_CUE_RE.search(text):
         return Classification(BUSINESS, "an explicit customer-facing or commercial choice")
     return Classification(AMBIGUITY, "no positive evidence of a new business decision; keep it in automated triage")

@@ -179,6 +179,7 @@
     "POST /v1/nodes/{name}/operations",
     "POST /v1/nodes/{name}/operations/{operation_id}/checkpoint",
     "POST /v1/nodes/{name}/operations/{operation_id}/result",
+    "POST /v1/nodes/{name}/operator-interventions",
     "POST /v1/nodes/{name}/release-failures",
     "POST /v1/nodes/{name}/worktrees/sweep",
     "POST /v1/notifications/channels/{channel_id}/test",

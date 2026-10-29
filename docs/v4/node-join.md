@@ -33,7 +33,9 @@ commands in a terminal.
 For each pending account, **Machines and AI** shows the provider's sign-in link and code. Open the link in a
 browser, enter the code when asked, then finish sign-in from the screen after the machine confirms the account is
 ready. Provider credentials stay in that account's home on the machine and are never sent to the control plane.
-The one-time machine join command above is the only setup action that uses a terminal.
+The one-time machine join command above is the only setup action that uses a terminal. After the one-time
+inventory import, the control database and **Machines and AI** own these runtime facts; see
+[Database-backed inventory](inventory-in-database.md).
 
 ## server-installer profile proposal
 

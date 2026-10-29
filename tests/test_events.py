@@ -197,7 +197,7 @@ class WiringTests(unittest.TestCase):
             jira.comment("JAIF-1", "hello")
             jira.link("JAIF-1", "JAIF-2")
             jira.set_agent("JAIF-1", "Claude")
-        self.assertEqual(self.names(), ["jira.transition", "jira.comment", "jira.link", "jira.agent"])
+            self.assertEqual(self.names(), ["jira.transition", "jira.comment", "jira.link", "jira.agent"])
 
     def test_a_failed_transition_is_an_event_too(self):
         from aiflow.jira import Jira, JiraError

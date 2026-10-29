@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 
 KINDS = ("fact", "case", "lesson", "context", "decision", "knowledge", "idea", "reference")
@@ -45,6 +46,9 @@ def scan_secrets(*texts: str) -> None:
 
 def check_entry(entry: dict, relaxed: bool = False) -> dict:
     """Validate and clean a proposed entry; raises Rejected. `relaxed` (the Workspaces notes): a body may be empty, a title one character."""
+    if not isinstance(entry, dict):
+        raise Rejected("entry must be a JSON object")
+    scan_secrets(json.dumps(entry, default=str))
     kind, scope = entry.get("kind", ""), entry.get("scope", "")
     if kind not in KINDS:
         raise Rejected(f"kind must be one of {', '.join(KINDS)}")
@@ -66,10 +70,13 @@ def check_entry(entry: dict, relaxed: bool = False) -> dict:
         project = ""
     if (scope in ("namespace", "project", "ticket") and not namespace) or (scope in ("project", "ticket") and not project):
         raise Rejected(f"scope {scope} needs a namespace" + (" and a project" if scope in ("project", "ticket") else ""))
-    scan_secrets(title, body)
-    return dict(kind=kind, scope=scope, namespace=namespace, project=project, repo=str(entry.get("repo", "")), jira_key=str(entry.get("jira_key", "")),
+    source = entry.get("source") if isinstance(entry.get("source"), dict) else {}
+    repo, jira_key = str(entry.get("repo", "")), str(entry.get("jira_key", ""))
+    created_by = str(entry.get("created_by", ""))[:80]
+    scan_secrets(title, body, namespace, project, repo, jira_key, created_by, *tags, str(source))
+    return dict(kind=kind, scope=scope, namespace=namespace, project=project, repo=repo, jira_key=jira_key,
                 title=title, body=body, tags=[t.strip().lower() for t in tags], source=entry.get("source") if isinstance(entry.get("source"), dict) else {},
-                created_by=str(entry.get("created_by", ""))[:80], supersedes=entry.get("supersedes") or None,
+                created_by=created_by, supersedes=entry.get("supersedes") or None,
                 confidence=float(entry.get("confidence", 0.5)), expires_at=entry.get("expires_at") or None)
 
 

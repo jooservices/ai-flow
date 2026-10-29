@@ -5,12 +5,19 @@ password hashing (scrypt from the standard library, salted, no new dependency), 
 and the gate. The gate only works with `AIFLOW4_CONSOLE_LOGIN=1`; without it nothing changes.
 
 Sign-in, in order:
-1. Redis rate limits per client IP and per IP+email, before any database lookup (429 with Retry-After).
+1. Redis rate limits per client IP and per IP+email; when those budgets are spent, only a valid password plus a
+   one-time second factor can still sign in (429 with Retry-After for other attempts).
 2. The user row; an account whose lock has expired gets `failed_attempts` reset first.
 3. scrypt verification in a worker thread, never on the event loop. Unknown emails and locked accounts are checked
    against a dummy hash, so every refusal costs the same and returns the same 401 answer.
 4. A wrong password counts a failure; MAX_FAILURES in a row lock the account for LOCK_S.
 Failed sign-ins are audited, but at most AUDIT_FAILED_PER_MIN rows a minute, so a flood cannot grow the table.
+
+Two-factor (docs/v4/security.md, mfa.py): an enrolled person adds `code` (authenticator code or recovery code). The lock of
+step 4 stops password-only guessing but not a request that also carries a valid second factor, so the real owner is never
+locked out. Each sign-in creates a `console_sessions` row named by the cookie's `sid`; ending that row (forced sign-out,
+logout, password reset) makes every later request on the cookie fail (console_auth.SESSION_REVOKED). Cookies: the session
+cookie is HttpOnly; the `aiflow4_csrf` cookie carries the CSRF token that security.py requires on state-changing requests.
 
 Gate rules when it is on:
 - a console page without a valid session redirects to `/login?next=...`; any other path answers 401;
@@ -34,25 +41,40 @@ import secrets
 import stat
 import time
 from typing import Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import redis
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
+
+from .application_context import ApplicationContext
 from starlette.routing import Match
 
-from .console_auth import (COOKIE_NAME, PAGE_VIEWS, ROLE_LABELS, ROLE_PERMISSIONS, ConsoleUser, has_permission,
-                           issue_session, landing_page, normalize_roles, permissions_for_view, resolve_session_user,
-                           verify_session)
+from . import audit as audit_log
+from . import console_auth, mfa
+from .console_auth import (COOKIE_NAME, PAGE_VIEWS, ROLE_LABELS, ROLE_PERMISSIONS, ConsoleUser, csrf_token,
+                           has_permission, issue_session, landing_page, normalize_roles, permissions_for_view,
+                           resolve_session_user, verify_session)
 from .db import J
 from .emails import EMAIL, normalize_email  # noqa: F401 - re-exported for callers of login.normalize_email
 from .ui import CONSOLE_PAGE_PATHS
 
 log = logging.getLogger(__name__)
 
-SESSION_TTL_S = 12 * 3600
+CSRF_COOKIE = "aiflow4_csrf"  # readable by the console script, which echoes it in the X-CSRF-Token header
+SESSION_TTL_S = 12 * 3600  # default session length; the "session length" security setting overrides it
+SESSION_TTL_MIN_S, SESSION_TTL_MAX_S = 5 * 60, 30 * 24 * 3600
+MFA_ROLES = ("administrator",)  # two-factor sign-in is mandatory for anyone holding one of these roles
+
+
+def mfa_role(roles) -> bool:
+    """True when the assigned role (or any of several) is one that must sign in with two factors."""
+    try:
+        return any(role in MFA_ROLES for role in normalize_roles(roles))
+    except ValueError:
+        return False
 MAX_FAILURES = 5          # wrong passwords in a row before the account is locked
 LOCK_S = 15 * 60
 RATE_WINDOW_S = 15 * 60
@@ -158,6 +180,10 @@ def seed_user(db, email: str, role: str | list[str] | tuple[str, ...], display_n
                                 (email, display_name.strip(), roles[0], list(roles), password_hash)).fetchone()
             if not created:
                 return None
+            audited = [("people", "user_created")] + ([("roles", "role_granted")] if role != "lead" else [])
+            for category, action in audited:  # same transaction as the insert, so no user exists without its entry
+                c.execute("INSERT INTO audit_log (actor, category, action, target, ip, detail) VALUES (%s,%s,%s,%s,%s,%s)",
+                          ("cli", category, action, email[:300], "", J({"role": role})))
             if deliver:
                 deliver(password)
     return password
@@ -172,14 +198,41 @@ def reset_password(db, email: str, deliver: Callable[[str], None] | None = None,
         raise ValueError(str(exc)) from None
     email = normalize_email(email)
     password = generate_password()
-    with db.pool.connection() as c:
+    with db.transaction() as c:
         updated = c.execute("UPDATE console_users SET password_hash=%s, failed_attempts=0, locked_until=NULL,"
                             " updated_at=now() WHERE email=%s RETURNING email", (hash_password(password), email)).fetchone()
         if not updated:
             raise ValueError("no such console user")
+        c.execute("UPDATE console_sessions SET revoked_at=now(), revoked_by='password reset'"
+                  " WHERE email=%s AND revoked_at IS NULL", (email,))  # a new password ends every open session
+        audit_log.record(db, "cli", "people", "password_reset", email)
         if deliver:
             deliver(password)
     return password
+
+
+def get_setting(db, key: str, default: str) -> str:
+    row = db.one("SELECT value FROM security_settings WHERE key=%s", (key,))
+    return row["value"] if row else default
+
+
+def set_setting(db, key: str, value: str, actor: str) -> None:
+    db.run("INSERT INTO security_settings (key, value, updated_by) VALUES (%s,%s,%s)"
+           " ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_by=EXCLUDED.updated_by, updated_at=now()",
+           (key, value, actor))
+
+
+def session_ttl_s(ctx) -> int:
+    try:
+        value = int(get_setting(ctx.db, "session_ttl_s", str(SESSION_TTL_S)))
+    except ValueError:
+        value = SESSION_TTL_S
+    return max(SESSION_TTL_MIN_S, min(SESSION_TTL_MAX_S, value))
+
+
+def require_mfa(_ctx) -> bool:
+    """Administrator MFA is mandatory even when a legacy setting says otherwise."""
+    return True
 
 
 # --- HTTP ----------------------------------------------------------------------------------------------------------
@@ -223,6 +276,37 @@ def client_ip(request: Request, trusted_proxies: list[str] | tuple[str, ...] = (
     return str(peer_address)
 
 
+def _origin_tuple(value: str, *, referrer: bool = False) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlsplit(value)
+        scheme, host = parsed.scheme.lower(), (parsed.hostname or "").lower().rstrip(".")
+        if scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+            return None
+        if not referrer and (parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+            return None
+        port = parsed.port or (443 if scheme == "https" else 80)
+        return scheme, host, port
+    except ValueError:
+        return None
+
+
+def preauth_origin_allowed(request: Request, public_url: str) -> bool:
+    """Require a same-origin marker on the pre-authentication login request."""
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        return False
+    origin = request.headers.get("origin", "")
+    referrer = request.headers.get("referer", "")
+    supplied = origin or referrer
+    if not supplied:
+        return False
+    source = _origin_tuple(supplied, referrer=not bool(origin))
+    if source is None:
+        return False
+    expected = {_origin_tuple(str(request.base_url)), _origin_tuple(public_url)}
+    expected.discard(None)
+    return source in expected
+
+
 LOGIN_PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign in · AI Flow</title>
@@ -243,6 +327,8 @@ button:disabled{opacity:.6;cursor:default}#msg{min-height:20px;margin-top:12px;c
 <main><form id="f" autocomplete="on"><h1>AI Flow Command Center</h1><p>Sign in to continue.</p>
 <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" required autofocus>
 <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+<label for="code">Authentication code or recovery code <span style="color:var(--muted)">(if two-factor is on)</span></label>
+<input id="code" name="code" type="text" autocomplete="one-time-code" inputmode="text" maxlength="32">
 <button id="go" type="submit">Sign in</button><div id="msg" role="alert"></div></form></main>
 <script>
 var next=new URLSearchParams(location.search).get("next")||"/cc";
@@ -253,17 +339,19 @@ fetch("/v1/auth/me",{credentials:"same-origin"}).then(function(r){if(r.status===
 document.getElementById("f").addEventListener("submit",function(e){e.preventDefault();
 var b=document.getElementById("go"),m=document.getElementById("msg");b.disabled=true;m.textContent="";
 fetch("/v1/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},credentials:"same-origin",
-body:JSON.stringify({email:document.getElementById("email").value,password:document.getElementById("password").value})})
+body:JSON.stringify({email:document.getElementById("email").value,password:document.getElementById("password").value,code:document.getElementById("code").value})})
 .then(function(r){return r.json().then(function(d){return[r.status,d]})})
-.then(function(x){if(x[0]===200){location.href=x[1].landing_page||next}
-else{m.textContent=x[1].detail||"Sign-in failed";b.disabled=false}})
+.then(function(x){if(x[0]===200){location.href=x[1].mfa_setup_required?"/security":(x[1].landing_page||next)}
+else{m.textContent=x[1].detail||"Sign-in failed";b.disabled=false;if(x[1].mfa_required){document.getElementById("code").focus()}}})
 .catch(function(){m.textContent="Cannot reach the server";b.disabled=false})});
 </script></body></html>
 """
 
 
-def install_login(app: FastAPI, ctx) -> None:
+def install_login(app: FastAPI, ctx: ApplicationContext) -> None:
     from . import setup_wizard
+    from .route_registry import concrete_routes
+    from .security import install_security
 
     settings = ctx.settings
     token_routes: dict[int, bool] = {}
@@ -278,12 +366,26 @@ def install_login(app: FastAPI, ctx) -> None:
             return True
         return any(param.name == "authorization" for d in flatten(route.dependant) for param in d.header_params)
 
+    def resolved_route(route, scope):
+        """Return the matching leaf route when FastAPI wraps included routers in the app route table."""
+        if isinstance(route, APIRoute):
+            return route
+        matcher = getattr(route, "_match", None)
+        if callable(matcher):
+            result = matcher(scope)
+            if result[0] == Match.FULL and len(result) > 2:
+                return resolved_route(result[2], scope)
+        return None
+
     def checks_token(request: Request) -> bool:
-        for route in app.routes:
+        for route in concrete_routes(app.routes):
             if route.matches(request.scope)[0] == Match.FULL:
-                if id(route) not in token_routes:
-                    token_routes[id(route)] = isinstance(route, APIRoute) and route_checks_token(route)
-                return token_routes[id(route)]
+                matched = resolved_route(route, request.scope)
+                if matched is None:
+                    return False
+                if id(matched) not in token_routes:
+                    token_routes[id(matched)] = route_checks_token(matched)
+                return token_routes[id(matched)]
         return False
 
     def key(*parts: str) -> str:
@@ -331,32 +433,80 @@ def install_login(app: FastAPI, ctx) -> None:
                 "roles": list(assigned), "role_labels": [ROLE_LABELS[role] for role in assigned],
                 "landing_page": landing_page(assigned)}
 
-    def attempt(ip: str, email: str, password: str) -> tuple[int, dict, dict]:
-        """The blocking part of a sign-in (Redis, database, scrypt); runs in a worker thread."""
+    def session_revoked(sid: str) -> bool:
+        """True when the session was ended (forced sign-out, logout, password reset), expired, or is unknown.
+        Fails closed: when the database cannot answer, the session does not count."""
+        try:
+            return ctx.db.one("SELECT 1 AS x FROM console_sessions WHERE sid=%s AND revoked_at IS NULL"
+                              " AND expires_at > now()", (sid,)) is None
+        except Exception:  # noqa: BLE001
+            log.exception("console session check failed")
+            return True
+
+    def register_revocation() -> None:
+        if len(settings.console_session_secret.encode()) >= 32:
+            console_auth.SESSION_REVOKED[settings.console_session_secret] = session_revoked
+
+    register_revocation()
+
+    def attempt(ip: str, email: str, password: str, code: str = "") -> tuple[int, dict, dict]:
+        """The blocking part of a sign-in (Redis, database, scrypt); runs in a worker thread.
+
+        Password guessing is slowed and blocked: per-IP and per-IP+email budgets, and MAX_FAILURES wrong passwords
+        lock the account against password-only attempts. The lock never shuts the real owner out: someone who also
+        presents a valid authenticator code or an unused recovery code (a second factor a guesser does not have) is
+        still checked and signed in, and success clears the lock."""
         wait = over_limit(ip, email)
-        if wait:
-            return 429, {"detail": "too many sign-in attempts; try again later"}, {"Retry-After": str(wait)}
+        limited = bool(wait)
+        with ctx.db.transaction():
+            return check_attempt(ip, email, password, code, wait, limited)
+
+    def check_attempt(ip: str, email: str, password: str, code: str, wait: int, limited: bool):
         row = None
         if email:
             ctx.db.run("UPDATE console_users SET failed_attempts=0, locked_until=NULL, updated_at=now()"
                        " WHERE email=%s AND locked_until IS NOT NULL AND locked_until <= now()", (email,))
-            row = ctx.db.one("SELECT email, display_name, role, roles, password_hash, disabled, locked_until"
-                             " FROM console_users WHERE email=%s", (email,))
+            row = ctx.db.one("SELECT email, display_name, role, roles, password_hash, disabled, locked_until,"
+                             " totp_secret, totp_enabled FROM console_users WHERE email=%s", (email,))
         locked = bool(row and row["locked_until"])
-        usable = bool(row and not locked and not row["disabled"])
+        enrolled = bool(row and row["totp_enabled"])
+        second_factor = bool(code.strip()) and enrolled
+        usable = bool(row and not row["disabled"] and (not locked or second_factor))
         good = verify_password(password, row["password_hash"] if usable else _dummy_hash())
+        factor = ""
+        if usable and good and enrolled and code.strip():
+            factor = mfa.check_second_factor(ctx.db, row, email, code, settings.console_session_secret)
+            good = bool(factor)
+        if limited and not (usable and good and enrolled and factor):
+            return 429, {"detail": "too many sign-in attempts; try again later"}, {"Retry-After": str(wait)}
+        if usable and good and enrolled and not code.strip():
+            # right password, second factor still to come; not a failure and nothing is revealed to a wrong password
+            return 401, {"detail": "enter the code from your authenticator app or a recovery code",
+                         "mfa_required": True}, {}
         if not (usable and good):
-            if usable:
+            if usable and not locked:
                 ctx.db.run("UPDATE console_users SET failed_attempts=failed_attempts+1,"
                            " locked_until=CASE WHEN failed_attempts+1 >= %s THEN now() + make_interval(secs => %s)"
                            " ELSE locked_until END, updated_at=now() WHERE email=%s", (MAX_FAILURES, LOCK_S, email))
-            audit_failure(email, "account locked" if locked else REFUSED)
+            audit_failure(email, "account locked" if locked and not second_factor else REFUSED)
             return 401, {"detail": REFUSED}, {}
         ctx.db.run("UPDATE console_users SET failed_attempts=0, locked_until=NULL, last_login_at=now(), updated_at=now()"
                    " WHERE email=%s", (email,))
         ctx.leases.r.delete(key("ip_email", digest(f"{ip}\n{email}")))
         audit("login", email, True, "signed in")
-        return 200, user_json(email, row.get("roles") or [row["role"]], row["display_name"]), {}
+        roles = row.get("roles") or [row["role"]]
+        pending = mfa_role(roles) and not enrolled and require_mfa(ctx)
+        ttl = session_ttl_s(ctx)
+        sid = secrets.token_urlsafe(18)
+        ctx.db.run("INSERT INTO console_sessions (sid, email, role, ip, expires_at)"
+                   " VALUES (%s,%s,%s,%s, now() + make_interval(secs => %s))", (sid, email, row["role"], ip, ttl))
+        audit_log.record(ctx.db, email, "auth", "signed_in", email,
+                         {"second_factor": factor or "none", "mfa_setup_required": pending}, ip)
+        body = user_json(email, roles, row["display_name"])
+        body.update({"mfa_setup_required": pending, "_sid": sid, "_ttl": ttl})
+        if factor == "recovery":
+            body["recovery_codes_left"] = mfa.recovery_codes_left(ctx.db, email)
+        return 200, body, {}
 
     @app.get("/login", include_in_schema=False)
     def login_page(request: Request) -> HTMLResponse:
@@ -369,6 +519,8 @@ def install_login(app: FastAPI, ctx) -> None:
         secret = settings.console_session_secret
         if len(secret.encode()) < 32:
             return JSONResponse({"detail": "console sign-in is not configured"}, status_code=503)
+        if not preauth_origin_allowed(request, settings.public_url):
+            return JSONResponse({"detail": "cross-site sign-in request refused"}, status_code=403)
         try:
             data = await request.json()
         except ValueError:
@@ -380,39 +532,68 @@ def install_login(app: FastAPI, ctx) -> None:
         except ValueError:
             email = ""
         try:
+            code = data.get("code") if isinstance(data.get("code"), str) else ""
             status, body, headers = await run_in_threadpool(
-                attempt, client_ip(request, settings.trusted_proxies), email, data["password"][:1024])
+                attempt, client_ip(request, settings.trusted_proxies), email, data["password"][:1024], code[:64])
         except redis.RedisError:
             log.exception("console sign-in: Redis is unavailable")
             return JSONResponse({"detail": "sign-in is unavailable; try again shortly"}, status_code=503)
+        sid, ttl = body.pop("_sid", ""), body.pop("_ttl", SESSION_TTL_S)
         response = JSONResponse(body, status_code=status, headers={"Cache-Control": "no-store", **headers})
         if status == 200:
-            response.set_cookie(COOKIE_NAME, issue_session(email, body["roles"], int(time.time()) + SESSION_TTL_S, secret),
-                                max_age=SESSION_TTL_S, httponly=True, secure=secure_cookie(), samesite="strict", path="/")
+            register_revocation()
+            token = issue_session(email, body["roles"], int(time.time()) + ttl, secret, sid=sid,
+                                  mfa_pending=body["mfa_setup_required"])
+            set_session_cookies(response, token, ttl)
         return response
+
+    def set_session_cookies(response, token: str, ttl: int) -> None:
+        response.set_cookie(COOKIE_NAME, token, max_age=ttl, httponly=True, secure=secure_cookie(), samesite="strict", path="/")
+        # The console script reads this cookie and echoes it in X-CSRF-Token; it only works with this session's cookie.
+        response.set_cookie(CSRF_COOKIE, csrf_token(token, settings.console_session_secret), max_age=ttl, httponly=False,
+                            secure=secure_cookie(), samesite="strict", path="/")
+
+    def end_session(request: Request, actor_hint: str = "") -> str:
+        """Mark the session named by the request's cookie as ended; returns who it belonged to."""
+        user = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret, allow_pending=True)
+        if user and user.sid:
+            ctx.db.run("UPDATE console_sessions SET revoked_at=now(), revoked_by=%s WHERE sid=%s AND revoked_at IS NULL",
+                       (user.subject, user.sid))
+            audit_log.record(ctx.db, user.subject, "auth", "signed_out", user.subject)
+        return user.subject if user else ""
+
+    def clear_cookies(response) -> None:
+        response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=secure_cookie(), samesite="strict")
+        response.delete_cookie(CSRF_COOKIE, path="/", secure=secure_cookie(), samesite="strict")
 
     @app.post("/v1/auth/logout")
-    def logout() -> JSONResponse:
+    def logout(request: Request) -> JSONResponse:
+        end_session(request)
         response = JSONResponse({"signed_out": True})
-        response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=secure_cookie(), samesite="strict")
+        clear_cookies(response)
         return response
 
-    @app.get("/logout", include_in_schema=False)
-    def logout_page() -> RedirectResponse:
+    @app.post("/logout", include_in_schema=False)
+    def logout_page(request: Request) -> RedirectResponse:
+        end_session(request)
         response = RedirectResponse("/login", status_code=303)
-        response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=secure_cookie(), samesite="strict")
+        clear_cookies(response)
         return response
 
     @app.get("/v1/auth/me")
     def me(request: Request) -> JSONResponse:
-        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret)
-        user = resolve_session_user(ctx.db, claims) if claims else None
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret,
+                                allow_pending=True)
+        user = resolve_session_user(ctx.db, claims, True) if claims else None
         if not user:
             return JSONResponse({"detail": "not signed in"}, status_code=401)
         row = ctx.db.one("SELECT display_name FROM console_users WHERE email=%s", (user.subject,))
         data = user_json(user.subject, list(user.assigned_roles), (row or {}).get("display_name", ""))
         data["landing_page"] = landing_page(user.effective_roles)
-        return JSONResponse(data)
+        data["mfa_setup_required"] = user.mfa_pending
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    app.state.set_session_cookies = set_session_cookies  # the two-factor setup route issues a full session after enrolling
 
     def users_manager(request: Request):
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret)
@@ -467,6 +648,8 @@ def install_login(app: FastAPI, ctx) -> None:
         if password is None:
             return JSONResponse({"detail": "A console user with this email already exists."}, status_code=409)
         audit("create_user", email, True, "created")
+        audit_log.record(ctx.db, user.subject, "people", "person_added", email, {"roles": [data["role"]]},
+                         client_ip(request, settings.trusted_proxies))
         return JSONResponse({"email": email, "name": display_name.strip(), "role": data["role"],
                              "initial_password": password,
                              "message": "Account created. Copy the initial password and share it securely."},
@@ -476,18 +659,23 @@ def install_login(app: FastAPI, ctx) -> None:
     mount_discovered_routers(app)
 
     if not settings.console_login:
+        install_security(app, ctx)
         return
 
     def api_permission(path: str) -> str:
         """Return the view permission that owns a console API path."""
+        if path in ("/v1/system-check", "/v1/support-bundle"):
+            return "node.operations.read"
         if path in ("/v1/role-health", "/v1/master/autonomy", "/v1/master/report"):
             return "view.machines_ai"
         if path in ("/v1/role-health/settings", "/v1/master/autonomy/budget"):
             return "console.manage"
         if path.startswith(("/v1/console/users", "/v1/console/audit", "/v1/console/view-as")):
             return "console.manage"
-        if path.startswith("/v1/runtime-settings"):
+        if path.startswith(("/v1/runtime-settings", "/v1/quota-refresh/")):
             return "console.manage"
+        if path.startswith("/v1/runs/") and path.endswith("/inbox"):
+            return "review.actions"
         if path.startswith("/v1/knowledge/"):
             return "view.knowledge"
         if path.startswith("/v1/integrations/"):
@@ -539,9 +727,11 @@ def install_login(app: FastAPI, ctx) -> None:
                    (user.subject, reason, J({"path": request.url.path, "method": request.method,
                                              "roles": list(user.effective_roles)})))
 
-    def active_user(request: Request) -> ConsoleUser | None:
-        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret)
-        return resolve_session_user(ctx.db, claims) if claims else None
+    def active_user(request: Request, allow_pending: bool = False) -> ConsoleUser | None:
+        # verify_session also refuses an ended session (forced sign-out) and a pre-hardening cookie
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret, None,
+                                allow_pending)
+        return resolve_session_user(ctx.db, claims, allow_pending) if claims else None
 
     def forbidden_page() -> HTMLResponse:
         return HTMLResponse("<!doctype html><html lang='en'><meta charset='utf-8'><title>View unavailable</title>"
@@ -558,9 +748,14 @@ def install_login(app: FastAPI, ctx) -> None:
         if path in OPEN_PATHS or path.startswith(OPEN_PREFIXES) or setup_open:
             return await call_next(request)
         bearer_route = bool(request.headers.get("authorization") and checks_token(request))
-        user = active_user(request)
+        user = await run_in_threadpool(active_user, request)  # reads the database (ended sessions): off the loop
         if user is None and bearer_route:
             return await call_next(request)
+        if user is None and await run_in_threadpool(active_user, request, True):
+            # signed in but two-factor setup is required first: only the page shell and the setup routes
+            if path in PAGES or path.startswith("/v1/security/mfa") or path == "/v1/auth/me":
+                return await call_next(request)
+            return JSONResponse({"detail": "set up two-factor sign-in first", "mfa_setup_required": True}, status_code=403)
         if user is None:
             if path in PAGES or path.startswith("/help/"):
                 target = safe_next(path + (f"?{request.url.query}" if request.url.query else ""))
@@ -600,3 +795,5 @@ def install_login(app: FastAPI, ctx) -> None:
             # Retain the current page for an already authenticated browser; sign-in itself lands by role priority.
             request.state.console_user = user
         return await call_next(request)
+
+    install_security(app, ctx)

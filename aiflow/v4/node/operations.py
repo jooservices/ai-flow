@@ -559,6 +559,8 @@ def _link_playwright(env: dict[str, str], link_dir: Path = Path("/usr/local/bin"
     if not (source.exists() or source.is_symlink()):
         raise OperationError(f"Playwright was installed but its command is missing from {prefix / 'bin'}")
     link = link_dir / "playwright"
+    if os.path.abspath(source) == os.path.abspath(link):
+        return
     temp_link = link.with_name(".playwright.aiflow4")
     try:
         temp_link.unlink(missing_ok=True)
@@ -580,12 +582,24 @@ def _browser_binary(root: Path) -> Path | None:
 def _check_browser_launch(root: Path) -> str:
     """Launch Chromium headless once as the AI user; return its version, or raise with the missing piece in plain words."""
     import logging
+    import pwd
+
     binary = _browser_binary(root)
     if binary is None:
         raise OperationError(f"Chromium was installed but no browser program was found in {root}")
     prefix: list[str] = []
-    if os.geteuid() == 0 and shutil.which("runuser"):
-        prefix = ["runuser", "-u", _AI_USER, "--"]
+    if os.geteuid() == 0:
+        runuser = shutil.which("runuser")
+        if not runuser:
+            raise OperationError(f"Chromium cannot be verified as {_AI_USER} because runuser is unavailable")
+        prefix = [runuser, "-u", _AI_USER, "--"]
+    else:
+        try:
+            worker_uid = pwd.getpwnam(_AI_USER).pw_uid
+        except KeyError as exc:
+            raise OperationError(f"Chromium cannot be verified because the {_AI_USER} account is missing") from exc
+        if os.geteuid() != worker_uid:
+            raise OperationError(f"Chromium must be verified as {_AI_USER}")
     with tempfile.TemporaryDirectory(prefix="aiflow4-browser-") as home:
         os.chmod(home, 0o777)
         env = _installer_env(HOME=home, PLAYWRIGHT_BROWSERS_PATH=str(root))
@@ -799,6 +813,7 @@ def _tool_version_ok(name: str, actual: str, expected: str) -> bool:
 
 
 def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[str, Any],
+                               required_tools: list[str] | None = None,
                                requested_tools: list[dict[str, str]] | None = None) -> dict[str, Any]:
     """Install and preflight every configured project stack on this host.
 
@@ -813,22 +828,29 @@ def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[st
         str(project): tools_for_stacks_in_project(stacks)
         for project, stacks in project_stacks.items()
     }
+    # Older callers passed the targeted repair plan as the third argument. Keep that shape working while
+    # heartbeats carry required tools and targeted repairs separately.
+    if required_tools and isinstance(required_tools[0], dict):
+        requested_tools = [*(requested_tools or []), *required_tools]
+        required_tools = []
     allowed = set(NODE_TOOLS) | set(CATALOG_TOOLS) | {tool for values in STACK_TOOLS.values() for tool in values}
     requests = {str(item.get("name", "")): str(item.get("version", ""))
                 for item in requested_tools or [] if isinstance(item, dict)
                 and str(item.get("name", "")) in allowed}
-    required = list(dict.fromkeys([tool for values in project_tools.values() for tool in values] + list(requests)))
+    required = list(dict.fromkeys([*(required_tools or []),
+                                   *(tool for values in project_tools.values() for tool in values), *requests]))
     if not required:
         return {"tools": {}, "gaps": {}}
     before = tool_versions(required)
     per_project_stacks = {str(project): stacks for project, stacks in project_stacks.items()}
-    selected = set()
+    selected = set(toolchain_gaps(before, required_tools or [], versions))
     for project, tools in project_tools.items():
         selected.update(toolchain_gaps(before, tools, versions, per_project_stacks[project], require_pins=True))
-    selected.update(tool for tool in requests if str(before.get(tool, "missing")) in {"", "missing", "timeout"}
-                    or str(before.get(tool, "missing")).startswith("broken:"))
+    selected.update(tool for tool, version in requests.items()
+                    if not _tool_version_ok(tool, str(before.get(tool, "missing")), version))
     ordered = sorted(selected, key=lambda tool: (
         _INSTALL_ORDER.index(tool) if tool in _INSTALL_ORDER else len(_INSTALL_ORDER), tool))
+    repaired: list[str] = []
     for tool in ordered:
         stacks = next((per_project_stacks[project] for project, tools in project_tools.items() if tool in tools), [])
         stack_tools = {required for stack in (stacks if isinstance(stacks, list) else [stacks])
@@ -840,6 +862,7 @@ def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[st
         version = request_version if requested else pinned_version(versions, tool, stacks)
         try:
             _install_component(tool, version, [])
+            repaired.append(tool)
         except Exception as exc:  # noqa: BLE001 - keep preparing unrelated tools/projects after one installer fails
             import logging
             logging.getLogger("aiflow4.node").warning("toolchain install failed for %s: %s", tool, type(exc).__name__)
@@ -848,7 +871,10 @@ def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[st
             for project, tools in project_tools.items()}
     request_gaps = [tool for tool, version in requests.items()
                     if not _tool_version_ok(tool, str(after.get(tool, "missing")), version)]
-    return {"tools": after, "gaps": gaps, "request_gaps": request_gaps}
+    system_gaps = set(toolchain_gaps(after, required_tools or [], versions))
+    installed = [tool for tool in repaired if tool not in system_gaps and tool not in request_gaps
+                 and not any(tool in project_gaps for project_gaps in gaps.values())]
+    return {"tools": after, "gaps": gaps, "installed": installed, "request_gaps": request_gaps}
 
 
 def _service_health(service: dict[str, Any]) -> dict[str, Any]:
@@ -1128,11 +1154,23 @@ def _execute_runtime_setting_rollback(payload: dict[str, Any]) -> dict[str, Any]
 
 def execute(operation: dict[str, Any],
             checkpoint: Callable[[dict[str, str]], dict[str, str]] | None = None) -> dict[str, Any]:
-    """Install missing components or reconcile all tools and services in a server-created operation payload."""
+    """Run a whitelist-bound install, repair, worker-restart or runtime-setting operation created by control."""
     payload = operation.get("payload") or {}
     from .agent import tool_versions
 
     action = payload.get("action")
+    if action == "restart_worker":
+        account = str(payload.get("account") or "")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}", account):
+            raise OperationError("worker account id is invalid")
+        try:
+            result = subprocess.run(["systemctl", "restart", f"aiflow4-worker@{account}.service"],
+                                    capture_output=True, text=True, timeout=180)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OperationError(f"worker restart could not run ({type(exc).__name__})") from exc
+        if result.returncode:
+            raise OperationError(f"systemd could not restart worker {account} (exit {result.returncode})")
+        return {"healthy": True, "action": "restart_worker", "account": account}
     if action in {"runtime_setting_project", "runtime_setting_control"}:
         expected_scope = "project" if action == "runtime_setting_project" else "secret"
         if payload.get("scope") != expected_scope:

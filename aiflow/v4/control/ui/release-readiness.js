@@ -1,0 +1,25 @@
+/* Shared release readiness labels used by the console's English and Vietnamese views. */
+window.AIFlowReadyText = {
+  en: { title: 'Release readiness', hint: 'Every ticket now in the Jira version must be Done, verified, not in rework and not blocked by an open release-qa Bug',
+        none: 'No unreleased Jira version.', ready: 'Ready', notReady: 'Not ready', done: 'Done',
+        empty: function () { return 'The version is empty: no ticket is in it'; },
+        not_done: function (r) { return r.ticket + ': not Done (status ' + r.status + ')'; },
+        rework: function (r) { return r.ticket + ': in rework'; },
+        not_verified: function (r) { return r.ticket + ': Done but not verified'; },
+        blocked_by_bug: function (r) { return r.ticket + ': blocked by release-qa Bug ' + r.bug; },
+        release_running: function () { return 'The release check is running'; },
+        release_failed: function (r) { return 'The release check failed' + (r.detail ? ': ' + r.detail : ''); },
+        scale_proof_missing: function (r) { return 'A passing scale proof is required before release' + (r.detail ? ': ' + r.detail : ''); },
+        scale_proof_failed: function (r) { return 'Scale proof regression blocks the release' + (r.detail ? ': ' + r.detail : ''); } },
+  vi: { title: 'Sẵn sàng release', hint: 'Mọi ticket đang ở trong Jira version phải Done, đã qua verify, không rework và không bị Bug release-qa còn mở chặn',
+        none: 'Không có Jira version nào chưa release.', ready: 'Sẵn sàng', notReady: 'Chưa sẵn sàng', done: 'Done',
+        empty: function () { return 'Version rỗng: chưa có ticket nào'; },
+        not_done: function (r) { return r.ticket + ': chưa Done (đang ở ' + r.status + ')'; },
+        rework: function (r) { return r.ticket + ': đang rework'; },
+        not_verified: function (r) { return r.ticket + ': đã Done nhưng chưa qua verify'; },
+        blocked_by_bug: function (r) { return r.ticket + ': bị Bug release-qa ' + r.bug + ' chặn'; },
+        release_running: function () { return 'Kiểm tra release đang chạy'; },
+        release_failed: function (r) { return 'Kiểm tra release bị lỗi' + (r.detail ? ': ' + r.detail : ''); },
+        scale_proof_missing: function (r) { return 'Cần scale proof đạt yêu cầu trước khi release' + (r.detail ? ': ' + r.detail : ''); },
+        scale_proof_failed: function (r) { return 'Scale proof bị thụt lùi, chặn release' + (r.detail ? ': ' + r.detail : ''); } }
+};

@@ -23,7 +23,10 @@ dependencies = [
 aiflow4 = "aiflow.v4.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.3"]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.17.3",
+]
 
 [build-system]
 requires = ["hatchling>=1.25"]
@@ -35,3 +38,21 @@ packages = ["aiflow"]
 [tool.pytest.ini_options]
 testpaths = ["tests/v4"]
 addopts = "-q"
+
+[tool.uv]
+# fastembed caps pillow below 13, but pillow 13 fixes published HIGH vulnerabilities (docs/v4/security.md). fastembed
+# only uses pillow for image embeddings, which AI Flow does not use (text embeddings only).
+override-dependencies = ["pillow>=13.0.0"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["build", "tests"]
+
+[tool.ruff.lint]
+# Bugs and structure, not taste: pyflakes, pycodestyle errors, bugbear, simplify, McCabe complexity.
+select = ["E9", "F", "B", "SIM", "C90"]
+ignore = ["B008", "SIM108"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12

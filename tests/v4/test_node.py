@@ -4,7 +4,7 @@ import pwd
 import stat
 from types import SimpleNamespace
 
-from aiflow.v4.node import agent
+from aiflow.v4.node import agent, operations
 
 
 def test_reconcile_can_prepare_a_new_console_account_home(monkeypatch, tmp_path):
@@ -62,6 +62,21 @@ def test_node_tool_versions_report_success_without_output_as_missing(monkeypatch
     versions = agent.tool_versions()
     assert versions["composer"] == "missing"
     assert versions["php"] == "php version"
+
+
+def test_scratch_cleanup_that_restores_disk_minimum_is_reported_as_fixed(monkeypatch):
+    gib = 1024 ** 3
+    free_space = iter((4 * gib, 6 * gib))
+    monkeypatch.setattr(agent, "_disk_free_bytes", lambda: next(free_space))
+    monkeypatch.setattr(agent, "clean_scratch", lambda: 1)
+    auto_fixed_conditions = set()
+
+    assert agent._run_disk_cleanup(agent.clean_scratch, auto_fixed_conditions) == 1
+    assert auto_fixed_conditions == {"disk-space"}
+    disk = next(condition for condition in agent._system_machine_conditions({"disk_free": 6 * gib},
+                                                                            auto_fixed_conditions)
+                if condition["id"] == "disk-space")
+    assert disk["result"] == "fixed_automatically"
 
 
 def test_node_tool_versions_report_stack_tools(monkeypatch):
@@ -128,6 +143,10 @@ def test_collect_heartbeat_gathers_metrics_tools_workers_and_settings(monkeypatc
 
     heartbeat = agent.collect_heartbeat(state, "node-test", 4, Relay(), "public-key")
 
+    readiness = {key: heartbeat.pop(key) for key in ("system_conditions", "credential_checks",
+                                                     "auto_fixed_tools", "auto_fixed_conditions")}
+    assert readiness["auto_fixed_tools"] == [] and readiness["auto_fixed_conditions"] == []
+    assert set(readiness["credential_checks"]) == {"codex-01", "claude-01"}
     assert heartbeat == {
         "slots_total": 4, "slots_used": 1, "release_version": "v4.2.0", "release_protocol": 1,
         "tools": {"codex": "Codex 1.0"}, "services": {"redis": {"healthy": True}},
@@ -190,6 +209,18 @@ def test_apply_heartbeat_reconciles_desired_worker_units_and_signins(monkeypatch
         ("enable", "--now", "aiflow4-worker@codex-new"),
         ("disable", "--now", "aiflow4-worker@codex-old.service"),
     ]
+def test_playwright_global_prefix_already_in_path_does_not_replace_its_command(monkeypatch, tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    source = bin_dir / "playwright"
+    source.write_text("#!/bin/sh\nexit 0\n")
+    monkeypatch.setattr(operations, "_run_installer",
+                        lambda *_args, **_kwargs: SimpleNamespace(stdout=f"{tmp_path}\n"))
+
+    operations._link_playwright({}, link_dir=bin_dir)
+
+    assert source.is_file() and not source.is_symlink()
+    assert source.read_text() == "#!/bin/sh\nexit 0\n"
 
 
 def test_heartbeat_carries_the_version_or_missing_for_each_project_tool(monkeypatch):

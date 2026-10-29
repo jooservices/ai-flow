@@ -1,18 +1,19 @@
 import csv
 import io
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from conftest import add_open_escalation, add_ticket, join_node
+from conftest import add_open_escalation, add_ticket, join_node, report_account_credentials
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 
 
-def join(client, name, ip=""):
-    r = join_node(client, name, ip=ip)
+def join(client, name, ip="", *, heartbeat=True):
+    r = join_node(client, name, ip=ip, heartbeat=heartbeat)
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
@@ -82,6 +83,34 @@ def test_developer_pr_lookup_is_fenced_and_scoped_to_the_run_repository(client, 
                                                      "repo": "jooservices/other", "head": "TESTWP-6-no-change"},
                             headers=cc)
     assert wrong_repo.status_code == 403
+
+
+def test_worker_poll_counts_running_project_tickets_only_when_a_limit_is_configured(client, ctx):
+    node = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-PARALLEL-LIMIT")
+    original_all = ctx.db.all
+    project_count_queries = []
+
+    def recording_all(sql, params=()):
+        if "SELECT project,count(*) AS count FROM runs" in sql:
+            project_count_queries.append((sql, params))
+        return original_all(sql, params)
+
+    ctx.db.all = recording_all
+    response = client.get("/v1/work/candidates?account=claude-01", headers=node)
+    assert response.status_code == 200
+    assert "TESTWP-PARALLEL-LIMIT" in {ticket["key"] for ticket in response.json()["tickets"]}
+    assert project_count_queries == []  # the fixture project's limit is zero (unlimited)
+
+    ctx.repo().projects["TESTWP"].limits["parallel"] = 1
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status)"
+               " VALUES (%s,'TESTWP-ACTIVE','TESTWP','dev','codex-01','codex','node1',1,'running')",
+               (str(uuid.uuid4()),))
+    response = client.get("/v1/work/candidates?account=claude-01", headers=node)
+    assert response.status_code == 200
+    assert response.json()["tickets"] == []
+    assert len(project_count_queries) == 1
+    assert "project=ANY(%s)" in project_count_queries[0][0]
 
 
 def test_board_snapshot_marks_already_done_runs_and_keeps_the_pull_request_link(client, ctx):
@@ -269,24 +298,30 @@ def test_joined_project_node_is_online_preflight_green_and_can_claim_project_tic
 
 
 def test_node_health_reports_heartbeat_and_preflight_for_the_installer(client, ctx):
-    headers = join(client, "node1")
-    before = client.get("/v1/nodes/node1/health", headers=headers).json()
+    token = client.post("/v1/nodes/join-tokens", json={
+        "provision_key": "join-secret", "name": "node-health", "project": "TESTWP"})
+    assert token.status_code == 200
+    joined = client.post("/v1/nodes/join", json={"join_token": token.json()["token"]})
+    assert joined.status_code == 200
+    headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+    before = client.get("/v1/nodes/node-health/health", headers=headers).json()
     assert before["status"] != "online" and before["preflight_ok"] is False and before["missing_tools"]
-    client.post("/v1/nodes/node1/heartbeat", json={
+    client.post("/v1/nodes/node-health/heartbeat", json={
         "tools": {"git": "git version 2", "uv": "uv 0.1", "codex": "codex 1.0",
                   "codex-code-mode-host": "present /usr/local/bin/codex-code-mode-host"},
         "slots_total": 2}, headers=headers)
-    after = client.get("/v1/nodes/node1/health", headers=headers).json()
+    after = client.get("/v1/nodes/node-health/health", headers=headers).json()
     assert after["status"] == "online" and after["preflight_ok"] is True and after["missing_tools"] == []
     assert 0 <= after["heartbeat_age_seconds"] < 60
-    assert client.get("/v1/nodes/node1/health").status_code == 401
+    assert client.get("/v1/nodes/node-health/health").status_code == 401
     other = join(client, "node2")
-    assert client.get("/v1/nodes/node1/health", headers=other).status_code == 403
+    assert client.get("/v1/nodes/node-health/health", headers=other).status_code == 403
 
 
 def test_node_heartbeat_is_shipped_to_openobserve_only(client, ctx):
     ctx.events.o2_url = "http://o2.test"  # queue only; the shipping thread is not started
     cc = join(client, "cc")
+    ctx.events.q.queue.clear()  # discard the test helper's simulated first agent heartbeat
     response = client.post("/v1/nodes/cc/heartbeat", json={
         "slots_total": 4, "slots_used": 2, "release_version": "4.0.0", "metrics": {"cpu_pct": 12.5}
     }, headers=cc)
@@ -425,7 +460,7 @@ def test_command_center_events_survive_many_heartbeats(client, ctx):
     assert "policy.denied" in types and "node.joined" in types
 
 
-def test_full_claim_flow_with_fencing(client, ctx):
+def test_full_claim_flow_with_fencing(client, ctx, monkeypatch):
     cc = join(client, "cc")
     assert client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "workers": [{"account": "claude-01", "state": "idle"}]},
                        headers=cc).json()["desired"]["accounts"] == ["claude-01", "opencode-01"]
@@ -441,12 +476,19 @@ def test_full_claim_flow_with_fencing(client, ctx):
     # explicit-only account gets nothing without its label
     assert client.get("/v1/work/candidates", params={"account": "opencode-01"}, headers=cc).json()["tickets"] == []
 
-    r = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).json()
+    with monkeypatch.context() as patch:
+        patch.setattr(ctx.leases, "held_keys", lambda: (_ for _ in ()).throw(
+            AssertionError("a scoped claim should not scan every Redis lease")))
+        r = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).json()
     assert r["claimed"] and r["fence"] == 1 and r["model"] == "opus" and r["provider"] == "claude"
     assert r["project"]["repo"] == "jooservices/test-aiflow-wp" and r["identity"][0].endswith("[bot]")
     run_id, fence = r["run_id"], r["fence"]
     # second claim of the same ticket is refused (held), candidate list no longer shows it
-    assert client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).status_code == 409
+    with monkeypatch.context() as patch:
+        patch.setattr(ctx.leases, "held_keys", lambda: (_ for _ in ()).throw(
+            AssertionError("an already-held claim should not scan every Redis lease")))
+        duplicate = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc)
+        assert duplicate.status_code == 409 and duplicate.json()["reason"] == "ticket is already claimed"
     assert [t["key"] for t in client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"]] == ["TESTWP-2"]
 
     assert client.post(f"/v1/runs/{run_id}/heartbeat", json={"fence": fence, "progress": {"phase": "ai"}}, headers=cc).status_code == 200
@@ -475,6 +517,24 @@ def test_full_claim_flow_with_fencing(client, ctx):
     refused = ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE accepted = false")["n"]
     assert refused == 1
     assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "lost"
+
+
+def test_worker_claim_reuses_the_live_repo_overlay_once_per_request(client, ctx, monkeypatch):
+    cc = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-13")
+    original_one = ctx.db.one
+    overlay_reads = []
+
+    def count_overlay_reads(sql, params=None):
+        if "EXISTS(SELECT 1 FROM nodes WHERE removed_at IS NOT NULL)" in sql:
+            overlay_reads.append(sql)
+        return original_one(sql, params)
+
+    monkeypatch.setattr(ctx.db, "one", count_overlay_reads)
+    response = client.post("/v1/work/claim", json={"ticket": "TESTWP-13", "account": "claude-01"}, headers=cc)
+
+    assert response.status_code == 200 and response.json()["claimed"] is True
+    assert len(overlay_reads) == 1
 
 
 def test_quota_result_cools_the_account_down(client, ctx):
@@ -509,13 +569,18 @@ def test_policy_hook_uses_the_run_token(client, ctx):
 def test_state_snapshot_and_watchdog(client, ctx):
     from aiflow.v4.control.loops import watchdog
     cc = join(client, "cc")
-    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "metrics": {"cpu_pct": 10}}, headers=cc)
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "metrics": {
+        "cpu_pct": 10, "load1": 0.1, "cpus": 4, "mem_total": 100, "mem_used": 20,
+        "disk_total": 100 * 1024 ** 3, "disk_free": 20 * 1024 ** 3}}, headers=cc)
     add_ticket(ctx.db, "TESTWP-9")
     r = client.post("/v1/work/claim", json={"ticket": "TESTWP-9", "account": "claude-01"}, headers=cc).json()
     ctx.jira.status_of["TESTWP-9"] = "In Progress"
     s = client.get("/v1/state").json()
     assert any(n["name"] == "cc" and n["status"] == "online" for n in s["nodes"])
     assert s["active_runs"][0]["ticket"] == "TESTWP-9"
+    assert next(n for n in s["nodes"] if n["name"] == "cc")["sessions_busy"] == 1
+    account = next(a for a in s["accounts"] if a["id"] == "claude-01")
+    assert account["runs_active"] == 1 and account["run"]["id"] == r["run_id"]
     assert any(a["id"] == "claude-01" and a["status"] == "working" for a in s["accounts"])
     # node goes silent, lease expires: watchdog marks node offline, opens an incident, requeues the ticket
     ctx.db.run("UPDATE nodes SET last_heartbeat = now() - interval '5 minutes' WHERE name='cc'")
@@ -572,15 +637,21 @@ def test_predicted_runout_alerts_owner_and_routes_account_work_to_its_provider_p
 
     notifications = []
     monkeypatch.setattr(incidents.notify, "send", lambda *args, **kwargs: notifications.append(args) or ["email"])
-    headers = join(client, "node1")
-    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=headers)
+    # Seed both accounts before joining: join starts asynchronous readiness checks, which must see the peer's
+    # credential baseline before candidate routing treats that peer as available.
     ctx.repo().accounts.append(Account(id="codex-02", provider="codex", node="node1", tier="middle", roles=["dev"]))
     client.app.state.sync_accounts()
+    headers = join(client, "node1")
+    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=headers)
+    for thread in list(threading.enumerate()):
+        if thread.name == "aiflow4-heartbeat-readiness-node1":
+            thread.join(timeout=15)
     add_ticket(ctx.db, "TESTWP-QUOTA-1")
     now = datetime.now(timezone.utc)
     quota = {"windows": {"five_hour": {"utilization": .8,
                                          "resets_at": (now + timedelta(hours=3)).isoformat()}}}
-    ctx.db.run("UPDATE accounts SET quota=%s WHERE id='codex-01'", (J(quota),))
+    ctx.db.run("UPDATE accounts SET quota=%s,quota_source='run',quota_observed_at=now() WHERE id='codex-01'",
+               (J(quota),))
     for index in range(20):
         started = now - timedelta(hours=2) + timedelta(minutes=index * 5)
         ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,status,outcome,"
@@ -603,7 +674,8 @@ def test_predicted_runout_alerts_owner_and_routes_account_work_to_its_provider_p
 
     # A replenished report clears the forecast and makes that account eligible again.
     quota["windows"]["five_hour"]["utilization"] = .1
-    ctx.db.run("UPDATE accounts SET quota=%s WHERE id='codex-01'", (J(quota),))
+    ctx.db.run("UPDATE accounts SET quota=%s,quota_source='run',quota_observed_at=now() WHERE id='codex-01'",
+               (J(quota),))
     watchdog(ctx)
     assert ctx.db.one("SELECT quota_at_risk FROM accounts WHERE id='codex-01'")["quota_at_risk"] is False
     assert [ticket["key"] for ticket in client.get("/v1/work/candidates?account=codex-01",
@@ -631,9 +703,9 @@ def test_quota_exhaustion_routes_ticket_to_peer_and_returns_it_after_reset(clien
     from aiflow.v4.core.controlrepo import Account
 
     headers = join(client, "cc")
-    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=headers)
     ctx.repo().accounts.append(Account(id="claude-02", provider="claude", node="cc", tier="senior", roles=["dev"]))
     client.app.state.sync_accounts()
+    report_account_credentials(ctx, "cc", {"claude-02": {"present": True, "valid": True}})
     add_ticket(ctx.db, "TESTWP-QUOTA-RESET")
 
     claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-QUOTA-RESET", "account": "claude-01"},
@@ -648,8 +720,9 @@ def test_quota_exhaustion_routes_ticket_to_peer_and_returns_it_after_reset(clien
                        headers=headers).json()["released"] is True
 
     assert client.get("/v1/work/candidates?account=claude-01", headers=headers).json()["tickets"] == []
-    peer_tickets = client.get("/v1/work/candidates?account=claude-02", headers=headers).json()["tickets"]
-    assert [ticket["key"] for ticket in peer_tickets] == ["TESTWP-QUOTA-RESET"]
+    peer_response = client.get("/v1/work/candidates?account=claude-02", headers=headers).json()
+    peer_tickets = peer_response["tickets"]
+    assert [ticket["key"] for ticket in peer_tickets] == ["TESTWP-QUOTA-RESET"], peer_response
     peer_claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-QUOTA-RESET", "account": "claude-02"},
                              headers=headers).json()
     assert ctx.db.one("SELECT account_id FROM runs WHERE id=%s", (peer_claim["run_id"],))["account_id"] == "claude-02"
@@ -669,11 +742,7 @@ def test_quota_exhaustion_routes_ticket_to_peer_and_returns_it_after_reset(clien
     assert [ticket["key"] for ticket in returned_tickets] == ["TESTWP-QUOTA-RESET"]
 
 
-def test_grok_recorded_stream_restores_probe_status_and_empty_answer_is_provider_failure(
-        client, ctx, tmp_path, monkeypatch):
-    import sys
-
-    from aiflow.v4.adapters.grok import GrokAdapter
+def test_grok_quota_refresh_is_unsupported_and_does_not_change_account_health(client, ctx, tmp_path, monkeypatch):
     from aiflow.v4.control.loops import watchdog
     from aiflow.v4.core.controlrepo import Account
     from aiflow.v4.worker import loop as worker_loop
@@ -692,59 +761,25 @@ def test_grok_recorded_stream_restores_probe_status_and_empty_answer_is_provider
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='account_quota' AND subject='grok-01'"
                       " AND closed_at IS NULL")["n"] == 1
 
-    fixture_dir = Path(__file__).parent / "fixtures"
-    adapter = GrokAdapter()
-    results = []
-
-    def use_fixture(fixture_name):
-        fixture = fixture_dir / fixture_name
-        script = tmp_path / f"{fixture.stem}.py"
-        script.write_text(f"from pathlib import Path\nprint(Path({str(fixture)!r}).read_text(), end='')\n")
-        adapter.argv = lambda _spec: [sys.executable, str(script)]
-
-    use_fixture("grok-streaming-json.jsonl")
-    run = adapter.run
-
-    def record_run(spec):
-        result = run(spec)
-        results.append(result)
-        return result
-
-    adapter.run = record_run
-    monkeypatch.setattr(worker_loop, "get_adapter", lambda _provider: adapter)
     monkeypatch.setattr(worker_loop.Worker, "publish", lambda self, **fields: self.state.update(fields))
     worker = worker_loop.Worker("grok-01", "http://testserver", "node-token", "cc", str(tmp_path), run_as=[])
 
-    def call_api(method, path, json=None, params=None):
+    def call_api(method, path, json=None, params=None, allow_not_found=False):
         response = client.request(method, path, json=json, params=params, headers=auth)
+        if allow_not_found and response.status_code == 404:
+            return None
         assert response.status_code == 200, response.text
         return response.json()
 
     worker.api.call = call_api
-    assert worker.probe() is True
-    assert results[0].final_text == "OK"
-    assert results[0].tokens_in == 10 and results[0].tokens_out == 1
-    assert results[0].cost_usd == 0.00123 and results[0].error_kind == ""
-    probe = ctx.db.one("SELECT outcome, data FROM events WHERE type='account.probe' AND account='grok-01'"
-                       " ORDER BY ts DESC LIMIT 1")
-    assert probe["outcome"] == "ok"
-    assert {key: probe["data"][key] for key in ("tokens_in", "tokens_out", "cost_usd")} == {
-        "tokens_in": 10, "tokens_out": 1, "cost_usd": 0.00123}
+    assert worker.refresh_quota() is False
+    assert ctx.db.one("SELECT status FROM accounts WHERE id='grok-01'")["status"] == "signed_out"
+    job = ctx.db.one("SELECT last_error,last_success_at FROM quota_refresh_jobs WHERE account_id='grok-01'")
+    assert "no read-only quota command" in job["last_error"] and job["last_success_at"] is None
+    assert ctx.db.one("SELECT count(*) AS n FROM account_quota_samples WHERE account_id='grok-01'")["n"] == 0
     watchdog(ctx)
-    state = client.get("/v1/state").json()
-    account = next(account for account in state["accounts"] if account["id"] == "grok-01")
-    assert account["status"] == "idle"
-    assert "grok-01" not in {account["id"] for account in state["sa"]["provider_blocks"]}
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='account_quota' AND subject='grok-01'"
-                      " AND closed_at IS NULL")["n"] == 0
-
-    # No answer and no CLI error must be a provider failure, never a sign-out.
-    use_fixture("grok-streaming-json-no-answer.jsonl")
-    assert worker.probe() is False
-    assert results[1].error_kind == "provider"
-    assert ctx.db.one("SELECT status FROM accounts WHERE id='grok-01'")["status"] == "error"
-    assert ctx.db.one("SELECT outcome FROM events WHERE type='account.probe' AND account='grok-01'"
-                      " ORDER BY ts DESC LIMIT 1")["outcome"] == "provider"
+                      " AND closed_at IS NULL")["n"] == 1
 
 
 def test_verify_goes_to_another_account_and_merges(client, ctx):
@@ -956,6 +991,7 @@ def test_node_without_ai_accounts_is_flagged(client, ctx):
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title, detail FROM incidents WHERE kind='node_no_ai' AND subject='node3' AND closed_at IS NULL")
     assert inc["severity"] == "warning" and "no AI account" in inc["title"] and "not described" in inc["detail"]
+    assert "Machines and AI screen" in inc["detail"] and "accounts.yaml" not in inc["detail"]
     s = client.get("/v1/state").json()
     n = next(x for x in s["nodes"] if x["name"] == "node3")
     assert n["accounts_assigned"] == 0 and n["in_control_repo"] is False
@@ -994,7 +1030,7 @@ def test_role_with_one_ready_account_is_reported(client, ctx):
     ctx.db.run("UPDATE accounts SET status='signed_out' WHERE id='codex-01'")
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title FROM incidents WHERE kind='role_coverage' AND subject='verify' AND closed_at IS NULL")
-    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account"
+    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account(s) from 1 provider(s)"
 
 
 def test_state_reports_registration_and_last_seen_for_an_offline_node(client, ctx):
@@ -1255,7 +1291,7 @@ def test_node_back_online_resolves_and_alerts(client, ctx, monkeypatch):
 def test_parallel_sessions_of_one_account(client, ctx, tmp_path):
     from aiflow.v4.worker.loop import Worker
     w = Worker("codex-01.2", "http://x", "t", "node1", str(tmp_path), run_as=[])
-    assert w.account == "codex-01" and w.instance == "codex-01.2" and w.probe_ok
+    assert w.account == "codex-01" and w.instance == "codex-01.2"
     n1 = join(client, "node1")
     hb = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2, "workers": [
         {"account": "codex-01", "state": "idle", "alive": True}, {"account": "codex-01", "state": "working", "alive": True}]},

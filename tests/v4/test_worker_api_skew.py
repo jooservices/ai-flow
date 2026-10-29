@@ -59,12 +59,8 @@ def test_worker_ahead_of_control_skips_missing_optional_route_and_completes_exis
     old_control = OldControlAPI()
     worker.api.c.close()
     worker.api.c = old_control
-    worker.next_probe = float("inf")
-    worker.probe_ok = True
-
     assert worker.once() is True
 
-    assert worker.probe_ok is True
     assert worker.state["state"] == "idle" and worker.state["last_outcome"] == "done"
     paths = [path for _, path, _ in old_control.requests]
     assert paths == [
@@ -76,6 +72,8 @@ def test_worker_ahead_of_control_skips_missing_optional_route_and_completes_exis
         "/v1/runs/run-1/result",
         "/v1/runs/run-1/release",
     ]
+    candidate_request = next(request for request in old_control.requests if request[1] == "/v1/work/candidates")
+    assert candidate_request[2] == {"account": "claude-01", "worker_id": "claude-01"}
 
 
 def test_control_client_only_accepts_404_when_route_is_marked_optional():

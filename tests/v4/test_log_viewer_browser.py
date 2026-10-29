@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from aiflow.v4.control.api import create_app
-from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
+from aiflow.v4.control.console_auth import COOKIE_NAME, csrf_token, issue_session
 from aiflow.v4.control.ui import mount_ui
 from conftest import join_node
 
@@ -62,10 +62,11 @@ def test_log_viewer_page_shows_lines_and_empty_message_after_node_completes_the_
     server = uvicorn.Server(uvicorn.Config(app, log_level="critical", access_log=False))
     server_thread = threading.Thread(target=server.run, kwargs={"sockets": [server_socket]}, daemon=True)
 
+    session = issue_session("admin@example.test", "administrator", 2_000_000_000, SESSION_SECRET)
     config_path = tmp_path / "log-browser-config.json"
     config_path.write_text(json.dumps({
         "baseUrl": base_url, "cookieName": COOKIE_NAME, "secret": LEAKED_VALUE,
-        "cookie": issue_session("admin@example.test", "administrator", 2_000_000_000, SESSION_SECRET),
+        "cookie": session, "csrf": csrf_token(session, SESSION_SECRET), "csrfCookieName": "aiflow4_csrf",
         "firstSource": "Container · aiflow4-control-api-a"}))
     playwright_cli = shutil.which("playwright")
     node = shutil.which("node")
@@ -85,7 +86,10 @@ def test_log_viewer_page_shows_lines_and_empty_message_after_node_completes_the_
         agent.start()
         result = subprocess.run([node, str(SUITE)], env=env, capture_output=True, text=True, timeout=180)
         if result.returncode:
-            pytest.fail("Log viewer browser suite failed.\n" + result.stderr[-8000:].replace(LEAKED_VALUE, "[REDACTED]"))
+            operations = ctx.db.all("SELECT status,count(*) AS count FROM node_operations WHERE action='read_logs'"
+                                    " GROUP BY status ORDER BY status")
+            pytest.fail("Log viewer browser suite failed.\n" + result.stderr[-8000:].replace(LEAKED_VALUE, "[REDACTED]")
+                        + f"\nhandled={len(handled)}, operations={operations}")
         assert "JAIF-175 log viewer browser suite passed" in result.stdout
         assert len(handled) == 2
     finally:

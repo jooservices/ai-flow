@@ -40,6 +40,8 @@ PAGES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
         ("conflict-loss", "Lost to merge conflicts", "full"),
         ("quota", "AI account quota", "full"),
         ("tool-waits", "Tickets waiting for a tool", "full"),
+        ("flow-doctor", "Flow doctor", "full"),
+        ("operator-interventions", "Operator interventions", "full"),
         ("autonomy", "Master autonomy", "full"),
         ("escalations", "Escalations and owner decisions", "full"),
         ("disagreements", "Jira and GitHub disagree", "full"),

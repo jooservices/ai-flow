@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..core import blocker_kind, technical_decision
 from ..core.environment import is_server_question
 from ..core.text import slug
 from . import tooling
@@ -39,12 +40,13 @@ UNREACHABLE = "unreachable_criterion"
 AMBIGUITY = "ambiguity_repository"
 TAKEN = "decision_already_taken"
 BUSINESS = "new_business_decision"
+TECHNICAL = "technical_decision"
 IRREVERSIBLE = "irreversible_or_production"
-CLASSES = (MISSING, POLICY, UNREACHABLE, AMBIGUITY, TAKEN, BUSINESS, IRREVERSIBLE)
+CLASSES = (MISSING, POLICY, UNREACHABLE, AMBIGUITY, TAKEN, TECHNICAL, BUSINESS, IRREVERSIBLE)
 PERSON_CLASSES = (BUSINESS, IRREVERSIBLE)
 LABELS = {MISSING: "Missing tool or environment", POLICY: "Policy or permission message",
           UNREACHABLE: "Unreachable acceptance criterion", AMBIGUITY: "Ambiguity the repository can answer",
-          TAKEN: "Decision already taken", BUSINESS: "New business decision",
+          TAKEN: "Decision already taken", TECHNICAL: "Technical decision for the SA", BUSINESS: "New business decision",
           IRREVERSIBLE: "Irreversible or production action"}
 # What removes a cause for good; the weekly report names it next to the three biggest causes.
 FIXES = {
@@ -56,6 +58,7 @@ FIXES = {
                  "the criterion and records the amendment.",
     AMBIGUITY: "Put the missing convention or location in AGENTS.md or the project docs so the AI finds it itself.",
     TAKEN: "Add the decision to the owner register (Command Center) with a pattern that matches how it is asked.",
+    TECHNICAL: "The SA decides and records the choice and the reason; the register keeps it as precedent for the next question.",
     BUSINESS: "Answer once in Command Center: the choice becomes a register entry and is applied from then on.",
     IRREVERSIBLE: "Keep releases, tags and production changes with the owner; nothing to fix.",
 }
@@ -129,6 +132,11 @@ REPOSITORY_FACT_RE = re.compile(
     r"\b(?:endpoint|route|api|function|handler)\b|"
     r"\bwhat\s+(?:value|setting)\b.{0,80}\b(?:existing|current|configured)\b.{0,80}\b(?:use|set|configured)\b",
     re.I | re.S)
+BUSINESS_TOPIC_RE = re.compile(
+    r"\b(?:customer(?:s|-facing)?|refund|payment|pricing|billing|subscription|marketing|brand|legal|contract|"
+    r"privacy|data retention)\b", re.I)
+REQUIREMENT_CONFLICT_RE = re.compile(r"\b(?:conflicts?|contradicts?|contradicting)\s+with\s+(?:the\s+)?AC\s?\d+\b", re.I)
+BUSINESS_DECISION_CUE_RE = re.compile(r"\b(?:should|whether|choose|choice|decision|decide|option|or)\b|\?", re.I)
 
 
 def _search(pattern: str, text: str) -> bool:
@@ -175,6 +183,10 @@ def classify(db, text: str, project: str = "") -> Classification:
         requirement = missing[0]
         return Classification(MISSING, f"the run explicitly reported missing tool or service {requirement.replace('_', ' ')}",
                               environment=requirement)
+    inferred = blocker_kind.missing_tools(text)
+    if inferred:  # a tool the run calls absent, in its own words: a machine problem, never the owner's
+        return Classification(MISSING, f"the run reported {', '.join(inferred)} as missing on the machine",
+                              environment=inferred[0], requirements=inferred)
     if environment and NEED_RE.search(text):
         return Classification(MISSING, f"the machine lacks or cannot reach {environment.replace('_', ' ')}",
                               environment=environment)
@@ -185,10 +197,21 @@ def classify(db, text: str, project: str = "") -> Classification:
         return Classification(AMBIGUITY, "the repository (ticket, spec or code) can answer this")
     if IRREVERSIBLE_RE.search(text):
         return Classification(IRREVERSIBLE, "an irreversible or production action")
+    return _classify_by_topic(text)
+
+
+def _classify_by_topic(text: str) -> Classification:
+    """The questions no source or marker answered: a server question, an engineering choice, a business choice."""
     if is_server_question(text):  # where and how something runs is never a question for the owner
         return Classification(MISSING, "a server, host, network or access question: the project configuration and the "
                                        "run environment answer it", environment="server")
-    return Classification(BUSINESS, "a business decision no source answers")
+    if technical_decision.is_technical(text):
+        return Classification(TECHNICAL, "an engineering choice: the SA decides it and records the reason")
+    if REQUIREMENT_CONFLICT_RE.search(text):  # the ticket contradicts its own acceptance criteria: only the owner can say which wins
+        return Classification(BUSINESS, "the ticket conflicts with its own acceptance criteria")
+    if BUSINESS_TOPIC_RE.search(text) and BUSINESS_DECISION_CUE_RE.search(text):
+        return Classification(BUSINESS, "an explicit customer-facing or commercial choice")
+    return Classification(AMBIGUITY, "no positive evidence of a new business decision; keep it in automated triage")
 
 
 # --- register ---------------------------------------------------------------------------------------------
@@ -650,6 +673,9 @@ def triage_decision(ctx, run: dict, decision: dict, question: str) -> dict:
                     "reason": f"{LABELS[cls]} requires the owner; triage cannot answer it"}
         settle(db, ticket, project, "triage", run_id, cls, question, decision.get("why", ""), "triage", None,
                decision.get("answer", ""))
+        if cls == TECHNICAL and decision.get("answer"):  # the choice becomes precedent for the next such question
+            add_decision(db, (decision.get("topic") or question)[:200], decision["answer"], decision.get("keywords") or [],
+                         project=project, by="sa", question=question, source="sa")
         return {"action": "answered", "class": cls}
     if kind == "AMEND":
         if cls != UNREACHABLE:

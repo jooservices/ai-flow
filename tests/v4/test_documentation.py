@@ -2,8 +2,10 @@
 and the CI check that keeps documentation current."""
 from __future__ import annotations
 
+import ast
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -48,15 +50,29 @@ def test_every_runbook_has_symptom_cause_and_fix():
 
 
 def test_every_console_screen_has_help_link_hint_and_target_page(site):
-    page = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
+    from aiflow.v4.control.ui import build_console_page
+
+    page = build_console_page()
     views = docsite.console_views()
     assert len(views) >= 10
     assert 'id="help-link"' in page and "helpUrl(S.view)" in page and "HELP_BASE = '/help/screens/'" in page
     hints = re.search(r"var HINTS = \{(.*?)\n\};", page, re.S).group(1)
     for view in views:
-        assert re.search(rf"\b{view}: '", hints), f"no first-use hint for {view}"
-        assert (GUIDE / "screens" / f"{view}.md").is_file() or view in docsite.SCREEN_TOPIC_DOCS
+        if view != "system-check":
+            if view == "security":
+                assert "HINTS.security =" in page
+            else:
+                assert re.search(rf"\b{view}'?: '", hints), f"no first-use hint for {view}"
+        assert docsite.screen_doc_source(view).is_file()
         assert (site / "screens" / f"{view}.html").is_file()
+    assert "HINTS['system-check'] =" in page
+
+
+def test_scale_proof_topic_is_linked_from_console_help(site):
+    assert (site / "topics" / "scale-proof.html").is_file()
+    for view in ("business", "cc"):
+        page = (site / "screens" / f"{view}.html").read_text()
+        assert '../topics/scale-proof.html' in page
 
 
 def test_users_and_sa_screen_guides_match_permissions_and_rendered_controls():
@@ -87,6 +103,47 @@ def test_help_route_serves_the_screen_pages(monkeypatch, site):
     assert client.get("/help/").status_code == 200
     assert client.get("/help/../../etc/passwd").status_code == 404
     assert client.get("/help/%2e%2e/%2e%2e/etc/passwd").status_code == 404
+
+
+def test_system_check_feature_document_is_its_console_help_page():
+    source = "docs/v4/system-check.md"
+    ui = "aiflow/v4/control/ui/system-check.js"
+    assert docsite.screen_doc_source("system-check") == ROOT / source
+    assert docsite.collect_pages(with_api=False)["screens/system-check.md"] == (ROOT / source).read_text()
+    assert docsite.documentation_gaps([ui, source], views={"system-check"}) == []
+    assert docsite.documentation_gaps([ui, "docs/guide/screens/system-check.md"],
+                                      views={"system-check"})
+
+
+def test_system_check_console_state_maps_to_its_screen_documentation():
+    console = (ROOT / "aiflow/v4/control/ui/system-check.js").read_text()
+    state_line = next(line for line in console.splitlines() if "S.systemCheck = null" in line)
+    mapped = {view for pattern, view in docsite.SCREEN_LINE_VIEWS if pattern.search(state_line)}
+    assert mapped == {"system-check"}
+
+
+def test_system_check_console_changes_map_to_its_screen_and_projects(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    ui_dir = root / "aiflow" / "v4" / "control" / "ui"
+    ui_dir.mkdir(parents=True)
+    page = ui_dir / "console.html"
+    extension = ui_dir / "system-check.js"
+    shutil.copyfile(ROOT / "aiflow" / "v4" / "control" / "ui" / "console.html", page)
+    shutil.copyfile(ROOT / "aiflow" / "v4" / "control" / "ui" / "system-check.js", extension)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "AI Flow docs test"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "docs-test@example.test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True,
+                          check=True).stdout.strip()
+    extension.write_text(extension.read_text() + "\n// renderer changed\n")
+    subprocess.run(["git", "add", str(extension)], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "change system check renderer"], cwd=root, check=True)
+
+    monkeypatch.setattr(docsite, "ROOT", root)
+    monkeypatch.setattr(docsite, "UI", page)
+    assert docsite.changed_views(base) == {"projects", "system-check"}
 
 
 def test_every_page_states_what_it_assumes_and_roles_have_a_guide():
@@ -196,6 +253,30 @@ def test_shared_state_response_helper_is_tracked_against_its_routes():
                                       routes=docsite.api_routes_by_module()) == []
 
 
+def test_license_row_initialization_is_not_mistaken_for_every_api_contract():
+    module = "aiflow/v4/control/licensing.py"
+    source = (ROOT / module).read_text().splitlines()
+    functions = {node.name: node for node in ast.walk(ast.parse("\n".join(source)))
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    contracts = docsite.api_route_contract_spans()[module]
+    for name in ("_row", "_row_in_connection"):
+        line = functions[name].lineno
+        assert not any(start <= line <= end for spans in contracts.values() for start, end in spans)
+
+    # The policy is narrow: entitlement/grace behavior is still linked to the six offer/claim routes it serves.
+    grace_line = functions["over_limit_grace"].lineno
+    grace_routes = {contract for contract, spans in contracts.items()
+                    if any(start <= grace_line <= end for start, end in spans)}
+    assert grace_routes == {
+        "GET /v1/work/candidates",
+        "GET /v1/master/candidate",
+        "GET /v1/ba-chat/candidate",
+        "POST /v1/work/claim",
+        "GET /v1/version-releases/candidates",
+        "POST /v1/version-releases/claim",
+    }
+
+
 def test_unchanged_ui_api_routes_are_not_reported_as_removed(monkeypatch):
     module = "aiflow/v4/control/ui/__init__.py"
     source = (ROOT / module).read_text()
@@ -248,6 +329,8 @@ def test_ci_check_fails_without_documentation_and_passes_with_it():
     layout_views = docsite.LAYOUT_SCREEN_VIEWS
     assert gaps(ui, "docs/v4/console-layouts.md", views=layout_views) == []
     assert gaps(ui, "docs/v4/console-layouts.md", views={"cc", "sa"})  # layout doc does not cover SA
+    assert gaps(ui, "docs/v4/security.md", "docs/v4/console-layouts.md",
+                views={"security", "cc"}) == []  # preserve both documentation mappings after a merge
     # every module that registers routes is watched, not only api.py
     login = "aiflow/v4/control/login.py"
     assert gaps(login, "docs/v4/knowledge.md")
@@ -384,7 +467,7 @@ def test_container_project_ui_changes_map_to_projects_screen(monkeypatch):
     assert docsite.changed_views("origin/develop") == {"projects"}
 
 
-def test_project_environment_toast_style_maps_to_projects_screen(monkeypatch):
+def test_toast_style_maps_to_every_screen_that_uses_the_shared_style(monkeypatch):
     ui = "aiflow/v4/control/ui/console.html"
     source_lines = (ROOT / ui).read_text().splitlines()
     line_no = next(i for i, line in enumerate(source_lines, 1) if line.startswith(".toasts{"))
@@ -401,7 +484,10 @@ def test_project_environment_toast_style_maps_to_projects_screen(monkeypatch):
         return Result(f"@@ -{line_no},1 +{line_no},1 @@\n")
 
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
-    assert docsite.changed_views("origin/develop") == {"projects"}
+    views = docsite.changed_views("origin/develop")
+    assert views == {"cc", "projects"}
+    pages = [ui, *(f"docs/guide/screens/{view}.md" for view in views)]
+    assert docsite.documentation_gaps(pages, views=views) == []
 
 
 def test_ci_check_maps_dashboard_v2_helpers_and_work_board_navigation(monkeypatch):
@@ -436,6 +522,7 @@ def test_ci_check_maps_global_theme_changes_to_all_documented_console_screens(mo
     ui = "aiflow/v4/control/ui/console.html"
     topic = "docs/v4/dashboard-v2.md"
     settings_topic = "docs/v4/runtime-settings.md"
+    system_check_topic = "docs/v4/system-check.md"
     source_lines = (ROOT / ui).read_text().splitlines()
     changed_lines = [
         next(i for i, line in enumerate(source_lines, 1) if line.startswith(":root{")),
@@ -456,7 +543,8 @@ def test_ci_check_maps_global_theme_changes_to_all_documented_console_screens(mo
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
     views = set(docsite.console_views())
     assert docsite.changed_views("origin/develop") == views
-    assert docsite.documentation_gaps([ui, topic, settings_topic], views=views) == []
+    assert docsite.documentation_gaps([ui, topic, settings_topic, system_check_topic, "docs/v4/security.md"],
+                                     views=views) == []
 
 
 def test_ci_check_maps_removed_global_theme_initializer_from_the_base_file(monkeypatch):
@@ -477,6 +565,8 @@ def test_ci_check_maps_removed_global_theme_initializer_from_the_base_file(monke
             self.stdout = stdout
 
     def fake_run(command, **kwargs):
+        if command[1] == "merge-base":
+            return Result("origin/develop")
         if command[1] == "show" and command[2].startswith("origin/develop:"):
             return Result("\n".join(base_lines) + "\n")
         if command[1] == "show":
@@ -521,6 +611,27 @@ def test_escalation_console_changes_map_to_command_center_screens(monkeypatch):
 
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
     assert docsite.changed_views("origin/develop") == {"cc", "machines"}
+
+
+def test_scale_proof_panel_injection_maps_only_to_command_center(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    line = next(i for i, value in enumerate(source_lines, 1)
+                if "scaleProofPanel(d.scale_proof, (S.biz || {}).jira_site)" in value)
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result("\n".join(source_lines) + "\n")
+        return Result(f"@@ -{line},1 +{line},1 @@\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == {"cc"}
 
 
 def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
@@ -570,7 +681,8 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
     current_lines = shared_lines + [hint_line]
     views = docsite.changed_views("origin/develop")
     assert views == set(docsite.console_views())
-    all_pages = ["aiflow/v4/control/ui/console.html", *(f"docs/guide/screens/{v}.md" for v in views)]
+    all_pages = ["aiflow/v4/control/ui/console.html",
+                 *(docsite.screen_doc_source(v).relative_to(ROOT).as_posix() for v in views)]
     assert docsite.documentation_gaps(all_pages, views=views) == []
     assert docsite.documentation_gaps([ui, "docs/guide/screens/cc.md"], views=views)
 
@@ -802,3 +914,9 @@ def test_schema_declarations_belong_to_their_route_contract():
     declared = next(i for i, line in enumerate((ROOT / api).read_text().splitlines(), 1)
                     if line.startswith("class JoinBody("))
     assert any(start <= declared <= end for start, end in join)
+
+
+def test_quota_refresh_asset_import_maps_to_settings_screen():
+    line = '<script src="/console-assets/quota-refresh-settings.js"></script>'
+    assert any(view == "settings" and pattern.search(line)
+               for pattern, view in docsite.SCREEN_LINE_VIEWS)

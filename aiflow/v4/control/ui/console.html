@@ -563,8 +563,8 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
 <main class="wrap">
   <div class="license-warning" id="license-warning" role="status" hidden></div>
   <div id="firstuse"></div>
-  <section class="view" id="view-cc" role="tabpanel" aria-labelledby="tab-cc"></section>
-  <section class="view" id="view-work" role="tabpanel" aria-labelledby="tab-work" hidden>
+  <section class="view" id="view-cc" role="tabpanel" aria-labelledby="tab-cc"><script src="/console-assets/release-readiness.js"></script><script src="/console-assets/scale-proof.js"></script><script src="/console-assets/flow-doctor.js"></script></section>
+  <section class="view" id="view-work" role="tabpanel" aria-labelledby="tab-work" hidden><script src="/console-assets/run-inbox.js"></script>
     <div class="dhead" id="work-head"></div>
     <div id="work-body" class="view"></div>
   </section>
@@ -574,7 +574,8 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   </section>
   <section class="view" id="view-sa" role="tabpanel" aria-labelledby="tab-sa" hidden></section>
   <section class="view" id="view-machines" role="tabpanel" aria-labelledby="tab-machines" hidden></section>
-  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden></section>
+  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden><script src="/console-assets/user-form-state.js"></script></section>
+  <section class="view" id="view-security" role="tabpanel" aria-labelledby="tab-security" hidden></section>
   <section class="view" id="view-lead" role="tabpanel" aria-labelledby="tab-lead" hidden></section>
   <section class="view" id="view-business" role="tabpanel" aria-labelledby="tab-business" hidden>
     <div class="dhead" id="bhead"></div>
@@ -622,7 +623,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
     <div class="command-hint"><kbd>Ctrl K</kbd> or <kbd>⌘ K</kbd> to open · <kbd>Esc</kbd> to close</div>
   </section>
 </div>
-<script>
+<script src="/console-assets/quota-refresh-settings.js"></script><script>
 (function () {
 document.documentElement.classList.add('role-loading');
 'use strict';
@@ -698,7 +699,7 @@ var S = {
   users: { data: null, error: '', busy: false, loadedAt: 0, initialPassword: '' },
   notifications: { data: null, error: '', notice: '', busy: false, editId: null,
     form: { kind: 'email', name: '', enabled: true }, preferencesDraft: null, preferencesDirty: false },
-  runtimeSettings: { data: null, error: '', notice: '', busy: false, scope: 'secret', project: '', key: '', value: '', changes: [] },
+  runtimeSettings: { data: null, quotaRefresh: null, error: '', notice: '', busy: false, scope: 'secret', project: '', key: '', value: '', changes: [] },
   machines: { addMachine: false, join: {name: '', role: 'worker', project: '', provision_key: '', command: '', expires_at: '', error: '', busy: false},
     addAccount: '', accountEditor: null, signIns: {}, signInLoading: {}, signInRefreshAt: {}, error: '', notice: '' },
   backup: { data: null, form: null, selected: '', error: '', notice: '', loading: false, saving: false, loadedAt: 0 },
@@ -1509,7 +1510,7 @@ function renderGitHubIntegrations() {
       h += '<div class="project-actions"><button class="btn sm" data-act="github-test" data-id="' + esc(c.id) + '">Test</button>';
       if (c.kind === 'token') h += '<input type="password" data-github-replace-token="' + esc(c.id) + '" placeholder="New token" autocomplete="off"><button class="btn sm" data-act="github-replace-token" data-id="' + esc(c.id) + '">Replace token</button>';
       else {
-        if (c.settings_url) h += '<a class="btn sm" href="' + esc(c.settings_url) + '" target="_blank" rel="noopener">Add repositories on GitHub</a>';
+        if (c.settings_url) h += '<a class="btn sm" href="' + esc(safeHref(c.settings_url)) + '" target="_blank" rel="noopener">Add repositories on GitHub</a>';
         h += '<button class="btn sm" data-act="github-replace-app" data-id="' + esc(c.id) + '">Replace App</button>';
       }
       h += '<button class="btn sm" data-act="github-remove" data-id="' + esc(c.id) + '">Remove</button></div></div>';
@@ -1647,7 +1648,7 @@ function accountMachinesSection(a) {
       b += '<tr><td class="mono">' + esc(m.node) + '</td><td>' + st + '</td><td>' + m.runs_active + '</td><td>' + m.runs_24h + '</td><td>' + tok(m.tokens_today || 0) + '</td><td>' + usd(m.cost_today || 0) + '</td><td>';
       if (manage && m.removable) b += '<button class="btn sm" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(m.node) + '" data-last="' + (ms.length === 1 ? '1' : '') + '">Remove</button>';
       b += '</td></tr>';
-      if (m.signin) b += '<tr><td colspan="7" class="small">Sign in on <b>' + esc(m.node) + '</b>: open <a href="' + esc(m.signin.link) + '" target="_blank" rel="noopener noreferrer">' + esc(m.signin.link) + '</a> and enter the code <code>' + esc(m.signin.code) + '</code>.</td></tr>';
+      if (m.signin) b += '<tr><td colspan="7" class="small">Sign in on <b>' + esc(m.node) + '</b>: open <a href="' + esc(safeHref(m.signin.link)) + '" target="_blank" rel="noopener noreferrer">' + esc(m.signin.link) + '</a> and enter the code <code>' + esc(m.signin.code) + '</code>.</td></tr>';
       else if (!m.signed_in) b += '<tr><td colspan="7" class="small">Waiting for ' + esc(m.node) + ' to show its sign-in link and code.'
         + (manage ? ' <button class="btn sm" data-act="acc-retry-signin" data-account="' + esc(a.id) + '" data-node="' + esc(m.node) + '">Get a new link</button>' : '') + '</td></tr>';
     });
@@ -1819,7 +1820,7 @@ function disagreementsPanel() {
   if (!rows.length) return h + '<div class="empty">Every ticket matches its pull request.</div></section>';
   h += '<div class="tablebox"><table><thead><tr><th>Ticket</th><th>Jira</th><th>Pull request</th><th>The flow will set</th><th>For</th><th>Why it is not fixed yet</th></tr></thead><tbody>';
   rows.forEach(function (r) {
-    h += '<tr><td><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(r.key) + '">' + esc(r.key) + '</button><div class="small">' + esc(r.summary) + '</div></td><td>' + esc(r.jira_status) + '</td><td>' + (r.pr_url ? '<a href="' + esc(r.pr_url) + '" target="_blank" rel="noopener">PR #' + esc(String(r.pr_url).split('/').pop()) + '</a> · ' : '') + esc(r.github_state) + '</td><td>' + esc(r.expected) + '</td><td class="mono">' + mmss(r.age_s) + '</td><td class="small" style="white-space:normal">' + esc(r.detail) + '</td></tr>';
+    h += '<tr><td><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(r.key) + '">' + esc(r.key) + '</button><div class="small">' + esc(r.summary) + '</div></td><td>' + esc(r.jira_status) + '</td><td>' + (r.pr_url ? '<a href="' + esc(safeHref(r.pr_url)) + '" target="_blank" rel="noopener">PR #' + esc(String(r.pr_url).split('/').pop()) + '</a> · ' : '') + esc(r.github_state) + '</td><td>' + esc(r.expected) + '</td><td class="mono">' + mmss(r.age_s) + '</td><td class="small" style="white-space:normal">' + esc(r.detail) + '</td></tr>';
   });
   return h + '</tbody></table></div></section>';
 }
@@ -1998,9 +1999,9 @@ function providerUsageChart(rows) {
       var tokens = byDay[day][provider] || 0;
       if (!tokens) return;
       var h = height * tokens / max; y -= h;
-      svg += '<rect class="provider-' + esc(provider) + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + width + '" height="' + h.toFixed(1) + '"><title>' + day + ' · ' + esc(PROVIDER[provider] || provider) + ': ' + tok(tokens) + ' tokens</title></rect>';
+      svg += '<rect class="provider-' + esc(provider) + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + width + '" height="' + h.toFixed(1) + '"><title>' + esc(day) + ' · ' + esc(PROVIDER[provider] || provider) + ': ' + tok(tokens) + ' tokens</title></rect>';
     });
-    svg += '<text x="' + (x + width / 2) + '" y="' + (height + labelHeight - 2) + '" text-anchor="middle">' + day.slice(8) + '</text>';
+    svg += '<text x="' + (x + width / 2) + '" y="' + (height + labelHeight - 2) + '" text-anchor="middle">' + esc(day.slice(8)) + '</text>';
   });
   return svg + '</svg>';
 }
@@ -2260,6 +2261,7 @@ function renderDashboard() {
   }
   h += '</section>';
   if (canSeeMachines) h += toolWaitsPanel(d);
+  if (canSeeMachines) h += flowDoctorPanel(d, esc, when);
   if (consoleCan('view.machines_ai')) h += masterAutonomyPanel();
   h += '</section></div>';
   root.innerHTML = h;
@@ -2342,21 +2344,21 @@ function renderCC() {
   var topQ = hi.length ? Math.max.apply(null, hi) : null;
 
   var h = '<section class="kpis" aria-label="Summary">';
-  h += kpi('Nodes online', online.length + ' / ' + d.nodes.length, offline.length ? offline.map(function (n) { return n.name; }).join(', ') + ' down' : (d.nodes.length ? 'all heartbeating' : 'no node joined yet'), offline.length ? 'crit' : '', 'p-nodes');
+  h += kpi('Nodes online', online.length + ' / ' + d.nodes.length, offline.length ? esc(offline.map(function (n) { return n.name; }).join(', ')) + ' down' : (d.nodes.length ? 'all heartbeating' : 'no node joined yet'), offline.length ? 'crit' : '', 'p-nodes');
   h += kpi('Slots in use', used + ' / ' + slots, (used ? used + ' AI run' + (used > 1 ? 's' : '') + ' now' : 'idle') + (idleSlots ? ' · ' + idleSlots + ' on nodes without AI' : ''), '', 'p-nodes');
   h += kpi('Accounts ready', ready.length + ' / ' + d.accounts.length, (cool ? cool + ' without quota' : 'all have quota') + (out ? ' · ' + out + ' failing' : ''), cool || out ? 'warn' : '', 'p-accounts');
   h += kpi('Highest quota use', topQ == null ? '—' : Math.round(topQ * 100) + '%', 'across reported windows', topQ != null && topQ >= 0.9 ? 'crit' : topQ != null && topQ >= 0.75 ? 'warn' : '', 'p-accounts');
   h += kpi('Runs · 24 h', String(t.runs_24h || 0), (t.done_24h || 0) + ' done · ' + (t.failed_24h || 0) + ' not done', t.failed_24h ? 'warn' : '', 'p-runs');
   h += kpi('Tokens · 24 h', tok((t.tokens_in_24h || 0) + (t.tokens_out_24h || 0)), 'cost ' + usd(t.cost_24h), '', 'p-runs');
   h += kpi('Open incidents', String(d.incidents.length), crit ? crit + ' critical' : d.incidents.length ? 'warnings only' : 'none open', crit ? 'crit' : d.incidents.length ? 'warn' : '', 'p-incidents');
-  h += kpi('Services', S.services.length ? (S.services.length - svcDown.length) + ' / ' + S.services.length : '—', svcDown.length ? svcDown.map(function (s) { return s.name; }).join(', ') + ' down' : (S.svcError ? 'checks unreachable' : 'all checks passing'), svcDown.length || S.svcError ? 'crit' : '', 'p-central');
+  h += kpi('Services', S.services.length ? (S.services.length - svcDown.length) + ' / ' + S.services.length : '—', svcDown.length ? esc(svcDown.map(function (s) { return s.name; }).join(', ')) + ' down' : (S.svcError ? 'checks unreachable' : 'all checks passing'), svcDown.length || S.svcError ? 'crit' : '', 'p-central');
   h += '</section>';
 
   var alerts = d.incidents.filter(function (i) { return i.severity === 'critical' || i.severity === 'warning'; });
   if (alerts.length) {
     h += '<section class="alerts" aria-label="Alerts">';
     alerts.forEach(function (i) {
-      h += '<div class="alert"><span class="pill" data-tone="' + (i.severity === 'critical' ? 'crit' : 'warn') + '">' + esc(KIND[i.kind] || i.kind) + '</span><span class="a-title">' + esc(i.title) + '</span><span class="a-detail">' + esc(i.detail) + '</span><span class="spacer"></span><span class="a-detail mono">' + esc(when(i.opened_at)) + '</span><button class="btn sm" data-act="open-inc" data-id="' + i.id + '">Details</button></div>';
+      h += '<div class="alert"><span class="pill" data-tone="' + (i.severity === 'critical' ? 'crit' : 'warn') + '">' + esc(KIND[i.kind] || i.kind) + '</span><span class="a-title">' + esc(i.title) + '</span><span class="a-detail">' + esc(i.detail) + '</span><span class="spacer"></span><span class="a-detail mono">' + esc(when(i.opened_at)) + '</span><button class="btn sm" data-act="open-inc" data-id="' + esc(i.id) + '">Details</button></div>';
     });
     h += '</section>';
   }
@@ -2376,13 +2378,13 @@ function renderCC() {
     h += '<button class="node" data-act="open-node" data-id="' + esc(n.name) + '"' + (off ? ' data-off' : '') + ' aria-label="Open node ' + esc(n.name) + '">';
     h += '<span class="node-top"><span class="n-name">' + esc(n.name) + '</span><span class="mono muted" style="font-size:12px">' + esc(n.ip) + (n.name === 'cc' ? ' · control plane' : '') + '</span><span class="spacer"></span>' + (!off && !accs.length ? pill('warn', 'No AI') : '') + pill(nodeTone(n), nodeLabel(n), n.status !== 'online') + '</span>';
     if (off) h += '<span class="offnote">No heartbeat for ' + mmss((n.heartbeat_age_s || 0) + since()) + '. Its runs go back to To Do when their lease ends.</span>';
-    else if (!accs.length) h += '<span class="offnote" style="color:var(--warn)">No AI account on this node: it adds ' + n.slots_total + ' slots but cannot take work.' + (n.in_control_repo === false ? ' Not described in aiflow-control/nodes/.' : '') + '</span>';
+    else if (!accs.length) h += '<span class="offnote" style="color:var(--warn)">No AI account on this node: it adds ' + n.slots_total + ' slots but cannot take work. Add an account on Machines and AI.</span>';
     var mm = n.metrics || {};
     h += '<span class="small mono">' + esc(mm.hostname || '—') + (n.purpose ? ' · ' + esc(n.purpose) : '') + '</span>';
     h += nodeMetrics(n);
     h += '<span class="slots">Slots ' + sl + '<span>' + runs + ' / ' + n.slots_total + '</span><span class="spacer"></span><span class="mono">' + relLabel(n) + '</span> · <span class="mono" data-since="' + (n.heartbeat_age_s == null ? '' : n.heartbeat_age_s) + '" data-fmt="ago"></span></span>';
     h += '<span class="node-accs">';
-    if (!accs.length) h += '<span class="node-acc"><span class="what">No accounts assigned (aiflow-control/accounts.yaml)</span></span>';
+    if (!accs.length) h += '<span class="node-acc"><span class="what">No accounts assigned. Manage accounts on Machines and AI.</span></span>';
     accs.forEach(function (a) { h += '<span class="node-acc"><span class="sdot" data-tone="' + accTone(a) + '"></span><span class="who">' + esc(a.id) + '</span><span class="what">' + esc(doing(a)) + '</span></span>'; });
     h += '</span></button>';
   });
@@ -2421,7 +2423,7 @@ function renderCC() {
 
   h += roleHealthPanel(d.role_health || { roles: [], settings: {} });
 
-  h += progressPanel(d.release_progress || [], 'en', 'p-ready', true);
+  h += progressPanel(d.release_progress || [], 'en', 'p-ready', true) + scaleProofPanel(d.scale_proof, (S.biz || {}).jira_site);
 
   h += '<section class="panel" id="p-runs" aria-labelledby="h-runs"><div class="panel-h"><h2 id="h-runs">Runs</h2><span class="hint">Running now and the last 30 finished</span></div>' + runsTable(d.active_runs.map(function (r) { return Object.assign({ outcome: 'running', duration_s: r.elapsed_s, live: true }, r); }).concat(d.recent_runs), 12) + '</section>';
 
@@ -2558,7 +2560,7 @@ function accMatch(a, f) {
 }
 function incCard(i, closed) {
   var tn = closed ? 'ok' : i.severity === 'critical' ? 'crit' : i.severity === 'warning' ? 'warn' : 'info';
-  return '<button class="inc" data-act="open-inc" data-id="' + i.id + '"' + (closed ? ' data-closed' : '') + '><span class="inc-top"><span class="mono muted" style="font-size:12px">#' + i.id + ' · ' + esc(when(i.opened_at)) + '</span><span style="font-weight:600">' + esc(i.title) + '</span><span class="spacer"></span>' + pill(tn, closed ? 'Resolved ' + when(i.closed_at) : (i.severity === 'critical' ? 'Critical' : 'Warning'), !closed && i.severity === 'critical') + '</span><span class="muted" style="font-size:12.5px">' + esc(i.detail) + '</span></button>';
+  return '<button class="inc" data-act="open-inc" data-id="' + esc(i.id) + '"' + (closed ? ' data-closed' : '') + '><span class="inc-top"><span class="mono muted" style="font-size:12px">#' + i.id + ' · ' + esc(when(i.opened_at)) + '</span><span style="font-weight:600">' + esc(i.title) + '</span><span class="spacer"></span>' + pill(tn, closed ? 'Resolved ' + when(i.closed_at) : (i.severity === 'critical' ? 'Critical' : 'Warning'), !closed && i.severity === 'critical') + '</span><span class="muted" style="font-size:12.5px">' + esc(i.detail) + '</span></button>';
 }
 function versionsBox() {
   var d = D(), pin = (d.versions && d.versions.tools) || {};
@@ -2583,7 +2585,7 @@ function runsTable(rows, limit) {
     h += '<tr tabindex="0" data-act="open-ticket" data-key="' + esc(r.ticket) + '"><td class="mono small">' + started + '</td><td class="mono">' + esc(r.ticket) + '</td><td>' + esc(r.step) + '</td><td class="mono">' + esc(r.account) + '</td><td class="mono small">' + esc(r.model || '—') + '</td><td class="mono">' + esc(r.node) + '</td>';
     h += '<td>' + pill(runTone(r.outcome), r.outcome + (r.error_kind && r.error_kind !== r.outcome ? ' · ' + r.error_kind : ''), r.live) + '</td>';
     h += '<td class="mono">' + (r.live ? '<span data-since="' + (r.elapsed_s || 0) + '" data-fmt="clock"></span>' : mmss(r.duration_s)) + '</td><td class="mono">' + (r.live ? '—' : tok((r.tokens_in || 0) + (r.tokens_out || 0))) + '</td><td class="mono">' + (r.live ? '—' : usd(r.cost_usd)) + '</td>';
-    h += '<td>' + (r.pr_url ? '<a href="' + esc(r.pr_url) + '" target="_blank" rel="noopener" data-stop>#' + esc(r.pr_url.split('/').pop()) + ' ' + ICON.ext + '</a>' : '—') + '</td></tr>';
+    h += '<td>' + (r.pr_url ? '<a href="' + esc(safeHref(r.pr_url)) + '" target="_blank" rel="noopener" data-stop>#' + esc(r.pr_url.split('/').pop()) + ' ' + ICON.ext + '</a>' : '—') + '</td></tr>';
   });
   return h + '</tbody></table></div>';
 }
@@ -2668,7 +2670,7 @@ function renderSA() {
   });
   h += '</section></div>';
 
-  h += '<section class="panel" id="sa-network"><div class="panel-h"><h2>Network errors and retries</h2><span class="hint">Read from registry events and runs</span><span class="spacer"></span><a class="btn sm" href="' + esc((d.links || {}).o2 || '/o2/') + '" target="_blank" rel="noopener">OpenObserve ' + ICON.ext + '</a></div>';
+  h += '<section class="panel" id="sa-network"><div class="panel-h"><h2>Network errors and retries</h2><span class="hint">Read from registry events and runs</span><span class="spacer"></span><a class="btn sm" href="' + esc(safeHref((d.links || {}).o2) || '/o2/') + '" target="_blank" rel="noopener">OpenObserve ' + ICON.ext + '</a></div>';
   if (!network.length) h += '<div class="empty">No network errors or retries recorded.</div>';
   else {
     h += '<div class="tablebox"><table style="min-width:850px"><thead><tr><th>Time</th><th>Source</th><th>Node / account</th><th>Ticket</th><th>Detail</th><th>Retry</th></tr></thead><tbody>';
@@ -2807,7 +2809,7 @@ function epicsPanel(all, act, id) {
   return h + '</div></section>';
 }
 function renderDBody() {
-  var all = projTickets();
+  if (!window.AIFlowConsole) { window.AIFlowConsole = { state: S, data: D, esc: esc, when: when, projectResponseError: projectResponseError, renderDBody: renderDBody, activeBoard: function () { return S.view === 'work' ? $('#work-body') : $('#dbody'); } }; if (typeof window.dispatchEvent === 'function') window.dispatchEvent(new Event('aiflow-console-ready')); } var all = projTickets();
   var byKey = {}; all.forEach(function (t) { byKey[t.key] = t; });
   var work = all.filter(function (t) { return t.type !== 'Epic'; });
   var q = S.search.trim().toLowerCase();
@@ -2824,7 +2826,7 @@ function renderDBody() {
   var devDone = runs.filter(function (r) { return r.step === 'dev' && r.outcome === 'done' && r.duration_s; }).map(function (r) { return r.duration_s; }).sort(function (a, b) { return a - b; });
   var med = devDone.length ? devDone[Math.floor(devDone.length / 2)] : null;
   var p = D().projects.filter(function (x) { return x.key === S.project; })[0] || {};
-  var wm = p.work_minutes || { target: 30, warn: 45, hard: 60 };
+  var wm = p.work_minutes || { target: 15, warn: 30, hard: 45 };
 
   var boardOnly = S.view === 'work', h = '';
   if (!boardOnly) {
@@ -2871,8 +2873,8 @@ function renderDBody() {
   h += '<section class="panel" data-block="runs" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
   h += analyticsPanel();
   }
-  var target = S.view === 'work' ? $('#work-body') : $('#dbody');
-  if (target) target.innerHTML = h;
+  var target = S.view === 'work' ? $('#work-body') : $('#dbody'); if (window.AIFlowConsole && window.AIFlowConsole.runInboxPanel) h += window.AIFlowConsole.runInboxPanel();
+  if (target && window.AIFlowConsole && window.AIFlowConsole.renderBoardContent) window.AIFlowConsole.renderBoardContent(target, h); else if (target) target.innerHTML = h;
   if (target && S.view === 'delivery') applyLayout('delivery', target);
 }
 
@@ -2917,13 +2919,13 @@ function renderReviews() {
       var labels = { question_from_ai: 'Question from AI', decision_needed: 'Decision needed', review_before_merge: 'Review before merge', blocked: 'Blocked' };
       h += '<article class="panel review-card" data-review-card data-key="' + esc(t.key) + '"><div class="review-title"><h2><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '</h2><span class="spacer"></span>' + pill(t.status === 'Needs owner' ? 'warn' : 'info', labels[t.kind] || t.status || 'Human review', true) + '</div>';
       if (t.description) h += '<div class="review-content">' + esc(t.description) + '</div>';
-      h += '<div class="review-facts"><div class="review-fact"><div class="label">Repository</div><div class="value mono">' + esc(t.repository || '—') + '</div></div><div class="review-fact"><div class="label">Pull request</div><div class="value">' + (pr.url ? '<a href="' + esc(pr.url) + '" target="_blank" rel="noopener">' + esc(pr.title || ('PR #' + pr.number)) + ' ' + ICON.ext + '</a>' : '—') + '</div></div>';
+      h += '<div class="review-facts"><div class="review-fact"><div class="label">Repository</div><div class="value mono">' + esc(t.repository || '—') + '</div></div><div class="review-fact"><div class="label">Pull request</div><div class="value">' + (pr.url ? '<a href="' + esc(safeHref(pr.url)) + '" target="_blank" rel="noopener">' + esc(pr.title || ('PR #' + pr.number)) + ' ' + ICON.ext + '</a>' : '—') + '</div></div>';
       diff.forEach(function (x) { h += '<div class="review-fact"><div class="label">' + x[0] + '</div><div class="value mono">' + (x[1] == null ? '—' : esc(x[1])) + '</div></div>'; });
       h += '<div class="review-fact"><div class="label">Verify</div><div class="value">' + (ver.outcome ? pill(runTone(ver.outcome), (ver.verdict ? ver.verdict + ' · ' : '') + ver.outcome) : '—') + (ver.checks ? '<div class="small muted" style="margin-top:4px">' + esc(ver.checks) + '</div>' : '') + '</div></div></div>';
       if (ver.summary) h += '<div><strong>Verify result:</strong> ' + esc(ver.summary) + '</div>';
       if (ver.findings) h += '<div class="review-content"><strong>Findings:</strong>\n' + esc(ver.findings) + '</div>';
-      h += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(t.jira_url) + '" target="_blank" rel="noopener">Open ticket in Jira ' + ICON.ext + '</a>';
-      if (t.preview_url) h += '<a class="btn sm" href="' + esc(t.preview_url) + '" target="_blank" rel="noopener">Preview environment ' + ICON.ext + '</a>';
+      h += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(safeHref(t.jira_url)) + '" target="_blank" rel="noopener">Open ticket in Jira ' + ICON.ext + '</a>';
+      if (t.preview_url) h += '<a class="btn sm" href="' + esc(safeHref(t.preview_url)) + '" target="_blank" rel="noopener">Preview environment ' + ICON.ext + '</a>';
       if (t.thread && t.thread.length) {
         h += '<div class="review-thread"><strong>AI question thread</strong>';
         t.thread.forEach(function (line) { h += '<div class="review-thread-line"><span class="muted">' + esc(line.author || line.kind) + ' · ' + esc(line.created_at || '') + '</span><div>' + esc(line.text || '') + '</div></div>'; });
@@ -3081,16 +3083,16 @@ function renderLearningKnowledge(k, canManage) {
     var statusTone = item.status === 'active' ? 'ok' : (item.status === 'stale' ? 'warn' : 'muted');
     h += '<article class="knowledge-item"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3>' + esc(item.title) + '</h3>' +
       '<span class="pill" data-tone="' + statusTone + '">' + esc(item.status) + '</span><span class="pill">' + esc(KNOWLEDGE_TYPES[item.kind] || item.kind) + ' · ' + esc(scope) + '</span></div>' +
-      '<div class="small">' + esc(item.content) + '</div><div class="small">Source: ' + source + (item.source_url ? ' · <a href="' + esc(item.source_url) + '" target="_blank" rel="noopener">ticket</a>' : '') +
+      '<div class="small">' + esc(item.content) + '</div><div class="small">Source: ' + source + (item.source_url ? ' · <a href="' + esc(safeHref(item.source_url)) + '" target="_blank" rel="noopener">ticket</a>' : '') +
       (item.run_id ? ' · <a href="/v1/tickets/' + encodeURIComponent(item.ticket_key) + '/timeline" target="_blank" rel="noopener">run ' + esc(item.run_id) + '</a>' : '') +
-      (item.pr_url ? ' · <a href="' + esc(item.pr_url) + '" target="_blank" rel="noopener">pull request</a>' : '') + '</div>' +
+      (item.pr_url ? ' · <a href="' + esc(safeHref(item.pr_url)) + '" target="_blank" rel="noopener">pull request</a>' : '') + '</div>' +
       '<div class="small">Created by ' + esc(item.created_by || 'unknown') + ' · approved by ' + esc(item.approved_by || 'pending') + ' · handed to ' + Number(item.handed_count || 0) + ' runs</div>';
     if (canManage) h += '<div class="knowledge-actions">' +
-      '<button class="btn sm" data-act="knowledge-item-edit" data-id="' + item.id + '">Correct</button>' +
-      ((!item.approved || item.status === 'stale') ? '<button class="btn sm" data-act="knowledge-item-approve" data-id="' + item.id + '">Approve / review</button>' : '') +
-      (item.status === 'active' ? '<button class="btn sm" data-act="knowledge-item-stale" data-id="' + item.id + '">Flag for review</button>' : '') +
-      (item.status !== 'retired' ? '<button class="btn sm" data-act="knowledge-item-retire" data-id="' + item.id + '">Retire</button>' : '') +
-      '<button class="btn sm" data-act="knowledge-item-merge" data-id="' + item.id + '">Merge duplicate…</button></div>';
+      '<button class="btn sm" data-act="knowledge-item-edit" data-id="' + esc(item.id) + '">Correct</button>' +
+      ((!item.approved || item.status === 'stale') ? '<button class="btn sm" data-act="knowledge-item-approve" data-id="' + esc(item.id) + '">Approve / review</button>' : '') +
+      (item.status === 'active' ? '<button class="btn sm" data-act="knowledge-item-stale" data-id="' + esc(item.id) + '">Flag for review</button>' : '') +
+      (item.status !== 'retired' ? '<button class="btn sm" data-act="knowledge-item-retire" data-id="' + esc(item.id) + '">Retire</button>' : '') +
+      '<button class="btn sm" data-act="knowledge-item-merge" data-id="' + esc(item.id) + '">Merge duplicate…</button></div>';
     h += '</article>';
   });
   h += '</div>';
@@ -3162,12 +3164,12 @@ function renderKnowledge() {
       var older = versions.filter(function (x) { return x.version === v.version - 1; })[0];
       h += '<article class="knowledge-version"><div><strong>Version ' + v.version + '</strong> · ' + esc(v.action) + ' · edited by <strong>' + esc(v.actor) + '</strong> · ' + esc(knowledgeDate(v.created_at)) +
         (v.approved_by ? ' · approved by ' + esc(v.approved_by) : '') + '</div><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before' + (older ? ' · v' + older.version : '') + '</div><pre>' + esc(older ? older.content : '(no earlier version)') + '</pre></div>' +
-        '<div><div class="small">After · ' + esc(v.title) + (v.archived ? ' · archived' : '') + '</div><pre>' + esc(v.content) + '</pre>' + (canManage ? '<button class="btn sm" data-act="knowledge-restore" data-kind="' + esc(k.history.type) + '" data-id="' + esc(k.history.id) + '" data-version="' + v.version + '">Restore this version</button>' : '') + '</div></div></article>';
+        '<div><div class="small">After · ' + esc(v.title) + (v.archived ? ' · archived' : '') + '</div><pre>' + esc(v.content) + '</pre>' + (canManage ? '<button class="btn sm" data-act="knowledge-restore" data-kind="' + esc(k.history.type) + '" data-id="' + esc(k.history.id) + '" data-version="' + esc(v.version) + '">Restore this version</button>' : '') + '</div></div></article>';
     });
     pendingHistory.forEach(function (p) {
       h += '<article class="knowledge-version"><div><strong>Pending PR #' + p.pr_number + '</strong> · proposed by <strong>' + esc(p.actor) + '</strong> · ' + esc(knowledgeDate(p.created_at)) +
         ' · before v' + p.base_version + ' · not active</div><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before</div><pre>' + esc(p.base_content || '(new policy)') + '</pre></div>' +
-        '<div><div class="small">Proposed after · ' + esc(p.title) + (p.archived ? ' · archived after merge' : '') + '</div><pre>' + esc(p.content) + '</pre><a href="' + esc(p.pr_url) + '" target="_blank" rel="noopener">Review pull request ' + ICON.ext + '</a></div></div></article>';
+        '<div><div class="small">Proposed after · ' + esc(p.title) + (p.archived ? ' · archived after merge' : '') + '</div><pre>' + esc(p.content) + '</pre><a href="' + esc(safeHref(p.pr_url)) + '" target="_blank" rel="noopener">Review pull request ' + ICON.ext + '</a></div></div></article>';
     });
     h += '</div></section>';
   }
@@ -3180,7 +3182,7 @@ function renderKnowledge() {
   pending.forEach(function (p) {
     h += '<article class="knowledge-item"><h3>' + esc(p.title) + '</h3><div class="small">' + esc(p.id) + ' · proposed by ' + esc(p.actor) + ' · ' + esc(knowledgeDate(p.created_at)) + '</div>' +
       '<details><summary>View proposed change</summary><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before · v' + p.base_version + '</div><pre>' + esc(p.base_content || '(new policy)') + '</pre></div><div><div class="small">After' + (p.archived ? ' · archived after merge' : '') + '</div><pre>' + esc(p.content) + '</pre></div></div></details>' +
-      '<a href="' + esc(p.pr_url) + '" target="_blank" rel="noopener">Review PR #' + p.pr_number + ' ' + ICON.ext + '</a>' + (canApprove ? '<div class="knowledge-actions"><button class="btn primary" data-act="knowledge-approve" data-proposal="' + p.proposal_id + '">Approve and merge policy</button></div>' : '') + '</article>';
+      '<a href="' + esc(safeHref(p.pr_url)) + '" target="_blank" rel="noopener">Review PR #' + esc(p.pr_number) + ' ' + ICON.ext + '</a>' + (canApprove ? '<div class="knowledge-actions"><button class="btn primary" data-act="knowledge-approve" data-proposal="' + esc(p.proposal_id) + '">Approve and merge policy</button></div>' : '') + '</article>';
   });
   h += '</section>';
   h += renderLearningKnowledge(k, canManage);
@@ -3499,7 +3501,7 @@ function renderRuntimeSettings() {
   if (!consoleCan('console.manage')) { root.innerHTML = '<section class="panel"><p>Settings are available to owners and administrators.</p></section>'; return; }
   if (!state.project && projects.length) state.project = projects[0];
   var services = state.scope === 'project' ? (data.project_services || {})[state.project] || [] : data.secret_services || [];
-  var h = '<section class="panel"><div class="panel-h"><h2>Runtime settings</h2><button class="btn sm" data-act="runtime-settings-refresh"' + (state.busy ? ' disabled' : '') + '>Refresh</button></div>' +
+  var h = (window.AIFlowQuotaRefresh ? window.AIFlowQuotaRefresh.panel(state, esc, when, renderRuntimeSettings, projectResponseError) : '') + '<section class="panel"><div class="panel-h"><h2>Runtime settings</h2><button class="btn sm" data-act="runtime-settings-refresh"' + (state.busy ? ' disabled' : '') + '>Refresh</button></div>' +
     '<p class="hint">Values are never shown after entry. The control APIs restart one at a time; project workers drain active work before they restart.</p>' +
     '<div class="project-form"><label>Location<select class="in" data-runtime-scope>' +
     '<option value="secret"' + (state.scope === 'secret' ? ' selected' : '') + '>Control runtime secret or setting</option>' +
@@ -3658,7 +3660,7 @@ function renderLead() {
 /* ---------- Business: progress by epic, tickets waiting on the owner, change requests ----------
    Read-only on tickets: the only write is the change request form (a new Story in Backlog). The owner moves an
    assessed change request to Intake in Jira; nothing here changes a ticket's status. */
-function jiraUrl(key) { return String((S.biz && S.biz.jira_site) || 'https://jooservices.atlassian.net').replace(/\/+$/, '') + '/browse/' + encodeURIComponent(key); }
+function jiraUrl(key) { return String(safeHref(S.biz && S.biz.jira_site) || 'https://jooservices.atlassian.net').replace(/\/+$/, '') + '/browse/' + encodeURIComponent(key); }
 function needsOwner(all) {
   var byKey = {}; all.forEach(function (t) { byKey[t.key] = t; });
   return all.filter(function (t) { return t.status === 'Needs owner'; }).map(function (t) {
@@ -3671,29 +3673,7 @@ function projTabs() {
   if (!d.projects.length) h += '<span class="muted">No project in aiflow-control/projects</span>';
   return h + '</div>';
 }
-/* Release readiness of each unreleased Jira version (/v1/state release_readiness): every ticket currently in the
-   version must be Done, verified, out of rework and not blocked by an open release-qa Bug. Command Center (en)
-   and Business (vi) show the same reasons from this one place. */
-var READY_TEXT = {
-  en: { title: 'Release readiness', hint: 'Every ticket now in the Jira version must be Done, verified, not in rework and not blocked by an open release-qa Bug',
-        none: 'No unreleased Jira version.', ready: 'Ready', notReady: 'Not ready', done: 'Done',
-        empty: function () { return 'The version is empty: no ticket is in it'; },
-        not_done: function (r) { return r.ticket + ': not Done (status ' + r.status + ')'; },
-        rework: function (r) { return r.ticket + ': in rework'; },
-        not_verified: function (r) { return r.ticket + ': Done but not verified'; },
-        blocked_by_bug: function (r) { return r.ticket + ': blocked by release-qa Bug ' + r.bug; },
-        release_running: function () { return 'The release check is running'; },
-        release_failed: function (r) { return 'The release check failed' + (r.detail ? ': ' + r.detail : ''); } },
-  vi: { title: 'Sẵn sàng release', hint: 'Mọi ticket đang ở trong Jira version phải Done, đã qua verify, không rework và không bị Bug release-qa còn mở chặn',
-        none: 'Không có Jira version nào chưa release.', ready: 'Sẵn sàng', notReady: 'Chưa sẵn sàng', done: 'Done',
-        empty: function () { return 'Version rỗng: chưa có ticket nào'; },
-        not_done: function (r) { return r.ticket + ': chưa Done (đang ở ' + r.status + ')'; },
-        rework: function (r) { return r.ticket + ': đang rework'; },
-        not_verified: function (r) { return r.ticket + ': đã Done nhưng chưa qua verify'; },
-        blocked_by_bug: function (r) { return r.ticket + ': bị Bug release-qa ' + r.bug + ' chặn'; },
-        release_running: function () { return 'Kiểm tra release đang chạy'; },
-        release_failed: function (r) { return 'Kiểm tra release bị lỗi' + (r.detail ? ': ' + r.detail : ''); } }
-};
+var READY_TEXT = window.AIFlowReadyText;
 /* Release progress per Jira version (/v1/state release_progress): x/y Done, open tickets, tickets added late with
    the date, why the version is not ready, and the release outcome. Command Center (detail) also lists the release
    steps with run ID and node; Business (compact) keeps x/y, late tickets, reasons, tag and GitHub Release link. */
@@ -3710,6 +3690,7 @@ var PROG_TEXT = {
         steps: { check: 'Kiểm tra', changelog: 'Changelog', pr: 'PR', merge: 'Merge', tag: 'Tag', release: 'GitHub Release' } }
 };
 function safeUrl(u) { return /^https?:\/\//.test(u || '') ? u : ''; }
+function safeHref(u) { u = String(u == null ? '' : u); return /^https?:\/\//i.test(u) || /^\/(?![\/\\])/.test(u) ? u : ''; }
 function releaseState(v) {
   var s = v.release && v.release.status;
   return v.released ? 'released' : s === 'checking' ? 'running' : s === 'failed' ? 'failed' : v.ready ? 'ready' : 'notReady';
@@ -3717,7 +3698,7 @@ function releaseState(v) {
 function releaseLink(v, t) {
   var rel = v.release || {}, h = '';
   if (rel.tag) h += '<span class="mono">' + esc(t.tag) + ' ' + esc(rel.tag) + '</span>';
-  if (safeUrl(rel.github_release_url)) h += ' <a href="' + esc(rel.github_release_url) + '" target="_blank" rel="noopener">' + esc(t.link) + '</a>';
+  if (safeUrl(rel.github_release_url)) h += ' <a href="' + esc(safeHref(rel.github_release_url)) + '" target="_blank" rel="noopener">' + esc(t.link) + '</a>';
   return h;
 }
 function releaseSteps(v, t) {
@@ -3725,7 +3706,7 @@ function releaseSteps(v, t) {
   if (!steps.length) return '<div class="muted">' + esc(t.noSteps) + '</div>';
   return '<ol class="d release-steps">' + steps.map(function (s) {
     var who = (s.run_id ? ' · ' + t.run + ' <span class="mono">' + esc(String(s.run_id).slice(0, 8)) + '</span>' : '') + (s.node ? ' · ' + t.node + ' <span class="mono">' + esc(s.node) + '</span>' : '');
-    var link = safeUrl(s.url) ? ' <a href="' + esc(s.url) + '" target="_blank" rel="noopener">' + esc(s.detail || '') + '</a>' : (s.detail ? ' ' + esc(s.detail) : '');
+    var link = safeUrl(s.url) ? ' <a href="' + esc(safeHref(s.url)) + '" target="_blank" rel="noopener">' + esc(s.detail || '') + '</a>' : (s.detail ? ' ' + esc(s.detail) : '');
     return '<li data-step="' + esc(s.step) + '" data-state="' + esc(s.state) + '"><b>' + esc(t.steps[s.step] || s.step) + '</b> · ' + esc(s.state) + link + who + '</li>';
   }).join('') + '</ol>';
 }
@@ -3793,7 +3774,7 @@ function renderBForm(force) {
   epics.forEach(function (e) { h += '<option value="' + esc(e.key) + '"' + (v.epic === e.key ? ' selected' : '') + '>' + esc(e.key + ' ' + e.summary.slice(0, 60)) + '</option>'; });
   h += '</select></label>';
   if (S.cr.errors.length) h += '<div class="err" role="alert">' + S.cr.errors.map(esc).join('<br>') + '</div>';
-  if (S.cr.created) h += '<div role="status">Đã tạo <a class="mono" href="' + esc(S.cr.created.url) + '" target="_blank" rel="noopener">' + esc(S.cr.created.key) + ' ' + ICON.ext + '</a> ở Backlog; AI đang đánh giá tác động.</div>';
+  if (S.cr.created) h += '<div role="status">Đã tạo <a class="mono" href="' + esc(safeHref(S.cr.created.url)) + '" target="_blank" rel="noopener">' + esc(S.cr.created.key) + ' ' + ICON.ext + '</a> ở Backlog; AI đang đánh giá tác động.</div>';
   h += '<div><button class="btn primary" type="submit"' + (S.cr.sending ? ' disabled' : '') + '>' + (S.cr.sending ? 'Đang gửi…' : 'Gửi change request') + '</button></div></form></section>';
   $('#bform').innerHTML = h;
 }
@@ -3816,7 +3797,7 @@ function submitCR() {
 function list(items) { return items && items.length ? '<ul>' + items.map(function (i) { return '<li>' + esc(i) + '</li>'; }).join('') + '</ul>' : '<span class="muted">không có</span>'; }
 function crCard(cr) {
   var ticket = ticketBy(cr.key), repository = ticket && ticket.repository;
-  var h = '<div class="cr-item" data-cr="' + esc(cr.key) + '"><div><a class="mono" href="' + esc(cr.url || jiraUrl(cr.key)) + '" target="_blank" rel="noopener">' + esc(cr.key) + '</a> ' + esc(cr.summary) + '</div>';
+  var h = '<div class="cr-item" data-cr="' + esc(cr.key) + '"><div><a class="mono" href="' + esc(safeHref(cr.url) || jiraUrl(cr.key)) + '" target="_blank" rel="noopener">' + esc(cr.key) + '</a> ' + esc(cr.summary) + '</div>';
   h += '<div class="small">Epic: ' + esc(cr.epic || '—') + ' · Repository: ' + esc(repository || '—') + ' · Trạng thái: ' + esc(cr.status) + '</div>';
   var i = cr.impact;
   if (!i) return h + '<div><span class="flag" data-tone="info">Đang đánh giá</span></div></div>';
@@ -3851,7 +3832,7 @@ function renderBusiness() {
 
 /* ---------- Stakeholder review and Jira verdicts ---------- */
 function stakeholderEnvLink(name, label, url) {
-  return url ? '<a class="btn" href="' + esc(url) + '" target="_blank" rel="noopener">' + label + ' ' + ICON.ext + '</a>' :
+  return url ? '<a class="btn" href="' + esc(safeHref(url)) + '" target="_blank" rel="noopener">' + label + ' ' + ICON.ext + '</a>' :
     '<span class="btn" aria-label="' + label + ': chưa deploy">' + label + ': chưa deploy</span>';
 }
 function renderStakeholderHead() {
@@ -3974,9 +3955,9 @@ function analyticsChart(rows) {
     [['ok', 'Done or merged'], ['rework', 'Rework'], ['failed', 'Failed'], ['other', 'Other']].forEach(function (k) {
       if (!b[k[0]]) return;
       var hh = H * b[k[0]] / max; y -= hh;
-      svg += '<rect class="an-' + k[0] + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + W + '" height="' + hh.toFixed(1) + '"><title>' + d + ' · ' + k[1] + ': ' + b[k[0]] + '</title></rect>';
+      svg += '<rect class="an-' + k[0] + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + W + '" height="' + hh.toFixed(1) + '"><title>' + esc(d) + ' · ' + k[1] + ': ' + b[k[0]] + '</title></rect>';
     });
-    svg += '<text x="' + (x + W / 2) + '" y="' + (H + LB - 3) + '" text-anchor="middle">' + d.slice(8) + '</text>';
+    svg += '<text x="' + (x + W / 2) + '" y="' + (H + LB - 3) + '" text-anchor="middle">' + esc(d.slice(8)) + '</text>';
   });
   return svg + '</svg>';
 }
@@ -4032,7 +4013,7 @@ function card(t, p) {
   if (flags) h += '<span class="c-top">' + flags + '</span>';
   if (t.run) {
     var wm = p.work_minutes || {};
-    var hard = (wm.hard || 60) * 60;
+    var hard = (wm.hard || 45) * 60;
     h += '<span class="c-run"><span class="sdot" data-tone="info"></span><span class="mono">' + esc(t.run.account) + '</span> · ' + esc(t.run.step) + ' · fence #' + t.run.fence + '</span>';
     h += '<span class="c-clock"><span class="track"><i data-clock="' + (t.run.elapsed_s || 0) + '" data-hard="' + hard + '"></i><b style="left:50%"></b><b style="left:75%"></b></span><span class="mono" data-since="' + (t.run.elapsed_s || 0) + '" data-fmt="clock"></span></span>';
   } else if (t.last_run) {
@@ -4042,7 +4023,7 @@ function card(t, p) {
   h += '</button>';
   if (t.status === 'In Verify' && t.already_done && t.already_done.pr_url) {
     var prMatch = t.already_done.pr_url.match(/\/pull\/(\d+)(?:\/|$)/), prLabel = prMatch ? 'Pull request #' + prMatch[1] : 'Open pull request';
-    return '<div class="card-wrap">' + h + '<a class="card-pr-link" href="' + esc(t.already_done.pr_url) + '" target="_blank" rel="noopener" aria-label="' + esc(prLabel + ' for ' + t.key) + '">' + esc(prLabel) + ' ' + ICON.ext + '</a></div>';
+    return '<div class="card-wrap">' + h + '<a class="card-pr-link" href="' + esc(safeHref(t.already_done.pr_url)) + '" target="_blank" rel="noopener" aria-label="' + esc(prLabel + ' for ' + t.key) + '">' + esc(prLabel) + ' ' + ICON.ext + '</a></div>';
   }
   return h;
 }
@@ -4072,7 +4053,7 @@ function timeSec(tl) {
 }
 function mergeSec(det) {
   var m = det.merge || {}, moves = det.moves || [];
-  var link = m.pr_url ? '<a href="' + esc(m.pr_url) + '" target="_blank" rel="noopener">PR #' + esc(String(m.pr_url).split('/').pop()) + ' ' + ICON.ext + '</a>' : '—';
+  var link = m.pr_url ? '<a href="' + esc(safeHref(m.pr_url)) + '" target="_blank" rel="noopener">PR #' + esc(String(m.pr_url).split('/').pop()) + ' ' + ICON.ext + '</a>' : '—';
   var h = '<div class="dsec" data-merge-facts><h4>Pull request and merge</h4><div class="facts">' + fact('Pull request', link) + fact('State on GitHub', esc(m.pr_state || '—')) +
     fact('Approved', m.approved_at ? when(m.approved_at) : '—') + fact('Merged', m.merged_at ? when(m.merged_at) + (m.merged_by ? ' · ' + esc(m.merged_by) : '') : '—') +
     fact('Merge commit', m.merge_sha ? '<span class="mono">' + esc(String(m.merge_sha).slice(0, 10)) + '</span>' : '—') +
@@ -4094,9 +4075,9 @@ function drawerTicket(key) {
   var b = '<div class="facts">' + fact('Type', esc(t.type)) + fact('Repository', '<span class="mono">' + esc(repository) + '</span>') + fact('Priority', esc(t.priority || '—')) + fact('Parent', t.parent_key ? '<button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(t.parent_key) + '">' + esc(t.parent_key) + '</button>' : '—') + fact('Blocked by', (t.blocked_by || []).length ? esc(t.blocked_by.join(', ')) : '—') + fact('Updated', t.updated_age_s != null ? ago(t.updated_age_s + since()) : '—');
   if (t.run) b += fact('Worker', '<span class="mono">' + esc(t.run.account) + '</span> · ' + esc(t.run.step)) + fact('Work clock', '<span class="mono" data-since="' + (t.run.elapsed_s || 0) + '" data-fmt="clock"></span> / 60:00') + fact('Lease', t.run.lease_ms > 0 ? Math.round(t.run.lease_ms / 1000) + ' s left' : 'expired') + fact('Fence', '#' + t.run.fence);
   b += '</div>';
-  b += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(det && det.jira_url ? det.jira_url : 'https://jooservices.atlassian.net/browse/' + key) + '" target="_blank" rel="noopener">Open in Jira ' + ICON.ext + '</a>';
+  b += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(safeHref(det && det.jira_url) || 'https://jooservices.atlassian.net/browse/' + key) + '" target="_blank" rel="noopener">Open in Jira ' + ICON.ext + '</a>';
   var prs = det ? det.runs.filter(function (r) { return r.pr_url; }).map(function (r) { return r.pr_url; }) : (t.last_run && t.last_run.pr_url ? [t.last_run.pr_url] : []);
-  prs.filter(function (u, i) { return prs.indexOf(u) === i; }).forEach(function (u) { b += '<a class="btn sm" href="' + esc(u) + '" target="_blank" rel="noopener">PR #' + esc(u.split('/').pop()) + ' ' + ICON.ext + '</a>'; });
+  prs.filter(function (u, i) { return prs.indexOf(u) === i; }).forEach(function (u) { b += '<a class="btn sm" href="' + esc(safeHref(u)) + '" target="_blank" rel="noopener">PR #' + esc(u.split('/').pop()) + ' ' + ICON.ext + '</a>'; });
   b += '</div>';
   if (!det) return drawerShell(esc(key) + ' · ' + esc(t.project || ''), esc(t.summary), pills, b + '<div class="empty">Loading runs and history…</div>');
   var acs = acLines(full.description);
@@ -4146,7 +4127,7 @@ function drawerTicket(key) {
 function drawerNode(name) {
   var n = nodeBy(name); if (!n) return drawerShell('node', esc(name), '', '<div class="empty">This node is no longer registered.</div>');
   var d = D(), accs = d.accounts.filter(function (a) { return accountAssignedTo(a, n.name); }), m = n.metrics || {};
-  var b = (n.purpose || n.notes ? '<div style="font-size:13.5px">' + esc(n.purpose || '') + (n.notes ? '<div class="small" style="margin-top:4px">' + esc(n.notes) + '</div>' : '') + '</div>' : '<div class="small">No purpose or notes yet: add <span class="mono">purpose</span> and <span class="mono">notes</span> to aiflow-control/nodes/' + esc(n.name) + '.yaml</div>') +
+  var b = (n.purpose || n.notes ? '<div style="font-size:13.5px">' + esc(n.purpose || '') + (n.notes ? '<div class="small" style="margin-top:4px">' + esc(n.notes) + '</div>' : '') + '</div>' : '<div class="small">No additional machine profile details are set.</div>') +
     '<div class="facts">' + fact('IP', '<span class="mono">' + esc(n.ip || '—') + '</span>') + fact('Joined', when(n.joined_at)) + fact('Projects', esc((n.projects || []).join(', ') || '—')) + fact('Capabilities', esc((n.capabilities || []).join(', ') || '—')) + fact('Status', nodeLabel(n)) + fact('Release', '<span class="mono">' + relLabel(n) + '</span>') + fact('Slots', d.active_runs.filter(function (r) { return r.node === n.name; }).length + ' / ' + n.slots_total) + fact('Last heartbeat', nodeLastSeen(n)) + fact('CPUs', String(m.cpus || '—')) + fact('Hostname', '<span class="mono">' + esc(m.hostname || '—') + '</span>') + '</div>';
   if (n.status === 'offline') b += '<div class="offnote">The node stopped sending heartbeats. The watchdog opened an incident and emailed it; runs on this node lose their lease after 90 s and their tickets return to To Do.</div>';
   b += '<div class="dsec"><h4>Resources</h4>' + nodeMetrics(n) + '</div>';
@@ -4232,7 +4213,7 @@ function drawerInc(id) {
     run_slow: 'The run passed the warning clock. It keeps working until the hard limit.',
     role_coverage: 'A role the flow needs (master, intake, verify, dev) has fewer than two ready accounts, so one quota limit or outage could stop it. Sign in or add an account with that role, ideally from another provider.',
     role_health: 'A role is switched off for an account only while the pool keeps at least two enabled accounts and no more than half are switched off. If every eligible account scores badly, AI Flow keeps the role on and reports the most frequent failure kind. Completed pull requests and clean no-change runs are successes. A corrected history or installed missing tool restores the role immediately; otherwise successful probation runs can restore it without a day-long wait. Failure counts and involved tickets appear above. Thresholds are on the Command Center, under AI quality by role.',
-    node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.',
+    node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Add an account for this machine on Machines and AI, then complete the sign-in handoff.',
     node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
     node_services: 'A test service (PostgreSQL or Redis) that a project declares is missing or unhealthy on this node, so the node takes no work for that project. The node agent recreates missing or stopped services; the incident closes when a later heartbeat reports them healthy.',
     service_undeclared: 'Tickets of a project are parked on a test service (PostgreSQL or Redis) that the project does not declare. The flow doctor declares it itself; this alert appears only when it could not. Add the service to Test services of the project on the Projects screen.',
@@ -4380,9 +4361,7 @@ function addMachineAccount(name) {
   var jobs = $$('[data-new-job]:checked', form).map(function (item) { return item.value; });
   var sessions = Number($('[name="sessions"]', form).value || 0), provider = $('[name="provider"]', form).value;
   machineRequest('/v1/machines/' + encodeURIComponent(name) + '/accounts', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({provider: provider, sessions: sessions, jobs: jobs})
-  }).then(function (d) { S.machines.signIns[d.account] = d; S.machines.signInRefreshAt[d.account] = Date.now(); S.machines.addAccount = ''; S.machines.error = ''; poll(); renderMachines(); })
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({provider: provider, name: ($('[name="name"]', form).value || '').trim(), sessions: sessions, jobs: jobs})}).then(function (d) { S.machines.signIns[d.account] = d; S.machines.signInRefreshAt[d.account] = Date.now(); S.machines.addAccount = ''; S.machines.error = ''; poll(); renderMachines(); })
     .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
 }
 function startAccountSignIn(id) {
@@ -4406,9 +4385,8 @@ function loadAccountSignIn(id) {
 function saveAccountSettings(id) {
   var form = $('#account-edit-' + CSS.escape(id)); if (!form) return;
   var jobs = $$('[data-edit-job]:checked', form).map(function (item) { return item.value; });
-  var sessions = Number($('[name="sessions"]', form).value || 0);
-  machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'PATCH', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sessions: sessions, jobs: jobs})})
+  var field = $('[name="sessions"]', form), payload = {jobs: jobs}; if (field) payload.sessions = Number(field.value || 0);  /* shared accounts keep one total limit */
+  machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)})
     .then(function () { S.machines.accountEditor = null; S.machines.error = ''; poll(); renderMachines(); })
     .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
 }
@@ -4472,7 +4450,7 @@ function renderMachines() {
     h += '<span>Configured AI sessions <strong>' + esc(assignedSessions) + ' / 8</strong></span>';
     h += '<span>Last heartbeat <strong>' + esc(nodeLastSeen(n)) + '</strong></span></div>';
     if (state.addAccount === n.name && consoleCan('nodes.manage')) {
-      h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider" aria-label="AI provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label>';
+      h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider" aria-label="AI provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label><label>Name<input name="name" type="text" maxlength="40" placeholder="Optional, e.g. Team plan" aria-label="Account name"></label>';
       h += '<label>Sessions at once<input name="sessions" type="number" min="1" max="' + availableSessions + '" value="1"' + (availableSessions < 1 ? ' disabled' : '') + '></label>';
       h += '<div class="small">' + availableSessions + ' of the machine’s eight AI sessions are available.</div><div class="wide job-options">' + jobChecks(['develop', 'verify'], 'data-new-job') + '</div>';
       h += '<div class="project-actions wide"><button class="btn primary" data-act="machine-account-save" data-name="' + esc(n.name) + '"' + (availableSessions < 1 ? ' disabled' : '') + '>Create sign-in link and code</button><button class="btn" data-act="machine-account-cancel">Cancel</button></div></form>';
@@ -4494,7 +4472,7 @@ function renderMachines() {
       if (consoleCan('nodes.manage') && removableAssignment) h += '<button class="btn sm danger" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(n.name) + '" data-last="' + ((a.machines || []).length === 1 ? '1' : '') + '">Remove</button>';
       else if (consoleCan('nodes.manage') && !sharedAssignment) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
       h += '</div>';
-      if (sharedAssignment && signIn && signIn.link) h += '<div class="signin-result"><a href="' + esc(signIn.link) + '" target="_blank" rel="noopener noreferrer">Open provider authorization</a>' +
+      if (sharedAssignment && signIn && signIn.link) h += '<div class="signin-result"><a href="' + esc(safeHref(signIn.link)) + '" target="_blank" rel="noopener noreferrer">Open provider authorization</a>' +
         (signIn.code ? ' · provider code <span class="mono">' + esc(signIn.code) + '</span>' : '') +
         (signIn.expires_at ? ' · expires ' + esc(when(signIn.expires_at)) : '') +
         '<p class="small">Complete authorization for ' + esc(n.name) + '. Its worker will check the credentials after the provider login finishes.</p></div>';
@@ -4502,7 +4480,7 @@ function renderMachines() {
         (consoleCan('nodes.manage') ? ' Use Retry sign-in to start a fresh attempt.' : '') + '</div>';
       else if (signIn && signIn.error) h += '<div class="small">' + esc(signIn.error) + ' · Start sign-in again to retry.</div>';
       else if (signIn && signIn.status === 'failed') h += '<div class="small">' + esc(signIn.error || 'Provider sign-in failed.') + ' · Start sign-in again to retry.</div>';
-      else if (signIn && signIn.sign_in_url) h += '<div class="signin-result"><a href="' + esc(signIn.sign_in_url) + '" target="_blank" rel="noopener">Open provider authorization</a>' +
+      else if (signIn && signIn.sign_in_url) h += '<div class="signin-result"><a href="' + esc(safeUrl(signIn.sign_in_url)) + '" target="_blank" rel="noopener">Open provider authorization</a>' +
         (signIn.code ? ' · provider code <span class="mono">' + esc(signIn.code) + '</span>' : '') +
         (signIn.expires_at ? ' · expires ' + esc(when(signIn.expires_at)) : '') +
         '<p class="small">Complete the provider authorization for this account on ' + esc(n.name) + '. The machine stores the resulting credentials in this account’s private home. After its check succeeds, choose Finish sign-in.</p></div>';
@@ -4515,20 +4493,20 @@ function renderMachines() {
       var machineUsage = (a.machines || []).find(function (m) { return m.node === n.name; }) || {};
       var sharedAssignment = !!(a.shared || a.shared_managed || machineUsage.shared_assignment);
       var removableAssignment = (a.machines || []).some(function (m) { return m.node === n.name && m.removable; });
-      h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill(accTone(a), a.paused ? 'Paused' : accLabel(a)) +
+      h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.name || a.id) + '</h4>' + pill(accTone(a), a.paused ? 'Paused' : accLabel(a)) +
         '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + (sharedAssignment
           ? ' · total limit ' + esc(a.session_limit || a.parallel) + ' sessions'
           : ' · ' + esc(a.parallel) + ' session' + (a.parallel === 1 ? '' : 's') +
             ' · ' + esc((a.jobs || []).join(', ') || 'no jobs')) + '</span><span class="spacer"></span>';
       if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-pause" data-id="' + esc(a.id) + '" data-paused="' + String(!a.paused) + '">' + (a.paused ? 'Resume' : 'Pause') + '</button>';
-      if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">Sessions and jobs</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">' + (sharedAssignment ? 'Jobs' : 'Sessions and jobs') + '</button>';
       if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">' + (a.status === 'signed_out' ? 'Sign in' : 'Sign in again') + '</button>';
       if (consoleCan('nodes.manage') && removableAssignment) h += '<button class="btn sm danger" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(n.name) + '" data-last="' + ((a.machines || []).length === 1 ? '1' : '') + '">Remove</button>';
       else if (consoleCan('nodes.manage') && !sharedAssignment) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
       h += '</div><div class="machine-facts"><span>Tokens today <strong>' + esc(tok(machineUsage.tokens_today || 0)) + '</strong></span>';
       h += '<span>Cost today <strong>' + esc(usd(machineUsage.cost_today || 0)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>';
-      if (!sharedAssignment && state.accountEditor === a.id) {
-        h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false"><label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label><div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
+      if (state.accountEditor === a.id && consoleCan('nodes.manage')) {
+        h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false">' + (sharedAssignment ? '' : '<label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label>') + '<div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
         h += '<div class="project-actions wide"><button class="btn primary" data-act="account-edit-save" data-id="' + esc(a.id) + '">Save changes</button><button class="btn" data-act="account-edit-cancel">Cancel</button></div></form>';
       }
       h += '</section>';
@@ -4578,7 +4556,6 @@ function toolWaitsPanel(d) {
   });
   return h + '</tbody></table></section>';
 }
-
 function renderProjects() {
   var root = $('#view-projects'); if (!root) return;
   var state = S.projectAdmin, rows = state.projects || [], invalid = state.invalidProjects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
@@ -4708,7 +4685,7 @@ function renderSupport() {
     h += '<section class="panel" aria-labelledby="support-inventory"><div class="panel-h"><h2 id="support-inventory">Review bundle inventory</h2><span class="badge ok">Sensitive data scan passed</span></div>';
     h += '<p class="hint">Created ' + esc(when(inv.created_at)) + '. Review these files before you share the downloaded bundle.</p><ul class="plain-list">';
     h += (inv.files || []).map(function (file) { return '<li><span class="mono">' + esc(file.name) + '</span><span class="hint">' + Number(file.bytes || 0).toLocaleString() + ' bytes</span></li>'; }).join('');
-    h += '</ul><div class="project-actions"><a class="btn primary" href="' + esc(support.bundle.download_url) + '">Download reviewed bundle</a><button class="btn" data-act="support-clear">Build another</button><span class="hint">The download stays available for 10 minutes.</span></div></section>';
+    h += '</ul><div class="project-actions"><a class="btn primary" href="' + esc(safeHref(support.bundle.download_url)) + '">Download reviewed bundle</a><button class="btn" data-act="support-clear">Build another</button><span class="hint">The download stays available for 10 minutes.</span></div></section>';
   }
   root.innerHTML = h;
 }
@@ -4843,10 +4820,10 @@ function renderNotifications() {
       '<div class="notify-meta">' + esc(kindLabels[c.kind] || c.kind) + ' · ' + esc(destination) + '<br>Credentials: ' +
       (secretCount ? 'saved, hidden' : 'not set') + '<br>Last delivery: ' + esc(last.status || 'never') +
       (last.at ? ' · ' + esc(when(last.at)) : '') + (last.error ? '<br>Result: ' + esc(last.error) : '') + '</div>' +
-      '<div class="notify-actions"><button class="btn sm" data-act="notification-test" data-id="' + c.id + '">Send test message</button>' +
-      '<button class="btn sm" data-act="notification-edit" data-id="' + c.id + '">Edit</button>' +
-      '<button class="btn sm" data-act="notification-toggle" data-id="' + c.id + '">' + (c.enabled ? 'Disable' : 'Enable') + '</button>' +
-      '<button class="btn sm" data-act="notification-delete" data-id="' + c.id + '">Remove</button></div></article>';
+      '<div class="notify-actions"><button class="btn sm" data-act="notification-test" data-id="' + esc(c.id) + '">Send test message</button>' +
+      '<button class="btn sm" data-act="notification-edit" data-id="' + esc(c.id) + '">Edit</button>' +
+      '<button class="btn sm" data-act="notification-toggle" data-id="' + esc(c.id) + '">' + (c.enabled ? 'Disable' : 'Enable') + '</button>' +
+      '<button class="btn sm" data-act="notification-delete" data-id="' + esc(c.id) + '">Remove</button></div></article>';
   });
   if (!channels.length) h += '<div class="empty">No alert channels configured yet.</div>';
   h += '</div><h3>' + (state.editId ? 'Edit channel' : 'Add a channel') + '</h3><form id="notification-channel-form" class="panel">' +
@@ -4879,7 +4856,7 @@ function renderNotifications() {
   Object.keys(data.alert_kinds || {}).forEach(function (kind) {
     h += '<div class="notify-routing"><span>' + esc(data.alert_kinds[kind]) + '</span>' + channels.map(function (c) {
       var checked = ((prefs.routes || {})[kind] || []).indexOf(c.id) >= 0;
-      return '<label><input type="checkbox" data-route-kind="' + esc(kind) + '" data-route-channel="' + c.id + '"' +
+      return '<label><input type="checkbox" data-route-kind="' + esc(kind) + '" data-route-channel="' + esc(c.id) + '"' +
         (checked ? ' checked' : '') + (!c.enabled ? ' disabled' : '') + '></label>';
     }).join('') + '</div>';
   });
@@ -5014,6 +4991,7 @@ function render() {
   else if (S.view === 'work' || S.view === 'delivery') { renderDHead(); renderDBody(); }
   else if (S.view === 'sa') renderSA();
   else if (S.view === 'users') renderUsers();
+  else if (S.view === 'security') renderSecurity();
   else if (S.view === 'lead') renderLead();
   else if (S.view === 'business') renderBusiness();
   else if (S.view === 'review') renderReviews();
@@ -5079,7 +5057,7 @@ function renderHelp() {
   var box = document.getElementById('firstuse');
   if (!box) return;
   box.innerHTML = (HINTS[S.view] && !hintSeen(S.view))
-    ? '<div class="firstuse" role="note"><span>' + esc(HINTS[S.view]) + ' <a href="' + helpUrl(S.view) + '" target="_blank" rel="noopener">Read more in Help</a></span><button class="btn sm" data-act="hint-dismiss">Got it</button></div>'
+    ? '<div class="firstuse" role="note"><span>' + esc(HINTS[S.view]) + ' <a href="' + esc(helpUrl(S.view)) + '" target="_blank" rel="noopener">Read more in Help</a></span><button class="btn sm" data-act="hint-dismiss">Got it</button></div>'
     : '';
 }
 function showView() {
@@ -5109,6 +5087,7 @@ function setView(v) {
   if (v === 'backup') loadBackups(true);
   if (v === 'integrations') loadIntegrations();
   if (v === 'projects') loadProjectList();
+  if (v === 'security') loadSecurity();
   if (v === 'licensing') loadLicensing();
   if (v === 'users') loadUsers();
   if (v === 'machines') pollServices();
@@ -5161,78 +5140,6 @@ function layoutHidden(blocks, view) {
   return hidden;
 }
 /* Every Dashboard block shares one grid so a person can move it across Work, AI and machines, and extra panels. */
-function applyLayout(view, root) {
-  var page = LAYOUT_PAGES[view], model = layoutModel(view);
-  if (!page || !root || !model || !root.children) return;
-  var editing = S.layouts.mode === page, meta = {}, hidden = layoutHidden(model.blocks, view);
-  model.blocks.forEach(function (b) { meta[b.id] = b; });
-  var bar = document.createElement('div');
-  bar.className = 'layout-bar'; bar.setAttribute('data-layout-bar', page);
-  bar.innerHTML = layoutBarHtml(editing, hidden, page);
-  var grid = document.createElement('div'), els, byId = {};
-  grid.className = 'blocks' + (editing ? ' editing' : ''); grid.setAttribute('data-layout-page', page);
-  if (view === 'cc') {
-    var dashboardPanel = root.querySelector('#dashboard-panel') || root, tabById = {};
-    var headings = document.createElement('div');
-    headings.className = 'dashboard-layout-headings';
-    headings.setAttribute('aria-label', 'Dashboard sections');
-    Array.prototype.slice.call(dashboardPanel.querySelectorAll('[data-dashboard-panel]')).forEach(function (section) {
-      var title = section.querySelector('.dash-section-title');
-      var tab = section.getAttribute('data-dashboard-panel');
-      if (title) { title.setAttribute('data-dashboard-tab', tab); title.hidden = !editing && tab !== S.dashboardTab; headings.appendChild(title); }
-    });
-    els = Array.prototype.slice.call(root.querySelectorAll('[data-block]'));
-    els.forEach(function (el) {
-      var section = el.closest('[data-dashboard-panel]');
-      byId[el.getAttribute('data-block')] = el;
-      tabById[el.getAttribute('data-block')] = section ? section.getAttribute('data-dashboard-panel') : 'work';
-    });
-    var dashboardIds = layoutOrder(model.blocks, Object.keys(byId));
-    var dashboardShown = dashboardIds.filter(function (id) { return !(meta[id] && meta[id].hidden); });
-    grid.setAttribute('id', 'dashboard-layout-grid');
-    dashboardPanel.appendChild(bar); dashboardPanel.appendChild(headings); dashboardPanel.appendChild(grid);
-    dashboardIds.forEach(function (id) {
-      var el = byId[id]; if (!el) return;
-      var b = meta[id] || { id: id, title: id, size: 'full', hidden: false };
-      var cell = document.createElement('div');
-      var tab = tabById[id];
-      cell.className = 'block-cell'; cell.setAttribute('data-block-id', id); cell.setAttribute('data-dashboard-tab', tab);
-      cell.setAttribute('data-size', b.size); cell.hidden = !!b.hidden || (!editing && tab !== S.dashboardTab);
-      if (editing) cell.insertAdjacentHTML('beforeend', layoutTools(b, dashboardShown.indexOf(id) + 1, dashboardShown.length));
-      cell.appendChild(el); grid.appendChild(cell);
-    });
-    Array.prototype.slice.call(dashboardPanel.querySelectorAll('[data-dashboard-panel]')).forEach(function (section) { section.remove(); });
-    dashboardPanel.insertBefore(bar, dashboardPanel.firstChild);
-    dashboardPanel.insertBefore(headings, bar.nextSibling);
-    dashboardPanel.insertBefore(grid, headings.nextSibling);
-    return;
-  }
-  els = layoutBlocksIn(root);
-  if (!els.length) return;
-  root.insertBefore(bar, els[0]);
-  root.insertBefore(grid, els[0]);
-  els.forEach(function (el) { byId[el.getAttribute('data-block')] = el; });
-  var ids = layoutOrder(model.blocks, Object.keys(byId));
-  var shown = ids.filter(function (id) { return !(meta[id] && meta[id].hidden); });
-  ids.forEach(function (id) {
-    var b = meta[id] || { id: id, title: id, size: 'full', hidden: false };
-    var cell = document.createElement('div');
-    cell.className = 'block-cell'; cell.setAttribute('data-block-id', id); cell.setAttribute('data-size', b.size); cell.hidden = !!b.hidden;
-    if (editing) cell.insertAdjacentHTML('beforeend', layoutTools(b, shown.indexOf(id) + 1, shown.length));
-    cell.appendChild(byId[id]); grid.appendChild(cell);
-  });
-}
-function layoutTools(b, position, total) {
-  var t = esc(b.title || b.id), id = esc(b.id);
-  var h = '<div class="block-tools" role="group" aria-label="Layout of ' + t + '">';
-  h += '<button type="button" class="block-handle" data-layout-handle data-id="' + id + '" title="Drag to move, or use the arrow keys" aria-label="Move ' + t + ', position ' + position + ' of ' + total + '. Arrow keys move it.">';
-  h += '<span aria-hidden="true">⠿</span> <span class="block-title">' + t + '</span></button>';
-  h += '<span class="block-sizes" role="group" aria-label="Width of ' + t + '">';
-  LAYOUT_SIZES.forEach(function (s) {
-    h += '<button type="button" class="btn sm" data-act="layout-size" data-id="' + id + '" data-size="' + s[0] + '" aria-pressed="' + (b.size === s[0]) + '" aria-label="' + s[1] + ' width for ' + t + '">' + s[1] + '</button>';
-  });
-  return h + '</span><button type="button" class="btn sm" data-act="layout-hide" data-id="' + id + '" aria-label="Hide ' + t + '">Hide</button></div>';
-}
 function layoutBarHtml(editing, hidden, page) {
   if (!editing) return '<button type="button" class="btn sm" data-act="layout-edit">Customize layout</button>';
   var h = '<button type="button" class="btn sm primary" data-act="layout-done">Done</button><button type="button" class="btn sm" data-act="layout-reset">Reset this page</button>';
@@ -5271,14 +5178,6 @@ function layoutPersist(page, model) {
   });
 }
 /* Apply a changed block list: store it, redraw, announce it and put the focus where the person was working. */
-function layoutCommit(blocks, say, focus) {
-  var model = layoutModel(S.view), page = LAYOUT_PAGES[S.view]; if (!model) return;
-  model.blocks = blocks; model.customized = true;
-  layoutPersist(page, model);
-  render();
-  layoutAnnounce(say);
-  var target = focus && $(focus); if (target && target.focus) target.focus();
-}
 function layoutAction(act, el) {
   var page = LAYOUT_PAGES[S.view], model = layoutModel(S.view), id = el.getAttribute('data-id');
   if (!page || !model) return;
@@ -5337,21 +5236,6 @@ function layoutDragMove(e) {
   // The other blocks make room: the dragged block takes the place of the one it passes.
   if (kids.indexOf(drag.cell) < kids.indexOf(target)) target.parentNode.insertBefore(drag.cell, target.nextSibling);
   else target.parentNode.insertBefore(drag.cell, target);
-}
-function layoutDragEnd() {
-  var drag = S.layouts.drag; if (!drag) return;
-  S.layouts.drag = null;
-  drag.cell.classList.remove('dragging');
-  var model = layoutModel(S.view); if (!model) return;
-  var cells = Array.prototype.slice.call(drag.cell.parentNode.children);
-  var present = cells.map(function (c) {
-    var id = c.getAttribute('data-block-id');
-    return model.blocks.filter(function (b) { return b.id === id; })[0] || { id: id, title: id, size: 'full', hidden: false };
-  });
-  var merged = layoutMerge(model.blocks, present);
-  if (merged.map(function (b) { return b.id; }).join() === model.blocks.map(function (b) { return b.id; }).join()) { render(); return; }
-  var shown = cells.filter(function (c) { return !c.hidden; }).map(function (c) { return c.getAttribute('data-block-id'); });
-  layoutCommit(merged, layoutTitle(model, drag.id) + ' moved to position ' + (shown.indexOf(drag.id) + 1) + ' of ' + shown.length + '.', '[data-layout-handle][data-id="' + drag.id + '"]');
 }
 function loadLayouts() {
   var who = S.consoleUser && S.consoleUser.user;
@@ -5882,6 +5766,7 @@ render();
 if (S.view === 'knowledge') loadKnowledge(true);
 if (S.view === 'backup') loadBackups(true);
 if (S.view === 'projects') loadProjectList();
+if (S.view === 'security') loadSecurity();
 if (S.view === 'integrations') {
   var githubResult = new URLSearchParams(location.search).get('github');
   if (githubResult === 'connected') S.integrations.notice = 'GitHub is connected.';

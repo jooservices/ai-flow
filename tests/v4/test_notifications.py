@@ -5,14 +5,24 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import httpx
+import pytest
 
-from aiflow.v4.control import notify
+from aiflow.v4.control import flow_doctor, notify
+from aiflow.v4.core import secretbox
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.ui import mount_ui
 from tests.v4.conftest import add_ticket
 
 
 SECRET = "notifications-test-session-secret-32-bytes"
+
+
+@pytest.fixture(autouse=True)
+def secret_key(monkeypatch):
+    """Channel credentials are encrypted at rest; the key comes from outside the database."""
+    key = secretbox.generate_key()
+    monkeypatch.setenv("AIFLOW4_SECRET_KEY", key)
+    return key
 
 
 def sign_in(client, ctx, role="owner"):
@@ -108,6 +118,38 @@ def test_admin_screen_channel_test_results_and_hidden_credentials(client, ctx, m
     sign_in(client, ctx, "lead")
     assert client.get("/v1/notifications").status_code == 403
     assert client.get("/notifications").status_code == 403
+
+
+def test_notification_configuration_changes_are_write_audited_without_an_operator_bug(client, ctx):
+    email, secret = "notification-admin@example.test", "n" * 40
+    ctx.settings.console_session_secret = secret
+    ctx.db.run("INSERT INTO console_users (email,role,roles,password_hash) VALUES (%s,'administrator',%s,'test')",
+               (email, ["administrator"]))
+    expires = int(datetime.now(timezone.utc).timestamp()) + 3600
+    client.cookies.set(COOKIE_NAME, issue_session(email, ["administrator"], expires, secret))
+
+    saved = client.put("/v1/notifications/channels", json={
+        "name": "Build notifications", "kind": "webhook",
+        "config": {"url": "https://hooks.example.test/notifications", "auth_token": "never-audit-this"},
+    })
+    assert saved.status_code == 200, saved.text
+    channel_id = saved.json()["channel"]["id"]
+    preferences = client.put("/v1/notifications/preferences", json={
+        "routes": {"critical_incident": [channel_id]},
+    })
+    assert preferences.status_code == 200, preferences.text
+    deleted = client.delete(f"/v1/notifications/channels/{channel_id}")
+    assert deleted.status_code == 200, deleted.text
+
+    writes = ctx.db.all("SELECT actor,action,accepted FROM write_audit WHERE target='notifications' ORDER BY id")
+    assert writes == [
+        {"actor": email, "action": "channel_save", "accepted": True},
+        {"actor": email, "action": "preferences_save", "accepted": True},
+        {"actor": email, "action": "channel_delete", "accepted": True},
+    ]
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
+    assert flow_doctor.create_intervention_bugs(ctx) == 0
+    assert not getattr(ctx.jira, "created", [])
 
 
 def test_route_selection_for_each_alert_kind_and_quiet_hours(client, ctx, monkeypatch):
@@ -268,4 +310,3 @@ def test_notify_and_deploy_scripts_have_no_legacy_environment_or_local_mail_path
     for path in files:
         contents = path.read_text(encoding="utf-8")
         assert not any(value in contents for value in legacy), path
-

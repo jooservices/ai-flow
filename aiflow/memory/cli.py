@@ -10,6 +10,7 @@ import os
 import sys
 
 from .client import Memory, Unavailable
+from .scoped import OPERATIONS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,10 +47,21 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("curate", help="run the curator (admin token)")
     sub.add_parser("stats", help="how many entries of each kind and status")
     sub.add_parser("flush", help="send the entries kept while the service was down")
+    scoped = sub.add_parser("scoped", help="use the configured PostgreSQL service for workspace scoped notes")
+    scoped.add_argument("operation", choices=OPERATIONS)
+    scoped.add_argument("--arguments", default="{}", help="JSON arguments for the operation")
     args = parser.parse_args(argv)
     memory = Memory(os.environ.get("AIFLOW_MEMORY_URL", ""), os.environ.get("AIFLOW_MEMORY_TOKEN", ""))
     try:
-        if args.command == "search":
+        if args.command == "scoped":
+            if os.environ.get("AIFLOW_MEMORY_SCOPED_STORAGE", "") != "postgres":
+                print("scoped PostgreSQL storage is not selected for this project", file=sys.stderr)
+                return 2
+            arguments = json.loads(args.arguments)
+            if not isinstance(arguments, dict):
+                raise ValueError("scoped arguments must be a JSON object")
+            print(json.dumps(memory.scoped(args.operation, arguments), indent=1))
+        elif args.command == "search":
             for item in memory.call("POST", "/v1/search", dict(query=args.query, namespace=args.namespace, project=args.project, repo=args.repo,
                                                                kinds=args.kind, limit=args.limit, touch=False))["items"]:
                 print(f"[{item['kind']}/{item['status']}] {item['title']}  (id {item['id']})\n    {' '.join(item['body'].split())[:300]}")

@@ -46,6 +46,7 @@ class RunSpec:
     control_url: str = ""
     run_token: str = ""
     log_path: str = ""
+    log_append: bool = False
     extra_env: dict[str, str] = field(default_factory=dict)
     sandbox: str = "workspace-write"
     container_start_hook: Callable[[int], None] | None = None
@@ -59,6 +60,7 @@ class RunResult:
     verdict_reason: str = ""
     tokens_in: int = 0
     tokens_out: int = 0
+    token_usage_reported: bool = False
     cost_usd: float = 0.0
     permission_denials: int = 0
     error_kind: str = ""       # "" | quota | auth | network | provider | timeout | idle | other
@@ -66,6 +68,7 @@ class RunResult:
     reset_at: datetime | None = None
     credential_expires_at: datetime | None = None
     quota: dict = field(default_factory=dict)
+    quota_observed_at: datetime | None = None
     duration_s: float = 0.0
     log_path: str = ""
     command_results: list[dict] = field(default_factory=list)
@@ -74,6 +77,7 @@ class RunResult:
         d = self.__dict__.copy()
         d["reset_at"] = self.reset_at.isoformat() if self.reset_at else None
         d["credential_expires_at"] = self.credential_expires_at.isoformat() if self.credential_expires_at else None
+        d["quota_observed_at"] = self.quota_observed_at.isoformat() if self.quota_observed_at else None
         return d
 
 
@@ -155,6 +159,13 @@ def quota_from_event(event: dict, provider: str) -> dict:
     return {"provider": provider, "windows": normalized} if normalized else {}
 
 
+def record_quota_observation(result: RunResult, quota: dict) -> None:
+    """Keep the worker-side arrival time beside the provider snapshot for stale-result protection."""
+    if quota:
+        result.quota = quota
+        result.quota_observed_at = datetime.now(timezone.utc)
+
+
 def _credential_expiry(event: dict, res: RunResult, credential_context: bool = False) -> None:
     """Capture only explicit expiry metadata emitted by a CLI's structured event stream."""
     if res.credential_expires_at:
@@ -214,11 +225,11 @@ class Adapter:
         return env
 
     def run(self, spec: RunSpec, on_progress: Callable[[dict], None] | None = None,
-            stop: "threading.Event | None" = None) -> RunResult:
+            stop: "threading.Event | None" = None, on_start: Callable[[], None] | None = None) -> RunResult:
         self.prepare(spec)
         res = RunResult(log_path=spec.log_path)
         started = time.time()
-        log = open(spec.log_path, "w", encoding="utf-8") if spec.log_path else None
+        log = open(spec.log_path, "a" if spec.log_append else "w", encoding="utf-8") if spec.log_path else None
         run_env = self.base_env(spec)
         self._command_path = run_env.get("PATH", "")
         proc = subprocess.Popen(self.argv(spec), cwd=spec.cwd, env=run_env, stdin=subprocess.DEVNULL,
@@ -240,6 +251,8 @@ class Adapter:
                         pass
                     proc.wait()
                 raise
+        if on_start:
+            on_start()
         sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ)
         last_output = time.time()

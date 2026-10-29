@@ -58,8 +58,11 @@ def _chunks(body: str) -> list[str]:
 
 
 def enabled_channels(ctx) -> list[dict]:
-    return ctx.db.all("SELECT * FROM notification_channels WHERE kind='telegram' AND enabled=true"
+    rows = ctx.db.all("SELECT * FROM notification_channels WHERE kind='telegram' AND enabled=true"
                       " AND COALESCE((config->>'ba_chat_enabled')::boolean,false)=true ORDER BY id")
+    for row in rows:
+        row["config"] = notify._reveal_config("telegram", row.get("config"))
+    return rows
 
 
 def _redact(text: str, token: str) -> str:
@@ -420,7 +423,7 @@ def complete_job(ctx, job_id: str, claim_token: str, account: str, node: str, ou
                 connection.execute("UPDATE ba_chat_jobs SET status='failed',last_error='channel removed',updated_at=now()"
                                    " WHERE id=%s", (job_id,))
                 return False
-            config = channel.get("config") or {}
+            config = notify._reveal_config("telegram", channel.get("config"))
             token = str(config.get("bot_token") or "")
             reply = ""
             proposal = None

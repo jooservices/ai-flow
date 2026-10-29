@@ -11,6 +11,11 @@ def join(client, name):
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
 
+def reported_tools(ctx, node):
+    row = ctx.db.one("SELECT tools FROM nodes WHERE name=%s", (node,))
+    return dict(row["tools"] or {})
+
+
 def test_stack_values_map_to_node_and_project_tools():
     assert STACK_TOOLS["php-8.3"] == ("php", "composer", "wp")
     assert STACK_TOOLS["python-3.12"] == ("python3", "uv")
@@ -168,12 +173,14 @@ def test_unhealthy_stack_blocks_only_its_project_and_watchdog_warns(client, ctx)
     repo.projects["TESTWP"].stack = "php-8.3"
     repo.projects["OTHER"] = Project(key="OTHER", repo="jooservices/other")
     repo.nodes["cc"].projects = ["TESTWP", "OTHER"]
+    ctx.github.repositories.append({"full_name": "jooservices/other", "name": "other", "default_branch": "develop"})
     repo.versions["tools"] = {"php": "8.3", "composer": "2.8", "wp": "2.12"}
     cc = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-930")
     add_ticket(ctx.db, "OTHER-930")
 
-    tools = {"git": "git 2.43", "uv": "uv 0.5", "php": "PHP 8.3.9", "composer": "Composer 2.7.9",
+    tools = {"git": "git 2.43", "uv": "uv 0.5", "claude": "Claude Code 2.1.305",
+             "opencode": "opencode 1.0.0", "php": "PHP 8.3.9", "composer": "Composer 2.7.9",
              "wp": "WP-CLI 2.12.0"}
     client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=cc)
     keys = [item["key"] for item in client.get("/v1/work/candidates", params={"account": "claude-01"},
@@ -206,7 +213,7 @@ def test_dynamic_node_receives_stack_preflight_and_is_gated_until_healthy(client
     add_ticket(ctx.db, "TESTWP-931")
 
     headers = join(client, "fresh-node")
-    tools = {"git": "git 2.43", "uv": "uv 0.5", "php": "PHP 8.3.10",
+    tools = {"git": "git 2.43", "uv": "uv 0.5", "claude": "Claude Code 2.1.305", "php": "PHP 8.3.10",
              "composer": "Composer 2.7.9", "wp": "WP-CLI 2.12.0"}
     response = client.post("/v1/nodes/fresh-node/heartbeat", json={"tools": tools}, headers=headers)
     desired = response.json()["desired"]
@@ -228,7 +235,8 @@ def test_project_requiring_containers_is_not_offered_until_runtime_is_healthy(cl
     ctx.repo().projects["TESTWP"].containers = True
     headers = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-932")
-    tools = {"git": "git version 2.43", "uv": "uv 0.8.1", "safe-container-runtime": "missing"}
+    tools = reported_tools(ctx, "cc")
+    tools["safe-container-runtime"] = "missing"
     client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=headers)
     candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
     assert candidates.json()["tickets"] == []
@@ -255,6 +263,8 @@ def test_missing_runtime_gates_only_tickets_mapped_to_container_repository(clien
 
     project = ctx.repo().projects["TESTWP"]
     container_repo = "jooservices/container-checks"
+    ctx.github.repositories.append({"full_name": container_repo, "name": "container-checks",
+                                   "default_branch": "develop"})
     project.repositories = [{"repo": container_repo, "containers": True}]
     project.epic_repositories = {"TESTWP-932": container_repo}
     headers = join(client, "cc")
@@ -264,7 +274,8 @@ def test_missing_runtime_gates_only_tickets_mapped_to_container_repository(clien
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-932'")
     ctx.db.run("UPDATE tickets SET parent_key='TESTWP-932' WHERE key='TESTWP-933'")
 
-    tools = {"git": "git version 2.43", "uv": "uv 0.8.1", "safe-container-runtime": "missing"}
+    tools = reported_tools(ctx, "cc")
+    tools["safe-container-runtime"] = "missing"
     client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=headers)
     candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
     assert [ticket["key"] for ticket in candidates.json()["tickets"]] == ["TESTWP-934"]
@@ -285,6 +296,10 @@ def test_missing_runtime_gates_resumed_work_using_the_previous_dev_repository_se
     project = ctx.repo().projects["TESTWP"]
     current_repository = "jooservices/current-checks"
     previous_repository = "jooservices/container-checks"
+    ctx.github.repositories.extend([
+        {"full_name": current_repository, "name": "current-checks", "default_branch": "develop"},
+        {"full_name": previous_repository, "name": "container-checks", "default_branch": "develop"},
+    ])
     project.repo = current_repository
     project.containers = False
     project.repositories = [{"repo": current_repository, "containers": False},
@@ -305,7 +320,8 @@ def test_missing_runtime_gates_resumed_work_using_the_previous_dev_repository_se
     prior_container_dev("TESTWP-935")
     prior_container_dev("TESTWP-936")
 
-    tools = {"git": "git version 2.43", "uv": "uv 0.8.1", "safe-container-runtime": "missing"}
+    tools = reported_tools(ctx, "cc")
+    tools["safe-container-runtime"] = "missing"
     client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=headers)
     candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
     assert [ticket["key"] for ticket in candidates.json()["tickets"]] == ["TESTWP-937"]

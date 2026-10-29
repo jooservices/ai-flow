@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from aiflow.v4.control import environment as environment_reports, version_release
+from aiflow.v4.control import api, environment as environment_reports, scale_proof, system_check_api, version_release
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.control.github_connections import GitHubConnections
 from aiflow.v4.core.controlrepo import Account, Project
+from aiflow.v4.core.system_check import condition
 from aiflow.v4.worker import version_release as release_worker
 from aiflow.v4.worker import post_merge as post_merge_worker
 from aiflow.v4.worker.dev import Claimed
@@ -25,7 +26,7 @@ def issue(key: str, status: str = "Done") -> dict:
     return {"key": key, "fields": {"summary": f"Summary {key}", "status": {"name": status}}}
 
 
-def configure(ctx, versions=(("101", CORE),), issues=None) -> None:
+def configure(ctx, versions=(("101", CORE),), issues=None, *, with_scale_proof=True) -> None:
     project = ctx.repo().projects["TESTWP"]
     project.version_release = {"enabled": True, "versions": [name for _, name in versions],
                                "tag_prefixes": {CORE: "testwp-core-v", THEME: "testwp-theme-v"}}
@@ -33,6 +34,12 @@ def configure(ctx, versions=(("101", CORE),), issues=None) -> None:
                                        for version_id, name in versions]
     for version_id, _ in versions:
         ctx.jira.version_issue_data[("TESTWP", version_id)] = list((issues or {}).get(version_id, []))
+    if with_scale_proof:
+        for _, name in versions:
+            scale_proof.record(ctx, {
+                "measurements": {budget.key: {"value": budget.limit} for budget in scale_proof.BUDGETS},
+                "checks": [],
+            }, name, "test")
 
 
 def evidence(ctx, key: str, *, status: str = "Done", reviewer: bool = True, qa: bool = True,
@@ -148,6 +155,37 @@ def test_candidate_claim_rechecks_live_gate_before_any_release_step(client, ctx)
     assert getattr(ctx.github, "merges", []) == []
     assert getattr(ctx.github, "tags", {}) == {}
     assert getattr(ctx.github, "releases", {}) == {}
+
+
+@pytest.mark.parametrize(("blocked_condition", "expected_name"), [
+    (condition("repository-settings", "Repository settings", "needs_action",
+               "Repository settings need attention.", "Configure the project repository settings."),
+     "Repository settings"),
+    (condition("credential:claude-01", "Credentials · claude-01", "needs_action",
+               "Credential is invalid.", "Sign in again to AI account claude-01 on this machine."),
+     "Credentials · claude-01"),
+])
+def test_release_candidates_and_claims_obey_project_and_account_readiness_gate(
+        client, ctx, monkeypatch, blocked_condition, expected_name):
+    configure(ctx)
+    evidence(ctx, "TESTWP-22")
+    monkeypatch.setattr(system_check_api, "schedule_join_readiness", lambda *_args: None)
+    headers = node_headers(client)
+    readiness = {"checked_at": datetime.now(timezone.utc).isoformat(), "machine": [],
+                 "projects": {"TESTWP": [blocked_condition]}}
+    if blocked_condition["id"].startswith("credential:"):
+        readiness["credential_statuses"] = {"claude-01": {"present": True, "valid": False}}
+    ctx.db.run("UPDATE nodes SET readiness=%s WHERE name='cc'", (J(readiness),))
+
+    candidates = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()
+    claim = claim_release(client, headers)
+
+    assert candidates["versions"] == []
+    assert expected_name in candidates["reason"]
+    assert claim.status_code == 409
+    assert expected_name in claim.text
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE step='version_release'")["n"] == 0
+    assert ctx.db.one("SELECT count(*) AS n FROM version_releases WHERE status='checking'")["n"] == 0
 
 
 def test_version_release_receives_only_its_permitted_environment_not_ticket_deferred_criteria(client, ctx):
@@ -272,11 +310,15 @@ def test_shared_release_account_is_a_candidate_on_its_secondary_machine(client, 
     enabled = client.post("/v1/shared-accounts/claude-01/machines", json={"node": "node-secondary"})
     assert enabled.status_code == 201, enabled.text
     assert client.post("/v1/accounts/claude-01/probe", json={"ok": True}, headers=secondary).status_code == 200
+    heartbeat = client.post("/v1/nodes/node-secondary/heartbeat",
+                            json={"slots_total": 4, "credential_checks": {
+                                "claude-01": {"present": True, "valid": True}}}, headers=secondary)
+    assert heartbeat.status_code == 200, heartbeat.text
 
     candidates = client.get("/v1/version-releases/candidates", params={"account": "claude-01"},
                             headers=secondary).json()
 
-    assert [item["version_id"] for item in candidates["versions"]] == ["101"]
+    assert [item["version_id"] for item in candidates["versions"]] == ["101"], candidates
 
 
 def test_version_release_claim_is_refused_when_shared_account_is_at_capacity(client, ctx):
@@ -314,6 +356,10 @@ def test_quota_risk_keeps_release_available_when_same_provider_peer_lacks_projec
                                      version_release={"enabled": True, "versions": ["Other 1.0"]})
     ctx.jira.version_data["OTHER"] = [{"id": "201", "name": "Other 1.0", "released": False}]
     ctx.jira.version_issue_data[("OTHER", "201")] = [issue("OTHER-1")]
+    scale_proof.record(ctx, {
+        "measurements": {budget.key: {"value": budget.limit} for budget in scale_proof.BUDGETS},
+        "checks": [],
+    }, "Other 1.0", "test")
     add_ticket(ctx.db, "OTHER-1", status="Done", labels=())
     now = datetime.now(timezone.utc)
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,started_at)"
@@ -802,7 +848,7 @@ def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_bac
     assert "TESTWP-50" in release["body"] and "TESTWP-51" in release["body"]
     assert "composer install" in release["body"]
     assert ctx.jira.released_versions == ["101"]
-    assert ctx.jira.version_release_dates["101"] == datetime.now(timezone.utc).date().isoformat()
+    assert ctx.jira.version_release_dates["101"] == date.today().isoformat()
     release_tracker = next(row for row in ctx.jira.created if row["issuetype"] == "Release")
     assert release_tracker["version_field"] == CORE
     assert not [transition for transition in ctx.jira.transitions if transition[1] == "Human review"]

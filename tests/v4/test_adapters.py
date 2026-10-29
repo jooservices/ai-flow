@@ -20,6 +20,8 @@ def test_claude_events_from_spike_s1():
                    "permission_denials": [{"tool_name": "Bash"}],
                    "usage": {"input_tokens": 8, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 900, "output_tokens": 370}}, res)
     assert res.quota["windows"]["seven_day"]["utilization"] == 0.64 and res.error_kind == ""
+    assert res.quota_observed_at is not None
+    assert res.to_dict()["quota_observed_at"] == res.quota_observed_at.isoformat()
     assert res.tokens_in == 1008 and res.tokens_out == 370 and res.permission_denials == 1 and res.cost_usd == 0.0679
     rejected = RunResult()
     a.parse_event({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1792561800}}, rejected)
@@ -69,7 +71,8 @@ def test_codex_and_grok_events_from_spikes():
     res = RunResult()
     CodexAdapter().parse_event({"type": "item.completed", "item": {"type": "agent_message", "text": "SUMMARY: x\nRESULT: DONE"}}, res)
     CodexAdapter().parse_event({"type": "turn.completed", "usage": {"input_tokens": 14152, "output_tokens": 17, "reasoning_output_tokens": 3}}, res)
-    assert res.tokens_in == 14152 and res.tokens_out == 20 and "RESULT: DONE" in res.final_text
+    assert res.tokens_in == 14152 and res.tokens_out == 20 and res.token_usage_reported
+    assert "RESULT: DONE" in res.final_text
     g = RunResult()
     GrokAdapter().parse_event({"type": "error", "message": "Internal error: { \"message\": \"API error (status 402 Payment Required):"
                                                             " Grok Build usage balance exhausted\" }"}, g)
@@ -77,6 +80,35 @@ def test_codex_and_grok_events_from_spikes():
     auth = RunResult()
     GrokAdapter().parse_event({"type": "error", "message": "You are not signed in. Please run /login."}, auth)
     assert auth.error_kind == "auth"
+
+
+def test_adapters_distinguish_measured_zero_usage_from_missing_usage():
+    codex_zero, codex_missing = RunResult(), RunResult()
+    CodexAdapter().parse_event({"type": "turn.completed", "usage": {"input_tokens": 0, "output_tokens": 0}}, codex_zero)
+    CodexAdapter().parse_event({"type": "turn.completed", "usage": {}}, codex_missing)
+    assert codex_zero.token_usage_reported is True
+    assert codex_missing.token_usage_reported is False
+
+    claude_zero, claude_missing = RunResult(), RunResult()
+    ClaudeAdapter().parse_event({"type": "result", "usage": {"input_tokens": 0, "output_tokens": 0}}, claude_zero)
+    ClaudeAdapter().parse_event({"type": "result", "usage": {}}, claude_missing)
+    assert claude_zero.token_usage_reported is True
+    assert claude_missing.token_usage_reported is False
+
+    grok_zero, grok_missing = RunResult(), RunResult()
+    GrokAdapter().parse_event({"type": "usage", "usage": {"input_tokens": 0, "output_tokens": 0}}, grok_zero)
+    GrokAdapter().parse_event({"type": "usage", "usage": {}}, grok_missing)
+    assert grok_zero.token_usage_reported is True
+    assert grok_missing.token_usage_reported is False
+    grok_invalid = RunResult()
+    GrokAdapter().parse_event({"type": "usage", "usage": {"input_tokens": "unknown", "output_tokens": 0}},
+                              grok_invalid)
+    assert grok_invalid.token_usage_reported is False
+
+    grok_aggregate = RunResult()
+    GrokAdapter().parse_event({"type": "usage", "usage": {"input_tokens": 10, "output_tokens": 4}}, grok_aggregate)
+    GrokAdapter().parse_event({"type": "end", "usage": {}}, grok_aggregate)
+    assert (grok_aggregate.tokens_in, grok_aggregate.tokens_out) == (10, 4)
 
 
 def test_codex_records_failed_command_execution_output():
@@ -118,10 +150,12 @@ def test_codex_and_grok_keep_reported_quota_windows_when_cli_exposes_them():
     }}}, codex)
     assert codex.quota["windows"]["five_hour"]["utilization"] == .64
     assert codex.quota["windows"]["seven_day"]["window_duration_minutes"] == 10080
+    assert codex.quota_observed_at is not None
     grok = RunResult()
     GrokAdapter().parse_event({"type": "usage", "quota": {"windows": {
         "weekly": {"used_percent": 0.3, "resets_at": "2026-10-29T12:00:00Z"}}}}, grok)
     assert grok.quota["windows"]["seven_day"]["utilization"] == 0.3
+    assert grok.quota_observed_at is not None
 
 
 @pytest.mark.parametrize(("field", "normalized_field"), [("limit", "limit_tokens"), ("total", "total_tokens")])
@@ -149,30 +183,14 @@ def test_grok_runs_recorded_streaming_json_and_reads_answer_usage_and_cost(tmp_p
     assert result.tokens_in == 10 and result.tokens_out == 1 and result.cost_usd == 0.00123
 
 
-def test_worker_probe_classifies_empty_success_as_provider_failure(tmp_path, monkeypatch):
-    from aiflow.v4.worker import loop as worker_loop
+def test_quota_parser_requires_labeled_read_only_window_percentages():
+    from aiflow.v4.worker.quota_cli import COMMANDS, parse_quota_text
 
-    work = tmp_path / "work" / ".probe" / "grok-01"
-    (work / ".git").mkdir(parents=True)
-    adapter = GrokAdapter()
-    adapter.argv = lambda _spec: []
-    adapter.run = lambda _spec: RunResult(exit_code=0)
-    monkeypatch.setattr(worker_loop, "get_adapter", lambda _provider: adapter)
-    monkeypatch.setattr(worker_loop.Worker, "publish", lambda self, **fields: self.state.update(fields))
-    worker = worker_loop.Worker("grok-01", "http://control", "token", "node1", str(tmp_path), run_as=[])
-    posted = []
-
-    def api_call(method, path, json=None, params=None):
-        if method == "GET" and path.endswith("/spec"):
-            return {"provider": "grok", "model": ""}
-        posted.append(json)
-        return {"ok": True}
-
-    worker.api.call = api_call
-
-    assert worker.probe() is False
-    assert posted[0]["error_kind"] == "provider"
-    assert posted[0]["summary"] == "provider: no answer"
+    parsed = parse_quota_text("codex", "Rate limits: 5h 42% used · weekly 81% remaining")
+    assert parsed == {"provider": "codex", "windows": {
+        "five_hour": {"utilization": .42}, "weekly": {"utilization": .19}}}
+    assert parse_quota_text("codex", "Context window: 42% used") == {}
+    assert COMMANDS == {"codex": "/status", "claude": "/usage"}
 
 
 def fake_cli(tmp_path: Path, lines: list[dict], exit_code: int = 0, sleep: float = 0) -> list[str]:
@@ -197,6 +215,20 @@ def test_run_loop_reads_events_and_verdict(tmp_path):
     res = a.run(spec)
     assert res.exit_code == 0 and res.verdict == "DONE" and res.tokens_in == 10 and res.error_kind == ""
     assert (tmp_path / "run.jsonl").read_text().count("\n") == 2
+
+
+def test_run_loop_can_append_continuation_events_and_signal_provider_start(tmp_path):
+    a = CodexAdapter()
+    log_path = tmp_path / "run.jsonl"
+    a.argv = lambda spec: fake_cli(tmp_path, [{"type": "turn.completed"}])
+    started = []
+    first = RunSpec(prompt="first", cwd=str(tmp_path), account_home=str(tmp_path), log_path=str(log_path))
+    a.run(first)
+    continuation = RunSpec(prompt="follow up", cwd=str(tmp_path), account_home=str(tmp_path),
+                           log_path=str(log_path), log_append=True)
+    result = a.run(continuation, on_start=lambda: started.append(True))
+    assert result.exit_code == 0 and started == [True]
+    assert log_path.read_text().count("\n") == 2
 
 
 def test_run_loop_captures_cli_credential_expiry_and_network_errors(tmp_path):

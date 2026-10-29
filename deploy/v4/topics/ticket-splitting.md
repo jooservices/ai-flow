@@ -1,0 +1,1 @@
+- [Ticket splitting](../../../docs/v4/ticket-splitting.md): intake splits oversized tickets into linked children; split parents are never developed and children follow blocker order

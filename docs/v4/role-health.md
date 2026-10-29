@@ -89,10 +89,10 @@ a failure, but it counts toward the retry backoff so the ticket is not offered a
 ## Thresholds
 
 Defaults: window 10 runs, failure score above 60 %. An owner (permission `console.manage`) edits both on the panel;
-`PUT /v1/role-health/settings` with `{"window_runs": 1-100, "failure_percent": 0-99}` stores them in
-`role_health_settings`, records the change in `write_audit` and re-scores every role at once.
+`PUT /v1/role-health/settings` with `{"window_runs": 1-100, "failure_percent": 0-99}` validates and stores them in
+`role_health_settings`, records the change in `write_audit` and re-scores every role before returning the updated
+summary.
 
 ## Timeouts and lost leases
 
 A run stopped by the time limit or by a lost lease counts as a quarter of a failed run in the failure score. The size of the ticket and the load of the machine are often the cause, so ten such runs alone never switch a role off, while real failures still do.
-

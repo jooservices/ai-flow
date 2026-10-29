@@ -13,7 +13,7 @@ log = logging.getLogger("aiflow4.projects")
 
 def _save_report(ctx, project: str, scope: str, subject: str, actor: str) -> dict[str, Any]:
     """Persist one report and its memory entry atomically; callers handle notification after commit."""
-    with ctx.db.pool.connection() as c:
+    with ctx.db.transaction() as c:
         with c.transaction():
             c.execute("INSERT INTO project_lifecycle (project) VALUES (%s) ON CONFLICT (project) DO NOTHING",
                       (project,))

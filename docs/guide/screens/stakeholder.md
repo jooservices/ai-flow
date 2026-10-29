@@ -9,4 +9,5 @@ Stakeholder (`/stakeholder`) opens the configured environments of a project and 
 1. Open the environment link and try the change.
 2. Record acceptance or your feedback. AI Flow writes it to the Jira ticket.
 
-The screen sends the decision through `POST /v1/stakeholder/{key}/verdict`.
+The screen sends the decision through `POST /v1/stakeholder/{key}/verdict`. For `not_expected` feedback, include
+what you expected and what happened so the flow can link actionable UAT feedback to the related ticket or epic.

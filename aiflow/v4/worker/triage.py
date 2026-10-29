@@ -6,9 +6,10 @@ import re
 import time
 from pathlib import Path
 
+from ..core import work_limits
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, with_knowledge_context
+from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
 from .gitops import Git
 from .notes import note
 
@@ -114,7 +115,7 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         logs.mkdir(parents=True, exist_ok=True)
         spec = RunSpec(prompt=build_prompt(c), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model,
-                       effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
+                       effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", work_limits.HARD)) * 60,
                        control_url=control_url, run_token=c.run_token,
                        log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=safe_directory_env(wt))
         adapter = get_adapter(c.provider)
@@ -127,8 +128,10 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             hb.progress = {"phase": "triage-ai", "events": events["n"],
                            "elapsed_s": int(time.time() - t0)}
 
-        res = adapter.run(spec, on_progress, stop=hb.lost)
+        res = run_with_inbox(adapter, spec, hb, on_progress)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
+                      quota_observed_at=(getattr(res, "quota_observed_at", None).isoformat()
+                                         if getattr(res, "quota_observed_at", None) else None),
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       head_sha=head)
         if hb.lost.is_set():
@@ -159,7 +162,7 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             jira("comment", body=text)
             if c.pr and c.pr.get("number"):
                 api.call("POST", "/v1/github/comment", {"run_id": c.run_id, "fence": c.fence,
-                                                          "number": c.pr["number"], "body": text})
+                                                          "number": c.pr["number"], "body": text, "kind": "triage"})
 
         if reviewer_question and decision["decision"] == "ANSWER":  # a reviewer's question is not an escalation
             answer_note = note(c, "answered reviewer question", what=f"The question was: {question}",

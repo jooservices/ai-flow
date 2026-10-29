@@ -8,11 +8,11 @@ from .. import VERSION
 from ..core.controlrepo import epic_for_ticket
 from ..core.services import SERVICES, endpoint, service_gaps
 from ..core.toolchains import missing_tools, toolchain_gaps
-from . import role_health
+from . import flow_doctor, role_health
 from . import tooling
+from . import load_policy
 from .sa import dashboard_data, thresholds
-from .shared_accounts import machines_view
-from .quota import assessments as quota_assessments
+from .shared_accounts import machines_views
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
@@ -26,7 +26,7 @@ def _iso(ts: datetime | None) -> str | None:
 
 
 def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
-    from . import api as control_api, release_progress, release_readiness, rollout
+    from . import api as control_api, release_progress, release_readiness, rollout, scale_proof
     db = ctx.db
     repo = ctx.repo()
     releases = control_api.RELEASES
@@ -36,8 +36,18 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
     for a in repo.accounts:
         for machine in a.machines:
             assigned[machine] = assigned.get(machine, 0) + 1
-    active_by_node = {row["node"]: int(row["busy"]) for row in db.all(
-        "SELECT node,count(*) AS busy FROM runs WHERE status='running' GROUP BY node")}
+    active_rows = db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
+                         " WHERE r.status='running' ORDER BY r.started_at")
+    active_by_node: dict[str, int] = {}
+    runs_per_account: dict[str, int] = {}
+    running: dict[str, dict] = {}
+    for row in active_rows:
+        active_by_node[row["node"]] = active_by_node.get(row["node"], 0) + 1
+        runs_per_account[row["account_id"]] = runs_per_account.get(row["account_id"], 0) + 1
+        # Keep the most recently started run as the account's representative run.
+        running[row["account_id"]] = row
+    host_load = {row["hostname"]: row for row in db.all(
+        "SELECT hostname,cpu_load_per_cpu,state FROM machine_host_load_limits")}
     for n in db.all("SELECT * FROM nodes WHERE removed_at IS NULL ORDER BY role DESC, name"):
         age = _age(n["last_heartbeat"])
         status = n["status"]
@@ -46,12 +56,14 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         projects = repo.projects_for_node(n["name"], n["projects"], n["dynamic"])
         required = repo.tools_for_node(n["name"], projects)
         configured = repo.nodes.get(n["name"])
-        stack_gaps = {tool for project in (configured.projects if configured else [])
+        stack_gaps = {tool for project in (projects if repo.inventory_in_db else configured.projects if configured else [])
                       if project in repo.projects for tool in toolchain_gaps(
                           n["tools"], repo.projects[project].tools, repo.versions, repo.projects[project].stacks,
                           require_pins=bool(repo.projects[project].stacks))}
         desired_services = [s for s in (configured.services or []) if isinstance(s, dict)] if configured else []
         reported_services = (n["metrics"] or {}).get("services") or {}
+        hostname = load_policy.host_name(n.get("metrics"))
+        host_policy = host_load.get(hostname, {})
         declared: dict[str, list[str]] = {}
         for project in projects:
             for service in repo.projects[project].required_services if project in repo.projects else []:
@@ -69,6 +81,11 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                       "sessions_busy": active_by_node.get(n["name"], int(n["slots_used"] or 0)),
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
                       "metrics": n["metrics"], "tools": n["tools"],
+                      "load_limits": load_policy.machine_limits(n.get("load_limits")),
+                      "load_state": n.get("load_state") or {"mode": "normal", "reason": ""},
+                      "host_load_limits": load_policy.host_limits(
+                          {"cpu_load_per_cpu": host_policy["cpu_load_per_cpu"]} if host_policy else None),
+                      "host_load_state": (host_policy.get("state") or {"mode": "normal", "reason": ""}),
                       "has_agent": bool(n["token_hash"]), "required_tools": required,
                       "desired_services": [{"name": str(s.get("name") or s.get("unit") or "service"),
                                             "unit": str(s.get("unit") or ""),
@@ -76,7 +93,9 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                                            for s in desired_services],
                       "missing_tools": sorted(set(missing_tools(n["tools"], required)) | stack_gaps),
                       "heartbeat_age_s": age,
-                      "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
+                      "accounts_assigned": assigned.get(n["name"], 0),
+                      "in_control_repo": (not bool(n["dynamic"]) if repo.inventory_in_db
+                                          else n["name"] in repo.nodes),
                       "last_heartbeat": _iso(n["last_heartbeat"]),
                       "idle_since": _iso(n["idle_since"]),
                       "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",
@@ -86,23 +105,26 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                       "version_policy": rollout.node_policy(ctx, n["name"], n["release_version"], releases),
                       "joined_at": n["created_at"]})
     node_status = {n["name"]: n["status"] for n in nodes}
-    runs_per_account: dict[str, int] = {}
-    for r in db.all("SELECT account_id FROM runs WHERE status='running'"):
-        runs_per_account[r["account_id"]] = runs_per_account.get(r["account_id"], 0) + 1
-    running = {r["account_id"]: r for r in db.all(
-        "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
     accounts = []
     account_rows = db.all("SELECT * FROM accounts ORDER BY node, provider, id")
-    quota_by_account = quota_assessments(db, account_rows)
+    cooldowns = ctx.leases.cooling_many([str(row["id"]) for row in account_rows])
+    # The watchdog refreshes account quota forecasts. `/v1/state` is loaded by every console
+    # view, so replaying history here would repeat the same run/sample scans per page request.
+    quota_by_account = {str(row["id"]): row.get("quota_forecast") or {} for row in account_rows}
+    account_configs = {str(row["id"]): repo.account(str(row["id"])) for row in account_rows}
+    machine_views = machines_views(db, [acc for acc in account_configs.values() if acc], node_status,
+                                   include_signin=include_signin)
     today_by_account = {row["account_id"]: row for row in db.all(
         "SELECT account_id,coalesce(sum(tokens_in),0) AS tokens_in,coalesce(sum(tokens_out),0) AS tokens_out,"
         "coalesce(sum(cost_usd),0) AS cost_usd FROM runs WHERE started_at >= date_trunc('day',now()) "
         "GROUP BY account_id")}
     sign_in_states = {row["id"]: row["sign_in_status"] for row in db.all(
         "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
+    account_names = {row["id"]: row["name"] for row in db.all(
+        "SELECT id,name FROM managed_ai_accounts WHERE removed_at IS NULL AND name<>''")}
     shared_managed = {row["id"] for row in db.all("SELECT id FROM shared_accounts WHERE managed")}
     for a in account_rows:
-        cool = ctx.leases.cooling(a["id"])
+        cool = cooldowns.get(str(a["id"]))
         r = running.get(a["id"])
         model, effort = repo.model_for(a["provider"], a["tier"])
         acc = repo.account(a["id"])
@@ -115,15 +137,17 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
             "node_offline" if not any(node_status.get(machine, "offline") == "online" for machine in acc.machines)
             and a["status"] not in ("signed_out", "error", "cooldown") else a["status"]))))
         probe = (a["worker_state"] or {}).get("probe") or {}
-        windows = (a["quota"] or {}).get("windows") or {}
+        trusted_quota = (a["quota"] or {}) if a.get("quota_source") else {}
+        windows = trusted_quota.get("windows") or {}
         used_windows = [window for window in windows.values()
                         if isinstance(window, dict) and window.get("utilization") is not None]
         resets = [window.get("resets_at") for window in used_windows if window.get("resets_at")]
         usage = today_by_account.get(a["id"], {})
         accounts.append({
-            "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc.machines else ""),
+            "id": a["id"], "name": account_names.get(a["id"], ""), "provider": a["provider"],
+            "node": (acc.machines[0] if acc.machines else ""),
             "tier": a["tier"], "roles": acc.roles,
-            "machines": machines_view(db, acc, node_status, include_signin=include_signin),
+            "machines": machine_views.get(a["id"], []),
             "session_limit": acc.sessions, "shared": len(acc.machines) > 1,
             "shared_managed": a["id"] in shared_managed,
             "explicit_only": bool(acc and acc.explicit_only),
@@ -138,7 +162,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
             "cooldown_until": a["cooldown_until"], "cooldown_since": _iso(a["cooldown_since"]),
             "idle_since": _iso(a["idle_since"]), "credential_expires_at": _iso(expiry) or "unknown",
             "credential_expiry_warning": expiry_warning, "check_failed": probe.get("ok") is False or a["status"] == "error",
-            "quota": a["quota"], "quota_awareness": quota_by_account.get(a["id"], {}),
+            "quota": trusted_quota, "quota_awareness": quota_by_account.get(a["id"], {}),
             "quota_used": max((float(w["utilization"]) for w in used_windows), default=None),
             "quota_resets_at": min(resets) if resets else None,
             "tokens_today": int(usage.get("tokens_in", 0)) + int(usage.get("tokens_out", 0)),
@@ -150,12 +174,12 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                                         "progress": r["progress"]},
         })
     active = []
-    for r in db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
-                    " WHERE r.status='running' ORDER BY r.started_at"):
+    lease_ttls = ctx.leases.ttl_ms_many([r["ticket_key"] for r in active_rows])
+    for r, lease_ms in zip(active_rows, lease_ttls):
         active.append({"id": str(r["id"]), "ticket": r["ticket_key"], "project": r["project"], "summary": r["summary"],
                        "step": r["step"], "account": r["account_id"], "provider": r["provider"], "model": r["model"],
                        "node": r["node"], "fence": r["fence"], "elapsed_s": _age(r["started_at"]),
-                       "heartbeat_age_s": _age(r["heartbeat_at"]), "lease_ms": ctx.leases.ttl_ms(r["ticket_key"]),
+                       "heartbeat_age_s": _age(r["heartbeat_at"]), "lease_ms": lease_ms,
                        "progress": r["progress"]})
     recent = []
     for r in db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
@@ -185,8 +209,10 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
     # The marker comes from the ticket's latest successful developer run, so a later verifier run that ends
     # without a verdict (quota, timeout) does not hide it while the ticket stays in verification.
     already_done = {}
+    verify_keys = [ticket["key"] for ticket in tickets if ticket["status"] == "In Verify"]
     for r in db.all("SELECT DISTINCT ON (ticket_key) id, ticket_key, pr_url, details FROM runs"
-                    " WHERE step='dev' AND outcome='done' ORDER BY ticket_key, started_at DESC"):
+                    " WHERE ticket_key=ANY(%s) AND step='dev' AND outcome='done'"
+                    " ORDER BY ticket_key, started_at DESC", (verify_keys,)) if verify_keys else []:
         if (r["details"] or {}).get("already_done"):
             already_done[r["ticket_key"]] = {"pr_url": r["pr_url"] or "", "run_id": str(r["id"])}
     for t in tickets:
@@ -225,11 +251,14 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(), "env": ctx.settings.env,
         "control_repo": repo.ref, "versions": repo.versions, "version": VERSION,
         "links": {"o2": "/o2/", "mail": "/mail/", "gatus": ctx.settings.gatus_url},
+        "flow_doctor": flow_doctor.dashboard(ctx),
+        "operator_interventions": flow_doctor.operator_intervention_summary(ctx),
         "tool_waits": tooling.waiting_summary(ctx),
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets,
         "release_readiness": release_readiness.all_versions(db, repo.projects),
-        "release_progress": release_progress.all_versions(db, repo.projects), "incidents": incidents, "incidents_recent": incidents_recent,
+        "release_progress": release_progress.all_versions(db, repo.projects), "scale_proof": scale_proof.summary(db),
+        "incidents": incidents, "incidents_recent": incidents_recent,
         "events": events, "sa": sa, "role_health": role_health.summary(ctx), "rollout": rollout.summary(db),
         "version_policy": {"control": ctx.settings.control_version or VERSION,
                            "max_minor_lag": ctx.settings.version_max_minor_lag},

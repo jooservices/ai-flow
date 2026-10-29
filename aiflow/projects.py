@@ -21,7 +21,7 @@ SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, 
             "human_on_deployment": bool, "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int,
             "loop_limit": int,
             "highest_developer": str, "release_check": str, "tag_prefix": str, "deploy_command": str,
-            "deploy_timeout_minutes": int, "deploy_on": str, "workers": int}
+            "deploy_timeout_minutes": int, "deploy_on": str, "workers": int, "memory_url": str}
 IDENTITY = {"name": str, "jira_key": str, "repo": str, "company": str, "database": str}
 MERGE_METHODS = ("merge", "squash", "rebase")
 DATABASE_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,23}$")
@@ -75,6 +75,7 @@ class Project:
     deploy_on: str = "base"  # "all" also runs after hotfix and release merges
     workers: int = 0  # workers of this project (aiflow-work@<KEY>-<n>); worker 1 serves only this project, the others may take other projects' tickets
     loop_limit: int | None = None  # None uses the global supervisor loop limit
+    memory_url: str | None = None  # project override; None inherits [runtime].memory_url / AIFLOW_MEMORY_URL
 
     def role(self, role: str) -> str:
         return {"developer": self.developer, "reviewer": self.reviewer, "qa": self.qa}.get(role, "")

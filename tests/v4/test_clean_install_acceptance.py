@@ -25,6 +25,7 @@ import subprocess
 import tarfile
 import threading
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -42,11 +43,14 @@ from aiflow.v4 import cli
 from aiflow.v4.control.github import GitHubApp
 from aiflow.v4.control.jira_connect import JiraAuth, SecretStore
 from aiflow.v4.control import api as control_api
-from aiflow.v4.control import login
+from aiflow.v4.control import login, mfa
+from aiflow.v4.control import system_check
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control.loops import jira_sync
 from aiflow.v4.control.ui import mount_ui
 from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.core.system_check import condition
+from aiflow.v4.core import secretbox
 from aiflow.v4.install import backup
 from aiflow.v4.install import secrets as sec
 from aiflow.v4.install.control import Layout
@@ -55,7 +59,12 @@ ADMIN = "owner@example.test"
 SESSION_SECRET = "acceptance-session-secret-with-32-bytes"
 DOC = ROOT / "docs/v4/clean-install-acceptance.md"
 TOOLS = {"git": "git version 2.43", "uv": "uv 0.8.1", "python3": "Python 3.12.2",
-         "codex": "codex 1.0", "codex-code-mode-host": "present"}
+         "claude": "Claude Code 2.1.305", "codex": "codex 1.0",
+         "codex-code-mode-host": "codex-code-mode-host 1.0", "grok": "grok 1.0",
+         "opencode": "opencode 1.0", "docker": "Docker version 29.1", "node": "node v24.0.0",
+         "gh": "gh version 2.58.0", "php": "PHP 8.3.10", "composer": "Composer 2.8.4",
+         "wp": "WP-CLI 2.12.0", "playwright": "Version 1.56.0",
+         "playwright-browser": "Playwright Chromium 1.56.0"}
 
 
 def issue(key, summary, status, labels, issuetype="Story"):
@@ -69,6 +78,8 @@ class Fresh:
 
     def __init__(self, machine, ctx, control_repo):
         self.machine, self.ctx, self.control_repo = machine, ctx, control_repo
+        self.mfa_secret = None
+        self.recovery_codes = []
 
     def install_control(self, version="v4.1.0", **opts):
         out: list[str] = []
@@ -101,8 +112,26 @@ class Fresh:
         return self.client
 
     def sign_in(self):
-        r = self.client.post("/v1/auth/login", json={"email": ADMIN, "password": self.password})
+        credentials = {"email": ADMIN, "password": self.password}
+        auth_time = None
+        if self.mfa_secret:
+            # Use the next unused TOTP step; setup consumed the preceding step.
+            auth_time = max(time.time(), (self.mfa_last_step + 1) * 30)
+            credentials["code"] = mfa.totp_code(self.mfa_secret, auth_time)
+        r = self.client.post("/v1/auth/login", json=credentials)
         assert r.status_code == 200, r.text
+        if auth_time is not None:
+            self.mfa_last_step = mfa.match_step(self.mfa_secret, credentials["code"], now=auth_time)
+        if r.json().get("mfa_setup_required"):
+            secret = self.client.post("/v1/security/mfa/setup").json()["secret"]
+            enrolled_at = time.time() - 30
+            code = mfa.totp_code(secret, enrolled_at)
+            enabled = self.client.post("/v1/security/mfa/enable", json={"code": code})
+            assert enabled.status_code == 200, enabled.text
+            self.mfa_secret = secret
+            self.mfa_last_step = mfa.match_step(secret, code)
+            self.recovery_codes = enabled.json()["recovery_codes"]
+            assert len(self.recovery_codes) == 10
         user = self.client.get("/v1/auth/me").json()
         assert user["role"] == "administrator" and user["role_label"] == "Administrator"
 
@@ -118,9 +147,53 @@ class Fresh:
         joined = self.client.post("/v1/nodes/join", json={"name": name, "join_token": token})
         assert joined.status_code == 200, joined.text
         headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
-        beat = self.client.post(f"/v1/nodes/{name}/heartbeat", json={"tools": TOOLS, "slots_total": 2}, headers=headers)
+        beat = self.heartbeat(name, headers)
         assert beat.status_code == 200, beat.text
         return headers, beat.json()
+
+    def heartbeat(self, name, headers):
+        """Report the ready machine and credential checks a current node agent sends."""
+        accounts = self.ctx.repo().accounts_on(name)
+        body = {
+            "tools": TOOLS,
+            "slots_total": 2,
+            "metrics": {"hostname": name, "load1": 0.1, "cpus": 4,
+                        "mem_total": 16 * 1024 ** 3, "mem_used": 4 * 1024 ** 3,
+                        "disk_total": 100 * 1024 ** 3, "disk_free": 20 * 1024 ** 3},
+            "system_conditions": [
+                condition("disk-space", "Free disk space", "ready", "20 GiB is available."),
+                condition("workspace-permissions", "Work directory permissions", "ready",
+                          "The node can write its work and state directories."),
+                condition("control-network", "Control API network", "ready",
+                          "The machine reached the control API and sent this heartbeat."),
+                condition("repository-network", "Repository network", "ready",
+                          "The machine can reach GitHub over HTTPS."),
+            ],
+            "credential_checks": {account.id: {"present": True, "valid": True} for account in accounts},
+        }
+        response = self.client.post(f"/v1/nodes/{name}/heartbeat", json=body, headers=headers)
+        if response.status_code != 200:
+            return response
+
+        # Join and heartbeat readiness checks run asynchronously. Wait for the provider-backed join check to
+        # finish before installing this deterministic simulated-agent snapshot, so it cannot overwrite the
+        # heartbeat report or leave a newly added project without a readiness result.
+        thread_names = {f"aiflow4-join-readiness-{name}", f"aiflow4-heartbeat-readiness-{name}"}
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            threads = [thread for thread in threading.enumerate() if thread.name in thread_names]
+            if not threads:
+                break
+            for thread in threads:
+                thread.join(timeout=min(0.1, max(0, deadline - time.monotonic())))
+        else:
+            raise AssertionError(f"readiness checks for {name} did not settle")
+
+        readiness = system_check.refresh_node(
+            self.ctx, name, "manual",
+            machine_conditions=body["system_conditions"], credential_checks=body["credential_checks"])
+        assert readiness["checked_at"], f"simulated node {name} has no readiness snapshot"
+        return response
 
     def machine_client(self):
         """A client without the console cookie: what a machine's own call looks like."""
@@ -140,6 +213,8 @@ def fresh(machine, ctx, control_repo, tmp_path, monkeypatch):  # noqa: F811
     (release / "SHA256SUMS").write_text(f"{digest}  {filename}\n", encoding="utf-8")
     (releases / "CURRENT").write_text("v4.1.0\n", encoding="utf-8")
     monkeypatch.setattr(control_api, "RELEASES", releases)
+    # The fake control process receives the same external key required by production secret stores.
+    monkeypatch.setenv("AIFLOW4_SECRET_KEY", secretbox.generate_key())
     ctx.settings.join_control_url = "https://control.example.test"
     f = Fresh(machine, ctx, control_repo)
     f.install_control()
@@ -166,12 +241,27 @@ def test_clean_control_machine_asks_for_sign_in_and_first_run_setup_needs_only_t
     assert beat["desired"]["accounts"]
     nodes = {n["name"]: n for n in client.get("/v1/state").json()["nodes"]}
     assert {"cc", "node1"} <= set(nodes)
+    readiness = client.get("/v1/system-check").json()["nodes"]
+    readiness_by_node = {row["name"]: row["readiness"] for row in readiness}
+    assert {"cc", "node1"} <= set(readiness_by_node)
+    assert all(row["machine"] and row["projects"].get("TESTWP") for row in readiness_by_node.values())
+    bundle = client.post("/v1/support/bundles", json={})
+    assert bundle.status_code == 200
+    downloaded = client.get(bundle.json()["download_url"])
+    assert downloaded.status_code == 200 and downloaded.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
+        support_readiness = json.loads(archive.read("system-check.json"))
+    archived_nodes = support_readiness["system_check"]["nodes"]
+    assert len(archived_nodes) >= 2
+    assert all(row["readiness"]["machine"] and row["readiness"]["projects"].get("TESTWP")
+               for row in archived_nodes)
 
 
 def test_every_setup_step_the_test_takes_is_in_the_document():
     text = DOC.read_text()
     for step in ("aiflow4-control-install", "browser setup", "Administrator", "/setup", "Projects",
-                 "join command", "/review", "signed candidate", "clean-install-acceptance.sh"):
+                 "two-factor", "recovery codes", "join command", "/review", "signed candidate",
+                 "clean-install-acceptance.sh"):
         assert step in text, step
 
 
@@ -194,9 +284,12 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
         fresh.control_repo.joinpath("accounts.yaml").read_text()
         + "  - {id: grok-01, provider: grok, node: cc, tier: middle, roles: [intake_refiner]}\n")
     snap = ControlRepo.load(fresh.control_repo)
-    ctx.repo = lambda: snap
+    from aiflow.v4.control.inventory import apply as apply_inventory
+    ctx.repo = lambda: apply_inventory(snap, ctx.db)
     ctx.refresh_repo = lambda: None
     fresh.app.state.sync_accounts()
+    heartbeat = fresh.heartbeat("cc", cc)
+    assert heartbeat.status_code == 200, heartbeat.text
 
     # Jira (the fake) is the source of truth: the registry only mirrors what the sync reads from it
     jira_now = {"NEWAPP-1": issue("NEWAPP-1", "Sample ticket", "Intake", []),
@@ -307,7 +400,12 @@ def test_machines_policy_calls_and_heartbeats_work_with_sign_in_on(fresh):
     hook["tool_input"]["command"] = "composer install"
     assert machine_client.post("/v1/policy/decide", json=hook, headers=token).json()[
         "hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert machine_client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=cc).status_code == 200
+    assert machine_client.post("/v1/nodes/cc/heartbeat", json={
+        "slots_total": 2,
+        "metrics": {"hostname": "cc", "load1": 0.1, "cpus": 4,
+                    "mem_total": 16 * 1024 ** 3, "mem_used": 4 * 1024 ** 3,
+                    "disk_total": 100 * 1024 ** 3, "disk_free": 20 * 1024 ** 3},
+    }, headers=cc).status_code == 200
     assert machine_client.post("/v1/policy/decide", json=hook).status_code == 401  # no credential at all: refused
 
 
@@ -426,6 +524,10 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     # Ensure a restored serial value collides with a newly initialized sequence unless restore advances it.
     ctx.db.run("TRUNCATE events RESTART IDENTITY")
     ctx.db.run("INSERT INTO events (type, ticket, outcome, data) VALUES ('backup.test','TESTWP-9','saved','{}')")
+    ctx.db.run("INSERT INTO operator_interventions "
+               "(source_key,source,actor,action,target,reason,details) "
+               "VALUES ('backup-test:operator-event','test','restore-fixture','manual_change','config',"
+               "'preserve audit evidence during restore','{}')")
 
     # Seed realistic active Integration credentials on the clean machine. They must be restored along with the
     # control keys because the connected Jira OAuth app and the GitHub App private key live outside `control/`.
@@ -452,6 +554,7 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     secrets_before = {p: p.read_bytes() for p in secret_files}
 
     archive = tmp_path / "aiflow-backup.tar.gz"  # invoked only by deploy/v4/ci/acceptance-backup.py
+    source_audit_count = ctx.db.one("SELECT count(*) AS n FROM audit_log")["n"]
     made = backup.create(test_database_url, archive, lay)
     assert archive.stat().st_mode & 0o777 == 0o600
     assert made["release"] == "v4.1.0" and {"console_users", "nodes", "tickets"} <= set(made["tables"])
@@ -464,14 +567,25 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
 
     # the disaster: a fresh install has recreated the registry schema and its sequences start at 1.
     with ctx.db.pool.connection() as c:
+        # Model a DBA replacing the database schema. Remove the old database-level audit event triggers before
+        # dropping their role registry and ledger as part of this destructive fixture reset.
+        c.execute("DROP EVENT TRIGGER IF EXISTS aiflow4_operator_ddl")
+        c.execute("DROP EVENT TRIGGER IF EXISTS aiflow4_operator_drop")
         c.execute("DROP TABLE " + ", ".join(f'"{t}"' for t in made["tables"]) + " CASCADE")
     ctx.db.migrate()
     shutil.rmtree(lay.p("/etc/aiflow/secrets"))
     assert ctx.db.one("SELECT count(*) AS n FROM console_users")["n"] == 0
+    ctx.db.run("INSERT INTO audit_log (actor, category, action, target, ip, detail) "
+               "VALUES ('restore-target', 'security', 'fresh_install', 'control', '', '{}')")
     assert fresh.client.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password}).status_code == 401
-
     restored = backup.restore(test_database_url, archive, lay)
     assert restored["release"] == "v4.1.0"
+    assert ctx.db.one("SELECT 1 FROM audit_log WHERE action='fresh_install'")
+    assert ctx.db.one("SELECT count(*) AS n FROM audit_log")["n"] >= source_audit_count + 1
+    assert ctx.db.one("SELECT actor,reason FROM operator_interventions "
+                      "WHERE source_key='backup-test:operator-event'") == {
+                          "actor": "restore-fixture", "reason": "preserve audit evidence during restore"}
+    assert ctx.db.one("SELECT count(*) AS n FROM audit_product_roles WHERE role_name=session_user")["n"] == 1
     assert {p: p.read_bytes() for p in secret_files} == secrets_before
     assert all(p.stat().st_mode & 0o777 == 0o600 for p in secret_files)
     assert fresh.machine.p("/etc/aiflow/secrets/control").stat().st_mode & 0o777 == 0o700
@@ -483,7 +597,9 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     )
     assert inserted["id"] > 1  # restored id 1 was not reused by the fresh sequence
     again = TestClient(fresh.app, follow_redirects=False, client=("127.0.0.1", 50002))
-    assert again.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password}).status_code == 200
+    signed_in = again.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password,
+                                                   "code": mfa.totp_code(fresh.mfa_secret)})
+    assert signed_in.status_code == 200
     # the machine resumes with the node token it already had
     assert fresh.machine_client().post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=cc).status_code == 200
 
@@ -631,10 +747,9 @@ def test_adding_a_machine_and_an_ai_account_while_sign_in_is_on(fresh):
     assert probed.status_code == 200, probed.text
     beat = machine_api.post("/v1/nodes/node3/heartbeat", json={"tools": TOOLS, "slots_total": 2}, headers=headers)
     assert beat.status_code == 200 and account_id in beat.json()["desired"]["accounts"]
+    # A successful credential probe automatically completes the recovery and retires the interactive handoff.
     details = client.get(f"/v1/accounts/{account_id}/sign-in")
-    assert details.status_code == 200 and details.json()["code"] == "ABCD-EFGH"
-    completed = client.post(f"/v1/accounts/{account_id}/sign-in/complete")
-    assert completed.status_code == 200 and completed.json()["signed_in"] is True
+    assert details.status_code == 404
     # A machine's own work request is authorized by its node token without a console cookie.
     assert machine_api.get("/v1/work/candidates", params={"account": account_id}, headers=headers).status_code == 200
 

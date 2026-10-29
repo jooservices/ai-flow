@@ -183,6 +183,14 @@ def capture_run(db, run_id: str, jira_site: str = "", actor: str = "AI Flow") ->
     return item
 
 
+def capture_reviewer_run(db, run_id: str, jira_site: str = "", *, ticket_key: str, outcome: str) -> dict | None:
+    """Capture a reviewer run and backfill its ticket only after a successful merge."""
+    item = capture_run(db, run_id, jira_site)
+    if outcome in {"merged", "skipped_gate"}:
+        capture_closed_tickets(db, jira_site, ticket_key=ticket_key)
+    return item
+
+
 def write_study_case(db, *, project: str, title: str, situation: str, cause: str, fix: str,
                      prevention: str, epic: str = "", source_type: str = "event", source_ref: str = "",
                      source_url: str = "", ticket_key: str = "", run_id: str = "", pr_url: str = "",
@@ -214,12 +222,17 @@ def write_study_case(db, *, project: str, title: str, situation: str, cause: str
         raise
 
 
-def capture_closed_tickets(db, jira_site: str = "") -> int:
-    """Backfill one idempotent study case for every ticket mirrored as Done."""
-    rows = db.all("SELECT t.key,t.project,t.summary,t.description,t.parent_key FROM tickets t WHERE t.status='Done' "
-                  "AND NOT EXISTS (SELECT 1 FROM knowledge_items k WHERE k.kind='study_case' "
-                  "AND k.source_type='ticket' AND k.source_ref=t.key) "
-                  "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key=t.key AND r.status='running')")
+def capture_closed_tickets(db, jira_site: str = "", *, ticket_key: str = "") -> int:
+    """Backfill study cases for closed tickets, optionally limiting the work to one newly closed ticket."""
+    query = ("SELECT t.key,t.project,t.summary,t.description,t.parent_key FROM tickets t WHERE t.status='Done' "
+             "AND NOT EXISTS (SELECT 1 FROM knowledge_items k WHERE k.kind='study_case' "
+             "AND k.source_type='ticket' AND k.source_ref=t.key) "
+             "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key=t.key AND r.status='running')")
+    params = ()
+    if ticket_key:
+        query += " AND t.key=%s"
+        params = (ticket_key,)
+    rows = db.all(query, params)
     count = 0
     for ticket in rows:
         runs = db.all("SELECT id,step,outcome,summary,details,pr_url FROM runs WHERE ticket_key=%s "

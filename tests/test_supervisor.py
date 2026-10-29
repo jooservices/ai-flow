@@ -163,7 +163,7 @@ def stamp(seconds_ago):
 
 
 def make(blockers=None, redis=None, **env):
-    cfg = load({"AIFLOW_ROOT": tempfile.gettempdir(), "AIFLOW_MACHINE": "test", **env})
+    cfg = replace(load({"AIFLOW_ROOT": tempfile.gettempdir(), "AIFLOW_MACHINE": "test", **env}), root=Path(tempfile.gettempdir()))
     return Supervisor(cfg, FakeJira(blockers), redis or FakeRedis())
 
 
@@ -848,7 +848,7 @@ class MergedPullRequestGateTests(unittest.TestCase):
         written_comments = []
         sup.jira.comment = lambda key, body: written_comments.append(body)
         pr = {"number": 10, "state": "MERGED", "url": "https://github.com/o/r/pull/10", "headRefName": "JAIF-9-fix"}
-        sup.remember_case = lambda *args: None
+        sup.memory_workflow.remember_case = lambda *args: None
         sup.teardown_ticket_database = lambda *args: None
         sup.after_merge = lambda *args: None
 
@@ -925,7 +925,6 @@ class MergedPullRequestGateTests(unittest.TestCase):
             sup.sweep_worktrees()
 
         self.assertEqual(repo.cleaned, ("JAIF-9", True))
-
 
 class PullRequestBodyTests(unittest.TestCase):
     values = {"summary": "Adds the thing.", "why": "Because it is needed.", "tests": "- [x] Reviewed by Grok\n- [ ] CI green\n- [ ] QA",

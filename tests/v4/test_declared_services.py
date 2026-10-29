@@ -79,10 +79,11 @@ def test_project_with_services_makes_machines_prepare_and_report_them(client, ct
     cc = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-950")
 
-    r = client.post("/v1/nodes/cc/heartbeat", json={"tools": {}}, headers=cc)
+    tools = ctx.db.one("SELECT tools FROM nodes WHERE name='cc'")["tools"]
+    r = client.post("/v1/nodes/cc/heartbeat", json={"tools": tools, "services": {}}, headers=cc)
     assert r.json()["desired"]["project_services"] == {"TESTWP": ["postgres", "redis"]}
     assert "TESTWP-950" not in candidates(client, cc)  # not reported yet
-    client.post("/v1/nodes/cc/heartbeat", json={"tools": {}, "services": HEALTHY}, headers=cc)
+    client.post("/v1/nodes/cc/heartbeat", json={"tools": tools, "services": HEALTHY}, headers=cc)
     assert "TESTWP-950" in candidates(client, cc)
 
 
@@ -145,7 +146,8 @@ def test_park_on_an_undeclared_service_is_declared_by_the_flow_doctor(client, ct
 
     # the machine now prepares and reports them, which ends the park
     cc = join(client, "cc")
-    heartbeat = client.post("/v1/nodes/cc/heartbeat", json={"tools": {}, "services": HEALTHY}, headers=cc)
+    tools = ctx.db.one("SELECT tools FROM nodes WHERE name='cc'")["tools"]
+    heartbeat = client.post("/v1/nodes/cc/heartbeat", json={"tools": tools, "services": HEALTHY}, headers=cc)
     assert heartbeat.json()["desired"]["project_services"] == {"TESTWP": ["postgres", "redis"]}
     assert ctx.db.one("SELECT count(*) AS n FROM tool_waits WHERE resolved_at IS NULL")["n"] == 0
     assert "TESTWP-951" in candidates(client, cc)

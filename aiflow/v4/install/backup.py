@@ -137,6 +137,44 @@ def _write(fd: int, database_url: str, lay: Layout) -> dict:
     return manifest
 
 
+def _restore_table(conn, tar, members: dict, t: str) -> None:
+    """Copy one table of the archive back; the append-only ledgers are merged, never truncated."""
+    if t == "audit_log":
+        conn.execute("CREATE TEMP TABLE _aiflow_restore_audit_log (LIKE public.audit_log) ON COMMIT DROP")
+        with conn.cursor().copy("COPY _aiflow_restore_audit_log FROM STDIN") as copy:
+            copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+        conn.execute(
+            "INSERT INTO audit_log (ts, actor, category, action, target, ip, detail) "
+            "SELECT source.ts, source.actor, source.category, source.action, source.target, source.ip, "
+            "source.detail FROM _aiflow_restore_audit_log AS source "
+            "WHERE NOT EXISTS (SELECT 1 FROM audit_log AS current WHERE "
+            "current.ts=source.ts AND current.actor=source.actor AND current.category=source.category "
+            "AND current.action=source.action AND current.target=source.target AND current.ip=source.ip "
+            "AND current.detail=source.detail) ORDER BY source.id"
+        )
+        return
+    if t == "audit_product_roles":
+        # Keep the roles registered on the destination database; they determine product-vs-human audit.
+        return
+    if t == "operator_interventions":
+        # Preserve destination evidence and append archived events idempotently by their stable source key.
+        # The id is deliberately omitted so the destination sequence remains authoritative.
+        conn.execute("CREATE TEMP TABLE _aiflow_restore_operator_interventions "
+                     "(LIKE public.operator_interventions INCLUDING DEFAULTS) ON COMMIT DROP")
+        with conn.cursor().copy("COPY _aiflow_restore_operator_interventions FROM STDIN") as copy:
+            copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+        conn.execute(
+            "INSERT INTO operator_interventions "
+            "(source_key,happened_at,source,actor,action,target,reason,details,bug_ticket_key,created_at,session_id) "
+            "SELECT source_key,happened_at,source,actor,action,target,reason,details,bug_ticket_key,created_at,session_id "
+            "FROM _aiflow_restore_operator_interventions ORDER BY id "
+            "ON CONFLICT (source_key) DO NOTHING"
+        )
+        return
+    with conn.cursor().copy(f'COPY "{t}" FROM STDIN') as copy:
+        copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+
+
 def restore(database_url: str, archive: Path, layout: Layout | None = None) -> dict:
     lay = layout or Layout()
     with tarfile.open(archive, "r:gz") as tar:
@@ -151,16 +189,25 @@ def restore(database_url: str, archive: Path, layout: Layout | None = None) -> d
         for t in manifest["tables"]:
             if f"db/{t}.copy" not in members:
                 raise BackupError(f"the backup lacks the data of table {t}")
-        with psycopg.connect(database_url) as conn:
+        # Restore is a product operation. Mark its connection as internal so the direct-SQL audit trigger
+        # does not mistake the restore's COPY statements for human intervention.
+        with psycopg.connect(database_url, application_name="aiflow4-control-restore") as conn:
             existing = set(_tables(conn))
             missing = [t for t in manifest["tables"] if t not in existing]
             if missing:
                 raise BackupError("the installed release lacks tables of the backup (" + ", ".join(missing)
                                   + "); install the release named in the backup first: " + manifest["release"])
-            conn.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in sorted(existing)) + " CASCADE")
+            # Security migration 013 makes the audit log append-only, including at the database level. Restore
+            # replaces mutable registry tables, but must preserve destination audit history and append the archived
+            # history without issuing UPDATE, DELETE or TRUNCATE against that table.
+            # Product identity and intervention evidence are control metadata, not replaceable registry state.
+            # Truncating audit_product_roles would make subsequent TRUNCATEs look like human actions, and
+            # truncating the append-only ledger would erase evidence during restore.
+            mutable = sorted(existing - {"audit_log", "audit_product_roles", "operator_interventions"})
+            if mutable:
+                conn.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in mutable) + " CASCADE")
             for t in manifest["tables"]:
-                with conn.cursor().copy(f'COPY "{t}" FROM STDIN') as copy:
-                    copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+                _restore_table(conn, tar, members, t)
             _reset_owned_sequences(conn, manifest["tables"])
         for name, m in members.items():
             if name.startswith("secrets/"):

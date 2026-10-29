@@ -96,7 +96,8 @@ def _past_files(db, ticket: dict[str, Any], epic: str) -> list[str]:
     return list(dict.fromkeys(files))
 
 
-def predict(db, ticket: dict[str, Any], epic: str = "", hot: Iterable[str] = HOT_FILES) -> dict[str, Any]:
+def predict(db, ticket: dict[str, Any], epic: str = "", hot: Iterable[str] = HOT_FILES, *,
+            include_history: bool = True) -> dict[str, Any]:
     """The footprint of a ticket: {"files", "areas", "hot", "sources"}. `hot` is the part that can conflict."""
     epic_row = db.one("SELECT summary, description FROM tickets WHERE key=%s", (epic,)) if epic else None
     texts = (("ticket", f"{ticket.get('summary', '')}\n{ticket.get('description', '')}"),
@@ -110,8 +111,9 @@ def predict(db, ticket: dict[str, Any], epic: str = "", hot: Iterable[str] = HOT
             areas.add(area)
             for path in area_files:
                 files.setdefault(path, source)
-    for path in _past_files(db, ticket, epic):
-        files.setdefault(path, "history")
+    if include_history:
+        for path in _past_files(db, ticket, epic):
+            files.setdefault(path, "history")
     hot_files = sorted(p for p in files if is_hot(p, hot))
     return {"files": sorted(files), "areas": sorted(areas), "hot": hot_files,
             "sources": {p: files[p] for p in hot_files}}

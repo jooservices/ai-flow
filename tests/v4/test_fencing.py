@@ -34,6 +34,9 @@ def test_renew_extends_only_for_the_owner(leases: Leases):
     time.sleep(0.4)
     assert leases.valid("TESTWP-3", "run-a", a.fence)
     assert leases.ttl_ms("TESTWP-3") > 3_000
+    active, missing = leases.ttl_ms_many(["TESTWP-3", "TESTWP-missing"])
+    assert active > 3_000 and missing == -2
+    assert leases.ttl_ms_many([]) == []
     assert "TESTWP-3" in leases.held_keys()
 
 
@@ -41,6 +44,10 @@ def test_cooldown_and_leader(leases: Leases):
     leases.cooldown("codex-01", 30, "quota")
     reason, ttl = leases.cooling("codex-01")
     assert reason == "quota" and 0 < ttl <= 30
+    batch = leases.cooling_many(["codex-01", "claude-01"])
+    assert set(batch) == {"codex-01"} and batch["codex-01"][0] == "quota"
+    assert 0 < batch["codex-01"][1] <= 30
+    assert leases.cooling_many([]) == {}
     assert leases.cooling("claude-01") is None
     assert leases.leader("jira_sync", "a", 5_000)
     assert leases.leader("jira_sync", "a", 5_000)

@@ -24,7 +24,7 @@ def execute(supervisor: Any, role: str, agent: str, key: str, view: dict[str, An
     if session_owner and not supervisor.redis.renew_session(supervisor.cfg.machine, agent, session_owner,
                                                               supervisor.cfg.lease_seconds):
         return "lost-lease", "", None, False
-    env = agents.run_env(agent, workdir, supervisor.cfg.root, supervisor.memory_env(key, repo))
+    env = agents.run_env(agent, workdir, supervisor.cfg.root, supervisor.memory_workflow.env(key, repo))
     max_seconds = supervisor.master_worker.execution_seconds(rescue_deadline, supervisor.cfg.max_minutes * 60)
     if rescue_deadline is not None and max_seconds <= 0:
         return "rescue budget expired during worker setup", "", None, False
@@ -54,7 +54,7 @@ def prepare(supervisor: Any, role: str, agent: str, key: str, view: dict[str, An
                   parent=view.get("parent") or "none", version=supervisor.state(key, "version"),
                   last_tag=supervisor.state(key, "lasttag") or "(none yet)",
                   release_check=supervisor.cfg.project(key).release_check or "(none configured)",
-                  project=key.rsplit("-", 1)[0], memory=supervisor.recall(key, view, repo))
+                  project=key.rsplit("-", 1)[0], memory=supervisor.memory_workflow.recall(key, view, repo))
     prompt_role = "release" if role == "developer" and supervisor.state(key, "isrelease") else role
     prompt = "\n\n".join((PROJECT_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8")
                          for name in ("common", prompt_role))
@@ -113,7 +113,7 @@ def finish(supervisor: Any, role: str, agent: str, key: str, repo: Any, workdir:
     text = agents.final_text(agent, log_file, result_file)
     found = agents.verdict(text)
     if not rescue_run:
-        supervisor.remember_lessons(key, repo, agent, text)
+        supervisor.memory_workflow.remember_lessons(key, repo, agent, text)
     quota = (code != 0 or found is None) and agents.looks_like_quota(log_file, text, code)
     verdict = found[0] if found else ""
     detail = "" if rescue_run or not found else found[1][:300]

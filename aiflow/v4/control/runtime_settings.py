@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from ..install.secrets import read_env, read_env_timestamps
 from ..core.runtime_settings_crypto import encrypt_value
+from .application_context import ApplicationContext
 from .db import J
 
 KEY = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
@@ -85,9 +86,9 @@ def _serves_project(ctx, node: dict, project: str) -> bool:
         return project in (node.get("projects") or [])
 
 
-def _worker_units(ctx, node_name: str) -> list[str]:
+def _worker_units(ctx, node_name: str, repo=None) -> list[str]:
     units: list[str] = []
-    for account in ctx.repo().accounts_on(node_name):
+    for account in (repo or ctx.repo()).accounts_on(node_name):
         if account.paused:
             continue
         workers = max(1, int(account.parallel or 1))
@@ -157,6 +158,65 @@ def _targets(ctx, scope: str, project: str = "") -> tuple[list[dict], list[str]]
     return targets, reported_services
 
 
+def _project_services_inventory(ctx, projects: list[str], nodes: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Build the Settings view's per-project service list from one fleet snapshot.
+
+    `_targets` is intentionally strict for writes and checks every serving node. Calling it once for each project
+    made the read-only inventory repeat the node/account scan for the whole project list. Here those same checks
+    are applied to a single node snapshot, while worker units and project assignments are computed once per node.
+    """
+    repo = ctx.repo()
+    projects_by_node: dict[str, set[str]] = {}
+    units_by_node: dict[str, list[str]] = {}
+    for node in nodes:
+        name = str(node["name"])
+        try:
+            projects_by_node[name] = set(repo.projects_for_node(
+                name, node.get("projects") or [], bool(node.get("dynamic"))))
+        except (KeyError, ValueError):
+            projects_by_node[name] = set(node.get("projects") or [])
+        units_by_node[name] = _worker_units(ctx, name, repo)
+
+    control_nodes = [node for node in nodes if node.get("role") == "control" and node.get("token_hash")]
+    if not control_nodes:
+        return {project: [] for project in projects}
+    control = control_nodes[0]
+    now = datetime.now(timezone.utc)
+    control_heartbeat = control.get("last_heartbeat")
+    control_ready = bool(control.get("status") == "online" and control_heartbeat
+                         and (now - control_heartbeat).total_seconds() <= 75
+                         and control.get("runtime_settings_public_key"))
+
+    inventory: dict[str, list[str]] = {}
+    for project in projects:
+        assigned = [node for node in nodes if node.get("token_hash")
+                    and project in projects_by_node.get(str(node["name"]), set())]
+        if not assigned or not control_ready:
+            inventory[project] = []
+            continue
+        ready = True
+        for node in assigned:
+            heartbeat = node.get("last_heartbeat")
+            if (node.get("status") != "online" or not heartbeat
+                    or (now - heartbeat).total_seconds() > 75
+                    or not node.get("accepting_work", True)
+                    or not node.get("runtime_settings_public_key")):
+                ready = False
+                break
+        if not ready:
+            inventory[project] = []
+            continue
+        services = [f"{node['name']}: {unit}" for node in assigned
+                    for unit in units_by_node.get(str(node["name"]), [])]
+        if not services:
+            targets = list(assigned)
+            if all(node["name"] != control["name"] for node in targets):
+                targets.append(control)
+            services = [f"worker services on {node['name']}" for node in targets]
+        inventory[project] = services
+    return inventory
+
+
 def _display_inventory(ctx) -> dict[str, Any]:
     secret_file = Path(ctx.settings.runtime_secret_file)
     rows = _file_rows(secret_file, "secret")
@@ -167,7 +227,9 @@ def _display_inventory(ctx) -> dict[str, Any]:
             if PROJECT.fullmatch(project):
                 rows.extend(_file_rows(path, "project", project))
     project_rows: dict[tuple[str, str], dict] = {}
-    for node in ctx.db.all("SELECT name,runtime_settings FROM nodes WHERE removed_at IS NULL ORDER BY name"):
+    nodes = ctx.db.all("SELECT name,role,status,token_hash,last_heartbeat,accepting_work,projects,dynamic,"
+                       "runtime_settings_public_key,runtime_settings FROM nodes WHERE removed_at IS NULL ORDER BY name")
+    for node in nodes:
         inventories = node.get("runtime_settings") or {}
         for project, entries in inventories.items():
             if not PROJECT.fullmatch(str(project)):
@@ -194,7 +256,7 @@ def _display_inventory(ctx) -> dict[str, Any]:
     projects = sorted(ctx.repo().projects)
     return {"settings": rows, "projects": projects, "changes": _recent_changes(ctx),
             "secret_services": ["control-api-a", "control-api-b"],
-            "project_services": {project: _project_services(ctx, project) for project in projects}}
+            "project_services": _project_services_inventory(ctx, projects, nodes)}
 
 
 def _project_services(ctx, project: str) -> list[str]:
@@ -396,7 +458,7 @@ def _resume_change_nodes(connection, applies: list[dict]) -> None:
                            " WHERE name=%s", (accepting, accepting, name))
 
 
-def install(app: FastAPI, ctx, console_user, audit) -> None:
+def install(app: FastAPI, ctx: ApplicationContext, console_user, audit) -> None:
     @app.get("/v1/runtime-settings")
     def runtime_settings_list(request: Request) -> dict:
         console_user(request, "console.manage")

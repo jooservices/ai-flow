@@ -6,8 +6,8 @@ Design (docs/v4/shared-accounts.md):
   `account_machine_exclusions` records a machine detached from a control-repo account. `overlay` merges these into
   the `ControlRepo` every caller already uses, so `repo.account(id).machines` is the one answer.
 - The account has ONE total session limit (`Account.sessions`). Running sessions, quota and cooldown are counted per
-  account id across machines. `claim_run` checks the total, per-machine share and free worker slots under account and
-  machine advisory locks, so simultaneous workers cannot exceed the limit or take another machine's capacity.
+  account id across machines. `claim_run` checks the total, per-machine share, free worker slots and concurrent quota
+  reservations under account and machine advisory locks, so simultaneous workers cannot exceed capacity.
 - Work is spread across online machines in proportion to their free worker slots, capped by each machine's free
   capacity; when a machine goes offline or runs out of capacity the others can take its share.
 - Credentials stay on the machines that signed in. Control stores only the sign-in prompt a machine reports (a
@@ -16,6 +16,7 @@ Design (docs/v4/shared-accounts.md):
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -24,7 +25,9 @@ from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .capacity import reported_run_tokens, reservation_tokens, unresolved_run_reservation_tokens
 from ..core.controlrepo import Account, ControlRepo
+from .application_context import ApplicationContext
 from .db import J
 
 NODE_ONLINE_S = 75
@@ -121,6 +124,96 @@ def machine_capacities(queryable, machines: list[str] | set[str], account_id: st
     return out
 
 
+def _routing_capacity_snapshot(db, machines: list[str]) -> tuple[
+        dict[str, int], dict[str, int], dict[str, dict[str | None, int]]]:
+    rows = _all(
+        db,
+        "SELECT n.name,n.slots_total,r.account_id,count(r.id) AS account_runs"
+        " FROM nodes n LEFT JOIN runs r ON r.node=n.name AND r.status='running'"
+        " WHERE n.name=ANY(%s) AND n.removed_at IS NULL AND n.status='online'"
+        " AND n.last_heartbeat IS NOT NULL"
+        " AND n.last_heartbeat > now() - make_interval(secs => %s)"
+        " GROUP BY n.name,n.slots_total,r.account_id",
+        (machines, NODE_ONLINE_S))
+    slots: dict[str, int] = {}
+    counts: dict[str, dict[str | None, int]] = {}
+    for row in rows:
+        name = row["name"]
+        slots[name] = max(0, int(row["slots_total"] or 0))
+        counts.setdefault(name, {})[row["account_id"]] = int(row["account_runs"] or 0)
+    free = {name: max(0, slots[name] - sum(counts[name].values())) for name in counts}
+    return free, slots, counts
+
+
+def routable_machines_many(db, accounts: Iterable[Account], online: set[str]) -> dict[str, list[str]]:
+    """Evaluate routing readiness for many accounts with a fixed number of database reads.
+
+    Keep the same admission rules as ``pending_nodes`` and ``may_take`` while batching their per-account lookups.
+    The capacity query intentionally uses the same online-heartbeat filter as ``machine_capacities``; a machine
+    that is online but drained can still affect a shared account's capacity share, even though it is not routable.
+    """
+    by_id = {account.id: account for account in accounts}
+    if not by_id:
+        return {}
+
+    account_ids = sorted(by_id)
+    pending_by_account: dict[str, set[str]] = {account_id: set() for account_id in account_ids}
+    for row in _all(db,
+                    "SELECT account_id,node FROM account_machines WHERE account_id=ANY(%s) AND status='pending'",
+                    (account_ids,)):
+        pending_by_account[row["account_id"]].add(row["node"])
+
+    bounded = [account for account in by_id.values() if account.session_limit]
+    free_by_node: dict[str, int] = {}
+    slots_by_node: dict[str, int] = {}
+    counts_by_node: dict[str, dict[str | None, int]] = {}
+    running_by_account: dict[str, dict[str, int]] = {account.id: {} for account in bounded}
+    if bounded:
+        machines = sorted({machine for account in bounded for machine in account.machines})
+        if machines:
+            free_by_node, slots_by_node, counts_by_node = _routing_capacity_snapshot(db, machines)
+
+        bounded_ids = sorted(account.id for account in bounded)
+        for row in _all(db,
+                        "SELECT account_id,node,count(*) AS n FROM runs"
+                        " WHERE account_id=ANY(%s) AND status='running' GROUP BY account_id,node",
+                        (bounded_ids,)):
+            running_by_account[row["account_id"]][row["node"]] = int(row["n"] or 0)
+
+    result: dict[str, list[str]] = {}
+    for account in by_id.values():
+        pending = pending_by_account[account.id]
+        assigned = [node for node in account.machines if node not in pending]
+        if not account.session_limit:
+            result[account.id] = [node for node in assigned if node in online]
+            continue
+
+        account_running = running_by_account[account.id]
+        total_running = sum(account_running.values())
+        eligible: dict[str, int] = {}
+        account_capacities: dict[str, dict[str, int]] = {}
+        for machine in assigned:
+            if machine not in counts_by_node:
+                continue
+            counts = counts_by_node[machine]
+            other_runs = sum(count for owner, count in counts.items()
+                             if owner is not None and owner != account.id)
+            capacity = {"free": free_by_node[machine],
+                        "account": max(0, slots_by_node[machine] - other_runs)}
+            account_capacities[machine] = capacity
+            if capacity["free"] > 0:
+                eligible[machine] = capacity["account"]
+        shares = capacity_shares(account.sessions, eligible)
+        result[account.id] = [
+            node for node in assigned
+            if node in online
+            and account_capacities.get(node, {}).get("free", 0) > 0
+            and total_running < account.sessions
+            and account_running.get(node, 0) < shares.get(node, 0)
+        ]
+    return result
+
+
 def capacity_shares(session_limit: int, capacities: dict[str, int]) -> dict[str, int]:
     """Apportion the account limit in whole sessions, proportional to machine capacity.
 
@@ -147,11 +240,15 @@ def may_take(db, acc: Account, node: str, *, as_peer: bool = False) -> tuple[boo
         return False, "this machine has not signed in to the account yet"
     if not acc.runs_on(node):
         return False, "this account is not enabled on this machine"
+    # Ordinary control-repo accounts have no shared session_limit; their node agent enforces `parallel`.
+    # Capacity aggregation only changes admission for shared accounts and quota-routing peers.
+    bounded = bool(acc.session_limit or as_peer)
+    if not bounded:
+        return True, ""
     candidates = [n for n in acc.machines if n not in pending]
     capacities = machine_capacities(db, candidates, acc.id)
     # A configured account without a shared limit is bounded by its `sessions` and machine slots only when it is
     # judged as a quota-routing peer; its own claims keep the worker-level limits they always had.
-    bounded = bool(acc.session_limit or as_peer)
     if bounded and capacities.get(node, {}).get("free", 0) <= 0:
         return False, "this machine has no free worker slots; its capacity is full"
     running = running_by_node(db, acc.id)
@@ -166,13 +263,50 @@ def may_take(db, acc: Account, node: str, *, as_peer: bool = False) -> tuple[boo
     return True, ""
 
 
-def claim_run(db, acc: Account, values: tuple) -> bool:
-    """Atomically enforce account and machine capacity limits before inserting a running session."""
+def _quota_reservation_short(conn, acc: Account, quota_reservation_tokens: int) -> bool:
+    """True when the tokens already reserved by running, unresolved and newly reported runs leave too little quota."""
+    account = conn.execute("SELECT quota_forecast,quota_observed_at FROM accounts WHERE id=%s",
+                           (acc.id,)).fetchone()
+    forecast = (account or {}).get("quota_forecast") or {}
+    observed_at = (account or {}).get("quota_observed_at")
+    windows = forecast.get("windows") if isinstance(forecast, dict) else []
+    balances = [int(window["left_tokens"]) for window in windows or []
+                if isinstance(window, dict) and window.get("left_tokens") is not None]
+    if balances:
+        reserved = 0
+        for active in conn.execute("SELECT details FROM runs WHERE account_id=%s AND status='running'",
+                                   (acc.id,)):
+            detail = active.get("details") if isinstance(active.get("details"), dict) else {}
+            reserved += reservation_tokens(detail)
+        for unresolved in conn.execute(
+                "SELECT details,started_at,ended_at FROM runs WHERE account_id=%s"
+                " AND status IN ('lost','released')",
+                (acc.id,)):
+            reserved += unresolved_run_reservation_tokens(unresolved, observed_at)
+        reported = 0
+        if forecast.get("source") == "reported" and observed_at:
+            for completed in conn.execute(
+                    "SELECT details,tokens_in,tokens_out FROM runs WHERE account_id=%s"
+                    " AND status='finished' AND ended_at>%s", (acc.id, observed_at)):
+                reported += reported_run_tokens(completed)
+        reserved += reported
+        if reserved and min(balances) - reserved < quota_reservation_tokens:
+            return True
+    return False
+
+
+def claim_run(db, acc: Account, values: tuple, *, max_node_runs: int | None = None,
+              hostname: str = "", max_host_runs: int | None = None,
+              run_details: dict | None = None, quota_reservation_tokens: int | None = None) -> bool:
+    """Atomically enforce account, machine, host-load and concurrent quota limits before inserting a run."""
     node = str(values[7])
     if not acc.runs_on(node):
         return False
     with db.pool.connection() as conn:
         with conn.transaction():
+            if hostname:
+                # Serialize claims by host so workers on separate machines share the same load budget.
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("host-load:" + hostname,))
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
             machines = sorted(set(acc.machines))
             # All claims take machine locks in the same order. Shared claims also use the locked counts to enforce
@@ -180,6 +314,17 @@ def claim_run(db, acc: Account, values: tuple) -> bool:
             for machine in machines:
                 conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                              (f"aiflow4-machine-sessions:{machine}",))
+            if max_node_runs is not None:
+                current = conn.execute("SELECT count(*) AS n FROM runs WHERE node=%s AND status='running'",
+                                       (node,)).fetchone()
+                if int(current["n"] or 0) >= max_node_runs:
+                    return False
+            if hostname and max_host_runs is not None:
+                current_host = conn.execute(
+                    "SELECT count(*) AS n FROM runs r JOIN nodes n ON n.name=r.node"
+                    " WHERE r.status='running' AND lower(n.metrics->>'hostname')=%s", (hostname,)).fetchone()
+                if int(current_host["n"] or 0) >= max_host_runs:
+                    return False
             # the limit is read under the lock, so a concurrent change is never missed
             stored = conn.execute("SELECT session_limit FROM shared_accounts WHERE id=%s", (acc.id,)).fetchone()
             if stored:
@@ -215,8 +360,17 @@ def claim_run(db, acc: Account, values: tuple) -> bool:
                 share = capacity_shares(acc.sessions, eligible_capacities).get(node, 0)
                 if counts.get(node, 0) >= share:
                     return False
+            if quota_reservation_tokens and quota_reservation_tokens > 0:
+                if _quota_reservation_short(conn, acc, quota_reservation_tokens):
+                    return False
+            else:
+                quota_reservation_tokens = None
+            details = dict(run_details or {})
+            if quota_reservation_tokens:
+                details["quota_reservation"] = {"tokens": int(quota_reservation_tokens)}
             conn.execute("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence,"
-                         " token_hash) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", values)
+                         " token_hash,details) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                         (*values, J(details)))
     return True
 
 
@@ -273,6 +427,58 @@ def machines_view(db, acc: Account | None, node_status: dict[str, str], *,
     return out
 
 
+def machines_views(db, accounts: list[Account], node_status: dict[str, str], *,
+                   include_signin: bool = False) -> dict[str, list[dict[str, Any]]]:
+    """Read machine details for a fleet snapshot in batches instead of five queries per account."""
+    ids = list(dict.fromkeys(acc.id for acc in accounts if acc))
+    if not ids:
+        return {}
+    machines_by_account: dict[str, dict[str, dict]] = {}
+    for row in db.all("SELECT * FROM account_machines WHERE account_id=ANY(%s)", (ids,)):
+        machines_by_account.setdefault(str(row["account_id"]), {})[str(row["node"])] = row
+    active: dict[tuple[str, str], int] = {}
+    for row in db.all("SELECT account_id,node,count(*) AS n FROM runs WHERE account_id=ANY(%s)"
+                      " AND status='running' GROUP BY account_id,node", (ids,)):
+        active[(str(row["account_id"]), str(row["node"]))] = int(row["n"])
+    managed = {str(row["id"]) for row in db.all(
+        "SELECT id FROM managed_ai_accounts WHERE id=ANY(%s) AND removed_at IS NULL", (ids,))}
+    recent: dict[tuple[str, str], int] = {}
+    for row in db.all("SELECT account_id,node,count(*) AS n FROM runs WHERE account_id=ANY(%s)"
+                      " AND started_at > now() - interval '24 hours' GROUP BY account_id,node", (ids,)):
+        recent[(str(row["account_id"]), str(row["node"]))] = int(row["n"])
+    usage: dict[tuple[str, str], dict] = {}
+    for row in db.all("SELECT account_id,node,coalesce(sum(tokens_in + tokens_out),0) AS tokens,"
+                      "coalesce(sum(cost_usd),0) AS cost FROM runs WHERE account_id=ANY(%s)"
+                      " AND started_at >= date_trunc('day',now()) GROUP BY account_id,node", (ids,)):
+        usage[(str(row["account_id"]), str(row["node"]))] = row
+
+    now = datetime.now(timezone.utc)
+    result: dict[str, list[dict[str, Any]]] = {}
+    for acc in accounts:
+        rows = machines_by_account.get(acc.id, {})
+        out = []
+        for node in acc.machines:
+            row = rows.get(node)
+            pending = bool(row and row["status"] == "pending")
+            node_usage = usage.get((acc.id, node), {})
+            prompt = None
+            if (include_signin and pending and row["signin_link"] and row["signin_expires_at"]
+                    and row["signin_expires_at"] > now):
+                prompt = {"link": row["signin_link"], "code": row["signin_code"],
+                          "expires_at": row["signin_expires_at"].isoformat()}
+            out.append({"node": node, "node_status": node_status.get(node, "offline"), "signed_in": not pending,
+                        "sign_in_pending": pending, "shared_assignment": bool(row),
+                        "removable": acc.id not in managed and (node == acc.node or bool(row)),
+                        "runs_active": active.get((acc.id, node), 0), "runs_24h": recent.get((acc.id, node), 0),
+                        "tokens_today": int(node_usage.get("tokens", 0)),
+                        "cost_today": float(node_usage.get("cost", 0)),
+                        "state": ((row or {}).get("worker_state") or {}).get("state", ""), "signin": prompt,
+                        "credential_expires_at": (row["credential_expires_at"].isoformat()
+                                                  if row and row["credential_expires_at"] else None)})
+        result[acc.id] = out
+    return result
+
+
 # --- request bodies ---------------------------------------------------------------------------------------
 class AccountBody(BaseModel):
     id: str = Field(min_length=2, max_length=40)
@@ -301,7 +507,7 @@ class SigninCompleteBody(BaseModel):
     request_id: str = Field(min_length=1, max_length=160)
 
 
-def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
+def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_auth) -> None:
     sync_accounts = app.state.sync_accounts
 
     def sync() -> list[str]:
@@ -525,4 +731,8 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
                 ctx.events.emit("account.machine_signed_in", account=acc.id, node=node, outcome="completed")
         elif row["status"] != "signed_in":
             raise HTTPException(409, f"{acc.id} is not waiting for sign-in on {node}")
+        # Provider-owned login establishes auth health on this machine, without creating quota data.
+        ctx.db.run("UPDATE accounts SET last_probe_at=now(),status=CASE WHEN status='signed_out' THEN 'idle'"
+                   " ELSE status END,last_error=CASE WHEN status='signed_out' THEN '' ELSE last_error END,"
+                   "updated_at=now() WHERE id=%s", (acc.id,))
         return {"completed": True, "account": acc.id, "node": node}

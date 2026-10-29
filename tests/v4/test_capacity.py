@@ -4,6 +4,8 @@ from pathlib import Path
 import re
 import uuid
 
+import pytest
+
 from conftest import add_ticket, join_node
 from aiflow.v4.control import capacity, quota as quota_reporting
 from aiflow.v4.control.db import J
@@ -49,13 +51,26 @@ def put_quota(ctx, account_id, *, utilization, tokens=100_000):
     reset = datetime.now(UTC) + timedelta(days=10)
     quota = {"windows": {"weekly": {"utilization": utilization, "quota_tokens": tokens,
                                       "resets_at": reset.isoformat()}}}
-    ctx.db.run("UPDATE accounts SET quota=%s WHERE id=%s", (J(quota), account_id))
+    ctx.db.run("UPDATE accounts SET quota=%s,quota_source='run',quota_observed_at=now() WHERE id=%s",
+               (J(quota), account_id))
 
 
 def refresh_forecasts(ctx):
-    rows = ctx.db.all("SELECT id,provider,quota FROM accounts ORDER BY id")
+    rows = ctx.db.all("SELECT id,provider,quota,quota_source,quota_observed_at FROM accounts ORDER BY id")
     for account_id, forecast in quota_reporting.assessments(ctx.db, rows).items():
         ctx.db.run("UPDATE accounts SET quota_forecast=%s WHERE id=%s", (J(forecast), account_id))
+
+
+def test_reported_run_tokens_preserves_measured_zero_and_falls_back_when_unknown():
+    measured_zero = {"tokens_in": 0, "tokens_out": 0, "details": {
+        "token_usage_reported": True, "quota_reservation": {"tokens": 25_000}}}
+    missing = {"tokens_in": 0, "tokens_out": 0, "details": {
+        "token_usage_reported": False, "quota_reservation": {"tokens": 25_000}}}
+    legacy = {"tokens_in": 0, "tokens_out": 0, "details": {"quota_reservation": {"tokens": 25_000}}}
+
+    assert capacity.reported_run_tokens(measured_zero) == 0
+    assert capacity.reported_run_tokens(missing) == 25_000
+    assert capacity.reported_run_tokens(legacy) == 25_000
 
 
 def test_estimate_uses_ticket_type_size_and_area_history_as_ranges(db):
@@ -118,6 +133,29 @@ def test_capacity_routing_avoids_account_that_will_run_out_and_saves_reason(clie
     assert detail["capacity_decision"]["reason"] == decision["reason"]
 
 
+def test_candidate_poll_skips_capacity_work_without_reliable_quota_forecasts(client, ctx, monkeypatch):
+    cc = online(client, "cc", "claude-01")
+    add_ticket(ctx.db, "TESTWP-LEGACY-CAPACITY-1")
+    queries = []
+    original_all = ctx.db.all
+
+    def record_queries(statement, params=None):
+        if "quota_forecast" in statement and "FROM accounts" in statement:
+            queries.append(statement)
+        return original_all(statement, params)
+
+    monkeypatch.setattr(ctx.db, "all", record_queries)
+    monkeypatch.setattr(capacity, "history", lambda _db: pytest.fail("unknown quotas must not estimate capacity"))
+
+    response = client.get("/v1/work/candidates?account=claude-01", headers=cc)
+
+    assert response.status_code == 200
+    assert "TESTWP-LEGACY-CAPACITY-1" in {item["key"] for item in response.json()["tickets"]}
+    assert len(queries) == 1
+    assert "quota_forecast->>'source'='reported'" in queries[0]
+    assert "quota_forecast->>'confidence' IN ('medium','high')" in queries[0]
+
+
 def test_capacity_routing_checks_exhaustion_for_window_without_token_balance(client, ctx):
     cc = online(client, "cc", "claude-01")
     node1 = online(client, "node1", "codex-01")
@@ -140,6 +178,83 @@ def test_capacity_routing_checks_exhaustion_for_window_without_token_balance(cli
 
     assert "TESTWP-UNKNOWN-WINDOW" not in {item["key"] for item in claude_candidates}
     assert "TESTWP-UNKNOWN-WINDOW" in {item["key"] for item in codex_candidates}
+
+
+def test_capacity_reserves_running_estimates_and_unobserved_reported_run_usage(ctx):
+    observed_at = datetime.now(UTC) - timedelta(minutes=5)
+    forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
+    ctx.db.run("INSERT INTO accounts (id,provider,node) VALUES ('claude-01','claude','cc')"
+               " ON CONFLICT (id) DO NOTHING")
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s,quota_observed_at=%s WHERE id='claude-01'",
+               (J(forecast), observed_at))
+    run_id = str(uuid.uuid4())
+    details = {"quota_reservation": {"tokens": 40_000}}
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,details)"
+               " VALUES (%s,'TESTWP-RESERVE-1','TESTWP','dev','claude-01','claude','cc',1,%s)",
+               (run_id, J(details)))
+
+    active = capacity.with_active_quota_reservations(ctx.db, {"claude-01": forecast})
+    assert active["claude-01"]["windows"][0]["left_tokens"] == 60_000
+
+    ended_at = datetime.now(UTC)
+    ctx.db.run("UPDATE runs SET status='finished',ended_at=%s,tokens_in=25_000,tokens_out=5_000 WHERE id=%s",
+               (ended_at, run_id))
+    stored = ctx.db.one("SELECT status,ended_at,tokens_in,tokens_out FROM runs WHERE id=%s", (run_id,))
+    snapshot_at = ctx.db.one("SELECT quota_observed_at FROM accounts WHERE id='claude-01'")["quota_observed_at"]
+    assert stored["status"] == "finished" and stored["ended_at"] > snapshot_at
+    assert stored["tokens_in"] == 25_000 and stored["tokens_out"] == 5_000
+    completed = capacity.with_active_quota_reservations(ctx.db, {"claude-01": forecast})
+    assert completed["claude-01"]["windows"][0]["left_tokens"] == 70_000
+
+    ctx.db.run("UPDATE accounts SET quota_observed_at=%s WHERE id='claude-01'", (ended_at + timedelta(seconds=1),))
+    reconciled = capacity.with_active_quota_reservations(ctx.db, {"claude-01": forecast})
+    assert reconciled["claude-01"]["windows"][0]["left_tokens"] == 100_000
+
+
+def test_capacity_uses_measured_zero_instead_of_the_run_reservation(ctx):
+    observed_at = datetime.now(UTC) - timedelta(minutes=5)
+    forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
+    ctx.db.run("INSERT INTO accounts (id,provider,node) VALUES ('claude-01','claude','cc')"
+               " ON CONFLICT (id) DO NOTHING")
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s,quota_observed_at=%s WHERE id='claude-01'",
+               (J(forecast), observed_at))
+    run_id = str(uuid.uuid4())
+    details = {"quota_reservation": {"tokens": 25_000}, "token_usage_reported": True}
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,started_at,"
+               "ended_at,tokens_in,tokens_out,details)"
+               " VALUES (%s,'TESTWP-MEASURED-ZERO','TESTWP','dev','claude-01','claude','cc',1,'finished','done',%s,%s,0,0,%s)",
+               (run_id, observed_at + timedelta(seconds=1), datetime.now(UTC), J(details)))
+
+    remaining = capacity.with_active_quota_reservations(ctx.db, {"claude-01": forecast})
+
+    assert remaining["claude-01"]["windows"][0]["left_tokens"] == 100_000
+
+
+@pytest.mark.parametrize("status", ["lost", "released"])
+def test_capacity_reserves_unreported_terminal_run_estimate_until_a_newer_snapshot(ctx, status):
+    observed_at = datetime.now(UTC) - timedelta(minutes=3)
+    terminal_at = observed_at + timedelta(minutes=1)
+    forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
+    ctx.db.run("INSERT INTO accounts (id,provider,node) VALUES ('claude-01','claude','cc')"
+               " ON CONFLICT (id) DO NOTHING")
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s,quota_observed_at=%s WHERE id='claude-01'",
+               (J(forecast), observed_at))
+    details = {"quota_reservation": {"tokens": 30_000}}
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,started_at,"
+               "ended_at,details) VALUES (%s,'TESTWP-TERMINAL-RESERVATION','TESTWP','dev','claude-01','claude','cc',"
+               "1,%s,%s,%s,%s)",
+               (str(uuid.uuid4()), status, terminal_at - timedelta(minutes=5), terminal_at, J(details)))
+
+    unresolved = capacity.with_active_quota_reservations(ctx.db, {"claude-01": forecast})
+    assert unresolved["claude-01"]["windows"][0]["left_tokens"] == 70_000
+
+    ctx.db.run("UPDATE accounts SET quota_observed_at=%s WHERE id='claude-01'",
+               (terminal_at + timedelta(seconds=1),))
+    reconciled = capacity.with_active_quota_reservations(ctx.db, {"claude-01": forecast})
+    assert reconciled["claude-01"]["windows"][0]["left_tokens"] == 100_000
 
 
 def test_capacity_routing_prefers_middle_tier_to_junior_for_ordinary_work():

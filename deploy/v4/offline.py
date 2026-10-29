@@ -56,7 +56,7 @@ VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # Project stacks whose tools ship inside the bundle (Python and Node.js runtimes). The node agent installs every
 # other stack's tools (PHP, Composer, WP-CLI, Playwright) from public registries, so such nodes are refused.
 OFFLINE_STACKS = frozenset({"python-3.12", "node-24"})
-APT_PACKAGES = ["systemd", "git", "docker.io", "ca-certificates", "passwd", "util-linux"]
+APT_PACKAGES = ["systemd", "git", "docker.io", "ca-certificates", "passwd", "util-linux", "auditd"]
 SAFE_NODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SAFE_ENV_VALUE = re.compile(r"[A-Za-z0-9_./:@\[\]-]+\Z")
 INSTALLER_BOOTSTRAP = """#!/bin/sh
@@ -409,7 +409,7 @@ def _build_debs(packages_dir: Path, version: str) -> None:
     """Build architecture-independent agent and worker packages with their systemd units."""
     deb_version = version.removeprefix("v")
     definitions = {
-        "aiflow4-node-agent": ("AI Flow v4 node agent", "systemd, git, docker.io, ca-certificates, passwd, util-linux", "aiflow4-node-agent.service"),
+        "aiflow4-node-agent": ("AI Flow v4 node agent", "systemd, git, docker.io, ca-certificates, passwd, util-linux, auditd", "aiflow4-node-agent.service"),
         "aiflow4-worker": ("AI Flow v4 worker template", "aiflow4-node-agent", "aiflow4-worker@.service"),
     }
     units = ROOT / "deploy/v4/node/systemd"
@@ -772,6 +772,16 @@ class OfflineInstaller:
         installer_target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(installer_source, installer_target)
         installer_target.chmod(0o755)
+        audit_source = release_dir / "deploy/v4/bin/aiflow4-audit-install"
+        audit_rules = release_dir / "deploy/v4/audit/aiflow4-operator.rules"
+        if not audit_source.is_file() or not audit_rules.is_file():
+            raise OfflineError("release archive is missing operator audit support")
+        audit_target = self.path("/usr/local/sbin/aiflow4-audit-install")
+        shutil.copy2(audit_source, audit_target)
+        audit_target.chmod(0o755)
+        audit_rules_target = self.path("/usr/local/share/aiflow4/audit/aiflow4-operator.rules")
+        audit_rules_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(audit_rules, audit_rules_target)
 
         base_url = control_url.rstrip("/")
         inspected = self.post_json(base_url, "/v1/nodes/join-tokens/inspect", {"join_token": join_token})
@@ -840,6 +850,7 @@ class OfflineInstaller:
             for path in (accounts_root, self.path("/srv/aiflow/cache/ai/tmp"), self.path("/srv/aiflow/work")):
                 path.mkdir(parents=True, exist_ok=True)
 
+        self.run([str(audit_target)])
         self.run(["systemctl", "daemon-reload"])
         self.run(["systemctl", "enable", "--now", "aiflow4-node-agent.service"])
         self.run([str(current / ".venv/bin/aiflow4"), "version"])

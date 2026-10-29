@@ -40,6 +40,8 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from ..core import secretbox
+from .application_context import ApplicationContext
 from .console_auth import COOKIE_NAME, checks_bearer, resolve_session_user, role_satisfies, verify_session
 from .db import J
 from . import licensing
@@ -103,10 +105,30 @@ class SecretStore:
 
     def _read(self, name: str) -> dict | None:
         try:
-            data = json.loads((self.dir / name).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            raw = (self.dir / name).read_text(encoding="utf-8")
+            data = json.loads(secretbox.decrypt(raw, context=name))
+            if not secretbox.is_encrypted(raw):
+                self._write(name, data)  # upgrade old plaintext files on first access
+        except (OSError, ValueError):  # SecretBoxError is a ValueError: an unreadable secret reads as not connected
             return None
         return data if isinstance(data, dict) else None
+
+    def migrate_plaintext(self) -> int:
+        """Encrypt legacy plaintext files and check the rest decrypt; raises (fail closed) without a usable key.
+
+        Runs at control startup, so the API never serves while a Jira secret is plaintext on disk."""
+        changed = 0
+        for name in (self.APP, self.CREDENTIAL, self.DISCONNECTED):
+            try:
+                raw = (self.dir / name).read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            if secretbox.is_encrypted(raw):
+                secretbox.decrypt(raw, context=name)
+                continue
+            self._write(name, json.loads(raw))  # seal() refuses when the external key is missing
+            changed += 1
+        return changed
 
     def _write(self, name: str, data: dict) -> None:
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -116,7 +138,7 @@ class SecretStore:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+                f.write(secretbox.seal(json.dumps(data), name))  # fails closed if the external key is missing
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.dir / name)
@@ -507,7 +529,7 @@ def _site(value: str) -> str | None:
     return f"https://{parts.netloc}"
 
 
-def mount(app: FastAPI, ctx) -> None:
+def mount(app: FastAPI, ctx: ApplicationContext) -> None:
     def auth() -> JiraAuth:
         a = getattr(ctx, "jira_auth", None)
         if a is None:

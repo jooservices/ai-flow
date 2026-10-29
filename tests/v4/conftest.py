@@ -3,12 +3,17 @@ disk, and fakes for Jira and GitHub so API flows run without the network."""
 from __future__ import annotations
 
 import os
+import threading
+import re
 import uuid
 from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import pytest
 import redis
 
+from aiflow.v4.control import api, system_check_api
 from aiflow.v4.control.api import Ctx, create_app
 from aiflow.v4.control.db import DB, J
 from aiflow.v4.control.events import Events
@@ -17,9 +22,11 @@ from aiflow.v4.control import licensing
 from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.fencing import Leases
 from aiflow.v4.core.settings import Settings
+from aiflow.v4.core import secretbox
 
-REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "redis://127.0.0.1:16399/5")
-DATABASE_URL = os.environ.get("AIFLOW4_TEST_DATABASE_URL", "postgresql://aiflow:test@127.0.0.1:15499/aiflow4")
+REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "")
+DATABASE_URL = os.environ.get("AIFLOW4_TEST_DATABASE_URL", "")
+REDIS_PREFIX = os.environ.get("AIFLOW4_TEST_REDIS_PREFIX", os.environ.get("REDIS_PREFIX", "aiflow4_test:"))
 
 
 @pytest.fixture(autouse=True)
@@ -28,10 +35,51 @@ def runtime_operation_key_in_test_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("AIFLOW4_NODE_OPERATION_KEY_FILE", str(tmp_path / "runtime-settings.key"))
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "raw_csrf: do not add the CSRF header to console requests (tests of the protection)")
+    # The CI unit-test job does not provision a production secret key. Give its isolated process test-only key material
+    # so app contexts can initialize; security tests explicitly remove or replace it when exercising fail-closed paths.
+    os.environ["AIFLOW4_SECRET_KEY"] = secretbox.generate_key()
+
+
+@pytest.fixture(autouse=True)
+def console_csrf_header(request, monkeypatch):
+    """A console session cookie needs the session's X-CSRF-Token on every state-changing request (AC4 of JAIF-231).
+    Tests of other features sign in with a forged cookie, so this adds the matching token for them. Tests of the
+    protection itself opt out with `@pytest.mark.raw_csrf` and send exactly what they mean to."""
+    raw_csrf = request.node.get_closest_marker("raw_csrf") is not None
+    from starlette.testclient import TestClient
+    from aiflow.v4.control.console_auth import COOKIE_NAME, csrf_token
+    original = TestClient.request
+
+    def request_with_token(self, method, url, **kwargs):
+        headers = kwargs.get("headers") or {}
+        if (method.upper() == "POST" and str(url).split("?", 1)[0].endswith("/v1/auth/login")
+                and not any(k.lower() in {"origin", "referer"} for k in headers)):
+            headers = {**headers, "Origin": str(self.base_url).rstrip("/")}
+            kwargs["headers"] = headers
+        cookie = ([c.value for c in self.cookies.jar if c.name == COOKIE_NAME] or [None])[-1]
+        if (not raw_csrf and cookie and method.upper() not in ("GET", "HEAD", "OPTIONS")
+                and not any(k.lower() == "x-csrf-token" for k in headers)):
+            ctx = getattr(self.app, "state", None) and getattr(self.app.state, "ctx", None)
+            if ctx is not None:
+                kwargs["headers"] = {**headers, "X-CSRF-Token": csrf_token(cookie, ctx.settings.console_session_secret)}
+        return original(self, method, url, **kwargs)
+
+    monkeypatch.setattr(TestClient, "request", request_with_token)
+
+
 @pytest.fixture
 def leases():
+    if not REDIS_URL:
+        pytest.fail("AIFLOW4_TEST_REDIS_URL must point at an isolated test Redis database")
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        redis_db = urlsplit(REDIS_URL).path.strip("/")
+        if redis_db in {"", "0", "5"} or not (
+                REDIS_PREFIX.endswith("_test:") or re.search(r"_wt[a-z0-9]+:$", REDIS_PREFIX)):
+            pytest.fail("local tests require a non-live Redis index and a *_test: or *_wt<id>: key prefix")
     r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-    prefix = f"t{uuid.uuid4().hex[:8]}:"
+    prefix = f"{REDIS_PREFIX}t{uuid.uuid4().hex[:8]}:"
     yield Leases(r, prefix)
     for k in r.scan_iter(match=prefix + "*"):
         r.delete(k)
@@ -39,41 +87,16 @@ def leases():
 
 @pytest.fixture(scope="session")
 def test_database_url():
-    """A database of its own for this pytest session (created next to the configured one, dropped at the end), so
-    parallel dev runs sharing one PostgreSQL server never drop each other's schema or wait on its migration lock.
-    Falls back to the configured database when the role may not create databases."""
-    import psycopg
-    from psycopg import sql
-    from psycopg.conninfo import make_conninfo
-    from aiflow.v4.core import testdb
-    name = testdb.new_name()
-    try:
-        try:  # leftovers of killed sessions: keep at most a handful of idle databases around
-            testdb.sweep(DATABASE_URL)
-        except Exception:  # noqa: BLE001 - a missing right to list or drop must not stop the tests
-            pass
-        admin = psycopg.connect(DATABASE_URL, autocommit=True)
-        template = os.environ.get("AIFLOW4_TEST_DATABASE_TEMPLATE")  # a database that already carries extensions (pgvector)
-        admin.execute(sql.SQL("CREATE DATABASE {}" + (" TEMPLATE {}" if template else ""))
-                      .format(sql.Identifier(name), *([sql.Identifier(template)] if template else [])))
-    except psycopg.Error:
-        yield DATABASE_URL
-        return
-    own = make_conninfo(DATABASE_URL, dbname=name)
-    # Keep the per-session database visible as active to the node agent's idle test-database sweeper. Individual
-    # test DB pools close between tests, and a long docs/browser check must not make this still-running session
-    # look like an abandoned database.
-    keepalive = psycopg.connect(own, autocommit=True)
-    try:
-        yield own
-    finally:
-        keepalive.close()
-        try:
-            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
-        except psycopg.Error:
-            pass
-        admin.close()
+    """Use only the database supplied by the test runner; never create, sweep or drop databases here."""
+    if not DATABASE_URL:
+        pytest.fail("AIFLOW4_TEST_DATABASE_URL must point at a dedicated test or worktree database")
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        from psycopg.conninfo import conninfo_to_dict
 
+        name = str(conninfo_to_dict(DATABASE_URL).get("dbname") or urlsplit(DATABASE_URL).path.lstrip("/"))
+        if not (name.endswith("_test") or re.search(r"_wt[a-z0-9]+$", name)):
+            pytest.fail("local tests require a dedicated *_test or *_wt<id> database")
+    yield DATABASE_URL
 
 @pytest.fixture
 def db(test_database_url):
@@ -111,6 +134,7 @@ def control_repo(tmp_path: Path) -> Path:
 
 class FakeJira:
     normalize = staticmethod(Jira.normalize)
+    operator_changes = staticmethod(Jira.operator_changes)
 
     def __init__(self) -> None:
         self.status_of: dict[str, str] = {}
@@ -124,6 +148,8 @@ class FakeJira:
                               {"key": "NEWAPP", "name": "New App"}]
         self.project_workflows: dict[str, list[str]] = {}
         self.project_reads: list[str] = []
+        self.project_permission_reads: list[str] = []
+        self.project_permissions: dict[str, dict[str, bool]] = {}
         self.versions_data: dict[str, list[dict]] = {}
         self.version_reads: list[str] = []
         self.search_data: list[dict] = []
@@ -143,6 +169,13 @@ class FakeJira:
         self.project_reads.append(key)
         return self.project_workflows.get(key, ["Backlog", "Intake", "To Do", "In Progress", "In Verify",
                                                 "Needs owner", "Done"])
+
+    def project_write_permissions(self, key: str) -> dict[str, bool]:
+        self.project_permission_reads.append(key)
+        return self.project_permissions.get(key, {
+            "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
+            "TRANSITION_ISSUES": True, "ADD_COMMENTS": True,
+        })
 
     def project_versions(self, key: str) -> list[dict]:
         self.version_reads.append(key)
@@ -226,11 +259,27 @@ class FakeJira:
     def link_issues(self, blocker, blocked, link_type="Blocks"):
         self.issue_links.append((blocker, blocked, link_type))
 
+    def issue_links_for(self, key):
+        return list(getattr(self, "links_by_ticket", {}).get(key, []))
+
+    def get_issue_links(self, key):
+        return list(getattr(self, "links_by_ticket", {}).get(key, []))
+
+    def delete_issue_link(self, link_id):
+        self.deleted_issue_links = getattr(self, "deleted_issue_links", []) + [str(link_id)]
+        for key in list(getattr(self, "links_by_ticket", {})):
+            self.links_by_ticket[key] = [link for link in self.links_by_ticket[key] if link.get("id") != str(link_id)]
+
     def add_attachment(self, key, filename, content, content_type):
         self.attachments.append((key, filename, content, content_type))
 
 class FakeGitHub:
     def __init__(self) -> None:
+        self.meta = {"installation_id": 77}
+        self.app_permissions = {
+            "contents": "write", "pull_requests": "write", "workflows": "write",
+            "actions": "read", "checks": "read", "statuses": "read", "administration": "write",
+        }
         self.prs: list[dict] = []
         self.commits: list[dict] = []
         self.branches: list[tuple[str, str, str]] = []
@@ -259,6 +308,10 @@ class FakeGitHub:
 
     def installation_repositories(self) -> list[dict[str, str]]:
         return list(self.repositories)
+
+    def installation_details(self, installation_id: int) -> dict:
+        assert installation_id == self.meta["installation_id"]
+        return {"id": installation_id, "permissions": dict(self.app_permissions)}
 
     def branch_exists(self, repo: str, branch: str) -> bool:
         self.branches.append((repo, branch, "check"))
@@ -294,6 +347,19 @@ class FakeGitHub:
         self.files[(repo, branch, path)] = content
         self.branch_heads[(repo, branch)] = f"{len(self.commits):040x}"
         return f"commit{len(self.commits):04d}"
+
+    def commit_changes(self, repo, branch, expected_sha, writes, deletions, message):
+        if self.branch_heads.get((repo, branch), f"sha-{branch}") != expected_sha:
+            raise RuntimeError("422: Update is not a fast forward")
+        for path in deletions:
+            self.deleted_files.append((repo, path))
+            self.files.pop((repo, branch, path), None)
+        for path, content in writes.items():
+            self.files[(repo, branch, path)] = content
+        self.commits.append({"repo": repo, "branch": branch, "writes": dict(writes), "deletions": list(deletions),
+                             "message": message})
+        self.branch_heads[(repo, branch)] = f"{len(self.commits):040x}"
+        return self.branch_heads[(repo, branch)]
 
     def delete_file(self, repo, branch, path, message):
         self.deleted_files.append((repo, path))
@@ -382,6 +448,10 @@ class FakeGitHub:
     def comment(self, repo, number, body):
         self.comments = getattr(self, "comments", []) + [(number, body)]
 
+    def upsert_comment(self, repo, number, kind, body):
+        self.comment(repo, number, body)
+        return "created"
+
     def branch_sha(self, repo, branch):
         return self.branch_heads.get((repo, branch), f"sha-{branch}")
 
@@ -411,7 +481,7 @@ class FakeGitHub:
 def ctx(db, leases, control_repo):
     s = Settings(join_token="join-secret", join_control_url="https://control.example.test",
                  reviewer_token="review-secret", owner_token="owner-secret", lease_ms=90_000,
-                 jira_projects=["TESTWP"])
+                 jira_projects=["TESTWP"], canary_bug_project="TESTFLOW")
     snap = ControlRepo.load(control_repo)
     c = Ctx(settings=s, db=db, leases=leases, events=Events(db), repo=lambda: snap, jira=FakeJira(), github=FakeGitHub())
     # General integration fixtures exercise multi-node, multi-account flows; the licensing tests restore the
@@ -427,7 +497,12 @@ def client(ctx):
     from fastapi.testclient import TestClient
     app = create_app(ctx)
     app.state.sync_accounts()
-    return TestClient(app)
+    yield TestClient(app)
+    # Readiness checks run on background threads; let them finish before the next test reuses the database.
+    for thread in list(threading.enumerate()):
+        if thread.name.startswith(("aiflow4-join-readiness-", "aiflow4-heartbeat-readiness-")):
+            thread.join(timeout=15)
+    system_check_api._PENDING_REFRESHES.clear()
 
 
 def add_ticket(db, key: str, status: str = "To Do", labels=("aiflow-ready",), priority: str = "Medium", blocked_by=()):
@@ -443,8 +518,78 @@ def add_open_escalation(db, key: str, question: str = "Which option should be us
     escalations.record(db, key, key.split("-")[0], "dev", "", escalations.AMBIGUITY, question)
 
 
-def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP"):
+def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP", *, heartbeat: bool = True):
     issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
                                                          "role": role, "project": project})
     assert issued.status_code == 200, issued.text
-    return client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    # This helper models a connected agent and seeds its healthy readiness baseline below. Suppress the
+    # provider-backed join probe so it cannot race with that deterministic fixture state under slow CI.
+    with patch.object(system_check_api, "schedule_join_readiness"):
+        joined = client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    if joined.status_code == 200:
+        # Finish any prior probe for this node before the fixture writes its deterministic readiness baseline.
+        for thread in list(threading.enumerate()):
+            if thread.name == f"aiflow4-join-readiness-{name}":
+                thread.join(timeout=15)
+        # The API tests model an installed agent: after join it reports a healthy baseline before tests change a
+        # particular condition. Tests of the join-only result post directly to /v1/nodes/join instead.
+        from aiflow.v4.core.system_check import condition
+        from aiflow.v4.core.toolchains import pinned_version
+
+        ctx = client.app.state.ctx
+        repo = ctx.repo()
+        project_key = joined.json()["project"]
+        required = repo.tools_for_node(name, [project_key])
+        tools = {}
+        for tool in required:
+            pin = pinned_version(repo.versions, tool, repo.projects[project_key].stacks)
+            version = pin or "1.0"
+            tools[tool] = f"{tool} {version}"
+        tools.update({"git": "git version 2.43.0", "uv": "uv 0.8.1", "claude": "Claude Code 2.1.305",
+                      "codex": "codex 1.0.0", "codex-code-mode-host": "codex-code-mode-host 1.0.0",
+                      "opencode": "opencode 1.0.0", "grok": "grok 1.0.0", "php": "PHP 8.3.10",
+                      "composer": "Composer 2.8.4", "wp": "WP-CLI 2.12.0", "node": "node v24.0.0",
+                      "python3": "Python 3.12.2", "playwright": "Version 1.56.0",
+                      "playwright-browser": "Playwright Chromium 1.56.0"})
+        services = {name: {"state": "running", "healthy": True, "detail": "healthy"}
+                    for name in repo.projects[project_key].required_services}
+        credentials = {account.id: {"present": True, "valid": True} for account in repo.accounts_on(name)}
+        from aiflow.v4.control.db import J
+        from aiflow.v4.control.system_check import refresh_node
+
+        # This helper models a connected agent that has already reported a healthy baseline.
+        # Keep every scheduler-required measurement present so feature tests that omit a later
+        # heartbeat's metrics are exercising the behavior under test, not missing telemetry.
+        metrics = {"hostname": name, "load1": 0.1, "cpus": 4, "mem_total": 100, "mem_used": 20,
+                   "disk_free": 20 * 1024 ** 3, "disk_total": 100 * 1024 ** 3,
+                   "services": services}
+        ctx.db.run("UPDATE nodes SET tools=%s,metrics=%s WHERE name=%s", (J(tools), J(metrics), name))
+        readiness = refresh_node(
+            ctx, name, "heartbeat",
+            [condition("disk-space", "Free disk space", "ready", "20 GiB is available."),
+             condition("workspace-permissions", "Work directory permissions", "ready",
+                       "The node can write its work and state directories."),
+             condition("control-network", "Control API network", "ready",
+                       "The machine reached the control API and sent this heartbeat."),
+             condition("repository-network", "Repository network", "ready",
+                       "The machine can reach GitHub over HTTPS.")],
+            credential_checks=credentials)
+        # Model the agent's ready baseline without scheduling provider-backed checks after every fixture join.
+        for item in readiness["machine"]:
+            if item["id"] == "node-heartbeat":
+                item.update(result="ready", detail="The test agent is connected to the control API.", action="")
+        ctx.db.run("UPDATE nodes SET readiness=%s WHERE name=%s", (J(readiness), name))
+        if heartbeat:
+            ctx.db.run("UPDATE nodes SET status='online',last_heartbeat=now() WHERE name=%s", (name,))
+    return joined
+
+
+def report_account_credentials(ctx, node: str, checks: dict[str, dict[str, bool]]) -> None:
+    """Refresh a node's test readiness snapshot after the test adds or probes an account."""
+    from aiflow.v4.control.system_check import refresh_node
+
+    row = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,)) or {}
+    readiness = row.get("readiness") or {}
+    reported = dict(readiness.get("credential_statuses") or {})
+    reported.update(checks)
+    refresh_node(ctx, node, "heartbeat", credential_checks=reported)

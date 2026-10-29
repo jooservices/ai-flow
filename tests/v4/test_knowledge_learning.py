@@ -54,6 +54,29 @@ def test_finished_run_and_closed_ticket_are_saved_with_sources_and_pr_links(db, 
     assert "What was done" in closed["content"] and "Why" in closed["content"]
 
 
+def test_closed_ticket_capture_can_be_limited_to_the_ticket_just_merged(db, monkeypatch):
+    no_embedding(monkeypatch)
+    add_ticket(db, "ALPHA-11", "ALPHA", status="Done")
+    add_ticket(db, "ALPHA-12", "ALPHA", status="Done")
+
+    assert knowledge.capture_closed_tickets(db, ticket_key="ALPHA-11") == 1
+    assert db.one("SELECT count(*) AS n FROM knowledge_items WHERE source_type='ticket'")["n"] == 1
+    assert db.one("SELECT count(*) AS n FROM knowledge_items WHERE source_type='ticket' AND source_ref='ALPHA-12'")["n"] == 0
+
+
+@pytest.mark.parametrize("outcome", ["merged", "skipped_gate"])
+def test_successful_reviewer_merge_captures_only_its_closed_ticket(db, monkeypatch, outcome):
+    no_embedding(monkeypatch)
+    add_ticket(db, "ALPHA-13", "ALPHA", status="Done")
+    add_ticket(db, "ALPHA-14", "ALPHA", status="Done")
+    run_id = add_run(db, "ALPHA-13", "ALPHA", "qa", outcome, "Merged the reviewed change")
+
+    knowledge.capture_reviewer_run(db, run_id, ticket_key="ALPHA-13", outcome=outcome)
+
+    assert db.one("SELECT count(*) AS n FROM knowledge_items WHERE source_type='ticket'")["n"] == 1
+    assert db.one("SELECT count(*) AS n FROM knowledge_items WHERE source_type='ticket' AND source_ref='ALPHA-14'")["n"] == 0
+
+
 def test_failure_study_case_is_handed_to_next_run_and_repetition_is_counted(db, monkeypatch):
     no_embedding(monkeypatch)
     add_ticket(db, "ALPHA-2", "ALPHA")
@@ -289,6 +312,8 @@ def test_context_pack_uses_vector_only_study_case_retrieval(db, monkeypatch):
 
 def test_work_claim_delivers_stored_pack_into_worker_prompt_and_run_result_is_captured(client, ctx, monkeypatch):
     no_embedding(monkeypatch)
+    monkeypatch.setattr(knowledge, "capture_closed_tickets",
+                        lambda *_args: pytest.fail("closed-ticket backfill belongs to Jira sync"))
     from conftest import add_ticket
     from test_api import join
     from aiflow.v4.control import memory
@@ -309,11 +334,15 @@ def test_work_claim_delivers_stored_pack_into_worker_prompt_and_run_result_is_ca
                            identity=tuple(claimed["identity"]), context_pack=claimed["context_pack"])
     assert "Project convention" in build_prompt(worker_claim, "TESTWP-93-checkout")
 
+    closed_ticket_sweeps = []
+    monkeypatch.setattr(knowledge, "capture_closed_tickets",
+                        lambda *_args, **_kwargs: closed_ticket_sweeps.append(True))
     result = client.post(f"/v1/runs/{claimed['run_id']}/result",
                          json={"fence": claimed["fence"], "outcome": "done", "summary": "Added validation",
                                "details": {"why": "The ticket requires input validation.",
                                            "changed_files": ["src/checkout.py"]}}, headers=auth)
     assert result.status_code == 200, result.text
+    assert closed_ticket_sweeps == []
     stored = ctx.db.one("SELECT * FROM knowledge_items WHERE source_type='run' AND source_ref=%s AND kind='decision'",
                         (claimed["run_id"],))
     assert stored and "src/checkout.py" in stored["content"]
@@ -424,6 +453,7 @@ def test_knowledge_learning_screen_is_verified_in_a_browser(ctx, monkeypatch):
 
         ctx.settings.console_login = True
         ctx.settings.console_session_secret = "browser-test-session-secret-at-least-32-bytes"
+        ctx.settings.console_require_mfa = False  # this browser test covers the rest of the console login flow
         ctx.settings.public_url = ""
         password = login.seed_user(ctx.db, "knowledge-browser@example.test", "super_admin", "Knowledge Browser")
         assert password

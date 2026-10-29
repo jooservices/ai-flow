@@ -112,10 +112,10 @@ def test_reasons_cover_open_rework_bug_empty_and_a_running_or_failed_check(ctx):
     release_row(ctx.db, "checking")
     causes = [(r["cause"], r["ticket"]) for r in progress(ctx)["reasons"]]
     assert causes == [("not_done", "TESTWP-1"), ("rework", "TESTWP-2"), ("blocked_by_bug", "TESTWP-3"),
-                      ("release_running", None)]
+                      ("release_running", None), ("scale_proof_missing", None)]
     ctx.db.run("UPDATE version_releases SET status='failed', gate_detail='pytest failed'")
-    last = progress(ctx)["reasons"][-1]
-    assert (last["cause"], last["detail"]) == ("release_failed", "pytest failed")
+    failed = next(reason for reason in progress(ctx)["reasons"] if reason["cause"] == "release_failed")
+    assert failed["detail"] == "pytest failed"
     sync(ctx, [], full=True)
     ctx.db.run("DELETE FROM ticket_versions")
     assert progress(ctx)["reasons"][0]["cause"] == "empty"

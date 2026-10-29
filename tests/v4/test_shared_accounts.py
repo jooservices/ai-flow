@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import sys
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from threading import Barrier, Event
+
+import pytest
 
 from conftest import add_ticket, join_node
 
@@ -26,8 +30,36 @@ def join(client, name):
 
 
 def beat(client, node, headers):
-    r = client.post(f"/v1/nodes/{node}/heartbeat", json={"slots_total": 4}, headers=headers)
+    ctx = client.app.state.ctx
+    row = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,)) or {}
+    readiness = row.get("readiness") or {}
+    credential_checks = dict(readiness.get("credential_statuses") or {})
+    for account in ctx.repo().accounts_on(node):
+        machine = ctx.db.one("SELECT status FROM account_machines WHERE account_id=%s AND node=%s",
+                             (account.id, node))
+        if machine:
+            signed_in = machine.get("status") == "signed_in"
+            credential_checks[account.id] = {"present": signed_in, "valid": signed_in}
+    # Accounts created in Command Center are overlaid at runtime and may not be in the configured repo snapshot.
+    # Their per-machine sign-in state is still part of the node's heartbeat readiness report.
+    for machine in ctx.db.all("SELECT account_id,status FROM account_machines WHERE node=%s", (node,)):
+        signed_in = machine["status"] == "signed_in"
+        credential_checks[machine["account_id"]] = {"present": signed_in, "valid": signed_in}
+    r = client.post(f"/v1/nodes/{node}/heartbeat",
+                    json={"slots_total": 4, "credential_checks": credential_checks}, headers=headers)
     assert r.status_code == 200
+    thread_name = f"aiflow4-heartbeat-readiness-{node}"
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        threads = [thread for thread in threading.enumerate() if thread.name == thread_name]
+        if not threads:
+            break
+        for thread in threads:
+            thread.join(timeout=min(0.1, max(0, deadline - time.monotonic())))
+    else:
+        raise AssertionError(f"heartbeat readiness check for {node} did not settle")
+    from aiflow.v4.control.system_check import refresh_node
+    refresh_node(ctx, node, "manual", credential_checks=credential_checks)
     return r.json()["desired"]
 
 
@@ -38,6 +70,21 @@ def candidates(client, headers, account="shared-01"):
 
 def claim(client, headers, ticket, account="shared-01"):
     return client.post("/v1/work/claim", json={"ticket": ticket, "account": account}, headers=headers)
+
+
+def test_unshared_account_skips_capacity_aggregation(monkeypatch):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.core.controlrepo import Account
+
+    account = Account(id="claude-01", provider="claude", node="cc", parallel=2)
+    monkeypatch.setattr(shared_accounts, "pending_nodes", lambda *_args: set())
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unshared accounts do not need shared-capacity queries")
+
+    monkeypatch.setattr(shared_accounts, "machine_capacities", unexpected)
+    monkeypatch.setattr(shared_accounts, "running_by_node", unexpected)
+    assert shared_accounts.may_take(object(), account, "cc") == (True, "")
 
 
 def two_machines(client, ctx, limit=2):
@@ -134,6 +181,10 @@ def test_account_exists_apart_from_machines_and_node_agent_reports_its_provider_
     assert heartbeat_desired["signin"][0]["provider"] == "claude"
     assert prompt_reports == [{"link": "https://claude.example.test/device", "code": "ABCD-2345",
                                "expires_in_s": 900}]
+    auth = ctx.db.one("SELECT status,last_probe_at,quota_source,quota_observed_at FROM accounts"
+                      " WHERE id='shared-01'")
+    assert auth["status"] == "idle" and auth["last_probe_at"]
+    assert auth["quota_source"] == "" and auth["quota_observed_at"] is None
 
     machines = {m["node"]: m for m in next(a for a in client.get("/v1/shared-accounts").json()["accounts"]
                                              if a["id"] == "shared-01")["machines"]}
@@ -158,7 +209,7 @@ def test_two_machines_share_one_session_limit_and_work_is_spread(client, ctx):
         "shared-01", "shared-01.2"]  # each machine can carry the whole limit
 
     first = claim(client, cc, "TESTWP-1")
-    assert first.status_code == 200 and first.json()["claimed"]
+    assert first.status_code == 200 and first.json()["claimed"], first.text
     # cc has its fair share (1 of 2): the other machine takes the next ticket
     assert candidates(client, cc) == []
     assert claim(client, cc, "TESTWP-2").status_code == 409
@@ -225,6 +276,99 @@ def test_simultaneous_claims_from_one_machine_cannot_take_another_online_machine
     assert shared_accounts.claim_run(ctx.db, acc, ("00000000-0000-0000-0000-000000000013", "TESTWP-13", "TESTWP",
                                                    "dev", "shared-01", "claude", "", "node1", 13, "x"))
     assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id='shared-01' AND status='running'")["n"] == 2
+
+
+def test_simultaneous_shared_account_claims_reserve_reported_quota(client, ctx):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.control.db import J
+
+    cc, node1 = two_machines(client, ctx, limit=2)
+    acc = ctx.repo().account("shared-01")
+    forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s WHERE id='shared-01'", (J(forecast),))
+    barrier = Barrier(3)
+
+    def claim_on(index, node):
+        barrier.wait(timeout=5)
+        run_id = f"00000000-0000-0000-0000-{index:012d}"
+        details = {"capacity": {"estimate": {"tokens": {"high": 60_000}}}}
+        return shared_accounts.claim_run(
+            ctx.db, acc,
+            (run_id, f"TESTWP-QUOTA-{index}", "TESTWP", "dev", "shared-01", "claude", "", node, index, "x"),
+            run_details=details, quota_reservation_tokens=60_000)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(claim_on, 31, "cc"), pool.submit(claim_on, 32, "node1")]
+        barrier.wait(timeout=5)
+        results = [future.result(timeout=10) for future in futures]
+
+    assert sorted(results) == [False, True]
+    running = ctx.db.all("SELECT details FROM runs WHERE account_id='shared-01' AND status='running'")
+    assert len(running) == 1
+    assert running[0]["details"]["quota_reservation"] == {"tokens": 60_000}
+
+
+def test_simultaneous_claims_include_reported_usage_after_the_last_quota_snapshot(client, ctx):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.control.db import J
+
+    two_machines(client, ctx, limit=2)
+    acc = ctx.repo().account("shared-01")
+    observed_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+    forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s,quota_observed_at=%s WHERE id='shared-01'",
+               (J(forecast), observed_at))
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,ended_at,"
+               "tokens_in,tokens_out) VALUES (%s,'TESTWP-QUOTA-PRIOR','TESTWP','dev','shared-01','claude','cc',1,"
+               "'finished',now(),30_000,20_000)", ("00000000-0000-0000-0000-000000000099",))
+    barrier = Barrier(3)
+
+    def claim_on(index, node):
+        barrier.wait(timeout=5)
+        run_id = f"00000000-0000-0000-0000-{index:012d}"
+        details = {"capacity": {"estimate": {"tokens": {"high": 30_000}}}}
+        return shared_accounts.claim_run(
+            ctx.db, acc,
+            (run_id, f"TESTWP-QUOTA-UNOBSERVED-{index}", "TESTWP", "dev", "shared-01", "claude", "",
+             node, index, "x"), run_details=details, quota_reservation_tokens=30_000)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(claim_on, 41, "cc"), pool.submit(claim_on, 42, "node1")]
+        barrier.wait(timeout=5)
+        results = [future.result(timeout=10) for future in futures]
+
+    assert sorted(results) == [False, True]
+    running = ctx.db.all("SELECT details FROM runs WHERE account_id='shared-01' AND status='running'")
+    assert len(running) == 1
+    assert running[0]["details"]["quota_reservation"] == {"tokens": 30_000}
+
+
+@pytest.mark.parametrize("status", ["lost", "released"])
+def test_atomic_claim_keeps_unreported_terminal_reservation_until_a_newer_provider_snapshot(client, ctx, status):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.control.db import J
+
+    two_machines(client, ctx, limit=2)
+    acc = ctx.repo().account("shared-01")
+    observed_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+    terminal_at = observed_at + timedelta(minutes=1)
+    forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}}]}
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s,quota_observed_at=%s WHERE id='shared-01'",
+               (J(forecast), observed_at))
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,ended_at,details)"
+               " VALUES (%s,'TESTWP-TERMINAL-QUOTA','TESTWP','dev','shared-01','claude','cc',1,%s,%s,%s)",
+               ("00000000-0000-0000-0000-000000000077", status, terminal_at,
+                J({"quota_reservation": {"tokens": 50_000}})))
+    values = ("00000000-0000-0000-0000-000000000078", "TESTWP-LOST-GUARD", "TESTWP", "dev", "shared-01",
+              "claude", "", "cc", 78, "x")
+    assert not shared_accounts.claim_run(ctx.db, acc, values, quota_reservation_tokens=60_000)
+
+    ctx.db.run("UPDATE accounts SET quota_observed_at=%s WHERE id='shared-01'",
+               (terminal_at + timedelta(seconds=1),))
+    assert shared_accounts.claim_run(ctx.db, acc, values, quota_reservation_tokens=60_000)
 
 
 def test_work_moves_to_the_other_machine_when_one_goes_offline(client, ctx):
@@ -333,6 +477,7 @@ def test_account_from_the_control_repo_can_be_shared_with_another_machine(client
     beat(client, "cc", cc)
     beat(client, "node1", node1)
     assert client.post("/v1/accounts/claude-01/probe", json={"ok": True}, headers=node1).status_code == 200
+    beat(client, "node1", node1)
     add_ticket(ctx.db, "TESTWP-1")
 
     # Removing the accounts.yaml primary detaches just that assignment; the other machine can still take work.
@@ -488,6 +633,28 @@ def test_auth_failure_reported_by_a_run_does_not_cool_down_healthy_machine(clien
     assert claim(client, cc, "TESTWP-2").json()["claimed"]
     assert claim(client, cc, "TESTWP-3").json()["claimed"]
     assert beat(client, "node1", node1)["signin"][0]["account"] == "shared-01"
+
+
+def test_run_auth_and_quota_updates_are_kept_while_a_sibling_run_is_active(client, ctx):
+    cc, node1 = two_machines(client, ctx, limit=2)
+    failed_run = claim(client, node1, "TESTWP-1").json()
+    sibling_run = claim(client, cc, "TESTWP-2").json()
+    assert failed_run["claimed"] and sibling_run["claimed"]
+
+    quota = {"windows": {"five_hour": {"utilization": 0.25}}}
+    result = client.post(
+        f"/v1/runs/{failed_run['run_id']}/result",
+        json={"fence": failed_run["fence"], "outcome": "failed", "error_kind": "auth",
+              "summary": "provider rejected this machine's credentials", "quota": quota},
+        headers=node1,
+    )
+
+    assert result.status_code == 200
+    assert ctx.db.one("SELECT quota FROM accounts WHERE id='shared-01'")["quota"] == quota
+    assert ctx.db.one("SELECT status FROM account_machines WHERE account_id='shared-01' AND node='node1'")[
+        "status"] == "pending"
+    assert ctx.db.one("SELECT status FROM accounts WHERE id='shared-01'")["status"] == "working"
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (sibling_run["run_id"],))["status"] == "running"
 
 
 def test_failed_sign_in_can_be_retried_with_a_fresh_request(client, ctx):

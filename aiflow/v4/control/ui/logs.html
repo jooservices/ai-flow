@@ -42,6 +42,10 @@
     const state = { sources: [], selected: '', busy: false, request: 0 };
     const byId = id => document.getElementById(id);
     const escapeHtml = value => String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    function csrfToken() {
+      const match = document.cookie.match(/(?:^|;\s*)aiflow4_csrf=([^;]+)/);
+      return match ? decodeURIComponent(match[1]) : '';
+    }
     async function jsonRequest(url, options) {
       const response = await fetch(url, Object.assign({ cache: 'no-store' }, options || {}));
       const data = await response.json().catch(() => ({}));
@@ -100,7 +104,8 @@
       renderSources();
       showLines({ available: null, message: 'Requesting recent log lines…' });
       try {
-        const data = await jsonRequest('/v1/logs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        const data = await jsonRequest('/v1/logs', { method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
           body: JSON.stringify({ source_id: sourceId }) });
         pollRequest(data.id, 0, token);
       } catch (error) {

@@ -11,18 +11,24 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_release_publication_waits_for_documented_install_and_fleet_smokes():
+def test_release_publication_waits_for_install_smokes_and_security_scan():
     workflow = yaml.load((ROOT / ".github/workflows/release-v4.yml").read_text(), Loader=yaml.BaseLoader)
     release = workflow["jobs"]["release"]
     assert release["needs"] == ["v4-tests", "acceptance"]
     names = [step.get("name", "") for step in release["steps"]]
     clean_install = names.index("Clean-install signed candidate on Ubuntu control and two nodes")
     rollout_smoke = names.index("Fleet rollout and rollback smoke using signed candidate artifacts")
-    image = names.index("Build and push control-api image to GHCR")
+    build = names.index("Build control-api image locally")
+    scan = names.index("Security scan and release security report")
+    publish_image = names.index("Publish control-api image to GHCR")
+    sign_image = names.index("Sign control-api image with GitHub OIDC")
     publish = names.index("Create GitHub Release and upload assets")
-    assert clean_install < rollout_smoke < image < publish
+    assert clean_install < rollout_smoke < build < scan < publish_image < sign_image < publish
     assert "clean-install-containers.sh" in release["steps"][clean_install]["run"]
     assert "install-smoke.sh" in release["steps"][rollout_smoke]["run"]
+    assert "security-scan.sh" in release["steps"][scan]["run"]
+    assert "SECURITY_SEVERITY_THRESHOLD" in release["steps"][scan]["env"]
+    assert "dist/SECURITY-REPORT.md" in release["steps"][publish]["run"]
     validate = next(step for step in release["steps"] if step.get("name") == "Validate tag and master ancestry")
     assert "gh release list" in validate["run"]
     assert "git merge-base --is-ancestor" in validate["run"]
@@ -47,13 +53,24 @@ def test_install_smoke_uses_signed_artifact_and_two_systemd_nodes_for_heartbeat_
     assert "node claim smoke passed" in script
 
 
+def test_install_smoke_authenticates_system_check_and_support_bundle_requests():
+    script = (ROOT / "deploy/v4/ci/install-smoke.sh").read_text()
+    assert "--cookie-jar /run/aiflow4-smoke/console-cookies" in script
+    helper = script.split("authenticated_control_get() {", 1)[1].split("\n}", 1)[0]
+    assert "--cookie /run/aiflow4-smoke/console-cookies" in helper
+    system_check = script.split("wait_for_system_check() {", 1)[1].split("\n}", 1)[0]
+    assert "authenticated_control_get /v1/system-check" in system_check
+    assert "authenticated_control_get /v1/support-bundle" in system_check
+
+
 def test_console_browser_suite_runs_in_pr_and_release_smokes_with_failure_traces():
     ci = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
-    v4 = ci["jobs"]["v4"]
+    v4 = ci["jobs"]["v4-browser"]
     install = next(step for step in v4["steps"] if step.get("name") == "Install")
     assert "npm install --global playwright@1.64.1" in install["run"]
     assert "playwright install chromium --with-deps" in install["run"]
-    assert "tests/v4" in next(step for step in v4["steps"] if step.get("name") == "Tests (real Redis and PostgreSQL)")["run"]
+    assert "tests/v4/test_console_browser.py" in next(
+        step for step in v4["steps"] if step.get("name") == "Browser journeys (real Redis and PostgreSQL)")["run"]
     upload = next(step for step in v4["steps"] if step.get("name") == "Upload sanitized Playwright traces")
     assert upload["if"] == "failure()"
     assert "aiflow-playwright-traces" in upload["with"]["path"]

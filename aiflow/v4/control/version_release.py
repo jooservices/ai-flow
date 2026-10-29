@@ -17,6 +17,7 @@ import uuid
 from dataclasses import replace
 from typing import Any
 
+from . import scale_proof
 from .db import J
 from . import environment as environment_reports
 from ..core.controlrepo import epic_for_ticket
@@ -470,6 +471,10 @@ def evaluate(ctx, project: Any, version: dict[str, Any]) -> dict[str, Any]:
     if not check_commands(project):
         reasons.append("no full project check commands are configured")
     reasons.extend(_failure_reasons(ctx, project, version, tickets))
+    # New candidates need passing evidence; versions already released before this gate are grandfathered.
+    regression = scale_proof.blocker(ctx.db, str(version["name"]), required=not bool(version.get("released")))
+    if regression:
+        reasons.append(regression)
     return {"project": project.key, "version_id": str(version["id"]), "version": version["name"],
             "repository": selected_repository,
             "tickets": tickets, "ready": bool(tickets) and not reasons, "reasons": reasons}

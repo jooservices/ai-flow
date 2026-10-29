@@ -62,7 +62,9 @@ as part of the author's intent and do not ask again what a comment already answe
 {comments}
 ---
 
-Answer in exactly one of these two forms and nothing after it.
+{split_instructions}
+
+Answer in exactly one of these forms and nothing after it.
 
 When you rewrote the ticket:
 DESCRIPTION:
@@ -83,3 +85,5 @@ QUESTIONS:
 - <question 1>
 - <question 2>
 INTAKE: QUESTIONS
+
+When this ticket needs splitting, do not use DESCRIPTION. Use the SPLIT form from the split instructions above.

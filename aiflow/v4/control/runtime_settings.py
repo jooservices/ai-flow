@@ -98,24 +98,29 @@ def _worker_units(ctx, node_name: str, repo=None) -> list[str]:
     return sorted(set(units))
 
 
+def _secret_targets(ctx, now) -> tuple[list[dict], list[str]]:
+    """The control hosts whose services restart when a secret changes."""
+    rows = ctx.db.all("SELECT name,status,token_hash,last_heartbeat,accepting_work,runtime_settings_public_key FROM nodes"
+                      " WHERE role='control' AND removed_at IS NULL ORDER BY name")
+    services = ["control-api-a", "control-api-b"]
+    targets = []
+    for node in rows:
+        heartbeat = node.get("last_heartbeat")
+        if (node.get("token_hash") and node.get("status") == "online" and heartbeat
+                and (now - heartbeat).total_seconds() <= 75):
+            if not node.get("runtime_settings_public_key"):
+                raise HTTPException(409, f"control host {node['name']} needs a current node-agent heartbeat")
+            targets.append({"name": node["name"], "units": services, "resume_accepting": True,
+                            "runtime_settings_public_key": node["runtime_settings_public_key"]})
+    if not targets:
+        raise HTTPException(409, "the control host agent must be online to restart control services safely")
+    return targets, services
+
+
 def _targets(ctx, scope: str, project: str = "") -> tuple[list[dict], list[str]]:
     now = datetime.now(timezone.utc)
     if scope == "secret":
-        rows = ctx.db.all("SELECT name,status,token_hash,last_heartbeat,accepting_work,runtime_settings_public_key FROM nodes"
-                          " WHERE role='control' AND removed_at IS NULL ORDER BY name")
-        services = ["control-api-a", "control-api-b"]
-        targets = []
-        for node in rows:
-            heartbeat = node.get("last_heartbeat")
-            if (node.get("token_hash") and node.get("status") == "online" and heartbeat
-                    and (now - heartbeat).total_seconds() <= 75):
-                if not node.get("runtime_settings_public_key"):
-                    raise HTTPException(409, f"control host {node['name']} needs a current node-agent heartbeat")
-                targets.append({"name": node["name"], "units": services, "resume_accepting": True,
-                                "runtime_settings_public_key": node["runtime_settings_public_key"]})
-        if not targets:
-            raise HTTPException(409, "the control host agent must be online to restart control services safely")
-        return targets, services
+        return _secret_targets(ctx, now)
 
     rows = ctx.db.all("SELECT name,role,status,token_hash,last_heartbeat,accepting_work,projects,dynamic,"
                       "runtime_settings_public_key"

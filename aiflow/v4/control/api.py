@@ -9,7 +9,6 @@ import hashlib
 import base64
 import hmac
 import csv
-import copy
 import io
 import ipaddress
 import re
@@ -33,16 +32,16 @@ from urllib.parse import urlsplit
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import (JSONResponse, PlainTextResponse, Response, StreamingResponse)
+from fastapi.responses import (JSONResponse, PlainTextResponse, Response)
 from pydantic import BaseModel, Field
 
 from .. import VERSION
 from ..core.controlrepo import ControlRepo
-from ..core import backups as control_backups, work_limits
+from ..core import work_limits
 from ..core.services import normalize_services
-from . import (business, capacity_routing as capacity_routing_service, dashboard_timeout_routes, eligibility, escalations,
+from . import (capacity_routing as capacity_routing_service, dashboard_timeout_routes, eligibility, escalations,
                jira_connect, knowledge, licensing, load_policy, load_policy_api,
-               memory, quota_refresh, role_health, rollout, runtime_settings, scale_proof, setup_wizard,
+               memory, quota_refresh, role_health, rollout, runtime_settings, setup_wizard,
                shared_accounts, state_schema, support_bundle, system_check_api, tooling, version_release)
 from . import run_inbox as run_inbox_control
 from . import triage_claim as triage_claim_service
@@ -65,9 +64,12 @@ from .policy import decide_master_action
 from . import inventory, notify, pr_comments
 from .pr_comments import PRCommentBody
 from .application_context import Ctx
+from .features.business import routes as business_module
+from .features.scale_proof import routes as scale_proof_module
+from .features.knowledge import routes as knowledge_module
+from .features.backups import routes as backups_module
 from .features.project_report import routes as project_report_module
 from .features.console import routes as console_module
-from .stakeholder_screenshot import decode_screenshot
 from .features.release import routes as release_module
 from .features.version_release import routes as version_release_module
 from .features.fleet import routes as fleet_module
@@ -362,12 +364,6 @@ class ClaimBody(BaseModel):
     step: str = "dev"
 
 
-class ScaleProofBody(BaseModel):
-    release: str = Field("", max_length=200)
-    source: str = Field("ci", max_length=60)
-    report: dict[str, Any]
-
-
 class ProjectCreateBody(ProjectPreflightBody):
     services: list[str] = Field(default_factory=list, max_length=10)
     checks: list[str] = Field(default_factory=list, max_length=50)
@@ -500,75 +496,6 @@ class MasterBudgetBody(BaseModel):
     daily_budget_minutes: int = Field(ge=0, le=1440)
 
 
-class ChangeRequestBody(BaseModel):
-    title: str = ""
-    description: str = ""
-    epic: str = ""
-
-
-class KnowledgeBody(BaseModel):
-    id: str = ""
-    type: str
-    title: str
-    content: str
-    actor: str
-    archived: bool = False
-    version: int | None = None
-
-
-class KnowledgeApprovalBody(BaseModel):
-    approved_by: str = "owner"
-
-
-class KnowledgeRestoreBody(BaseModel):
-    version: int
-    actor: str
-
-
-class BackupConfigBody(BaseModel):
-    schedule: Literal["daily", "weekly"] = "daily"
-    destination_kind: Literal["local", "mounted", "s3"] = "local"
-    destination_path: str = "/srv/aiflow/backups"
-    s3_endpoint: str = ""
-    s3_bucket: str = ""
-    s3_prefix: str = ""
-    s3_region: str = "us-east-1"
-    retention_days: int = Field(default=30, ge=1, le=3650)
-
-
-class KnowledgeItemBody(BaseModel):
-    project: str = Field(default="", max_length=32)
-    scope: str = Field(default="project", max_length=16)
-    epic: str = Field(default="", max_length=100)
-    kind: str
-    title: str = Field(min_length=1, max_length=200)
-    content: str = Field(min_length=1, max_length=30_000)
-    actor: str = Field(default="", max_length=200)
-
-
-class KnowledgeItemActionBody(BaseModel):
-    actor: str = Field(default="", max_length=200)
-    project: str = Field(default="", max_length=32)
-    scope: str = Field(default="", max_length=16)
-    epic: str = Field(default="", max_length=100)
-    title: str = Field(default="", max_length=200)
-    content: str = Field(default="", max_length=30_000)
-    duplicate_id: int | None = None
-
-
-class StakeholderVerdictBody(BaseModel):
-    change_key: str
-    target_key: str = ""
-    environment: Literal["develop", "production"]
-    verdict: Literal["expected", "not_expected"]
-    sender: str = Field(min_length=1, max_length=200)
-    release_commit: str = Field(default="", max_length=500)
-    expected: str = Field(default="", max_length=10_000)
-    actual: str = Field(default="", max_length=10_000)
-    screenshot_data: str = Field(default="", max_length=7_000_000)
-    screenshot_filename: str = Field(default="screenshot.png", max_length=255)
-
-
 # --- app --------------------------------------------------------------------------------------------------
 def create_app(ctx: Ctx) -> FastAPI:
     from contextlib import asynccontextmanager
@@ -578,8 +505,6 @@ def create_app(ctx: Ctx) -> FastAPI:
     runtime_repo_cache_enabled: ContextVar[bool] = ContextVar("aiflow_runtime_repo_cache_enabled", default=False)
     capacity_history_lock = threading.Lock()
     capacity_history_cache: dict[str, Any] = {"at": 0.0, "samples": []}
-    state_snapshot_lock = threading.Lock()
-    state_snapshot_cache: dict[bool, tuple[float, dict[str, Any]]] = {}
 
     def capacity_history() -> list[dict[str, Any]]:
         """Share the completed-work estimate sample across concurrent worker polls for one second."""
@@ -589,20 +514,6 @@ def create_app(ctx: Ctx) -> FastAPI:
                 capacity_history_cache["samples"] = capacity.history(ctx.db)
                 capacity_history_cache["at"] = now
             return capacity_history_cache["samples"]
-
-    def cached_state_snapshot(include_signin: bool) -> dict[str, Any]:
-        """Coalesce identical console snapshot reads while several views load at the same time."""
-        requested_at = time.monotonic()
-        with state_snapshot_lock:
-            cached = state_snapshot_cache.get(include_signin)
-            # A caller that began while the preceding snapshot was being built may share it.
-            # Requests arriving after that read finished always see current database state.
-            if cached and requested_at < cached[0]:
-                return cached[1]
-            from .state import snapshot
-            data = snapshot(ctx, include_signin=include_signin)
-            state_snapshot_cache[include_signin] = (time.monotonic(), data)
-            return data
 
     configured_repo = ctx.configured_repo or ctx.repo
     ctx.configured_repo = configured_repo
@@ -2553,537 +2464,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"account": acc.id, "provider": acc.provider, "tier": acc.tier, "model": model, "effort": effort}
 
 
-    # --- Business view: change requests (same access as the console, no node token) -----------------------------
-    def business_project(key: str) -> str:
-        if key not in ctx.repo().projects:
-            raise HTTPException(404, f"unknown project {key}")
-        return key
-
-    @app.get("/v1/business/{key}/change-requests")
-    def business_change_requests(key: str) -> dict:
-        project = business_project(key)
-        return {"project": project, "jira_site": ctx.settings.jira_site, "epics": business.epics(ctx.db, project),
-                "change_requests": business.change_requests(ctx.db, project, ctx.settings.jira_site)}
-
-    @app.get("/v1/business/{key}/release-readiness")
-    def business_release_readiness(key: str) -> dict:
-        project = business_project(key)
-        return {"project": project, "versions": business.release_readiness(ctx.db, project)}
-
-    @app.get("/v1/business/{key}/release-progress")
-    def business_release_progress(key: str) -> dict:
-        project = business_project(key)
-        return {"project": project, "versions": business.release_progress_of(ctx.db, project)}
-
-    @app.post("/v1/business/{key}/change-requests")
-    def business_change_request(key: str, body: ChangeRequestBody) -> dict:
-        project = business_project(key)
-        try:
-            title, description, epic = business.validate(ctx.db, project, body.title, body.description, body.epic)
-        except business.Invalid as e:
-            raise HTTPException(400, str(e)) from e
-        if not ctx.jira:
-            raise HTTPException(503, "Jira is unavailable")
-        created = business.create(ctx, project, title, description, epic)
-        audit("jira", "create", created["key"], "", None, business.ACTOR, True, created["status"],
-              {"project": project, "type": "Story", "labels": [business.LABEL], "epic": epic,
-               "chars": len(description)})
-        ctx.events.emit("business.change_request", ticket=created["key"], project=project, outcome=created["status"],
-                        reason=title[:200])
-        return created
-
-    # --- Stakeholder acceptance and UAT feedback --------------------------------------------------------------
-    def stakeholder_project(key: str):
-        project = ctx.repo().projects.get(key)
-        if not project:
-            raise HTTPException(404, f"unknown project {key}")
-        return project
-
-    def stakeholder_changes(project: str) -> list[dict[str, Any]]:
-        rows = ctx.db.all(
-            "SELECT DISTINCT ON (t.key) t.key, t.summary, t.type, t.status, t.parent_key, p.type AS parent_type,"
-            " r.branch, r.head_sha, r.summary AS change_summary, r.details, r.started_at, r.ended_at"
-            " FROM runs r JOIN tickets t ON t.key=r.ticket_key LEFT JOIN tickets p ON p.key=t.parent_key"
-            " WHERE r.project=%s AND t.project=%s AND r.step='dev' AND r.status<>'running'"
-            " AND r.outcome IN ('done','merged')"
-            " ORDER BY t.key, r.started_at DESC", (project, project))
-        rows.sort(key=lambda r: r["ended_at"] or r["started_at"], reverse=True)
-        out = []
-        for row in rows[:30]:
-            details = row["details"] or {}
-            epic = row["key"] if row["type"] == "Epic" else (
-                row["parent_key"] if row["parent_type"] == "Epic" else "")
-            release_commit = (details.get("release") or details.get("version") or row["head_sha"] or row["branch"] or "")
-            out.append({"key": row["key"], "summary": row["summary"], "type": row["type"],
-                        "status": row["status"], "epic": epic, "branch": row["branch"],
-                        "commit": row["head_sha"], "release_commit": release_commit,
-                        "change_summary": row["change_summary"],
-                        "changed_at": (row["ended_at"] or row["started_at"]).isoformat()})
-        return out
-
-    @app.get("/v1/stakeholder/{key}")
-    def stakeholder_view(key: str) -> dict:
-        project = stakeholder_project(key)
-        configured = project.urls or {}
-        return {"project": key, "urls": {"develop": str(configured.get("develop") or ""),
-                                          "production": str(configured.get("production") or "")},
-                "changes": stakeholder_changes(key)}
-
-    @app.post("/v1/stakeholder/{key}/verdict")
-    def stakeholder_verdict(key: str, body: StakeholderVerdictBody) -> dict:
-        project = stakeholder_project(key)
-        if not ctx.jira:
-            raise HTTPException(503, "Jira is unavailable")
-        sender = body.sender.strip()
-        if not sender:
-            raise HTTPException(400, "sender is required")
-        change = ctx.db.one("SELECT key, summary, type, parent_key FROM tickets WHERE key=%s AND project=%s",
-                            (body.change_key, key))
-        if not change:
-            raise HTTPException(400, "change must belong to this project")
-        target = body.target_key.strip() or body.change_key
-        if target != body.change_key and target != change["parent_key"]:
-            raise HTTPException(400, "acceptance target must be the related ticket or its epic")
-        if target != body.change_key and not ctx.db.one(
-                "SELECT key FROM tickets WHERE key=%s AND project=%s AND type='Epic'", (target, key)):
-            raise HTTPException(400, "acceptance target must be the related epic")
-        if body.verdict == "not_expected" and (not body.expected.strip() or not body.actual.strip()):
-            raise HTTPException(400, "expected and actual behaviour are required for UAT feedback")
-
-        screenshot = decode_screenshot(body.screenshot_data, body.screenshot_filename)
-
-        page_url = str((project.urls or {}).get(body.environment) or "").strip()
-        page_label = page_url or "chưa deploy"
-        release_commit = body.release_commit.strip() or "chưa có dữ liệu"
-        if body.verdict == "expected":
-            comment = (f"Comment nghiệm thu\nMôi trường: {body.environment}\n"
-                       f"Release hoặc commit: {release_commit}\nNgười gửi: {sender}")
-            try:
-                comment_id = ctx.jira.comment(target, comment)
-            except Exception as exc:  # Jira adapters and HTTP clients can raise different transport exceptions.
-                log.warning("Stakeholder acceptance comment failed for %s", target)
-                raise HTTPException(502, "Jira could not record the acceptance") from exc
-            audit("jira", "stakeholder_acceptance", target, "", None, sender, True, comment_id,
-                  {"project": key, "change": body.change_key, "environment": body.environment})
-            ctx.events.emit("stakeholder.acceptance", ticket=target, project=key, outcome="accepted",
-                            account=sender, reason=body.environment)
-            return {"ok": True, "verdict": body.verdict, "ticket": target, "comment_id": comment_id}
-
-        description = (f"Related change: {change['key']} - {change['summary']}\n"
-                       f"Page URL: {page_label}\nEnvironment: {body.environment}\n"
-                       f"Release or commit: {release_commit}\n"
-                       f"Expected behaviour (mong đợi):\n{body.expected.strip()}\n\n"
-                       f"Actual behaviour (thực tế):\n{body.actual.strip()}\n\n"
-                       f"Sender (người gửi): {sender}")
-        summary = f"[UAT {body.environment}] {change['key']}: {body.actual.strip().splitlines()[0][:120]}"
-        try:
-            issue_key = ctx.jira.create_issue(key, summary, description, issuetype="Bug", labels=["uat-bug"])
-            status = ctx.jira.transition_to(issue_key, "Intake")
-            if status != "Intake":
-                raise RuntimeError("new UAT issue did not reach Intake")
-            if screenshot:
-                ctx.jira.add_attachment(issue_key, screenshot[0], screenshot[1], screenshot[2])
-        except Exception as exc:  # Never tell the stakeholder a partial Jira write succeeded.
-            log.warning("Stakeholder UAT issue creation failed for project %s", key)
-            raise HTTPException(502, "Jira could not record the UAT feedback") from exc
-        ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
-                   " VALUES (%s,%s,'Intake','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
-                   " status='Intake', type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
-                   " description=EXCLUDED.description, synced_at=now()",
-                   (issue_key, key, ["uat-bug"], summary, description))
-        audit("jira", "stakeholder_bug", issue_key, "", None, sender, True, status,
-              {"project": key, "change": body.change_key, "environment": body.environment,
-               "screenshot": bool(screenshot)})
-        ctx.events.emit("stakeholder.feedback", ticket=issue_key, project=key, outcome="created",
-                        account=sender, reason=body.environment, data={"related": body.change_key})
-        return {"ok": True, "verdict": body.verdict, "key": issue_key, "status": status}
-
-    @app.get("/v1/state", responses={200: {"description": "Command Center, Delivery, and SA snapshot",
-                                            "content": {"application/json": {"schema": STATE_RESPONSE_SCHEMA}}}})
-    def state(request: Request, authorization: str = Header(default="")) -> dict:
-        if authorization:  # the deploy scripts on the control machine read it with the owner token (login is on)
-            owner_auth(request, authorization)
-        # The login middleware authenticates console sessions and permits this legacy owner-token route;
-        # resolving the cookie here keeps scoped session data filtered while allowing the owner token alone.
-        user = optional_console_user(request)
-        include_signin = bool(user and has_permission(user.effective_roles, "nodes.manage"))
-        data = cached_state_snapshot(include_signin)
-        all_tickets = data["tickets"]
-        if user and user.project_keys is not None:
-            data = copy.deepcopy(data)
-            all_tickets = data["tickets"]
-            visible = set(user.project_keys)
-            data["projects"] = [project for project in data["projects"] if project["key"] in visible]
-            data["tickets"] = [ticket for ticket in all_tickets if ticket["project"] in visible]
-            ticket_keys = {ticket["key"] for ticket in data["tickets"]}
-            data["active_runs"] = [run for run in data["active_runs"] if run.get("project") in visible]
-            data["recent_runs"] = [run for run in data["recent_runs"] if run.get("ticket") in ticket_keys]
-            data["events"] = [event for event in data["events"] if event.get("ticket") in ticket_keys]
-            # Project level artifacts carry different shapes across releases; omit aggregates for restricted users.
-            data["release_readiness"] = []
-            data["release_progress"] = []
-            data["rollout"] = {}
-            data["totals"] = ctx.db.one(
-                "SELECT count(*) FILTER (WHERE started_at > now()-interval '24 hours') AS runs_24h,"
-                " coalesce(sum(cost_usd) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS cost_24h,"
-                " coalesce(sum(tokens_in) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_in_24h,"
-                " coalesce(sum(tokens_out) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_out_24h,"
-                " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome='done') AS done_24h,"
-                " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome = ANY(%s)) AS failed_24h"
-                " FROM runs WHERE project=ANY(%s)",
-                (["failed", "blocked", "timeout", "lost"], list(visible)))
-            data["totals"] = {key: int(value) if key in {"runs_24h", "tokens_in_24h", "tokens_out_24h",
-                                                               "done_24h", "failed_24h"} else float(value)
-                              for key, value in data["totals"].items()}
-            visible_nodes = {node["name"] for node in data["nodes"] if visible.intersection(node.get("projects") or [])}
-            data["nodes"] = [node for node in data["nodes"] if node["name"] in visible_nodes]
-            data["accounts"] = [account for account in data["accounts"]
-                                if any(machine.get("node") in visible_nodes
-                                       for machine in account.get("machines") or [])]
-            data["incidents"] = [item for item in data["incidents"]
-                                 if item.get("subject") in visible or item.get("subject") in visible_nodes]
-            data["incidents_recent"] = [item for item in data["incidents_recent"]
-                                         if item.get("subject") in visible or item.get("subject") in visible_nodes]
-            data["sa"] = {}
-            data["version_policy"] = {}
-        if user and not has_permission(user.effective_roles, "view.machines_ai"):
-            data["nodes"] = []
-            data["accounts"] = []
-            data["sa"] = {}
-            data["role_health"] = {"roles": [], "settings": {}}
-            data["version_policy"] = {}
-            data["incidents"] = []
-            data["incidents_recent"] = []
-            data["events"] = [{key: event.get(key) for key in ("ts", "type", "ticket", "outcome", "reason")}
-                               for event in data["events"]]
-            for ticket in data["tickets"]:
-                if ticket.get("run"):
-                    ticket["run"] = {key: ticket["run"].get(key) for key in
-                                     ("id", "ticket", "project", "summary", "step", "elapsed_s", "progress")}
-                if ticket.get("last_run"):
-                    ticket["last_run"] = {key: ticket["last_run"].get(key) for key in
-                                          ("id", "ticket", "summary", "step", "outcome", "error_kind",
-                                           "duration_s", "pr_url", "already_done", "ended_age_s")}
-            data["active_runs"] = [{key: run[key] for key in ("id", "ticket", "project", "summary", "step",
-                                                                  "elapsed_s", "heartbeat_age_s", "lease_ms", "progress")}
-                                    for run in data["active_runs"]]
-            data["recent_runs"] = [{key: run[key] for key in ("id", "ticket", "summary", "step", "outcome",
-                                                                  "error_kind", "duration_s", "pr_url", "already_done",
-                                                                  "ended_age_s")}
-                                    for run in data["recent_runs"]]
-            for ticket in data["tickets"]:
-                if ticket.get("run"):
-                    ticket["run"] = {key: ticket["run"].get(key) for key in
-                                     ("id", "ticket", "project", "summary", "step", "elapsed_s", "progress")}
-                if ticket.get("last_run"):
-                    ticket["last_run"] = {key: ticket["last_run"].get(key) for key in
-                                          ("id", "ticket", "summary", "step", "outcome", "error_kind",
-                                           "duration_s", "pr_url", "already_done", "ended_age_s")}
-        return data
-
-    @app.get("/v1/deploy/state")
-    def deploy_state(_deploy: str = Depends(deploy_auth)) -> dict:
-        """The registry state for aiflow4-autodeploy; works with console sign-in on because it checks the token."""
-        from .state import snapshot
-        return snapshot(ctx)
-
-    @app.get("/v1/deploy/ci-state")
-    def deploy_ci_state(repo: str = Query(pattern=r"^[\w.-]+/[\w.-]+$"), sha: str = Query(pattern=r"^[0-9a-fA-F]{7,64}$"),
-                        _deploy: str = Depends(deploy_auth)) -> dict:
-        """CI state of a commit (pending|failed|ok|none) through the connection for its repository."""
-        from .canary import ci_state
-        gateway = github_gateway(ctx, repo)
-        return {"repo": repo, "sha": sha, "state": ci_state(gateway, repo, sha)}
-
-    # --- scale proof: budgets, runs attached to releases, tickets for findings (docs/v4/scale-proof.md) ---------
-    @app.get("/v1/scale-proof")
-    def scale_proof_summary() -> dict:
-        return scale_proof.summary(ctx.db)
-
-    @app.post("/v1/scale-proof/results")
-    def scale_proof_results(body: ScaleProofBody, actor: str = Depends(owner_auth)) -> dict:
-        """CI submits a run: it is attached to the release, judged against the budgets here (the submitted verdict
-        is ignored) and every finding becomes a ticket."""
-        report = body.report
-        if not isinstance(report.get("measurements"), dict) or not report["measurements"]:
-            raise HTTPException(422, "the report has no measurements")
-        run_id = scale_proof.record(ctx, report, body.release, body.source)
-        tickets = scale_proof.file_tickets(ctx, run_id)
-        run = ctx.db.one("SELECT release, passed, report FROM scale_proof_runs WHERE id=%s", (run_id,))
-        audit("aiflow-control", "scale-proof-result", "", "", None, actor, True,
-              "passed" if run["passed"] else "failed", {"run_id": run_id, "release": run["release"]})
-        return {"run_id": run_id, "release": run["release"], "passed": run["passed"], "blocked": not run["passed"],
-                "failures": run["report"]["failures"], "tickets": tickets}
-
-
-    # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
-
-
-    # --- learned knowledge: automatic capture, isolated context packs, and Knowledge screen data --------------
-    @app.get("/v1/knowledge/items")
-    def knowledge_items(request: Request, project: str = "", q: str = "", include_retired: bool = True) -> dict:
-        console_user(request, "knowledge.read")
-        return knowledge.dashboard(ctx.db, project, q, include_retired)
-
-    @app.post("/v1/knowledge/items")
-    def knowledge_item_save(body: KnowledgeItemBody, request: Request) -> dict:
-        user = console_user(request, "knowledge.manage", target="knowledge", action="item_save")
-        try:
-            item = knowledge.save_item(ctx.db, project=body.project, scope=body.scope, epic=body.epic, kind=body.kind,
-                                       title=body.title, content=body.content, actor=user.subject)
-        except knowledge.Invalid as exc:
-            raise HTTPException(422, str(exc)) from exc
-        audit("knowledge", "item_save", str(item["id"]), "", None, user.subject, True, "saved",
-              {"kind": body.kind, "project": body.project, "scope": body.scope})
-        return knowledge._pack_item(item)
-
-    @app.post("/v1/knowledge/items/{item_id}/{action}")
-    def knowledge_item_action(item_id: int, action: str, body: KnowledgeItemActionBody, request: Request) -> dict:
-        user = console_user(request, "knowledge.manage", target="knowledge", action="item_" + action,
-                            node=str(item_id))
-        try:
-            item = knowledge.moderate_item(ctx.db, item_id, action=action, actor=user.subject,
-                                           content=body.content, title=body.title,
-                                           duplicate_id=body.duplicate_id, project=body.project,
-                                           scope=body.scope or None, epic=body.epic)
-        except knowledge.Invalid as exc:
-            raise HTTPException(422 if "not found" not in str(exc) else 404, str(exc)) from exc
-        audit("knowledge", "item_" + action, str(item_id), "", None, user.subject, True, "updated",
-              {"item_id": item_id})
-        return knowledge._pack_item(item)
-
-    # --- Knowledge screen: versioned control-repo resources -------------------------------------------------
-    def load_managed_resources() -> None:
-        knowledge.import_local(ctx.db, ctx.repo().root)
-
-    def submit_resource_change(kind: str, resource_id: str, title: str, content: str, archived: bool,
-                               actor: str, action: str, expected_version: int | None = None) -> dict:
-        try:
-            kind, resource_id, title, content, actor = knowledge.validate(kind, resource_id, title, content, actor)
-        except knowledge.Invalid as e:
-            raise HTTPException(400, str(e)) from e
-        github = github_control_gateway(ctx)
-        load_managed_resources()
-        current = knowledge.get_resource(ctx.db, kind, resource_id)
-        if expected_version is not None and (not current or int(current["version"]) != expected_version):
-            raise HTTPException(409, "resource changed since it was loaded; refresh and try again")
-        path = knowledge.path_for(kind, resource_id)
-        repo_name = Path(ctx.settings.control_repo).name
-        payload = knowledge.file_content(kind, resource_id, title, content, archived)
-        try:
-            base = github.default_branch(repo_name)
-            if kind == "policy":
-                branch = f"aiflow/policy-{resource_id.lower()}-{secrets.token_hex(4)}"
-                github.create_branch(repo_name, branch, base)
-                sha = github.commit_file(repo_name, branch, path, payload,
-                                             f"policy: propose {action} {resource_id}")
-                pr = github.create_control_pr(repo_name, branch, base, f"Policy: {title}",
-                                                  f"Policy {action} for `{resource_id}` proposed by {actor}.\n\n"
-                                                  "Merge only after owner approval in the AI Flow Knowledge screen.")
-                ctx.db.run("INSERT INTO managed_resource_proposals (resource_type,resource_id,title,content,archived,"
-                           "base_title,base_content,base_archived,base_version,actor,action,branch,pr_number,pr_url)"
-                           " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                           (kind, resource_id, title, content, archived, current["title"] if current else "",
-                            current["content"] if current else "", current["archived"] if current else False,
-                            current["version"] if current else 0, actor, action, branch, int(pr["number"]),
-                            str(pr.get("html_url") or "")))
-                audit("aiflow-control", "policy-pr", "", "", None, actor, True, str(pr["html_url"]),
-                      {"type": kind, "id": resource_id, "branch": branch, "pr": int(pr["number"]), "commit": sha})
-                ctx.events.emit("resource.policy_proposed", project=resource_id if resource_id != "default" else "",
-                                account=actor, outcome="pending", reason=f"PR #{pr['number']}",
-                                data={"type": kind, "id": resource_id})
-                return {"pending": True, "type": kind, "id": resource_id, "title": title,
-                        "pr_number": int(pr["number"]), "pr_url": str(pr.get("html_url") or ""), "version":
-                        int(current["version"]) if current else 0}
-
-            sha = github.commit_file(repo_name, base, path, payload, f"{kind}: {action} {resource_id}")
-        except HTTPException:
-            raise
-        except Exception as e:  # GitHub errors vary between App and transport implementations.
-            log.warning("control repo write failed for %s/%s", kind, resource_id)
-            raise HTTPException(502, "control repo could not save the resource") from e
-        row = knowledge.save_current(ctx.db, kind=kind, resource_id=resource_id, title=title, content=content,
-                                     archived=archived, actor=actor, action=action, path=path, commit_sha=sha)
-        audit("aiflow-control", "resource-commit", "", "", None, actor, True, sha,
-              {"type": kind, "id": resource_id, "version": row["version"], "path": path})
-        ctx.events.emit("resource.changed", account=actor, outcome=action, reason=f"{kind}/{resource_id}",
-                        data={"type": kind, "id": resource_id, "version": row["version"], "commit": sha})
-        return row
-
-    @app.get("/v1/knowledge/resources")
-    def knowledge_resources(request: Request, include_archived: bool = True) -> dict:
-        console_user(request, "knowledge.read")
-        load_managed_resources()
-        return {"resources": knowledge.list_resources(ctx.db, include_archived),
-                "proposals": knowledge.proposals(ctx.db)}
-
-    @app.get("/v1/knowledge/resources/{kind}/{resource_id}/history")
-    def knowledge_history(kind: str, resource_id: str, request: Request) -> dict:
-        console_user(request, "knowledge.read")
-        load_managed_resources()
-        if kind not in knowledge.KINDS:
-            raise HTTPException(404, "unknown resource type")
-        return {"type": kind, "id": resource_id, "history": knowledge.history(ctx.db, kind, resource_id),
-                "proposals": knowledge.proposals(ctx.db, kind, resource_id)}
-
-    @app.post("/v1/knowledge/resources")
-    def knowledge_save(body: KnowledgeBody, request: Request) -> dict:
-        user = console_user(request, "knowledge.manage", target="aiflow-control", action="resource_save")
-        if not body.id.strip():
-            raise HTTPException(400, "resource id is required")
-        action = "archive" if body.archived else "save"
-        return submit_resource_change(body.type, body.id, body.title, body.content, body.archived, user.subject, action,
-                                      body.version)
-
-    @app.post("/v1/knowledge/resources/{kind}/{resource_id}/restore")
-    def knowledge_restore(kind: str, resource_id: str, body: KnowledgeRestoreBody, request: Request) -> dict:
-        user = console_user(request, "knowledge.manage", target="aiflow-control", action="resource_restore",
-                            node=resource_id)
-        load_managed_resources()
-        version = ctx.db.one("SELECT title,content,archived FROM managed_resource_history WHERE resource_type=%s"
-                             " AND resource_id=%s AND version=%s", (kind, resource_id, body.version))
-        if not version:
-            raise HTTPException(404, "resource version not found")
-        return submit_resource_change(kind, resource_id, version["title"], version["content"], version["archived"],
-                                      user.subject, "restore")
-
-    @app.post("/v1/knowledge/proposals/{proposal_id}/approve")
-    def knowledge_approve(proposal_id: int, body: KnowledgeApprovalBody,
-                          _owner: str = Depends(owner_auth)) -> dict:
-        proposal = ctx.db.one("SELECT * FROM managed_resource_proposals WHERE id=%s", (proposal_id,))
-        if not proposal:
-            raise HTTPException(404, "policy proposal not found")
-        if proposal["status"] != "pending":
-            raise HTTPException(409, "policy proposal is no longer pending")
-        github = github_control_gateway(ctx)
-        repo_name = Path(ctx.settings.control_repo).name
-        owner = _owner
-        try:
-            merged = github.merge_pr(repo_name, int(proposal["pr_number"]),
-                                         f"Policy: {proposal['title']}", "squash")
-        except Exception as e:  # Do not expose provider responses or credentials through the UI.
-            log.warning("policy proposal merge failed for PR #%s", proposal["pr_number"])
-            raise HTTPException(502, "policy proposal could not be merged") from e
-        if not merged.get("merged"):
-            return {"merged": False, "message": merged.get("message", "GitHub refused the merge")}
-        resource = knowledge.save_current(
-            ctx.db, kind="policy", resource_id=proposal["resource_id"], title=proposal["title"],
-            content=proposal["content"], archived=proposal["archived"], actor=proposal["actor"],
-            action=proposal["action"], path=knowledge.path_for("policy", proposal["resource_id"]),
-            commit_sha=str(merged.get("sha") or ""), approved_by=owner)
-        ctx.db.run("UPDATE managed_resource_proposals SET status='merged',merged_at=now(),approved_by=%s WHERE id=%s",
-                   (owner, proposal_id))
-        audit("aiflow-control", "policy-merge", "", "", None, owner, True, str(merged.get("sha") or ""),
-              {"id": proposal["resource_id"], "pr": proposal["pr_number"], "version": resource["version"]})
-        ctx.events.emit("resource.policy_merged", project=proposal["resource_id"] if proposal["resource_id"] != "default" else "",
-                        account=owner, outcome="merged", reason=f"PR #{proposal['pr_number']}",
-                        data={"type": "policy", "id": proposal["resource_id"], "version": resource["version"]})
-        if ctx.refresh_repo:
-            try:
-                ctx.refresh_repo()
-            except Exception:
-                log.warning("control repo refresh after policy merge failed")
-        return {"merged": True, "sha": merged.get("sha", ""), "resource": resource}
-
-    # --- encrypted backups and disaster recovery ----------------------------------------------------------
-    def backup_config(include_history: bool = True) -> dict:
-        row = ctx.db.one("SELECT * FROM control_backup_config WHERE id=true")
-        if not row:
-            raise HTTPException(503, "backup settings are not initialized")
-        result = {key: value for key, value in row.items() if key not in {"id", "updated_at"}}
-        for key, value in list(result.items()):
-            if hasattr(value, "isoformat"):
-                result[key] = value.isoformat()
-        result["key_downloaded"] = bool(row["key_downloaded_at"])
-        result["key_available"] = Path(ctx.settings.backup_key_file).is_file()
-        if include_history:
-            try:
-                result["backups"] = control_backups.list_backups(result)
-                result["storage_error"] = ""
-            except control_backups.BackupError:
-                result["backups"] = []
-                result["storage_error"] = "Backup destination could not be listed; check its settings and credentials."
-        return result
-
-    @app.get("/v1/backups")
-    def backup_status(request: Request) -> dict:
-        console_user(request, "backup.read")
-        return backup_config()
-
-    @app.put("/v1/backups/config")
-    def backup_configure(body: BackupConfigBody, request: Request) -> dict:
-        user = console_user(request, "backup.manage", target="backup", action="configure")
-        if body.destination_kind in {"local", "mounted"}:
-            requested = Path(body.destination_path.strip())
-            if not requested.is_absolute() or requested == Path("/") or ".." in requested.parts:
-                raise HTTPException(400, "backup folder must be an absolute folder path")
-            destination = requested.resolve(strict=False)
-            if body.destination_kind == "local":
-                local_root = Path(ctx.settings.backup_path).resolve(strict=False)
-                if destination != local_root and not destination.is_relative_to(local_root):
-                    raise HTTPException(400, "local backups must be stored under the durable local backup folder")
-            protected = [Path(ctx.settings.control_repo).resolve(strict=False),
-                         Path(ctx.settings.control_secrets_dir).resolve(strict=False),
-                         Path(ctx.settings.console_secrets_dir).resolve(strict=False),
-                         Path(ctx.settings.github_app_dir).resolve(strict=False),
-                         Path(ctx.settings.jira_secret_dir).resolve(strict=False)]
-            if any(destination == root or destination.is_relative_to(root) or root.is_relative_to(destination)
-                   for root in protected):
-                raise HTTPException(400, "backup folder must be separate from the control repository and secrets")
-            path_value = str(destination)
-            endpoint, bucket, prefix, region = "", "", "", "us-east-1"
-        else:
-            from urllib.parse import urlsplit
-            parsed = urlsplit(body.s3_endpoint.strip())
-            if (parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password
-                    or parsed.query or parsed.fragment or not body.s3_bucket.strip()):
-                raise HTTPException(400, "enter an HTTPS S3-compatible endpoint and bucket")
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,62}", body.s3_bucket.strip()):
-                raise HTTPException(400, "S3 bucket name is invalid")
-            endpoint, bucket = body.s3_endpoint.strip().rstrip("/"), body.s3_bucket.strip()
-            prefix = "/".join(part for part in body.s3_prefix.strip().split("/") if part and part not in {".", ".."})
-            region = body.s3_region.strip() or "us-east-1"
-            path_value = "/srv/aiflow/backups"
-        ctx.db.run("UPDATE control_backup_config SET schedule=%s,destination_kind=%s,destination_path=%s,s3_endpoint=%s,"
-                   "s3_bucket=%s,s3_prefix=%s,s3_region=%s,retention_days=%s,updated_at=now() WHERE id=true",
-                   (body.schedule, body.destination_kind, path_value, endpoint, bucket, prefix, region,
-                    body.retention_days))
-        audit("backup", "configure", "", "", None, user.subject, True, "backup settings updated",
-              {"schedule": body.schedule, "destination": body.destination_kind, "retention_days": body.retention_days})
-        return backup_config()
-
-    @app.post("/v1/backups/key")
-    def backup_key_download(request: Request) -> StreamingResponse:
-        user = console_user(request, "backup.manage", target="backup", action="download_key")
-        from fastapi import HTTPException as ApiError
-        key_path = Path(ctx.settings.backup_key_file)
-        try:
-            with ctx.db.pool.connection() as connection:
-                with connection.transaction():
-                    row = connection.execute("SELECT key_downloaded_at FROM control_backup_config WHERE id=true FOR UPDATE").fetchone()
-                    if not row:
-                        raise ApiError(503, "backup settings are not initialized")
-                    if row["key_downloaded_at"] is not None or key_path.exists():
-                        raise ApiError(409, "the backup encryption key has already been downloaded")
-                    key = control_backups.create_key_file(key_path)
-                    connection.execute("UPDATE control_backup_config SET key_downloaded_at=now(),updated_at=now() WHERE id=true")
-        except ApiError:
-            raise
-        except OSError as exc:
-            raise HTTPException(503, "the backup encryption key could not be created") from exc
-        audit("backup", "download_key", "", "", None, user.subject, True, "one-time backup key download")
-        return StreamingResponse(iter([key]), media_type="application/octet-stream",
-                                  headers={"Content-Disposition": 'attachment; filename="aiflow4-backup-key"',
-                                           "Cache-Control": "no-store", "Pragma": "no-cache",
-                                           "X-Content-Type-Options": "nosniff"})
-
-    @app.post("/v1/backups/run")
-    def backup_request(request: Request) -> dict:
-        user = console_user(request, "backup.manage", target="backup", action="run_now")
-        ctx.db.run("UPDATE control_backup_config SET backup_requested_at=now(),updated_at=now() WHERE id=true")
-        audit("backup", "run_now", "", "", None, user.subject, True, "backup queued")
-        return {"queued": True}
-
     jira_connect.mount(app, ctx); setup_wizard.install(app, ctx)
     runtime_settings.install(app, ctx, console_user, audit)
     app.state.control_api_auth = {"node_auth": node_auth, "console_user": console_user, "audit": audit,
@@ -3098,4 +2478,8 @@ def create_app(ctx: Ctx) -> FastAPI:
     version_release_module.install(app, ctx, SimpleNamespace(account_master_paused=account_master_paused, bot_identity=bot_identity, fenced=fenced, node_auth=node_auth, quota_peer_release_candidates=quota_peer_release_candidates))
     console_module.install(app, ctx, SimpleNamespace(audit=audit, audit_in=audit_in, console_user=console_user, optional_console_user=optional_console_user, require_capacity=require_capacity))
     project_report_module.install(app, ctx, SimpleNamespace())
+    backups_module.install(app, ctx, SimpleNamespace(audit=audit, console_user=console_user))
+    knowledge_module.install(app, ctx, SimpleNamespace(audit=audit, console_user=console_user, owner_auth=owner_auth))
+    scale_proof_module.install(app, ctx, SimpleNamespace(audit=audit, owner_auth=owner_auth))
+    business_module.install(app, ctx, SimpleNamespace(audit=audit, deploy_auth=deploy_auth, optional_console_user=optional_console_user, owner_auth=owner_auth))
     return app

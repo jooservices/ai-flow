@@ -1,0 +1,1 @@
+- [Scale proof routes](../../../docs/v4/scale_proof-routes.md): The scale-proof summary and result routes.

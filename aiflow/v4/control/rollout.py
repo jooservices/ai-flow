@@ -230,6 +230,19 @@ def tick(ctx, current: str | None = None) -> dict | None:
     return latest(ctx.db)
 
 
+def _member_problem(n: dict | None, m: dict, r: dict, now, s, on_target: bool, reported: str) -> str:
+    """Why an assigned node stops the rollout (lost heartbeat, switched back, install timeout), or an empty string."""
+    if not _fresh(n, now):
+        age = int((now - n["last_heartbeat"]).total_seconds()) if n and n["last_heartbeat"] else None
+        return f"lost its heartbeat ({'never seen' if age is None else f'{age} s ago'})"
+    if m["upgraded_at"] and not on_target:
+        return f"switched back to {reported or 'unknown'} after installing {r['target']}"
+    if not on_target and (now - m["assigned_at"]).total_seconds() > s.rollout_install_timeout_s:
+        return (f"did not report {r['target']} within {s.rollout_install_timeout_s} s"
+                f" (reports {reported or 'unknown'})")
+    return ""
+
+
 def _advance(ctx, r: dict) -> None:
     now, s = _now(), ctx.settings
     nodes = _nodes(ctx.db)
@@ -244,15 +257,7 @@ def _advance(ctx, r: dict) -> None:
             m["upgraded_at"] = now
             ctx.db.run("UPDATE fleet_rollout_nodes SET upgraded_at=%s WHERE rollout_id=%s AND node=%s",
                        (now, r["id"], m["node"]))
-        why = ""
-        if not _fresh(n, now):
-            age = int((now - n["last_heartbeat"]).total_seconds()) if n and n["last_heartbeat"] else None
-            why = f"lost its heartbeat ({'never seen' if age is None else f'{age} s ago'})"
-        elif m["upgraded_at"] and not on_target:
-            why = f"switched back to {reported or 'unknown'} after installing {r['target']}"
-        elif not on_target and (now - m["assigned_at"]).total_seconds() > s.rollout_install_timeout_s:
-            why = (f"did not report {r['target']} within {s.rollout_install_timeout_s} s"
-                   f" (reports {reported or 'unknown'})")
+        why = _member_problem(n, m, r, now, s, on_target, reported)
         if why:
             halt(ctx, r, m["node"], why)
             return

@@ -232,10 +232,10 @@ def test_generated_api_reference_shows_request_and_response_schema_fields():
         "release_progress[].release.steps[].state",
     ):
         assert f"`{field}`" in state, f"/v1/state reference omits {field}"
-    api_module = "aiflow/v4/control/api.py"
-    schema_line = next(number for number, line in enumerate((ROOT / api_module).read_text().splitlines(), 1)
-                       if line.startswith("STATE_RESPONSE_SCHEMA ="))
-    state_spans = docsite.api_route_contract_spans()[api_module]["GET /v1/state"]
+    routes_module = "aiflow/v4/control/features/business/routes.py"
+    schema_line = next(number for number, line in enumerate((ROOT / routes_module).read_text().splitlines(), 1)
+                       if '"schema": STATE_RESPONSE_SCHEMA' in line)
+    state_spans = docsite.api_route_contract_spans()[routes_module]["GET /v1/state"]
     assert any(start <= schema_line <= end for start, end in state_spans)
 
 

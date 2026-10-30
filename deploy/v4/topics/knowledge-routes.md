@@ -1,0 +1,1 @@
+- [Knowledge routes](../../../docs/v4/knowledge-routes.md): The memory, learned-knowledge and Knowledge screen resource routes.

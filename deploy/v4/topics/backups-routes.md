@@ -1,0 +1,1 @@
+- [Backup routes](../../../docs/v4/backups-routes.md): The encrypted-backup configuration, status, key download and run-now routes.

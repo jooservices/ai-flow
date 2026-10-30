@@ -6,7 +6,7 @@ import pytest
 
 from aiflow.v4.control.platform.events import CATALOG, Dispatcher, DomainEvent, Registry, event, publish, replay
 
-T0 = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+T0 = datetime(2100, 1, 1, 12, 0, tzinfo=timezone.utc)  # after the real clock: rows are created with now()
 
 
 @pytest.fixture

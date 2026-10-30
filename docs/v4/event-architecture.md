@@ -91,6 +91,10 @@ Work (JAIF-481): the 298-line `eligible` function that was nested in `create_app
 unchanged); the app keeps a three-line wrapper and hands it the few helpers it needs (`work_deps`: pause and quota checks, the
 previous dev run, the epic of a ticket, capacity routing, and the releases directory, read at call time so tests may patch
 `RELEASES`). `PRIORITY`, the back-off queries and `utcnow` moved to `features/work/constants.py` and are re-imported by `api.py`.
+
+Work claim (JAIF-482): the 216-line handler of `POST /v1/work/claim` is `features/work/claim.py`. It is moved verbatim and
+stays one atomic claim (lease, hot files, run row); the app helpers it needs (`eligible`, `master_candidate`, `last_dev`,
+`ticket_epic`, `capacity_history`, `related_hits`, `bot_identity`, `RELEASES`) arrive as `deps`. `RunStarted` comes with JAIF-483.
 It serves `GET /v1/work/candidates` and `POST /v1/work/claim`, whose behaviour is unchanged; `api.py` is 320 lines shorter. The constants are also read by `GET /v1/github/git/{git_path:path}`, `GET /v1/master/autonomy`,
 `GET /v1/master/context`, `GET /v1/master/report`, `POST /v1/console/view-as`, `POST /v1/console/view-as/stop`,
 `POST /v1/github/git/{git_path:path}`, `POST /v1/github/token`, `POST /v1/nodes/{name}/check-probes/token`,

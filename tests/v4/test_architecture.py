@@ -106,7 +106,10 @@ def test_feature_route_installers_are_registered_in_create_app():
         if path == entry_point:
             continue
         for function in _top_level_registration_functions(path):
-            target = (None, function) if function == "install_login" else (path.stem, function)
+            if path.name == "routes" + ".py" and path.parent.parent.name == "features":
+                target = (f"{path.parent.name}_module", function)  # features/<name>/routes.py is imported as <name>_module
+            else:
+                target = (None, function) if function == "install_login" else (path.stem, function)
             if target not in calls:
                 missing.append(f"{path.relative_to(control)}:{function}")
     assert not missing, f"feature route installers must be registered from create_app: {sorted(set(missing))}"

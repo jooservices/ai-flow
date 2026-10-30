@@ -1,0 +1,1 @@
+- [Fleet routes](../../../docs/v4/fleet-routes.md): the nodes, machines and managed-account routes now live in the fleet feature module.

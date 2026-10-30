@@ -104,6 +104,12 @@ Work repository (JAIF-480): the SQL of the claim path (previous runs, triage ans
 assigned, the node tools, the board for the impact step) is `WorkRepository` in `features/work/repository.py` (typed results from `features/work/models.py`), except the
 prior developer run that `dev_history.delivered_or_last` in `aiflow/v4/control/dev_history.py` still queries; `claim.py`
 no longer holds raw queries on runs, accounts or nodes.
+
+Fleet routes (JAIF-485): the routes for nodes (join tokens, join, heartbeat, health, operations, probes), machines and managed accounts
+(`POST /v1/nodes/join`, `POST /v1/nodes/{name}/heartbeat`, `POST /v1/machines/{name}/accounts` and the sign-in routes) are
+`features/fleet/routes.py`, moved as they were; their request bodies are `features/fleet/bodies.py`. `install(app, ctx, deps)`
+registers them at the end of `create_app` and `deps` carries the helpers that still live in the app (`audit`, `console_user`,
+`node_auth`, `require_capacity` and the release helpers). A service/repository split follows when those routes change.
 It serves `GET /v1/work/candidates` and `POST /v1/work/claim`, whose behaviour is unchanged; `api.py` is 320 lines shorter. The constants are also read by `GET /v1/github/git/{git_path:path}`, `GET /v1/master/autonomy`,
 `GET /v1/master/context`, `GET /v1/master/report`, `POST /v1/console/view-as`, `POST /v1/console/view-as/stop`,
 `POST /v1/github/git/{git_path:path}`, `POST /v1/github/token`, `POST /v1/nodes/{name}/check-probes/token`,

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from aiflow.v4.control import api as control_api
+from aiflow.v4.control.features.fleet import routes as fleet_routes
 from aiflow.v4.control.console_auth import ROLE_PERMISSIONS, issue_session
 from aiflow.v4 import cli
 from aiflow.v4.core.controlrepo import Account
@@ -238,7 +239,7 @@ def test_missing_safe_runtime_is_not_queued_as_an_installable_tool(client, ctx, 
                                                     "tools": {"safe-container-runtime": "missing"}},
                 headers=headers)
     sign_in(client, ctx, role="super_admin")
-    monkeypatch.setattr(control_api, "toolchain_gaps", lambda *args, **kwargs: ["safe-container-runtime"])
+    monkeypatch.setattr(fleet_routes, "toolchain_gaps", lambda *args, **kwargs: ["safe-container-runtime"])
 
     automatic = client.post("/v1/nodes/node1/operations", json={"action": "install"})
     assert automatic.status_code == 409

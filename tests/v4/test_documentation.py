@@ -964,10 +964,10 @@ def test_route_spans_cover_whole_handlers():
 
 
 def test_schema_declarations_belong_to_their_route_contract():
-    api = "aiflow/v4/control/api.py"
-    spans = docsite.api_route_contract_spans()[api]
+    bodies = "aiflow/v4/control/features/fleet/bodies.py"
+    spans = docsite.api_route_contract_spans()[bodies]
     join = next(ranges for contract, ranges in spans.items() if contract == "POST /v1/nodes/join")
-    declared = next(i for i, line in enumerate((ROOT / api).read_text().splitlines(), 1)
+    declared = next(i for i, line in enumerate((ROOT / bodies).read_text().splitlines(), 1)
                     if line.startswith("class JoinBody("))
     assert any(start <= declared <= end for start, end in join)
 

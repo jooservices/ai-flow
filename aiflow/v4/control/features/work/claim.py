@@ -5,6 +5,7 @@ otherwise unchanged and stays one atomic claim."""
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 import secrets
 import uuid
 from typing import Any
@@ -19,13 +20,14 @@ from ....core import handover
 from ..work.constants import utcnow
 from ...platform.events.wiring import publish_for
 from .events import RunStarted
-from ...db import J
+from .repository import WorkRepository
 from ...route_deps import h
 
 log = logging.getLogger("aiflow4.control")
 
 
 def claim(ctx, deps, body, node: str) -> Any:
+    store = WorkRepository(ctx.db)
     # Candidate lists can be stale when several workers poll together. A live lease proves this ticket
     # cannot be granted, so refuse it before rebuilding licence and eligibility state. New claims still
     # pass every gate below, and the atomic lease acquisition handles the race after this check.
@@ -114,9 +116,8 @@ def claim(ctx, deps, body, node: str) -> Any:
     if body.step == "dev":
         capacity_samples = deps.capacity_history()
         ticket_estimate = capacity.estimate(t, capacity_samples)
-        account_row = ctx.db.one("SELECT id,quota_forecast FROM accounts WHERE id=%s", (acc.id,)) or {}
-        account_forecasts = ({str(account_row["id"]): account_row.get("quota_forecast") or {}}
-                             if account_row else {})
+        account_row = store.account_forecast(acc.id)
+        account_forecasts = {account_row.id: account_row.quota_forecast} if account_row else {}
         account_forecasts = capacity.with_active_quota_reservations(ctx.db, account_forecasts)
         fit = capacity.account_fit(acc.id, account_forecasts.get(acc.id, {}), ticket_estimate)
         expected_tokens = ticket_estimate["tokens"]
@@ -157,55 +158,46 @@ def claim(ctx, deps, body, node: str) -> Any:
                              " concurrent sessions or machine load capacity is full"}, status_code=409)
     ctx.provider_eligibility.record_assignment(t, acc, body.step)
     if run_details:
-        ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
+        store.set_run_details(run_id, run_details)
     if body.step == "dev" and prior_dev and prior_dev.get("pr_url") and prior_dev.get("branch"):
         # A rework run carries the PR identity that the previous developer run recorded. The CI-log endpoint
         # uses this row to bind branch and SHA requests to this ticket's pull request. Preserve provenance so
         # role health does not treat a later failed run as the run that produced the PR.
-        ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s, head_sha=%s, details=details || %s WHERE id=%s",
-                   (prior_dev["pr_url"], prior_dev["branch"], prior_dev.get("head_sha") or "",
-                    J({"pr_url_source": "inherited"}), run_id))
+        store.inherit_pull_request(run_id, prior_dev)
     if probation_id is not None:
         role_health.attach_probation_run(ctx.db, probation_id, run_id)
         ctx.events.emit("role.probation", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
                         account=acc.id, outcome="assigned",
                         reason=f"probation ticket for role {role_health.role_of(body.step)}")
-    ctx.db.run("UPDATE accounts SET status='working', updated_at=now(), idle_since=NULL, cooldown_since=NULL WHERE id=%s",
-               (acc.id,))
+    store.mark_account_working(acc.id)
     with ctx.db.transaction():
         publish_for(ctx, RunStarted(run_id=run_id, ticket_key=t["key"], project=t["project"], step=body.step, fence=c.fence,
                                     account=acc.id, provider=acc.provider, model=model, node=node))
     extra: dict[str, Any] = {}
     if body.step == "dev":
         tooling.resolve_ticket(ctx, t["key"], node)
-        extra["machine_tools"] = tooling.machine_tools(
-            ctx.db.one("SELECT tools,metrics FROM nodes WHERE name=%s", (node,)) or {})
+        extra["machine_tools"] = tooling.machine_tools(store.node_tools(node).as_row())
     dev = prior_dev
     if body.step == "verify" and dev:
         extra["pr"] = {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
                        "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],
                        "dev_summary": (dev["summary"] or "") + handover.render(dev.get("details"))}
     if body.step == "dev":
-        v = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s"
-                       " AND step IN ('verify','qa')"
-                       " AND outcome='rework' ORDER BY started_at DESC LIMIT 1", (t["key"],))
-        if v and (not dev or v["started_at"] > dev["started_at"]):
-            extra["findings"] = (v["details"] or {}).get("findings") or v["summary"]
+        v = store.latest_rework(t["key"])
+        if v and (not dev or v.started_at > dev["started_at"]):
+            extra["findings"] = v.details.get("findings") or v.summary
         if dev and dev["branch"]:
             extra["branch"] = dev["branch"]
         # the master AI's answer to the question a dev run stopped on, until a dev run finishes or blocks again
-        a = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s AND step='triage'"
-                       " AND outcome='answered' ORDER BY started_at DESC LIMIT 1", (t["key"],))
-        if a and not ctx.db.one("SELECT 1 AS x FROM runs WHERE ticket_key=%s AND step='dev' AND started_at > %s"
-                                " AND outcome IN ('done', 'blocked') LIMIT 1", (t["key"], a["started_at"])):
-            q = ctx.db.one("SELECT summary FROM runs WHERE ticket_key=%s AND step='dev' AND outcome='blocked'"
-                           " AND started_at < %s ORDER BY started_at DESC LIMIT 1", (t["key"], a["started_at"]))
-            extra["triage_answer"] = (a["details"] or {}).get("answer") or a["summary"]
-            extra["triage_question"] = (q or {}).get("summary") or ""
+        a = store.latest_answered_triage(t["key"])
+        if a and not store.dev_finished_since(t["key"], a.started_at):
+            q = store.blocked_question_before(t["key"], a.started_at)
+            extra["triage_answer"] = a.details.get("answer") or a.summary
+            extra["triage_question"] = q
         # an escalation resolved without a triage run (register, policy message, machine, amendment) is answered
         # the same way; the newer of the two wins
         auto = escalations.pending_answer(ctx.db, t["key"])
-        if auto and (not extra.get("triage_answer") or not a or auto["created_at"] > a["started_at"]):
+        if auto and (not extra.get("triage_answer") or not a or auto["created_at"] > a.started_at):
             extra["triage_answer"], extra["triage_question"] = auto["answer"], auto["question"]
         if owner_answer:
             extra["triage_answer"] = owner_answer["answer"]
@@ -223,9 +215,7 @@ def claim(ctx, deps, body, node: str) -> Any:
             log.warning("comments of %s for intake failed: %s", t["key"], e)
     if body.step == "impact":
         # the board the assessment compares against: the project's epics and its open work
-        extra["project_tickets"] = ctx.db.all(
-            "SELECT key, type, status, summary, parent_key FROM tickets WHERE project=%s AND status<>'Done'"
-            " AND key<>%s ORDER BY type<>'Epic', key LIMIT 300", (t["project"], t["key"]))
+        extra["project_tickets"] = [asdict(x) for x in store.open_project_tickets(t["project"], t["key"])]
     if body.step == "master":
         extra["master_scope"] = "global"
     else:

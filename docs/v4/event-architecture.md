@@ -99,6 +99,11 @@ stays one atomic claim (lease, hot files, run row); the app helpers it needs (`e
 Run events (JAIF-483): a claim publishes `RunStarted` and a run result (worker, or a reviewer action in the console)
 publishes `RunFinished`; the `run.claimed` and `run.finished` timeline rows are in-transaction listeners in
 `features/work/listeners.py`. Token counts travel as `usage_in` and `usage_out` because the catalog refuses field names with "token".
+
+Work repository (JAIF-480): the SQL of the claim path (previous runs, triage answer, rework findings, the account being
+assigned, the node tools, the board for the impact step) is `WorkRepository` in `features/work/repository.py` (typed results from `features/work/models.py`), except the
+prior developer run that `dev_history.delivered_or_last` in `aiflow/v4/control/dev_history.py` still queries; `claim.py`
+no longer holds raw queries on runs, accounts or nodes.
 It serves `GET /v1/work/candidates` and `POST /v1/work/claim`, whose behaviour is unchanged; `api.py` is 320 lines shorter. The constants are also read by `GET /v1/github/git/{git_path:path}`, `GET /v1/master/autonomy`,
 `GET /v1/master/context`, `GET /v1/master/report`, `POST /v1/console/view-as`, `POST /v1/console/view-as/stop`,
 `POST /v1/github/git/{git_path:path}`, `POST /v1/github/token`, `POST /v1/nodes/{name}/check-probes/token`,

@@ -103,7 +103,6 @@ def build_ctx(s: Settings):
     from .control import inventory, shared_accounts
     # Accounts and machines come from the database (docs/v4/inventory-in-database.md); the repo only adds policy.
     ctx.repo = lambda: shared_accounts.overlay(inventory.apply(repo_cache(), db), db)
-    ctx._shared_accounts = True
     events.bind_incident_context(ctx)
     jira_auth.bind(ctx)
     return ctx

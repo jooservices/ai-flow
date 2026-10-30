@@ -26,12 +26,12 @@ def _feature_installers():
 
 def registry_for(ctx: Any) -> Registry:
     with _LOCK:
-        registry = getattr(ctx, "_event_registry", None)
+        registry = ctx.event_registry
         if registry is None:
             registry = Registry()
             for register in _feature_installers():
                 register(ctx, registry)
-            ctx._event_registry = registry
+            ctx.event_registry = registry
         return registry
 
 

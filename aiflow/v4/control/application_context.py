@@ -56,6 +56,14 @@ class ApplicationContext:
     clock: Clock = field(default_factory=SystemClock)
     provider_routing: object | None = None  # set by create_app (docs/v4/provider-routing.md)
     provider_eligibility: object | None = None
+    # Services that create_app and the loops attach after construction. They are declared here, typed and defaulted,
+    # so no module needs getattr/setattr with a private name (JAIF-465).
+    configured_repo: RepositoryProvider | None = None  # the control-repo snapshot before the database inventory overlay
+    worker_resource_counts: object | None = None  # licensing.ResourceCountsCache
+    system_check_integration_cache: dict = field(default_factory=dict)  # sanitized provider probe results
+    event_registry: object | None = None  # platform.events.Registry of this application
+    github_registry: object | None = None  # GitHubConnections
+    github_connection_for_repository: Callable[[str], object] | None = None
 
     def __post_init__(self) -> None:
         if not callable(self.repo):

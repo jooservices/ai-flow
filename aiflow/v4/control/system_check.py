@@ -163,10 +163,7 @@ def _machine_conditions(raw: list[dict] | None, metrics: dict[str, Any],
 
 def _cached_integration_probe(ctx, key: tuple[object, ...], trigger: str, probe):
     """Cache one sanitized integration probe through an hour and deduplicate same-trigger fan-out."""
-    cache = getattr(ctx, "_system_check_integration_cache", None)
-    if not isinstance(cache, dict):
-        cache = {}
-        setattr(ctx, "_system_check_integration_cache", cache)
+    cache = ctx.system_check_integration_cache
     now = time.monotonic()
     entry = cache.get(key)
     if isinstance(entry, dict) and now - entry.get("at", 0) < 3600:

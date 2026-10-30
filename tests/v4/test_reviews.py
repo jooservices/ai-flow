@@ -7,6 +7,7 @@ from conftest import add_ticket, join_node
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 from aiflow.v4.control.loops import jira_sync
+from aiflow.v4.control.platform.events import wiring
 from aiflow.v4.control import notify
 from aiflow.v4.control.review_metrics import calculate_review_metrics
 from aiflow.v4.core.controlrepo import Project
@@ -90,6 +91,8 @@ def test_jira_sync_notifies_assignee_when_require_human_ticket_enters_review(ctx
                         calls.append((severity, title, detail, link, recipient)) or ["email"])
 
     assert jira_sync(ctx) == 1
+    assert calls == []  # the notice is a listener of TicketMoved: it runs when the dispatcher delivers the event
+    wiring.dispatcher_for(ctx).run_once()
     assert len(calls) == 1
     assert calls[0][0] == "info" and calls[0][1] == "TESTWP-81 is ready for human review"
     assert calls[0][3] == ctx.settings.public_url.rstrip("/") + "/review"
@@ -110,6 +113,7 @@ def test_worker_transition_notifies_owner_when_assignee_is_missing(client, ctx, 
                            json={"run_id": run["run_id"], "fence": run["fence"], "to": "Human review"},
                            headers=headers)
     assert response.json() == {"status": "Human review"}
+    wiring.dispatcher_for(ctx).run_once()
     assert calls == [""]  # empty recipient uses the saved channel recipient
 
 

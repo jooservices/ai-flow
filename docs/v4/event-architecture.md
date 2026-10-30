@@ -58,6 +58,12 @@ and two other functions had no caller. `escalations.py` and `ticket_lifecycle.py
 `POST /v1/escalations/raise`, `POST /v1/escalations/triage` and `POST /v1/work/claim`, whose behaviour is unchanged); the remaining direct `tickets`
 SQL of `api.py` moves with the features that own it.
 
+Two reactions that were inline in the Jira transition route and in the Jira sync are now outbox listeners of `TicketMoved`
+(`features/tickets/listeners.py`): the completion report of an epic that reached Done, and the notice when a ticket enters
+Human review. They run when the dispatcher delivers the event, about a second after the move, and the same listener now also
+reacts to a move made by the flow itself (before, only the two inline places did). The epic status rules of `jira_sync`
+(`_reconcile_epics`) and the merge flow follow in later slices.
+
 ## Conventions
 
 - Commands and queries are direct calls to a service; only reactions go through events.

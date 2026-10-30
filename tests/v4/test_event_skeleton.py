@@ -30,7 +30,7 @@ def test_an_outbox_listener_receives_the_event_through_the_dispatcher_with_a_mea
     started = time.perf_counter()
     merge_flow.record_move(ctx, "TESTWP-2", "To Do", "Done", "merge", "")
     assert seen == []  # the listener never runs inside the publisher's call
-    assert wiring.dispatcher_for(ctx).run_once() == 1
+    assert wiring.dispatcher_for(ctx).run_once() == 3  # one delivery per outbox listener of TicketMoved
     delay = time.perf_counter() - started
 
     envelope, item = seen[0]

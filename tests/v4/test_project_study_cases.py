@@ -81,8 +81,12 @@ def test_done_epic_generates_an_epic_report_and_email_once(ctx, monkeypatch):
     monkeypatch.setattr(notify, "send", lambda severity, title, detail="", link="", **kwargs:
                         sent.append((severity, title, detail)) or ["email"])
 
+    from aiflow.v4.control.platform.events import wiring
+
     assert jira_sync(ctx, full=True) == 1
+    wiring.dispatcher_for(ctx).run_once()  # the report is the listener of the epic's move to Done
     assert jira_sync(ctx, full=True) == 1
+    wiring.dispatcher_for(ctx).run_once()
 
     row = ctx.db.one("SELECT scope, subject, version, report, markdown, sent_channels FROM project_reports")
     assert (row["scope"], row["subject"], row["version"]) == ("epic", "TESTWP-700", 1)

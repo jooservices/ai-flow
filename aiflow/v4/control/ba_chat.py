@@ -325,6 +325,17 @@ def _ticket_description(item: dict) -> str:
             f"Technical notes:\n{item['technical_notes']}\n\nDefinition of done:\n{done}")
 
 
+def _all_items(proposal: dict) -> list[dict]:
+    """Every epic, story and task of a proposal, in creation order."""
+    items: list[dict] = []
+    for epic in proposal["epics"]:
+        items.append(epic)
+        for story in epic["stories"]:
+            items.append(story)
+            items.extend(story.get("tasks") or [])
+    return items
+
+
 def create_proposal(ctx, proposal: dict) -> dict:
     """Create every approved ticket from one proposal, continuing after a Jira refusal."""
     try:
@@ -335,14 +346,8 @@ def create_proposal(ctx, proposal: dict) -> dict:
     failed: list[dict] = []
     project = proposal["project_key"]
     if not ctx.jira:
-        all_items = []
-        for epic in proposal["epics"]:
-            all_items.append(epic)
-            for story in epic["stories"]:
-                all_items.append(story)
-                all_items.extend(story.get("tasks") or [])
         return {"created": [], "failed": [{"title": item["title"], "reason": "Jira is not connected"}
-                                           for item in all_items]}
+                                           for item in _all_items(proposal)]}
 
     def create(item: dict, kind: str, parent: str = "") -> str:
         key = ctx.jira.create_issue(project, item["title"], _ticket_description(item), issuetype=kind, parent=parent)

@@ -1,0 +1,1 @@
+- [Release routes](../../../docs/v4/release-routes.md): The routes through which nodes read the tagged, signed release, report a failed release and sweep worktrees.

@@ -1,0 +1,1 @@
+- [Version release routes](../../../docs/v4/version_release-routes.md): The configured Jira version-release routes (candidates, claim, complete, post-merge).

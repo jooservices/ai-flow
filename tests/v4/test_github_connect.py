@@ -71,7 +71,9 @@ def owner_sign_in(client, ctx, role="owner"):
 
 def patch_flow_gateway(monkeypatch):
     import aiflow.v4.control.api as api
+    from aiflow.v4.control.features.projects import routes as project_routes
     monkeypatch.setattr(api, "GitHubApp", FakeConnectGitHub)
+    monkeypatch.setattr(project_routes, "GitHubApp", FakeConnectGitHub)  # the GitHub connection routes moved there
     return api
 
 

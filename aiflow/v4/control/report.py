@@ -303,6 +303,27 @@ def _duration(stats: dict[str, Any]) -> str:
             f"p90 {_duration_value(stats['p90_seconds'])} (n={stats['sample_size']})")
 
 
+def _coverage_markdown(report: dict[str, Any]) -> list[str]:
+    """The requirement-coverage section of the Markdown report."""
+    out: list[str] = []
+    out += ["", "## Requirement coverage", "",
+            ("**Insufficient tasks found.**" if report["requirement_coverage"]["insufficient_tasks"]
+             else "No task coverage gaps found."), ""]
+    out += ["| Ticket | Parent | Status | Acceptance criteria |", "| --- | --- | --- | --- |"]
+    for ticket in report["requirement_coverage"]["tickets"]:
+        ac_text = "<br>".join(f"{_md_text(ac['id'])} [{ac['status']}]: {_md_text(ac['text'])}"
+                              for ac in ticket["acceptance_criteria"]) or "No AC lines"
+        out.append(f"| {_md_text(ticket['key'])} · {_md_text(ticket['summary'])} | "
+                   f"{_md_text(ticket['parent_key'] or '—')} | {_md_text(ticket['status'])} | {ac_text} |")
+    if not report["requirement_coverage"]["tickets"]:
+        out.append("| — | — | — | No child tickets |")
+    if report["requirement_coverage"]["gaps"]:
+        out += ["", "Gaps:"]
+        out.extend(f"- {_md_text(gap['ticket'])}: {_md_text(gap['reason'])}"
+                   for gap in report["requirement_coverage"]["gaps"])
+    return out
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     """Render a portable Markdown progress and requirement-coverage report."""
     title = _md_text(report["epic"] or report["project"])
@@ -329,21 +350,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     out.extend(f"| {_md_text(kind)} | {count} |" for kind, count in tickets["done_by_type"].items())
     if not tickets["done_by_type"]:
         out.append("| — | 0 |")
-    out += ["", "## Requirement coverage", "",
-            ("**Insufficient tasks found.**" if report["requirement_coverage"]["insufficient_tasks"]
-             else "No task coverage gaps found."), ""]
-    out += ["| Ticket | Parent | Status | Acceptance criteria |", "| --- | --- | --- | --- |"]
-    for ticket in report["requirement_coverage"]["tickets"]:
-        ac_text = "<br>".join(f"{_md_text(ac['id'])} [{ac['status']}]: {_md_text(ac['text'])}"
-                              for ac in ticket["acceptance_criteria"]) or "No AC lines"
-        out.append(f"| {_md_text(ticket['key'])} · {_md_text(ticket['summary'])} | "
-                   f"{_md_text(ticket['parent_key'] or '—')} | {_md_text(ticket['status'])} | {ac_text} |")
-    if not report["requirement_coverage"]["tickets"]:
-        out.append("| — | — | — | No child tickets |")
-    if report["requirement_coverage"]["gaps"]:
-        out += ["", "Gaps:"]
-        out.extend(f"- {_md_text(gap['ticket'])}: {_md_text(gap['reason'])}"
-                   for gap in report["requirement_coverage"]["gaps"])
+    out += _coverage_markdown(report)
     out += ["", "## Time", "", f"- Lead time: {_duration(report['lead_time'])}",
             f"- AI time per completed ticket: {_duration(report['ai_time'])}",
             f"- Total recorded AI time: {_duration_value(report['ai_time']['total_seconds'])}", "",

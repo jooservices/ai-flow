@@ -9,6 +9,7 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
+from aiflow.v4.control.features.projects import routes as project_routes
 from conftest import FakeGitHub, add_ticket, join_node
 from test_projects import owner_sign_in, prepare_project_control, worker_headers
 from test_reviews import add_review_run
@@ -56,7 +57,7 @@ def secrets_dir(ctx, tmp_path, monkeypatch):
                        "account_type": "Organization", "installation_id": 77}
     ctx.github_registry = GitHubConnections(ctx.settings.github_app_dir, lambda d, o: FakeGitHub(),
                                             lambda token, account, kind: PersonalGitHub(token, account))
-    monkeypatch.setattr(api, "verify_token", lambda token, account="": PersonalGitHub(token, account or "person"))
+    monkeypatch.setattr(project_routes, "verify_token", lambda token, account="": PersonalGitHub(token, account or "person"))
     return tmp_path / "github-secrets"
 
 
@@ -153,7 +154,7 @@ def test_token_rejected_by_github_is_not_stored(client, ctx, secrets_dir, monkey
     def refuse(token, account=""):
         raise RuntimeError("401 bad credentials " + token)
 
-    monkeypatch.setattr(api, "verify_token", refuse)
+    monkeypatch.setattr(project_routes, "verify_token", refuse)
     response = add_token(client)
     assert response.status_code == 422 and TOKEN not in response.text
     assert not (secrets_dir / "connections").exists()

@@ -1,10 +1,9 @@
 """Run-inbox lifecycle operations shared by worker and console routes."""
 from __future__ import annotations
 
-from fastapi import HTTPException
-
 from . import ticket_split_apply
 from .db import J
+from .platform.errors import Conflict, DomainError, Forbidden
 from .repositories import run_inbox
 
 
@@ -23,11 +22,11 @@ def _close_messages(ctx, run: dict, run_id: str, fence: int, node: str, reason: 
         current = connection.execute("SELECT status,result_received_at,inbox_pending_count FROM runs"
                                      " WHERE id=%s FOR UPDATE", (run_id,)).fetchone()
         if require_running and (not current or current["status"] != "running"):
-            raise HTTPException(409, "run is no longer active")
+            raise Conflict("run is no longer active")
         if allowed_statuses and (not current or current["status"] not in allowed_statuses):
-            raise HTTPException(409, "run is no longer active")
+            raise Conflict("run is no longer active")
         if require_unrecorded and current["result_received_at"]:
-            raise HTTPException(409, "run result was already recorded")
+            raise Conflict("run result was already recorded")
         message_ids = (run_inbox.mark_undelivered(connection, run_id, reason)
                        if int(current["inbox_pending_count"] or 0) else [])
         connection.execute(update_sql, params)
@@ -37,9 +36,9 @@ def _close_messages(ctx, run: dict, run_id: str, fence: int, node: str, reason: 
 
 def heartbeat(ctx, run: dict, run_id: str, body, node: str) -> dict:
     if run["node"] != node:
-        raise HTTPException(403, "run belongs to another node")
+        raise Forbidden("run belongs to another node")
     if run["status"] != "running":
-        raise HTTPException(409, "run is no longer active")
+        raise Conflict("run is no longer active")
     valid = int(run["fence"]) == body.fence and ctx.leases.renew(
         run["ticket_key"], run_id, body.fence, ctx.settings.lease_ms)
     if not valid:
@@ -48,14 +47,14 @@ def heartbeat(ctx, run: dict, run_id: str, body, node: str) -> dict:
                         " WHERE id=%s AND status='running'", (run_id,))
         ctx.events.emit("run.lost", ticket=run["ticket_key"], run_id=run_id, fence=body.fence,
                         account=run["account_id"], node=node, reason="lease expired or taken")
-        raise HTTPException(409, "lease lost")
+        raise Conflict("lease lost")
 
     with ctx.db.pool.connection() as connection:
         updated = connection.execute("UPDATE runs SET heartbeat_at=now(), progress=progress || %s"
                                      " WHERE id=%s AND status='running'",
                                      (J(body.progress), run_id)).rowcount
         if not updated:
-            raise HTTPException(409, "run is no longer active")
+            raise Conflict("run is no longer active")
         received = run_inbox.mark_received(connection, run_id, body.inbox_received) if body.inbox_received else []
         included = run_inbox.mark_included(connection, run_id, body.inbox_included) if body.inbox_included else []
         messages = run_inbox.queued(connection, run_id) if int(run.get("inbox_pending_count") or 0) else []
@@ -113,7 +112,7 @@ def watchdog_lost(ctx, run: dict) -> tuple[bool, list[int]]:
         message_ids, _ = _close_messages(ctx, run, run_id, fence, run["node"], reason,
                                          "UPDATE runs SET status='lost', outcome='lost', ended_at=now()"
                                          " WHERE id=%s AND status='running'", (run["id"],), require_running=True)
-    except HTTPException as exc:
+    except DomainError as exc:
         if exc.status_code != 409:
             raise
         return False, []

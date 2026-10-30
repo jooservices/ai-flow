@@ -87,6 +87,15 @@ dispatcher instead of failing the caller. The routes that open incidents behave 
 `GET /v1/master/candidate`, `GET /v1/version-releases/candidates`, `GET /v1/work/candidates`, `POST /v1/master/plan-outcome`,
 `POST /v1/nodes/{name}/release-failures`, `POST /v1/version-releases/claim` and `PUT /v1/role-health/settings`.
 
+Work (JAIF-481): the 298-line `eligible` function that was nested in `create_app` is `features/work/eligible.py` (moved
+unchanged); the app keeps a three-line wrapper and hands it the few helpers it needs (`work_deps`: pause and quota checks, the
+previous dev run, the epic of a ticket, capacity routing, and the releases directory, read at call time so tests may patch
+`RELEASES`). `PRIORITY`, the back-off queries and `utcnow` moved to `features/work/constants.py` and are re-imported by `api.py`.
+It serves `GET /v1/work/candidates` and `POST /v1/work/claim`, whose behaviour is unchanged; `api.py` is 320 lines shorter. The constants are also read by `GET /v1/github/git/{git_path:path}`, `GET /v1/master/autonomy`,
+`GET /v1/master/context`, `GET /v1/master/report`, `POST /v1/console/view-as`, `POST /v1/console/view-as/stop`,
+`POST /v1/github/git/{git_path:path}`, `POST /v1/github/token`, `POST /v1/nodes/{name}/check-probes/token`,
+`POST /v1/nodes/{name}/operations` and `PUT /v1/master/autonomy/budget`, which are unchanged.
+
 ## Conventions
 
 - Commands and queries are direct calls to a service; only reactions go through events.

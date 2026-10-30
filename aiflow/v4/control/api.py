@@ -29,6 +29,7 @@ from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
@@ -48,10 +49,10 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from .audit import record_console_user_change as audit_user, record_console_user_roles_change as audit_user_roles
 from . import (business, capacity_routing as capacity_routing_service, dashboard_timeout_routes, eligibility, escalations,
-               flow_doctor, flow_doctor_api, jira_connect, knowledge, layouts, licensing, load_policy, load_policy_api,
+               flow_doctor_api, jira_connect, knowledge, layouts, licensing, load_policy, load_policy_api,
                log_viewer, memory, quota_refresh, role_health, rollout, runtime_settings, scale_proof, setup_wizard,
                shared_accounts, state_schema, support_bundle, system_check, system_check_api, tooling, version_release,
-               work_steps, dev_history)
+               dev_history)
 from . import run_inbox as run_inbox_control
 from . import triage_claim as triage_claim_service
 from . import environment as environment_reports
@@ -75,10 +76,11 @@ from .report import ReportNotFound, build_report, render_csv, render_html, rende
 from . import inventory, notify, pr_comments
 from .pr_comments import PRCommentBody
 from .application_context import Ctx
+from .features.work.constants import BACKOFF_SQL, PRIORITY, utcnow
+from .features.work.eligible import eligible as eligible_tickets
 
 log = logging.getLogger("aiflow4.api")
 
-PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 MASTER_SCOPE = "master:global"
 MASTER_CYCLE_S = 60
 DEFAULT_MASTER_DAILY_BUDGET_MINUTES = 60
@@ -89,42 +91,7 @@ RELEASES = Path("/srv/aiflow/control/releases")
 _NON_ROUTABLE_JOIN_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
 ))
-# A ticket whose recent dev runs failed waits before the next try: 2, 4, 8, 16 then 30 minutes after the last
-# failure (consecutive failures since the last run that produced work), so a broken ticket cannot spin.
-BACKOFF_SQL = """
-WITH candidates AS (
-  SELECT DISTINCT ticket_key FROM runs WHERE step = %(step)s AND status <> 'running'
-    AND started_at > now() - interval '1 day'
-    AND outcome IN ('failed', 'timeout', 'lost', 'no_changes')
-), last AS (
-  SELECT r.ticket_key, r.outcome, r.ended_at,
-         row_number() OVER (PARTITION BY r.ticket_key ORDER BY r.started_at DESC) AS n
-  FROM candidates c JOIN runs r ON r.ticket_key = c.ticket_key
-  WHERE r.step = %(step)s AND r.status <> 'running' AND r.started_at > now() - interval '1 day'
-), streak AS (
-  SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
-  FROM last l
-  WHERE l.outcome IN ('failed', 'timeout', 'lost', 'no_changes')
-    AND NOT EXISTS (SELECT 1 FROM last g WHERE g.ticket_key = l.ticket_key AND g.n < l.n
-                    AND g.outcome NOT IN ('failed', 'timeout', 'lost', 'no_changes'))
-  GROUP BY l.ticket_key
-)
-SELECT ticket_key, fails FROM streak
-WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
-"""
-# An Intake ticket whose last intake run failed waits 10 minutes before the next refinement try (the same for the
-# impact assessment of a change request).
-INTAKE_BACKOFF_SQL = """
-SELECT DISTINCT ON (ticket_key) ticket_key, outcome, ended_at FROM runs
-WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
-ORDER BY ticket_key, started_at DESC
-"""
-
 STATE_RESPONSE_SCHEMA = state_schema.STATE_RESPONSE_SCHEMA
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
 
 def validated_join_control_url(value: str) -> str:
     """Validate the operator-configured API address advertised to a new machine."""
@@ -3882,305 +3849,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         return ctx.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
                           + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
 
-    def eligible(account_id: str, node: str, *, routing: bool = True, capacity_routing: bool = True,
-                 ticket_key: str | None = None, lease_checked: bool = False,
-                 step_filter: str | None = None) -> list[dict]:
-        """Tickets this account may take now; claims can scope revalidation to their requested ticket and step."""
-        repo = ctx.repo()
-        acc = repo.account(account_id)
-        if not acc or not acc.runs_on(node):
-            raise HTTPException(403, f"account {account_id} does not run on {node}")
-        if acc.paused or account_master_paused(account_id):
-            return []
-        if ctx.leases.cooling(account_id):
-            return []
-        if not shared_accounts.may_take(ctx.db, acc, node)[0]:  # total session limit and this machine's share
-            return []
-        quota_at_risk = quota_forecast_at_risk(account_id)
-        node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics,readiness,accepting_work FROM nodes WHERE name=%s"
-                              " AND removed_at IS NULL AND status='online' AND last_heartbeat IS NOT NULL"
-                              " AND last_heartbeat > now() - make_interval(secs => %s)",
-                              (node, shared_accounts.NODE_ONLINE_S))
-        # Never route from persisted pre-reboot readiness; the agent must report a fresh heartbeat first.
-        if not node_row:
-            return []
-        if not node_row.get("accepting_work", True):
-            return []
-        projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
-        projects = [key for key in projects if not repo.projects[key].paused]
-        limited_projects = [key for key in projects if repo.projects[key].parallel_limit]
-        if limited_projects:
-            running_by_project = {row["project"]: int(row["count"]) for row in
-                                  ctx.db.all("SELECT project,count(*) AS count FROM runs"
-                                             " WHERE status='running' AND project=ANY(%s) GROUP BY project",
-                                             (limited_projects,))}
-            projects = [key for key in projects if key not in limited_projects or
-                        running_by_project.get(key, 0) < repo.projects[key].parallel_limit]
-        node_tools = node_row.get("tools") or {}
-        missing_container_runtime = bool(toolchain_gaps(node_tools, [CONTAINER_RUNTIME_TOOL], repo.versions))
-
-        def ticket_needs_missing_container_runtime(ticket: dict[str, Any], step: str) -> bool:
-            project = repo.projects.get(str(ticket.get("project") or ""))
-            if not project or not missing_container_runtime:
-                return False
-            selected = project.settings_for_ticket({"key": ticket.get("key"), "type": ticket.get("type"),
-                                                     "epic": ticket_epic(ticket)})
-            # Verify and rework restore the repository settings captured by the development run. Gate on those
-            # same settings so a later project remap cannot offer container work to a node without the runtime.
-            if step in {"dev", "verify", "qa", "triage"}:
-                prior_dev = dev_history.delivered_or_last(ctx.db, str(ticket.get("key") or ""))
-                details = (prior_dev or {}).get("details") or {}
-                prior_repository = str(details.get("repository") or "")
-                if prior_repository:
-                    prior_settings = details.get("repository_settings")
-                    selected = (dict(prior_settings) if isinstance(prior_settings, dict)
-                                else project.settings_for_repo(prior_repository))
-            return bool(selected.get("containers"))
-
-        # A project with a declared stack is offered only after this node reports every pinned tool healthy.
-        # Filtering here keeps another project on the same node available while a stack install is pending.
-        projects = [p for p in projects if not (repo.projects[p].stacks or repo.projects[p].uses_containers)
-                    or not toolchain_gaps(node_tools,
-                                          [tool for tool in repo.projects[p].tools if tool != CONTAINER_RUNTIME_TOOL],
-                                          repo.versions, repo.projects[p].stacks,
-                                          require_pins=bool(repo.projects[p].stacks))]
-        # Declared test services (PostgreSQL, Redis) must be reported healthy too; other projects stay available.
-        reported_services = (node_row.get("metrics") or {}).get("services")
-        projects = [p for p in projects
-                    if not service_gaps(reported_services, repo.projects[p].required_services)]
-        projects = [p for p in projects if not system_check.blocking_reasons(node_row.get("readiness"), p, account_id)]
-        roles = work_steps.roles_for_step(acc.roles or ["dev", "verify"], step_filter)
-        if not roles:
-            return []
-        scoped_key = " AND key=%s" if ticket_key is not None else ""
-        scoped_tickets_key = " AND tickets.key=%s" if ticket_key is not None else ""
-        scoped_ticket = (ticket_key,) if ticket_key is not None else ()
-
-        def backoff_rows(step: str) -> list[dict]:
-            query = BACKOFF_SQL
-            params = {"step": step}
-            if ticket_key is not None:
-                marker = "AND outcome IN ('failed', 'timeout', 'lost', 'no_changes')"
-                query = query.replace(marker, marker + "\n    AND ticket_key = %(ticket_key)s", 1)
-                params["ticket_key"] = ticket_key
-            return ctx.db.all(query, params)
-
-        def intake_backoff_rows(step: str) -> list[dict]:
-            query = INTAKE_BACKOFF_SQL
-            params = {"step": step}
-            if ticket_key is not None:
-                marker = "ORDER BY ticket_key, started_at DESC"
-                query = query.replace(marker, "AND ticket_key = %(ticket_key)s\n" + marker, 1)
-                params["ticket_key"] = ticket_key
-            return ctx.db.all(query, params)
-        # a role switched off for this account (docs/v4/role-health.md) takes one unresolved probation ticket
-        modes = role_health.modes(ctx.db, acc.id, sorted(roles))
-
-        def allowed(role: str, t: dict) -> bool:
-            return modes.get(role) == "on" or (modes.get(role) == "probation" and role_health.probation_ticket(t))
-
-        def probation(role: str) -> bool:
-            return modes.get(role) == "probation"
-
-        # A claim has already checked this ticket's lease above and the atomic lease acquisition below handles
-        # races. Avoid scanning every Redis lease when revalidating that one requested ticket.
-        held = set() if lease_checked else set(ctx.leases.held_keys())
-        out: list[dict] = []
-        if not projects:
-            return []
-        prio = {k: int(getattr(p, "priority", 5) or 5) for k, p in repo.projects.items()}
-        if "verify" in roles:
-            verify_cooling = {r["ticket_key"] for r in backoff_rows("verify")}
-            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
-                                " AND NOT ('aiflow-hold' = ANY(labels))" + scoped_key,
-                                (projects, *scoped_ticket)):
-                if ticket_needs_missing_container_runtime(t, "verify"):
-                    continue
-                if t["key"] in held or t["key"] in verify_cooling:
-                    continue
-                dev = last_dev(t["key"], done=True)
-                if not dev or not dev["pr_url"]:
-                    continue
-                if dev["account_id"] == acc.id:  # never grade your own work
-                    continue
-                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
-                    continue
-                if not allowed("verify", t):
-                    continue
-                out.append({**t, "step": "verify", "probation": probation("verify")})
-        if "release" in roles:
-            post_merge_cooling = {r["ticket_key"] for r in backoff_rows("post_merge")}
-            post_merge_projects = projects
-            if ticket_key is not None:
-                ticket_project = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket_key,))
-                project_key = str((ticket_project or {}).get("project") or "")
-                post_merge_projects = [project_key] if project_key in projects else []
-            pending = [item for project_key in post_merge_projects
-                       for item in environment_reports.pending_post_merge(
-                           ctx, project_key, [ticket_key] if ticket_key is not None else None)]
-            for waiting in pending:
-                t = ctx.db.one("SELECT * FROM tickets WHERE key=%s", (waiting["ticket"],))
-                if not t or t["key"] in held or t["key"] in post_merge_cooling:
-                    continue
-                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
-                    continue
-                if not allowed("release", t):
-                    continue
-                out.append({**t, "step": "post_merge", "probation": probation("release")})
-        if "master" in roles:
-            triage_cooling = {r["ticket_key"] for r in backoff_rows("triage")}
-            # Triage decides a raised escalation; a ticket in Needs owner without an open one has nothing to decide
-            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
-                                " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))"
-                                " AND EXISTS (SELECT 1 FROM escalations e WHERE e.ticket_key = tickets.key"
-                                " AND e.resolution = 'open')" + scoped_tickets_key,
-                                (projects, *scoped_ticket)):
-                if ticket_needs_missing_container_runtime(t, "triage"):
-                    continue
-                if t["key"] in held or t["key"] in triage_cooling:
-                    continue
-                dev = last_dev(t["key"])
-                if dev and dev["account_id"] == acc.id:
-                    continue
-                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
-                    continue
-                if not allowed("master", t):
-                    continue
-                out.append({**t, "step": "triage", "probation": probation("master")})
-        if "intake_refiner" in roles:
-            def backoff(step: str) -> set[str]:
-                return {r["ticket_key"] for r in intake_backoff_rows(step)
-                        if r["outcome"] in ("failed", "timeout", "lost") and r["ended_at"]
-                        and r["ended_at"] > utcnow() - timedelta(minutes=10)}
-            waiting = backoff("intake")
-            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'"
-                                " AND NOT ('aiflow-hold' = ANY(labels))" + scoped_key
-                                + " ORDER BY jira_created NULLS LAST, key", (projects, *scoped_ticket)):
-                if ticket_needs_missing_container_runtime(t, "intake"):
-                    continue
-                if t["key"] in held or t["key"] in waiting:
-                    continue
-                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
-                    continue
-                if not allowed("intake_refiner", t):
-                    continue
-                out.append({**t, "step": "intake", "probation": probation("intake_refiner")})
-            # change requests from the Business view: assess the impact once, while they wait in Backlog
-            waiting = backoff("impact")
-            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Backlog'"
-                                " AND 'change-request' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))"
-                                " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
-                                " AND r.step = 'impact' AND r.outcome = 'assessed')" + scoped_tickets_key
-                                + " ORDER BY jira_created NULLS LAST, key", (projects, *scoped_ticket)):
-                if ticket_needs_missing_container_runtime(t, "impact"):
-                    continue
-                if t["key"] in held or t["key"] in waiting:
-                    continue
-                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
-                    continue
-                if not allowed("intake_refiner", t):
-                    continue
-                out.append({**t, "step": "impact", "probation": probation("intake_refiner")})
-        out.sort(key=lambda t: (prio.get(t["project"], 5), t["jira_created"] or utcnow()))
-        if "dev" in roles:
-            cooling = {r["ticket_key"] for r in backoff_rows("dev")}
-            dev_rows = []
-            scope = [ticket_key] if ticket_key is not None else None
-            parked = tooling.parked_tickets(ctx, node_row, scope)  # waiting for a tool this machine lacks
-            parked |= environment_reports.parked_tickets(ctx, scope)  # waiting for an environment item
-            footprints: dict[str, dict] = {}
-            footprint_history: dict[str, bool] = {}
-            epics: dict[str, str] = {}
-            dev_tickets = ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s)"
-                                     + worker_candidates.DEV_TICKET_SQL + scoped_key,
-                                     (projects, *scoped_ticket))
-            blocker_keys = sorted({str(blocker) for ticket in dev_tickets
-                                   for blocker in ticket.get("blocked_by") or []})
-            done = ({row["key"] for row in ctx.db.all(
-                "SELECT key FROM tickets WHERE key=ANY(%s) AND status='Done'", (blocker_keys,))}
-                    if blocker_keys else set())
-            # Fresh tickets without a parent have no historical hot-file footprint unless they already have a
-            # successful dev run that recorded changed files. Batch that lookup instead of querying history once
-            # per candidate on every worker poll.
-            dev_keys = [t["key"] for t in dev_tickets]
-            history_keys = ({row["ticket_key"] for row in ctx.db.all(
-                "SELECT DISTINCT ticket_key FROM runs WHERE ticket_key = ANY(%s) AND step='dev' AND outcome='done'"
-                " AND details ? 'changed_files'", (dev_keys,))} if dev_keys else set())
-            blocked_keys = ({row["ticket_key"] for row in ctx.db.all(
-                "SELECT ticket_key FROM hot_file_blocked WHERE ticket_key = ANY(%s)", (dev_keys,))}
-                if dev_keys else set())
-
-            def footprint(row: dict, include_history: bool = False) -> dict:
-                key = str(row["key"])
-                if key not in epics:
-                    epics[key] = ticket_epic(row)
-                include = include_history or bool(epics[key]) or key in history_keys
-                if key not in footprints or (include and not footprint_history.get(key, False)):
-                    footprints[key] = hotfiles.predict(ctx.db, row, epics[key], include_history=include)
-                    footprint_history[key] = include
-                return footprints[key]
-
-            flying: dict[str, list[str]] | None = None
-            for t in dev_tickets:
-                if ticket_needs_missing_container_runtime(t, "dev"):
-                    continue
-                if not worker_candidates.may_offer_dev(t, done, held=held, cooling=cooling, parked=parked):
-                    continue
-                labels = set(t["labels"])
-                if "tier-senior" in labels and acc.tier != "senior":
-                    continue
-                if acc.explicit_only and f"ai-{acc.provider}" not in labels:
-                    continue
-                if not allowed("dev", t):
-                    continue
-                candidate_footprint = footprint(t)
-                if not candidate_footprint["hot"]:
-                    if t["key"] in blocked_keys:
-                        hotfiles.clear_blocked(ctx.db, t["key"])
-                        blocked_keys.discard(t["key"])
-                    dev_rows.append({**t, "step": "dev", "probation": probation("dev")})
-                    continue
-                # never start two tickets expected to touch the same hot file (docs/v4/merge-conflicts.md)
-                if flying is None:
-                    flying = hotfiles.in_flight_hot_files(
-                        ctx.db, lambda row: footprint(row, include_history=True))
-                if hotfiles.blocking_ticket(candidate_footprint,
-                                           {k: v for k, v in flying.items() if k != t["key"]},
-                                           slots=ctx.settings.hot_file_slots):
-                    # A hot-file holder keeps its reservation through development and review; waiting never permits overlap.
-                    if t["key"] not in blocked_keys:
-                        hotfiles.mark_blocked(ctx.db, t["key"])
-                        blocked_keys.add(t["key"])
-                    continue
-                elif t["key"] in blocked_keys:
-                    hotfiles.clear_blocked(ctx.db, t["key"])
-                    blocked_keys.discard(t["key"])
-                dev_rows.append({**t, "step": "dev", "probation": probation("dev")})
-            dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
-                                         PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
-            out += dev_rows
-        # Routes the Flow doctor moved a ticket away from (failed account or machine) are not offered again.
-        out = flow_doctor.exclude_failed_routes(ctx, account_id, node, [t for t in out if t.get("type") != "Epic"])
-        # Keep the normal workflow order stable, but put a generated flow bug first whenever it is eligible.
-        out.sort(key=lambda t: "flow-bug" not in (t.get("labels") or []))
-        if routing and ticket_key is None and out:  # spend the provider with the most quota left first (docs/v4/provider-routing.md)
-            out = ctx.provider_eligibility.filter_headroom(acc, out)
-        if routing and quota_at_risk and out:
-            # Prefer peers only for tickets they can actually claim. A peer on another node, with different
-            # project access or roles, must not leave this account's otherwise-routable tickets waiting.
-            available_elsewhere: set[tuple[str, str]] = set()
-            for peer in quota_peer_accounts(account_id, roles):
-                for peer_node in peer["nodes"]:
-                    if not rollout.node_compatible(ctx, peer_node, RELEASES)["compatible"]:
-                        continue
-                    available_elsewhere.update((ticket["key"], ticket["step"])
-                                               for ticket in eligible(peer["id"], peer_node, routing=False,
-                                                                      capacity_routing=True,
-                                                                      ticket_key=ticket_key))
-            out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
-        if capacity_routing and out:
-            out = route_capacity(account_id, node, out, ticket_key=ticket_key)
-        return out
+    def eligible(account_id: str, node: str, **options) -> list[dict]:
+        """Tickets this account may take now (rules in features/work/eligible.py)."""
+        return eligible_tickets(ctx, work_deps, account_id, node, **options)
 
     def route_capacity(account_id: str, node: str, offered: list[dict],
                        ticket_key: str | None = None) -> list[dict]:
@@ -4236,6 +3907,12 @@ def create_app(ctx: Ctx) -> FastAPI:
         return [ticket for ticket in offered
                 if ticket.get("step") != "dev" or (ticket["key"], ticket["step"]) not in selected
                 or account_id in selected[(ticket["key"], ticket["step"])]]
+
+    # What the eligibility rules of features/work/eligible.py need from this app; read when a rule runs, so tests may patch RELEASES.
+    work_deps = SimpleNamespace(
+        eligible=eligible, account_master_paused=account_master_paused, last_dev=last_dev,
+        quota_forecast_at_risk=quota_forecast_at_risk, quota_peer_accounts=quota_peer_accounts,
+        route_capacity=route_capacity, ticket_epic=ticket_epic, releases=lambda: RELEASES)
 
     def master_ready(account_id: str, node: str) -> bool:
         if ctx.leases.cooling(account_id) or account_master_paused(account_id):

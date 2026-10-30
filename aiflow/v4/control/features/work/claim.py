@@ -5,6 +5,7 @@ otherwise unchanged and stays one atomic claim."""
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 import secrets
 import uuid
 from typing import Any
@@ -116,8 +117,7 @@ def claim(ctx, deps, body, node: str) -> Any:
         capacity_samples = deps.capacity_history()
         ticket_estimate = capacity.estimate(t, capacity_samples)
         account_row = store.account_forecast(acc.id)
-        account_forecasts = ({str(account_row["id"]): account_row.get("quota_forecast") or {}}
-                             if account_row else {})
+        account_forecasts = {account_row.id: account_row.quota_forecast} if account_row else {}
         account_forecasts = capacity.with_active_quota_reservations(ctx.db, account_forecasts)
         fit = capacity.account_fit(acc.id, account_forecasts.get(acc.id, {}), ticket_estimate)
         expected_tokens = ticket_estimate["tokens"]
@@ -176,8 +176,7 @@ def claim(ctx, deps, body, node: str) -> Any:
     extra: dict[str, Any] = {}
     if body.step == "dev":
         tooling.resolve_ticket(ctx, t["key"], node)
-        extra["machine_tools"] = tooling.machine_tools(
-            store.node_tools(node))
+        extra["machine_tools"] = tooling.machine_tools(store.node_tools(node).as_row())
     dev = prior_dev
     if body.step == "verify" and dev:
         extra["pr"] = {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
@@ -185,20 +184,20 @@ def claim(ctx, deps, body, node: str) -> Any:
                        "dev_summary": (dev["summary"] or "") + handover.render(dev.get("details"))}
     if body.step == "dev":
         v = store.latest_rework(t["key"])
-        if v and (not dev or v["started_at"] > dev["started_at"]):
-            extra["findings"] = (v["details"] or {}).get("findings") or v["summary"]
+        if v and (not dev or v.started_at > dev["started_at"]):
+            extra["findings"] = v.details.get("findings") or v.summary
         if dev and dev["branch"]:
             extra["branch"] = dev["branch"]
         # the master AI's answer to the question a dev run stopped on, until a dev run finishes or blocks again
         a = store.latest_answered_triage(t["key"])
-        if a and not store.dev_finished_since(t["key"], a["started_at"]):
-            q = store.blocked_question_before(t["key"], a["started_at"])
-            extra["triage_answer"] = (a["details"] or {}).get("answer") or a["summary"]
-            extra["triage_question"] = (q or {}).get("summary") or ""
+        if a and not store.dev_finished_since(t["key"], a.started_at):
+            q = store.blocked_question_before(t["key"], a.started_at)
+            extra["triage_answer"] = a.details.get("answer") or a.summary
+            extra["triage_question"] = q
         # an escalation resolved without a triage run (register, policy message, machine, amendment) is answered
         # the same way; the newer of the two wins
         auto = escalations.pending_answer(ctx.db, t["key"])
-        if auto and (not extra.get("triage_answer") or not a or auto["created_at"] > a["started_at"]):
+        if auto and (not extra.get("triage_answer") or not a or auto["created_at"] > a.started_at):
             extra["triage_answer"], extra["triage_question"] = auto["answer"], auto["question"]
         if owner_answer:
             extra["triage_answer"] = owner_answer["answer"]
@@ -216,7 +215,7 @@ def claim(ctx, deps, body, node: str) -> Any:
             log.warning("comments of %s for intake failed: %s", t["key"], e)
     if body.step == "impact":
         # the board the assessment compares against: the project's epics and its open work
-        extra["project_tickets"] = store.open_project_tickets(t["project"], t["key"])
+        extra["project_tickets"] = [asdict(x) for x in store.open_project_tickets(t["project"], t["key"])]
     if body.step == "master":
         extra["master_scope"] = "global"
     else:

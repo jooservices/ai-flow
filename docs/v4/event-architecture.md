@@ -77,4 +77,12 @@ savepoint (a failure leaves none of them), ordered per aggregate and listener, r
 `max_attempts` (the `on_dead` callback opens the incident, and later events of the aggregate are no longer held back), and
 `replay()` puts dead deliveries back. Running it from the control loops comes with the walking skeleton (JAIF-467).
 
-Walking skeleton: `ticket.moved` (JAIF-467) proves the platform before any wide roll-out.
+Walking skeleton (JAIF-468): `merge_flow.record_move` now writes the `ticket_moves` row and publishes `TicketMoved`
+(`features/tickets/events.py`) in one transaction; the `ticket.moved` telemetry row is its in-transaction listener
+(`features/tickets/listeners.py`), so the Command Center timeline is unchanged. `platform/events/wiring.py` gives each
+application context its own registry (filled by the `register_listeners` function of each feature), `publish_for`,
+`dispatcher_for` and the one-second `dispatch_loop` that `run_loops` starts for outbox listeners. The routes that move a ticket through it (`POST /v1/jira/{key}/transition`, `POST /v1/reviews/{key}/answer`,
+`POST /v1/reviews/{key}/approve`, `POST /v1/reviews/{key}/ask-ai`, `POST /v1/reviews/{key}/reject`,
+`POST /v1/reviews/{key}/rework`, `POST /v1/reviews/{key}/skip-gate`) behave as before and now publish the event. Measured on PostgreSQL:
+a move costs 1.36 ms instead of 1.29 ms (300 moves each), and the 100/50/200 scale proof is unchanged (ticket pickup p95
+13.9 to 14.9 s locally, no statement to the event tables because it never moves a ticket through the merge flow).

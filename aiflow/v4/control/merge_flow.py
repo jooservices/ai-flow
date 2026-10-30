@@ -91,11 +91,15 @@ def pr_ref(url: str) -> dict[str, Any] | None:
 
 
 def record_move(ctx, ticket: str, from_status: str, to_status: str, cause: str, detail: str = "") -> None:
-    """Keep who or what moved a ticket, in the move table and on the ticket timeline."""
-    ctx.db.run("INSERT INTO ticket_moves (ticket, from_status, to_status, cause, detail) VALUES (%s,%s,%s,%s,%s)",
-               (ticket, from_status or "", to_status, cause, detail[:500]))
-    ctx.events.emit("ticket.moved", ticket=ticket, outcome=to_status, reason=f"{cause}: {detail}"[:300],
-                    cause=cause, from_status=from_status or "")
+    """Keep who or what moved a ticket, in the move table, and publish `TicketMoved` (its timeline row is a listener)."""
+    from .features.tickets.events import TicketMoved
+    from .platform.events.wiring import publish_for
+
+    with ctx.db.transaction():
+        ctx.db.run("INSERT INTO ticket_moves (ticket, from_status, to_status, cause, detail) VALUES (%s,%s,%s,%s,%s)",
+                   (ticket, from_status or "", to_status, cause, detail[:500]))
+        publish_for(ctx, TicketMoved(ticket_key=ticket, from_status=from_status or "", to_status=to_status, cause=cause,
+                                     detail=detail[:300]))
 
 
 def moves(db, ticket: str, limit: int = 30) -> list[dict]:

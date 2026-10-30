@@ -570,9 +570,27 @@ def _safe_json(value: Any, file_name: str | None = None) -> str:
     return safe + "\n"
 
 
-def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) -> dict[str, bytes]:
+def _readiness_export(ctx) -> dict:
+    """The System check snapshot with the fields the generic secret scanner would mistake for credentials removed."""
     from . import system_check
 
+    readiness = system_check.support_bundle(ctx)
+    # The per-account boolean mirror is redundant with readiness condition rows and its field name resembles
+    # secret metadata to the generic support-bundle scanner. Keep the conditions, omit that redundant map.
+    for node in readiness["system_check"]["nodes"]:
+        snapshot = node.get("readiness", {})
+        snapshot.pop("credential_statuses", None)
+        condition_rows = list(snapshot.get("machine", []) or [])
+        for rows in (snapshot.get("projects", {}) or {}).values():
+            condition_rows.extend(rows or [])
+        for item in condition_rows:
+            if isinstance(item, dict) and str(item.get("id", "")).startswith("credential:"):
+                # Avoid rendering an account condition ID as a secret assignment to the generic text scanner.
+                item["id"] = str(item["id"]).replace("credential:", "credential-", 1)
+    return readiness
+
+
+def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) -> dict[str, bytes]:
     repo = ctx.repo()
     now = datetime.now(timezone.utc)
     version = _safe_release_version(ctx.settings.control_version or VERSION)
@@ -600,19 +618,7 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
                       "subject": "[REDACTED_FREEFORM]", "title": "[REDACTED_FREEFORM]",
                       "detail": "[REDACTED_FREEFORM]"} for row in incidents]
 
-    readiness = system_check.support_bundle(ctx)
-    # The per-account boolean mirror is redundant with readiness condition rows and its field name resembles
-    # secret metadata to the generic support-bundle scanner. Keep the conditions, omit that redundant map.
-    for node in readiness["system_check"]["nodes"]:
-        snapshot = node.get("readiness", {})
-        snapshot.pop("credential_statuses", None)
-        condition_rows = list(snapshot.get("machine", []) or [])
-        for rows in (snapshot.get("projects", {}) or {}).values():
-            condition_rows.extend(rows or [])
-        for item in condition_rows:
-            if isinstance(item, dict) and str(item.get("id", "")).startswith("credential:"):
-                # Avoid rendering an account condition ID as a secret assignment to the generic text scanner.
-                item["id"] = str(item["id"]).replace("credential:", "credential-", 1)
+    readiness = _readiness_export(ctx)
 
     files: dict[str, bytes] = {
         "versions.json": _safe_json({"aiflow": version, "python": platform.python_version(),

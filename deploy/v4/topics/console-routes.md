@@ -1,0 +1,1 @@
+- [Console routes](../../../docs/v4/console-routes.md): The console session, user, view-as, layout, preference, notification and licensing routes.

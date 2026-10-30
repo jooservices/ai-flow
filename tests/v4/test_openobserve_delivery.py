@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from aiflow.v4.control import events as events_module
+from aiflow.v4.control import openobserve_shipper as shipper_module
 from aiflow.v4.control.events import Events
 from aiflow.v4.core.settings import Settings
 
@@ -46,26 +46,26 @@ def test_failed_batch_is_preserved_and_retry_delay_has_a_hard_cap(db, monkeypatc
             self.closed = True
 
     fake = Client()
-    monkeypatch.setattr(events_module.httpx, "Client", lambda **kwargs: fake)
+    monkeypatch.setattr(shipper_module.httpx, "Client", lambda **kwargs: fake)
     events = Events(db, "http://o2", source="test-exporter")
     for idx in range(101):
-        events.q.put_nowait({"type": "test.event", "number": idx})
+        events.shipper.q.put_nowait({"type": "test.event", "number": idx})
     waits = []
 
     def stop_after_retries(seconds):
         waits.append(seconds)
         if len(waits) == 8:
-            events._stop.set()
-        return events._stop.is_set()
+            events.shipper._stop.set()
+        return events.shipper._stop.is_set()
 
-    monkeypatch.setattr(events, "_wait_for_retry", stop_after_retries)
+    monkeypatch.setattr(events.shipper, "_wait_for_retry", stop_after_retries)
     caplog.set_level("WARNING", logger="aiflow4.events")
-    events._ship()
+    events.shipper._ship()
 
     payloads = [json.loads(content) for _, content in fake.payloads]
     assert all(payload == payloads[0] for payload in payloads)
     assert len(payloads[0]) == 100
-    assert events.q.qsize() == 1  # newly queued events are not appended to a batch being retried
+    assert events.shipper.q.qsize() == 1  # newly queued events are not appended to a batch being retried
     assert waits == [1, 2, 4, 8, 16, 32, 60, 60]
     assert len([record for record in caplog.records if "OpenObserve event delivery failing" in record.message]) == 1
     assert fake.closed
@@ -80,13 +80,13 @@ def test_continuous_rejection_opens_one_incident_and_success_resolves_it(ctx, mo
     events.bind_incident_context(ctx)
     caplog.set_level("WARNING", logger="aiflow4.events")
 
-    events._delivery_failed("503 MemoryTableOverflowError", now_at=100.0)
-    events._delivery_failed("503 MemoryTableOverflowError", now_at=130.0)
-    events._delivery_failed("503 MemoryTableOverflowError", now_at=219.9)
+    events.shipper._delivery_failed("503 MemoryTableOverflowError", now_at=100.0)
+    events.shipper._delivery_failed("503 MemoryTableOverflowError", now_at=130.0)
+    events.shipper._delivery_failed("503 MemoryTableOverflowError", now_at=219.9)
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='openobserve_delivery' AND closed_at IS NULL")["n"] == 0
 
-    events._delivery_failed("503 MemoryTableOverflowError", now_at=220.0)
-    events._delivery_failed("503 MemoryTableOverflowError", now_at=225.0)
+    events.shipper._delivery_failed("503 MemoryTableOverflowError", now_at=220.0)
+    events.shipper._delivery_failed("503 MemoryTableOverflowError", now_at=225.0)
     incident = ctx.db.one("SELECT * FROM incidents WHERE kind='openobserve_delivery' AND closed_at IS NULL")
     assert incident["subject"] == "control-api-a:aiflow4_events"
     assert incident["severity"] == "warning"
@@ -94,9 +94,9 @@ def test_continuous_rejection_opens_one_incident_and_success_resolves_it(ctx, mo
     assert len(notifications) == 1
     assert len([record for record in caplog.records if "OpenObserve event delivery failing" in record.message]) == 1
 
-    events._delivery_failed("503 MemoryTableOverflowError", now_at=400.0)
+    events.shipper._delivery_failed("503 MemoryTableOverflowError", now_at=400.0)
     assert len([record for record in caplog.records if "OpenObserve event delivery failing" in record.message]) == 2
-    events._delivery_succeeded(now_at=421.0)
+    events.shipper._delivery_succeeded(now_at=421.0)
     assert ctx.db.one("SELECT closed_at FROM incidents WHERE id=%s", (incident["id"],))["closed_at"] is not None
 
 
@@ -109,7 +109,7 @@ def test_first_successful_batch_closes_incident_left_open_by_a_restarted_exporte
     events = Events(ctx.db, source="control-api-a")
     events.bind_incident_context(ctx)
 
-    events._delivery_succeeded(now_at=200.0)
+    events.shipper._delivery_succeeded(now_at=200.0)
 
     incident = ctx.db.one("SELECT closed_at FROM incidents WHERE kind='openobserve_delivery'")
     assert incident["closed_at"] is not None

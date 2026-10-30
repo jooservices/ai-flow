@@ -319,15 +319,15 @@ def test_node_health_reports_heartbeat_and_preflight_for_the_installer(client, c
 
 
 def test_node_heartbeat_is_shipped_to_openobserve_only(client, ctx):
-    ctx.events.o2_url = "http://o2.test"  # queue only; the shipping thread is not started
+    ctx.events.shipper.url = "http://o2.test"  # queue only; the shipping thread is not started
     cc = join(client, "cc")
-    ctx.events.q.queue.clear()  # discard the test helper's simulated first agent heartbeat
+    ctx.events.shipper.q.queue.clear()  # discard the test helper's simulated first agent heartbeat
     response = client.post("/v1/nodes/cc/heartbeat", json={
         "slots_total": 4, "slots_used": 2, "release_version": "4.0.0", "metrics": {"cpu_pct": 12.5}
     }, headers=cc)
 
     assert response.status_code == 200
-    shipped = [e for e in list(ctx.events.q.queue) if e["type"] == "node.heartbeat"]
+    shipped = [e for e in list(ctx.events.shipper.q.queue) if e["type"] == "node.heartbeat"]
     assert len(shipped) == 1
     assert shipped[0]["node"] == "cc" and shipped[0]["outcome"] == "online"
     assert shipped[0]["slots_total"] == 4 and shipped[0]["metrics"] == {"cpu_pct": 12.5}

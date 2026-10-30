@@ -54,7 +54,8 @@ for a listener.
   `Invalid`) are mapped to HTTP in one place in `platform/errors.py`.
 - Route models (pydantic) are separate from domain entities.
 - Behaviour-preserving moves: the route set (`application-context-route-snapshot.json`) and the REST audit stay unchanged.
-- A new feature starts from the scaffold (JAIF-456), which creates the folder with tests.
+- A new feature starts from the scaffold: `uv run python -m aiflow.v4.core.scaffold_feature <name>` creates the folder,
+  its registration in `control/routes/<name>.py` and a first test, and refuses to overwrite anything.
 
 ## Decisions
 

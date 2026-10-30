@@ -1,0 +1,933 @@
+{
+ "/healthz": {
+  "shape": {
+   "ok": "bool",
+   "version": "str"
+  },
+  "status": 200
+ },
+ "/v1/analytics/conflicts": {
+  "shape": {
+   "bucket": "str",
+   "change": {
+    "seconds": "int",
+    "share_points": "float"
+   },
+   "current": {
+    "average_seconds": "int",
+    "clean_updates": "int",
+    "conflicts": "int",
+    "seconds": "int",
+    "share_percent": "float",
+    "verifications": "int"
+   },
+   "days": "int",
+   "definition": "str",
+   "previous": {
+    "average_seconds": "int",
+    "clean_updates": "int",
+    "conflicts": "int",
+    "seconds": "int",
+    "share_percent": "float",
+    "verifications": "int"
+   },
+   "project": "str",
+   "trend": [
+    {
+     "conflicts": "int",
+     "period": "str",
+     "seconds": "int",
+     "share_percent": "float",
+     "verifications": "int"
+    }
+   ]
+  },
+  "status": 200
+ },
+ "/v1/analytics/daily": {
+  "shape": {
+   "days": "int",
+   "project": "str",
+   "rows": []
+  },
+  "status": 200
+ },
+ "/v1/analytics/usage": {
+  "shape": {
+   "days": "int",
+   "filters": {
+    "account": "str",
+    "project": "str",
+    "ticket": "str"
+   },
+   "group_by": "str",
+   "rows": []
+  },
+  "status": 200
+ },
+ "/v1/analytics/usage/daily": {
+  "shape": {
+   "days": "int",
+   "group_by": "str",
+   "rows": []
+  },
+  "status": 200
+ },
+ "/v1/capacity": {
+  "shape": {
+   "accounts": [
+    {
+     "account": "str",
+     "confidence": "str",
+     "known": "bool",
+     "limiting_window": "str",
+     "provider": "str",
+     "quota_source": "str",
+     "tickets": "int",
+     "tokens_available": "int"
+    }
+   ],
+   "decisions": [],
+   "errors": [],
+   "estimate_method": "str",
+   "estimated_tokens_per_ticket": "int",
+   "limiting_ai": "null",
+   "quota_capacity_tickets": "int",
+   "ready_tickets": "int",
+   "tickets_finishable": "int",
+   "week_start": "str"
+  },
+  "status": 200
+ },
+ "/v1/console/session": {
+  "shape": {
+   "authenticated": "bool"
+  },
+  "status": 200
+ },
+ "/v1/dashboard/disagreements": {
+  "shape": {
+   "after_s": "int",
+   "tickets": []
+  },
+  "status": 200
+ },
+ "/v1/dashboard/quota": {
+  "shape": {
+   "rows": [
+    {
+     "label": "str",
+     "provider": "str",
+     "windows": []
+    }
+   ]
+  },
+  "status": 200
+ },
+ "/v1/dashboard/timeouts": {
+  "shape": {
+   "daily": [],
+   "days": "int",
+   "developer_runs": "int",
+   "target_share_pct": "float",
+   "tickets": [],
+   "timeout_share_pct": "float",
+   "timeouts": "int"
+  },
+  "status": 200
+ },
+ "/v1/dashboard/waiting": {
+  "shape": {
+   "ticket_keys": []
+  },
+  "status": 200
+ },
+ "/v1/deploy/state": {
+  "shape": {
+   "accounts": [
+    {
+     "check_failed": "bool",
+     "cooldown": "null",
+     "cooldown_since": "null",
+     "cooldown_until": "null",
+     "cost_today": "float",
+     "credential_expires_at": "str",
+     "credential_expiry_warning": "bool",
+     "effort": "str",
+     "explicit_only": "bool",
+     "id": "str",
+     "idle_since": "null",
+     "jobs": [
+      "str"
+     ],
+     "last_error": "str",
+     "machines": [
+      {
+       "cost_today": "float",
+       "credential_expires_at": "null",
+       "node": "str",
+       "node_status": "str",
+       "removable": "bool",
+       "runs_24h": "int",
+       "runs_active": "int",
+       "shared_assignment": "bool",
+       "sign_in_pending": "bool",
+       "signed_in": "bool",
+       "signin": "null",
+       "state": "str",
+       "tokens_today": "int"
+      }
+     ],
+     "model": "str",
+     "name": "str",
+     "node": "str",
+     "parallel": "int",
+     "paused": "bool",
+     "provider": "str",
+     "provider_status": "str",
+     "quota": {},
+     "quota_awareness": {},
+     "quota_resets_at": "null",
+     "quota_used": "null",
+     "roles": [
+      "str"
+     ],
+     "run": "null",
+     "runs_active": "int",
+     "session_limit": "int",
+     "shared": "bool",
+     "shared_managed": "bool",
+     "sign_in_pending": "bool",
+     "sign_in_status": "str",
+     "status": "str",
+     "tier": "str",
+     "tokens_today": "int",
+     "worker": {}
+    }
+   ],
+   "active_runs": [],
+   "control_repo": "str",
+   "env": "str",
+   "events": [],
+   "flow_doctor": {
+    "actions": [],
+    "checked": [
+     "str"
+    ],
+    "findings": [],
+    "role_coverage": [
+     {
+      "healthy": "bool",
+      "next_step": "str",
+      "provider_count": "int",
+      "providers": [],
+      "ready_accounts": [],
+      "ready_count": "int",
+      "reason": "str",
+      "role": "str"
+     }
+    ]
+   },
+   "generated_at": "str",
+   "incidents": [],
+   "incidents_recent": [],
+   "links": {
+    "gatus": "str",
+    "mail": "str",
+    "o2": "str"
+   },
+   "nodes": [
+    {
+     "accepting_work": "bool",
+     "accounts_assigned": "int",
+     "capabilities": [],
+     "desired_services": [],
+     "has_agent": "bool",
+     "heartbeat_age_s": "null",
+     "host_load_limits": {
+      "cpu_load_per_cpu": "float"
+     },
+     "host_load_state": {
+      "mode": "str",
+      "reason": "str"
+     },
+     "idle_since": "null",
+     "in_control_repo": "bool",
+     "ip": "str",
+     "joined_at": "str",
+     "last_heartbeat": "null",
+     "load_limits": {
+      "cpu_load_per_cpu": "float",
+      "disk_free_pct": "float",
+      "memory_used_pct": "float"
+     },
+     "load_state": {
+      "mode": "str",
+      "reason": "str"
+     },
+     "metrics": {},
+     "missing_tools": [
+      "str"
+     ],
+     "name": "str",
+     "notes": "str",
+     "projects": [
+      "str"
+     ],
+     "purpose": "str",
+     "release": "str",
+     "required_tools": [
+      "str"
+     ],
+     "role": "str",
+     "services": [],
+     "sessions_busy": "int",
+     "slots_total": "int",
+     "slots_used": "int",
+     "status": "str",
+     "tools": {},
+     "version_policy": {
+      "compatible": "bool",
+      "reason": "str",
+      "state": "str"
+     }
+    }
+   ],
+   "operator_interventions": {
+    "last_24h": "int",
+    "last_7d": "int",
+    "recent": []
+   },
+   "projects": [
+    {
+     "base": "str",
+     "close_suggested": "bool",
+     "closed": "bool",
+     "closed_at": "null",
+     "closed_by": "str",
+     "counts": {},
+     "environments": {},
+     "key": "str",
+     "repo": "str",
+     "report_version": "int",
+     "repositories": [
+      "str"
+     ],
+     "status": "str",
+     "work_minutes": {
+      "hard": "int",
+      "target": "int",
+      "warn": "int"
+     }
+    }
+   ],
+   "recent_runs": [],
+   "release_progress": [],
+   "release_readiness": [],
+   "role_health": {
+    "metrics_days": "int",
+    "roles": [
+     {
+      "account": "str",
+      "cost_per_finished_ticket": "null",
+      "disabled_at": "null",
+      "enabled": "bool",
+      "failure_score": "null",
+      "finished_tickets": "int",
+      "mode": "str",
+      "note": "str",
+      "probation": "null",
+      "provider": "str",
+      "rework_rounds": "int",
+      "role": "str",
+      "scored_runs": "int",
+      "success_rate": "null"
+     }
+    ],
+    "settings": {
+     "defaults": {
+      "failure_percent": "int",
+      "window_runs": "int"
+     },
+     "failure_percent": "int",
+     "updated_at": "null",
+     "updated_by": "str",
+     "window_runs": "int"
+    }
+   },
+   "rollout": "null",
+   "sa": {
+    "network_issues": [],
+    "policy_denials": [],
+    "provider_blocks": [],
+    "recommendations": [],
+    "slots": {
+     "pressure_since": "null",
+     "total": "int",
+     "used": "int",
+     "utilization_percent": "null"
+    },
+    "thresholds": {
+     "credential_expiry_days": "int",
+     "idle_days": "int",
+     "role_cooldown_minutes": "int",
+     "slots_duration_minutes": "int",
+     "slots_used_percent": "int"
+    }
+   },
+   "scale_proof": {
+    "budgets": [
+     {
+      "key": "str",
+      "limit": "float",
+      "measures": "str",
+      "statistic": "str",
+      "title": "str",
+      "unit": "str"
+     }
+    ],
+    "findings": [],
+    "runs": []
+   },
+   "tickets": [],
+   "tool_waits": [],
+   "totals": {
+    "cost_24h": "float",
+    "done_24h": "int",
+    "failed_24h": "int",
+    "runs_24h": "int",
+    "tokens_in_24h": "int",
+    "tokens_out_24h": "int"
+   },
+   "version": "str",
+   "version_policy": {
+    "control": "str",
+    "max_minor_lag": "int"
+   },
+   "versions": {
+    "schema": "int",
+    "tools": {
+     "claude_code": "str"
+    }
+   }
+  },
+  "status": 200
+ },
+ "/v1/environment/missing": {
+  "shape": {
+   "missing": []
+  },
+  "status": 200
+ },
+ "/v1/memory/search": {
+  "shape": {
+   "hits": [],
+   "project": "str",
+   "q": "str"
+  },
+  "status": 200
+ },
+ "/v1/memory/study-cases": {
+  "shape": {
+   "project": "str",
+   "study_cases": []
+  },
+  "status": 200
+ },
+ "/v1/projects": {
+  "shape": {
+   "invalid_projects": [],
+   "projects": [
+    {
+     "base": "str",
+     "checks": {
+      "cannot_run": "int",
+      "has_checks": "bool",
+      "machines": [],
+      "signature": "str"
+     },
+     "key": "str",
+     "node_readiness": [
+      {
+       "blocked": "bool",
+       "conditions": [
+        {
+         "action": "str",
+         "affects_work": "bool",
+         "detail": "str",
+         "id": "str",
+         "name": "str",
+         "result": "str"
+        }
+       ],
+       "name": "str"
+      }
+     ],
+     "priority": "int",
+     "repo": "str",
+     "repositories": [
+      "str"
+     ],
+     "services": [],
+     "stack": "str",
+     "status": "str",
+     "ticket_count": "int"
+    }
+   ]
+  },
+  "status": 200
+ },
+ "/v1/provider-routing": {
+  "shape": {
+   "decisions": [],
+   "order": [
+    "str"
+   ],
+   "providers": [
+    {
+     "accounts": "int",
+     "at_risk_share": "float",
+     "ceiling_pct": "int",
+     "headroom_pct": "float",
+     "held_back": "bool",
+     "held_reason": "str",
+     "note": "str",
+     "preference": "str",
+     "provider": "str",
+     "rank": "int",
+     "score": "float",
+     "unknown": "bool",
+     "windows": []
+    }
+   ],
+   "settings": {
+    "ceilings": {},
+    "defaults": {
+     "ceiling": "int",
+     "order": [
+      "str"
+     ]
+    },
+    "order": [],
+    "updated_at": "null",
+    "updated_by": "str"
+   }
+  },
+  "status": 200
+ },
+ "/v1/provider-routing/decisions": {
+  "shape": {
+   "decisions": [],
+   "limit": "int",
+   "offset": "int",
+   "ticket": "str",
+   "total": "int"
+  },
+  "status": 200
+ },
+ "/v1/reviews": {
+  "shape": {
+   "metrics": {
+    "approved_first_time_pct": "null",
+    "decided_tickets": "int",
+    "finished_tickets": "int",
+    "finished_with_no_person_pct": "null",
+    "median_wait_minutes": "null",
+    "people_needed_eight_weeks_ago": "int",
+    "people_needed_this_week": "int",
+    "sent_back_or_rejected_pct": "null",
+    "suggestions": [
+     {
+      "reason": "str",
+      "suggestion": "str"
+     }
+    ],
+    "weekly": [
+     {
+      "by_reason": {
+       "blocked": "int",
+       "decision_needed": "int",
+       "question_from_ai": "int",
+       "review_before_merge": "int"
+      },
+      "total": "int",
+      "week": "str"
+     }
+    ]
+   },
+   "projects": [
+    "str"
+   ],
+   "threads": [],
+   "tickets": []
+  },
+  "status": 200
+ },
+ "/v1/role-health": {
+  "shape": {
+   "metrics_days": "int",
+   "roles": [
+    {
+     "account": "str",
+     "cost_per_finished_ticket": "null",
+     "disabled_at": "null",
+     "enabled": "bool",
+     "failure_score": "null",
+     "finished_tickets": "int",
+     "mode": "str",
+     "note": "str",
+     "probation": "null",
+     "provider": "str",
+     "rework_rounds": "int",
+     "role": "str",
+     "scored_runs": "int",
+     "success_rate": "null"
+    }
+   ],
+   "settings": {
+    "defaults": {
+     "failure_percent": "int",
+     "window_runs": "int"
+    },
+    "failure_percent": "int",
+    "updated_at": "null",
+    "updated_by": "str",
+    "window_runs": "int"
+   }
+  },
+  "status": 200
+ },
+ "/v1/scale-proof": {
+  "shape": {
+   "budgets": [
+    {
+     "key": "str",
+     "limit": "float",
+     "measures": "str",
+     "statistic": "str",
+     "title": "str",
+     "unit": "str"
+    }
+   ],
+   "findings": [],
+   "runs": []
+  },
+  "status": 200
+ },
+ "/v1/setup/status": {
+  "shape": {
+   "admin_exists": "bool",
+   "bootstrap_token": "str",
+   "locked": "bool"
+  },
+  "status": 200
+ },
+ "/v1/state": {
+  "shape": {
+   "accounts": [
+    {
+     "check_failed": "bool",
+     "cooldown": "null",
+     "cooldown_since": "null",
+     "cooldown_until": "null",
+     "cost_today": "float",
+     "credential_expires_at": "str",
+     "credential_expiry_warning": "bool",
+     "effort": "str",
+     "explicit_only": "bool",
+     "id": "str",
+     "idle_since": "null",
+     "jobs": [
+      "str"
+     ],
+     "last_error": "str",
+     "machines": [
+      {
+       "cost_today": "float",
+       "credential_expires_at": "null",
+       "node": "str",
+       "node_status": "str",
+       "removable": "bool",
+       "runs_24h": "int",
+       "runs_active": "int",
+       "shared_assignment": "bool",
+       "sign_in_pending": "bool",
+       "signed_in": "bool",
+       "signin": "null",
+       "state": "str",
+       "tokens_today": "int"
+      }
+     ],
+     "model": "str",
+     "name": "str",
+     "node": "str",
+     "parallel": "int",
+     "paused": "bool",
+     "provider": "str",
+     "provider_status": "str",
+     "quota": {},
+     "quota_awareness": {},
+     "quota_resets_at": "null",
+     "quota_used": "null",
+     "roles": [
+      "str"
+     ],
+     "run": "null",
+     "runs_active": "int",
+     "session_limit": "int",
+     "shared": "bool",
+     "shared_managed": "bool",
+     "sign_in_pending": "bool",
+     "sign_in_status": "str",
+     "status": "str",
+     "tier": "str",
+     "tokens_today": "int",
+     "worker": {}
+    }
+   ],
+   "active_runs": [],
+   "control_repo": "str",
+   "env": "str",
+   "events": [],
+   "flow_doctor": {
+    "actions": [],
+    "checked": [
+     "str"
+    ],
+    "findings": [],
+    "role_coverage": [
+     {
+      "healthy": "bool",
+      "next_step": "str",
+      "provider_count": "int",
+      "providers": [],
+      "ready_accounts": [],
+      "ready_count": "int",
+      "reason": "str",
+      "role": "str"
+     }
+    ]
+   },
+   "generated_at": "str",
+   "incidents": [],
+   "incidents_recent": [],
+   "links": {
+    "gatus": "str",
+    "mail": "str",
+    "o2": "str"
+   },
+   "nodes": [
+    {
+     "accepting_work": "bool",
+     "accounts_assigned": "int",
+     "capabilities": [],
+     "desired_services": [],
+     "has_agent": "bool",
+     "heartbeat_age_s": "null",
+     "host_load_limits": {
+      "cpu_load_per_cpu": "float"
+     },
+     "host_load_state": {
+      "mode": "str",
+      "reason": "str"
+     },
+     "idle_since": "null",
+     "in_control_repo": "bool",
+     "ip": "str",
+     "joined_at": "str",
+     "last_heartbeat": "null",
+     "load_limits": {
+      "cpu_load_per_cpu": "float",
+      "disk_free_pct": "float",
+      "memory_used_pct": "float"
+     },
+     "load_state": {
+      "mode": "str",
+      "reason": "str"
+     },
+     "metrics": {},
+     "missing_tools": [
+      "str"
+     ],
+     "name": "str",
+     "notes": "str",
+     "projects": [
+      "str"
+     ],
+     "purpose": "str",
+     "release": "str",
+     "required_tools": [
+      "str"
+     ],
+     "role": "str",
+     "services": [],
+     "sessions_busy": "int",
+     "slots_total": "int",
+     "slots_used": "int",
+     "status": "str",
+     "tools": {},
+     "version_policy": {
+      "compatible": "bool",
+      "reason": "str",
+      "state": "str"
+     }
+    }
+   ],
+   "operator_interventions": {
+    "last_24h": "int",
+    "last_7d": "int",
+    "recent": []
+   },
+   "projects": [
+    {
+     "base": "str",
+     "close_suggested": "bool",
+     "closed": "bool",
+     "closed_at": "null",
+     "closed_by": "str",
+     "counts": {},
+     "environments": {},
+     "key": "str",
+     "repo": "str",
+     "report_version": "int",
+     "repositories": [
+      "str"
+     ],
+     "status": "str",
+     "work_minutes": {
+      "hard": "int",
+      "target": "int",
+      "warn": "int"
+     }
+    }
+   ],
+   "recent_runs": [],
+   "release_progress": [],
+   "release_readiness": [],
+   "role_health": {
+    "metrics_days": "int",
+    "roles": [
+     {
+      "account": "str",
+      "cost_per_finished_ticket": "null",
+      "disabled_at": "null",
+      "enabled": "bool",
+      "failure_score": "null",
+      "finished_tickets": "int",
+      "mode": "str",
+      "note": "str",
+      "probation": "null",
+      "provider": "str",
+      "rework_rounds": "int",
+      "role": "str",
+      "scored_runs": "int",
+      "success_rate": "null"
+     }
+    ],
+    "settings": {
+     "defaults": {
+      "failure_percent": "int",
+      "window_runs": "int"
+     },
+     "failure_percent": "int",
+     "updated_at": "null",
+     "updated_by": "str",
+     "window_runs": "int"
+    }
+   },
+   "rollout": "null",
+   "sa": {
+    "network_issues": [],
+    "policy_denials": [],
+    "provider_blocks": [],
+    "recommendations": [],
+    "slots": {
+     "pressure_since": "null",
+     "total": "int",
+     "used": "int",
+     "utilization_percent": "null"
+    },
+    "thresholds": {
+     "credential_expiry_days": "int",
+     "idle_days": "int",
+     "role_cooldown_minutes": "int",
+     "slots_duration_minutes": "int",
+     "slots_used_percent": "int"
+    }
+   },
+   "scale_proof": {
+    "budgets": [
+     {
+      "key": "str",
+      "limit": "float",
+      "measures": "str",
+      "statistic": "str",
+      "title": "str",
+      "unit": "str"
+     }
+    ],
+    "findings": [],
+    "runs": []
+   },
+   "tickets": [],
+   "tool_waits": [],
+   "totals": {
+    "cost_24h": "float",
+    "done_24h": "int",
+    "failed_24h": "int",
+    "runs_24h": "int",
+    "tokens_in_24h": "int",
+    "tokens_out_24h": "int"
+   },
+   "version": "str",
+   "version_policy": {
+    "control": "str",
+    "max_minor_lag": "int"
+   },
+   "versions": {
+    "schema": "int",
+    "tools": {
+     "claude_code": "str"
+    }
+   }
+  },
+  "status": 200
+ },
+ "/v1/support-bundle": {
+  "shape": {
+   "generated_at": "str",
+   "projects": [
+    "str"
+   ],
+   "system_check": {
+    "nodes": [
+     {
+      "checked_at": "null",
+      "name": "str",
+      "readiness": {
+       "credential_statuses": {}
+      },
+      "release": "str",
+      "status": "str"
+     }
+    ]
+   }
+  },
+  "status": 200
+ },
+ "/v1/system-check": {
+  "shape": {
+   "nodes": [
+    {
+     "checked_at": "null",
+     "name": "str",
+     "readiness": {
+      "credential_statuses": {}
+     },
+     "status": "str"
+    }
+   ]
+  },
+  "status": 200
+ }
+}

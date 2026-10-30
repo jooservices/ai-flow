@@ -550,6 +550,8 @@ def run_loops(ctx: ApplicationContext, stop: threading.Event | None = None) -> N
     # never delay the one-minute bound of "Jira follows GitHub" (merge_flow.RECONCILE_BOUND_S)
     reconciler = threading.Thread(target=reconcile_loop, args=(ctx, stop), name="pr-reconcile", daemon=True)
     reconciler.start()
+    from .platform.events import wiring as event_wiring
+    threading.Thread(target=event_wiring.dispatch_loop, args=(ctx, stop), name="event-dispatch", daemon=True).start()
     while not stop.is_set():
         now = time.time()
         try:

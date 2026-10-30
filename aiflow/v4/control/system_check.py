@@ -491,6 +491,25 @@ def _jira_workflow_condition(ctx, project_key: str, trigger: str,
                      f"Jira project {project_key} has all required workflow statuses.")
 
 
+def _service_conditions(project, metrics: dict, node: str) -> list[dict[str, object]]:
+    """One condition per service the project requires: healthy, started automatically, or needing repair."""
+    out: list[dict[str, object]] = []
+    services = (metrics.get("services") or {}) if isinstance(metrics, dict) else {}
+    for service in project.required_services:
+        state = services.get(service) if isinstance(services, dict) else None
+        if not isinstance(state, dict) or not state.get("healthy"):
+            detail = "The service has not reported healthy."
+            out.append(condition(f"service:{service}", f"Service · {service}", "needs_action", detail,
+                                 f"Start or repair the {service} service on node {node}."))
+        elif state.get("state") in {"started", "recreated"}:
+            out.append(condition(f"service:{service}", f"Service · {service}", "fixed_automatically",
+                                 f"The {service} service was started automatically and is healthy."))
+        else:
+            out.append(condition(f"service:{service}", f"Service · {service}", "ready",
+                                 f"The {service} service is healthy."))
+    return out
+
+
 def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, metrics: dict,
                         auto_fixed_tools: set[str], credentials: dict[str, dict],
                         trigger: str = "heartbeat", provider_checks: bool = True) -> list[dict[str, object]]:
@@ -531,19 +550,7 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
             out.append(condition(f"tool:{tool}", f"Tool · {tool}", "ready",
                                  f"{tool} is installed and matches its configured version."))
 
-    services = (metrics.get("services") or {}) if isinstance(metrics, dict) else {}
-    for service in project.required_services:
-        state = services.get(service) if isinstance(services, dict) else None
-        if not isinstance(state, dict) or not state.get("healthy"):
-            detail = "The service has not reported healthy."
-            out.append(condition(f"service:{service}", f"Service · {service}", "needs_action", detail,
-                                 f"Start or repair the {service} service on node {node}."))
-        elif state.get("state") in {"started", "recreated"}:
-            out.append(condition(f"service:{service}", f"Service · {service}", "fixed_automatically",
-                                 f"The {service} service was started automatically and is healthy."))
-        else:
-            out.append(condition(f"service:{service}", f"Service · {service}", "ready",
-                                 f"The {service} service is healthy."))
+    out.extend(_service_conditions(project, metrics, node))
 
     if not repositories or any(not project.settings_for_repo(name).get("base") for name in repositories):
         out.append(condition("repository-settings", "Repository settings", "needs_action",

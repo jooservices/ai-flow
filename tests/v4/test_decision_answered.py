@@ -49,4 +49,4 @@ def test_a_failing_resume_is_left_for_the_dispatcher_to_retry(ctx, db, monkeypat
 
 def test_the_event_carries_ids_and_text_but_no_secrets():
     names = {item.name for item in dataclasses.fields(DecisionAnswered)}
-    assert names == {"decision_id", "answer", "answered_by", "waiting_tickets", "skip_ticket"}
+    assert names == {"decision_id", "answer", "answered_by", "waiting_tickets", "skip_ticket", "ticket_key", "title"}

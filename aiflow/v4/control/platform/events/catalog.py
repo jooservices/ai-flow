@@ -16,6 +16,18 @@ CATALOG: dict[str, type["DomainEvent"]] = {}
 
 
 @dataclass(frozen=True)
+class Audit:
+    """One row of the append-only write audit that an event asks for (see platform/events/audit_ledger.py)."""
+
+    target: str
+    action: str
+    ticket: str
+    actor: str
+    result: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class DomainEvent:
     """Base of every domain event; subclasses are frozen dataclasses whose fields are the payload."""
 
@@ -27,6 +39,10 @@ class DomainEvent:
 
     def aggregate_id(self) -> str:
         return str(getattr(self, self.aggregate_field))
+
+    def audit(self) -> Audit | None:
+        """The write-audit row of this event; an event that is audited overrides it. Routes then do not call audit()."""
+        return None
 
 
 @dataclass(frozen=True)

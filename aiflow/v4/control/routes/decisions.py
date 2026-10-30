@@ -48,8 +48,6 @@ def decision_answer(decision_id: int, body: OwnerDecisionAnswerBody, request: Re
         raise HTTPException(409, str(exc)) from None
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from None
-    route_deps.audit(ctx, "escalation", "decision-answer", row["ticket_key"], "", None, user.subject, True,
-                     f"D{row['id']} {row['title']}", {"decision_id": row["id"]})
     return {"id": row["id"], "register": escalations.register(ctx.db)}
 
 

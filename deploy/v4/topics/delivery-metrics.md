@@ -1,0 +1,1 @@
+- [Delivery metrics](../../../docs/v4/delivery-metrics.md): lead time, branch-update commits, CI attempts and hot-file churn per merged pull request, and the baseline before the refactor.

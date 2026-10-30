@@ -224,6 +224,10 @@ def test_canary_rollback_opens_incident_and_flow_bug_with_suspected_commit():
             self.incident_open = False
             self.pending = {}
 
+        @contextmanager
+        def transaction(self):
+            yield self
+
         def one(self, sql, params=None):
             self.calls.append((sql, params))
             if "INSERT INTO incidents" in sql:
@@ -314,6 +318,10 @@ def test_under_observed_promotion_records_the_run_count_and_configured_minimum()
     class DB:
         def __init__(self):
             self.calls = []
+
+        @contextmanager
+        def transaction(self):
+            yield self
 
         def one(self, sql, params=None):
             self.calls.append((sql, params))

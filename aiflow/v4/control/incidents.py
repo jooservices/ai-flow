@@ -146,29 +146,10 @@ def open_incident(ctx, kind: str, subject: str, severity: str, title: str, detai
                      " ON CONFLICT (kind, subject) WHERE closed_at IS NULL DO NOTHING RETURNING id",
                      (kind, subject, severity, title, detail))
     if row:
-        ctx.events.emit("incident.opened", reason=title, outcome=severity, kind=kind, subject=subject, detail=detail)
-        ticket = ctx.db.one("SELECT key,project,parent_key FROM tickets WHERE key=%s", (subject,))
-        latest_run = ctx.db.one("SELECT id FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 1", (subject,)) if ticket else None
-        try:
-            knowledge.write_study_case(
-                ctx.db, project=ticket["project"] if ticket else "", scope="project" if ticket else "general",
-                epic=knowledge._ticket_epic(ctx.db, subject, ticket.get("parent_key") or "") if ticket else "",
-                title=f"Incident: {title[:170]}", situation=detail or title, cause=title,
-                fix="Resolution pending while this incident is open.",
-                prevention="Use the incident trigger and recovery checks when handling a similar condition.",
-                source_type="incident", source_ref=str(row["id"]),
-                source_url=(f"{ctx.settings.jira_site.rstrip('/')}/browse/{subject}"
-                            if ticket and ctx.settings.jira_site else ""),
-                ticket_key=subject if ticket else "", run_id=str(latest_run["id"]) if latest_run else "")
-        except Exception as exc:  # noqa: BLE001 - incident alerts still flow if knowledge storage is unavailable
-            import logging
-            logging.getLogger("aiflow4.incidents").warning("incident knowledge capture failed: %s", type(exc).__name__)
-        if severity in ("critical", "warning"):
-            channels = notify.send(severity, title, detail, ctx.settings.public_url + "/cc", ctx=ctx,
-                                   alert_kind="critical_incident" if severity == "critical" else "ticket_needs_person",
-                                   ticket=subject if _TICKET_KEY.fullmatch(subject or "") else "",
-                                   needed=detail or title)
-            ctx.db.run("UPDATE incidents SET notified=%s WHERE id=%s", (bool(channels), row["id"]))
+        from .features.incidents.events import IncidentOpened
+        from .platform.events.wiring import publish_for
+        publish_for(ctx, IncidentOpened(incident_id=row["id"], kind=kind, subject=subject, severity=severity, title=title,
+                                        detail=detail), deliver_now=True)
     return bool(row)
 
 

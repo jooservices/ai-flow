@@ -26,6 +26,14 @@ def _usage_counts(usage: dict) -> tuple[int, int]:
     return tokens_in, _token_count(usage.get("output_tokens"))
 
 
+def _record_cost(ev: dict, res: RunResult) -> None:
+    if ev.get("total_cost_usd") is not None:
+        try:
+            res.cost_usd = float(ev["total_cost_usd"])
+        except (TypeError, ValueError):
+            pass
+
+
 def _record_usage(event: dict, res: RunResult, *, replace: bool = False) -> None:
     usage = event.get("usage")
     if not isinstance(usage, dict):
@@ -70,21 +78,13 @@ class GrokAdapter(Adapter):
             _record_usage(ev, res)
         elif t == "end":
             _record_usage(ev, res, replace=True)
-            if ev.get("total_cost_usd") is not None:
-                try:
-                    res.cost_usd = float(ev["total_cost_usd"])
-                except (TypeError, ValueError):
-                    pass
+            _record_cost(ev, res)
         elif t == "error":
             msg = str(ev.get("message") or "")
             res.error_message = msg[:400]
             res.error_kind = "quota" if QUOTA_PATTERN.search(msg) else ("auth" if AUTH_PATTERN.search(msg) else "provider")
             _record_usage(ev, res, replace=True)
-            if ev.get("total_cost_usd") is not None:
-                try:
-                    res.cost_usd = float(ev["total_cost_usd"])
-                except (TypeError, ValueError):
-                    pass
+            _record_cost(ev, res)
         elif t in ("result", "final", "message") and ev.get("text"):
             res.final_text = ev.get("text") or res.final_text
         elif t == "result" and ev.get("result"):

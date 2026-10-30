@@ -53,8 +53,11 @@ it is stale.
 ## Conventions
 
 - Commands and queries are direct calls to a service; only reactions go through events.
-- A service takes only the repositories it uses (no god context). Domain errors (`NotFound`, `Conflict`, `Forbidden`,
-  `Invalid`) are mapped to HTTP in one place in `platform/errors.py`.
+- A service takes only the repositories it uses (no god context). Domain errors (`Invalid` 400, `Unauthorized` 401, `Forbidden` 403, `NotFound` 404,
+  `Conflict` 409, `Unprocessable` 422, `Unavailable` 503) live in `platform/errors.py`, the one place that knows their status.
+  They derive from `HTTPException`, so existing `except HTTPException` handlers and FastAPI's response keep working while
+  services stop importing FastAPI. `run_inbox.py` is the first module moved (it serves `POST /v1/master/actions`,
+  `POST /v1/runs/{run_id}/heartbeat`, `POST /v1/runs/{run_id}/release` and `POST /v1/runs/{run_id}/result`, whose responses are unchanged); a module moves when it is touched.
 - Route models (pydantic) are separate from domain entities.
 - Behaviour-preserving moves: the route set (`application-context-route-snapshot.json`) and the REST audit stay unchanged.
 - A new feature starts from the scaffold: `uv run python -m aiflow.v4.core.scaffold_feature <name>` creates the folder,

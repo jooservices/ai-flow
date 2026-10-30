@@ -51,7 +51,7 @@ from . import (business, capacity_routing as capacity_routing_service, dashboard
                flow_doctor, flow_doctor_api, jira_connect, knowledge, layouts, licensing, load_policy, load_policy_api,
                log_viewer, memory, quota_refresh, role_health, rollout, runtime_settings, scale_proof, setup_wizard,
                shared_accounts, state_schema, support_bundle, system_check, system_check_api, tooling, version_release,
-               work_steps)
+               work_steps, dev_history)
 from . import run_inbox as run_inbox_control
 from . import triage_claim as triage_claim_service
 from . import environment as environment_reports
@@ -3930,7 +3930,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             # Verify and rework restore the repository settings captured by the development run. Gate on those
             # same settings so a later project remap cannot offer container work to a node without the runtime.
             if step in {"dev", "verify", "qa", "triage"}:
-                prior_dev = last_dev(str(ticket.get("key") or ""), done=True) or last_dev(str(ticket.get("key") or ""))
+                prior_dev = dev_history.delivered_or_last(ctx.db, str(ticket.get("key") or ""))
                 details = (prior_dev or {}).get("details") or {}
                 prior_repository = str(details.get("repository") or "")
                 if prior_repository:
@@ -4401,7 +4401,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         epic = ticket_epic(t)
         ticket_data = {**{k: t[k] for k in ("key", "project", "summary", "description", "labels", "priority", "type")},
                        "parent_key": t.get("parent_key"), "epic": epic}
-        prior_dev = None if body.step == "master" else (last_dev(t["key"], done=True) or last_dev(t["key"]))
+        prior_dev = None if body.step == "master" else dev_history.delivered_or_last(ctx.db, t["key"])
         selected_repo = p.settings_for_ticket(ticket_data) if p else {}
         # Once development starts, verify and rework keep the repository that produced the PR even if
         # the owner changes the epic mapping while that work waits for review.

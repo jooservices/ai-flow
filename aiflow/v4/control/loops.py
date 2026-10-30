@@ -38,7 +38,6 @@ from ..core.services import service_gaps
 from ..core.toolchains import toolchain_gaps
 from .application_context import ApplicationContext
 from .incidents import check_idle_flow, check_stack_pins, close_incident, open_incident
-from .human_review_notice import notify_human_review
 from .db import J
 from .state import NODE_OFFLINE_S
 from .quota import assessments as quota_assessments
@@ -211,13 +210,11 @@ def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
                        (t["first_in_progress"], t["key"]))
         if not old:
             project_lifecycle.reopen_for_new_ticket(ctx, t["project"], t["key"])
-        if t["type"] == "Epic" and t["status"] == "Done" and (not old or old["status"] != "Done"):
+        if t["type"] == "Epic" and t["status"] == "Done" and not old:  # a moved epic is reported by its listener
             try:
                 project_lifecycle.report_done_epic(ctx, t["project"], t["key"])
             except Exception as e:  # noqa: BLE001
                 log.warning("could not generate completion report for epic %s: %s", t["key"], e)
-        if old and old["status"] != "Human review" and t["status"] == "Human review":
-            notify_human_review(ctx, t["key"], t)
         if old and old["status"] != t["status"]:  # the flow writes its own moves to the mirror first: this one is a person's
             merge_flow.record_move(ctx, t["key"], old["status"], t["status"], merge_flow.PERSON, "moved in Jira")
         ready = "aiflow-ready" in t["labels"]

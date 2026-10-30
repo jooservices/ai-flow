@@ -7,8 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import Any
 
-from ..human_review_notice import notify_human_review
-from .. import merge_flow, projects as project_lifecycle, route_deps
+from .. import merge_flow, route_deps
 
 log = logging.getLogger("aiflow4.api")  # the logger name the handlers always used
 router = APIRouter()
@@ -46,13 +45,6 @@ def jira_transition(request: Request, key: str, body: JiraWrite, node: str = Dep
         merge_flow.record_move(ctx, key, previous["status"], status,
                                merge_flow.FLOW_MERGE if merged_by_verify else merge_flow.FLOW,
                                f"{run['step']} run by {run['account_id']}")
-    if previous and previous["type"] == "Epic" and previous["status"] != "Done" and status == "Done":
-        try:
-            project_lifecycle.report_done_epic(ctx, previous["project"], key)
-        except Exception as e:  # noqa: BLE001
-            log.warning("could not generate completion report for epic %s: %s", key, e)
-    if previous and previous["status"] != "Human review" and status == "Human review":
-        notify_human_review(ctx, key, {**previous, "key": key})
     return {"status": status}
 
 

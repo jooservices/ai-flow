@@ -24,3 +24,27 @@ After phase 2 of the refactor (the pilot features) the command is run again and 
 roll-out continues (JAIF-473). The structure is working when pull requests touching `api.py` fall well below half and
 branch-update commits and CI attempts per pull request fall. If they do not, the roll-out stops and the plan is revised.
 The weekly report (`notify.py`) does not include these numbers yet; run the command for the review.
+
+## Phase 2 review (30 October 2026, JAIF-473)
+
+The pilot features (tickets and escalation) and the event platform are merged. The same command over the last 100 and the last
+25 merged pull requests:
+
+| Metric | Baseline (100) | After, last 100 | After, last 25 |
+| --- | --- | --- | --- |
+| Lead time, median / p90 (hours) | 2.19 / 81.1 | 1.64 / 14.5 | 0.11 / 2.38 |
+| Pull requests with a branch-update commit | 55 | 46 | 4 |
+| Branch-update commits per pull request | 1.15 | 0.99 | 0.2 |
+| CI attempts per pull request | 3.89 | 3.24 | 1.96 |
+| Pull requests touching `api.py` | 50% | 41% | 20% |
+| Pull requests touching `console.html` | 35% | 26% | 0% |
+
+What the numbers can and cannot say. The direction is the wanted one, but the last 25 pull requests are almost all
+refactor foundations (documents, tests, new modules) written in sequence by one author, so they avoid `api.py` and each
+other by construction; they do not yet show how parallel feature tickets behave. Cost side: a ticket move costs 1.36 ms
+instead of 1.29 ms, the scale proof is unchanged, and the pickup budget was met on CI after JAIF-449. The honest reading is
+"no harm found, benefit not yet proven".
+
+Decision: go on with the roll-out (phase 4), in the order work, fleet, projects, console, release. Stop-loss: measure again
+after the first two roll-out features and after ten feature tickets from other authors have merged; if pull requests touching
+`api.py` are still above 40% or branch-update commits per pull request above 1, pause and revise the plan.

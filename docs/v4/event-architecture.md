@@ -76,6 +76,10 @@ ledger stays append-only and the row commits with the change. `DecisionAnswered`
 no longer calls `audit()` itself, and the deadline default and the Jira answer path are now audited too. The remaining
 `audit()` calls move with their features (JAIF-478).
 
+`Events` (telemetry log) is split by responsibility: `events.py` writes the registry row and hands the event over; shipping to
+OpenObserve (queue, thread, capped backoff, delivery incident) is `openobserve_shipper.OpenObserveShipper`, reached as
+`events.shipper`. Telemetry stays a log and is not a domain event, so there is no listener for it (JAIF-476).
+
 ## Conventions
 
 - Commands and queries are direct calls to a service; only reactions go through events.

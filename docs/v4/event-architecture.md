@@ -50,6 +50,14 @@ for a listener.
 The full list of events with their owner, payload and listeners is generated into [events.md](events.md); a test fails when
 it is stale.
 
+## Pilot: the tickets feature
+
+`features/tickets/` has `models.Ticket` (frozen), `repository.TicketRepository` (get, update_status, remove_label,
+update_description; typed results) and `events.TicketMoved`. It replaced `repositories/tickets.py`, whose six candidate queries
+and two other functions had no caller. `escalations.py` and `ticket_lifecycle.py` use it (they serve `POST /v1/decisions/{decision_id}/answer`,
+`POST /v1/escalations/raise`, `POST /v1/escalations/triage` and `POST /v1/work/claim`, whose behaviour is unchanged); the remaining direct `tickets`
+SQL of `api.py` moves with the features that own it.
+
 ## Conventions
 
 - Commands and queries are direct calls to a service; only reactions go through events.

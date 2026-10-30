@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from .repositories import tickets as ticket_repository
+from .features.tickets.repository import TicketRepository
 from .repositories import triage_claim as claim_repository
 
 
@@ -52,7 +52,7 @@ def transition(ctx, ticket: dict, name: str) -> str:
             raise RuntimeError(f"{ticket['key']} did not transition to {rule.target}")
     else:
         status = rule.target
-    ticket_repository.update_status(ctx.db, ticket["key"], status)
+    TicketRepository(ctx.db).update_status(ticket["key"], status)
     ctx.events.emit("jira.transition", ticket=ticket["key"], project=ticket["project"], account="control",
                     node="control", outcome=status, reason=rule.reason)
     return status

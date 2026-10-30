@@ -31,9 +31,9 @@ from ..core.owner_escalation import owner_question_comment
 from ..core.text import normalize_adf_text, slug
 from . import tooling
 from . import ticket_lifecycle
+from .features.tickets.repository import TicketRepository
 from .repositories import escalations as escalation_repository
 from .repositories import nodes as node_repository
-from .repositories import tickets as ticket_repository
 from .repositories import triage_claim as triage_claim_repository
 from ..core.toolchains import parse_missing_requirements
 
@@ -356,7 +356,7 @@ def _resume_waiting_tickets(ctx, decision: dict, text: str, skip_ticket: str) ->
 
 def _resume_waiting_ticket(ctx, decision: dict, text: str, key: str, skip_ticket: str) -> None:
     if key != skip_ticket:
-        ticket = ticket_repository.lifecycle_ticket(ctx.db, key)
+        ticket = TicketRepository(ctx.db).get(key)
         if not ticket:
             raise LookupError(f"ticket {key} is missing from the Jira mirror")
         clear_owner_labels(ctx, key)
@@ -368,7 +368,7 @@ def _resume_waiting_ticket(ctx, decision: dict, text: str, key: str, skip_ticket
             comments = []
         if not any(str(item.get("body") or "").strip() == comment for item in comments):
             ctx.jira.comment(key, comment)
-        ticket_lifecycle.transition(ctx, ticket, "verified-owner-answer")
+        ticket_lifecycle.transition(ctx, {"key": ticket.key, "project": ticket.project}, "verified-owner-answer")
     escalation_repository.finish_resumption(ctx.db, key, decision["id"], text)
 
 
@@ -382,7 +382,7 @@ def clear_owner_labels(ctx, ticket: str) -> None:
     """Remove the public and compatibility labels once the owner has answered."""
     for label in ("needs-owner", "owner-escalated"):
         ctx.jira.remove_label(ticket, label)
-        ticket_repository.remove_label(ctx.db, ticket, label)
+        TicketRepository(ctx.db).remove_label(ticket, label)
 
 
 def _store_owner_answer(db, decision_id: int, text: str, by: str) -> dict:
@@ -683,7 +683,7 @@ def amend_description(description: str, criterion: str, decision_id: int, enviro
 def amend_ticket(ctx, ticket: str, project: str, criterion: str, environment: str, reason: str, narrowed: str = "",
                  by: str = "triage") -> dict | None:
     """Amend the ticket itself and record the amendment in the register. Never blocks: the ticket goes back to work."""
-    row = ticket_repository.description(ctx.db, ticket)
+    row = TicketRepository(ctx.db).get(ticket)
     if not row or not criterion:
         return None
     existing = escalation_repository.amendment_for_ticket(ctx.db, ticket, criterion)
@@ -693,7 +693,7 @@ def amend_ticket(ctx, ticket: str, project: str, criterion: str, environment: st
     entry = existing or escalation_repository.insert_pending_amendment(
         ctx.db, unique_topic(ctx.db, f"amend {ticket} {criterion}"),
         f"{criterion.upper()} of {ticket} amended", reason, project, ticket, by)
-    amended = amend_description(row["description"] or "", criterion, entry["id"], environment, narrowed)
+    amended = amend_description(row.description, criterion, entry["id"], environment, narrowed)
     if not amended:
         if not existing:
             escalation_repository.delete_pending_amendment(ctx.db, entry["id"])
@@ -702,7 +702,7 @@ def amend_ticket(ctx, ticket: str, project: str, criterion: str, environment: st
     # Keep the pending register row if Jira is unavailable or the process stops here. A retry finds the same row
     # and replays this ticket update instead of treating the pending entry as a completed amendment.
     ctx.jira.set_description(ticket, text)
-    ticket_repository.update_description(ctx.db, ticket, text)
+    TicketRepository(ctx.db).update_description(ticket, text)
     entry = escalation_repository.update_decision(ctx.db, entry["id"], f"{summary}: {reason}")
     return {"decision": entry, "summary": summary, "citation": citation(entry), "already": False}
 

@@ -33,7 +33,7 @@ from urllib.parse import urlsplit
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse)
+from fastapi.responses import (JSONResponse, PlainTextResponse, Response, StreamingResponse)
 from pydantic import BaseModel, Field
 
 from .. import VERSION
@@ -53,7 +53,6 @@ from .console_auth import (ConsoleUser, COOKIE_NAME, has_permission,
 from . import capacity, merge_queue, review_queue_api, worker_candidates
 from . import merge_flow
 from . import quota as quota_reporting
-from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from . import route_deps
 from .db import J
@@ -63,10 +62,10 @@ from .github_connect import GitHubSecretStore
 from .github_registry import github_connections as _github_registry
 from .github_connections import DEFAULT_ID, Connection, GitHubConnections, GitHubTokenApp
 from .policy import decide_master_action
-from .report import ReportNotFound, build_report, render_csv, render_html, render_markdown
 from . import inventory, notify, pr_comments
 from .pr_comments import PRCommentBody
 from .application_context import Ctx
+from .features.project_report import routes as project_report_module
 from .features.console import routes as console_module
 from .stakeholder_screenshot import decode_screenshot
 from .features.release import routes as release_module
@@ -505,10 +504,6 @@ class ChangeRequestBody(BaseModel):
     title: str = ""
     description: str = ""
     epic: str = ""
-
-
-class CloseProjectBody(BaseModel):
-    actor: str = "owner"
 
 
 class KnowledgeBody(BaseModel):
@@ -2558,64 +2553,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"account": acc.id, "provider": acc.provider, "tier": acc.tier, "model": model, "effort": effort}
 
 
-    # --- state for dashboards ---------------------------------------------------------------------------------
-    @app.get("/v1/projects/{key}/versions")
-    def project_versions(key: str) -> dict:
-        if key not in ctx.repo().projects:
-            raise HTTPException(404, f"unknown project {key}")
-        versions = ctx.db.all(
-            "SELECT v.id, v.name, v.released, v.release_date, count(t.key)::int AS ticket_count,"
-            " count(t.key) FILTER (WHERE t.status='Done')::int AS done_count"
-            " FROM versions v LEFT JOIN ticket_versions tv ON tv.version_id=v.id"
-            " LEFT JOIN tickets t ON t.key=tv.ticket_key WHERE v.project=%s"
-            " GROUP BY v.id, v.name, v.released, v.release_date ORDER BY v.name, v.id", (key,))
-        for version in versions:
-            version["open_tickets"] = ctx.db.all(
-                "SELECT t.key, t.summary, t.status FROM ticket_versions tv"
-                " JOIN tickets t ON t.key=tv.ticket_key"
-                " WHERE tv.version_id=%s AND t.project=%s AND t.status <> 'Done' ORDER BY t.key",
-                (version["id"], key))
-        return {"project": key, "versions": versions}
-
-    @app.get("/v1/projects/{key}/report")
-    def project_report(key: str, epic: str | None = None, format: str = Query(default="json")):
-        if key not in ctx.repo().projects:
-            raise HTTPException(404, f"unknown project {key}")
-        if format not in ("json", "md", "csv", "html"):
-            raise HTTPException(400, "format must be json, md, csv or html")
-        try:
-            report = build_report(ctx, key, epic)
-        except ReportNotFound as e:
-            raise HTTPException(404, str(e)) from e
-        if format == "md":
-            filename = f"{epic or key}-progress.md"
-            return PlainTextResponse(render_markdown(report), media_type="text/markdown",
-                                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
-        if format == "csv":
-            filename = f"{epic or key}-progress.csv"
-            return PlainTextResponse(render_csv(report), media_type="text/csv; charset=utf-8",
-                                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
-        if format == "html":
-            return HTMLResponse(render_html(report))
-        return report
-
-    @app.post("/v1/projects/{key}/close")
-    def close_project(key: str, body: CloseProjectBody | None = None) -> dict:
-        if key not in ctx.repo().projects:
-            raise HTTPException(404, f"unknown project {key}")
-        result = project_lifecycle.close_project(ctx, key, body.actor if body else "owner")
-        return {"project": key, "status": result["status"], "version": result["version"],
-                "report": result.get("report"), "markdown": result.get("markdown"),
-                "study_case_ref": result["study_case_ref"], "created": result["created"],
-                "sent_channels": result["sent_channels"]}
-
-    @app.get("/v1/projects/{key}/study-cases")
-    def project_study_cases(key: str, limit: int = Query(50, ge=1, le=100)) -> dict:
-        if key not in ctx.repo().projects:
-            raise HTTPException(404, f"unknown project {key}")
-        cases = project_lifecycle.study_cases(ctx.db, key, limit)
-        return {"project": key, "study_cases": cases}
-
     # --- Business view: change requests (same access as the console, no node token) -----------------------------
     def business_project(key: str) -> str:
         if key not in ctx.repo().projects:
@@ -3160,4 +3097,5 @@ def create_app(ctx: Ctx) -> FastAPI:
     projects_routes = projects_module.install(app, ctx, SimpleNamespace(audit=audit, console_user=console_user, fenced=fenced, node_auth=node_auth, optional_console_user=optional_console_user, require_capacity=require_capacity))
     version_release_module.install(app, ctx, SimpleNamespace(account_master_paused=account_master_paused, bot_identity=bot_identity, fenced=fenced, node_auth=node_auth, quota_peer_release_candidates=quota_peer_release_candidates))
     console_module.install(app, ctx, SimpleNamespace(audit=audit, audit_in=audit_in, console_user=console_user, optional_console_user=optional_console_user, require_capacity=require_capacity))
+    project_report_module.install(app, ctx, SimpleNamespace())
     return app

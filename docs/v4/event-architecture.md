@@ -64,6 +64,12 @@ Human review. They run when the dispatcher delivers the event, about a second af
 reacts to a move made by the flow itself (before, only the two inline places did). The epic status rules of `jira_sync`
 (`_reconcile_epics`) and the merge flow follow in later slices.
 
+Escalation pilot: when the owner answers (`answer_decision`) or answers in Jira (`owner_answered_on_ticket`), the code publishes
+`DecisionAnswered` (`features/escalation/events.py`) and the outbox listener `escalation.resume_waiting_tickets` resumes the waiting
+tickets. `publish_for(ctx, event, deliver_now=True)` attempts the delivery right after the commit, so an answer still resumes in the
+same request; if the resume fails, the delivery stays pending and the dispatcher retries it with backoff (on top of the existing
+`retry_resumptions`). The events are listed in [events.md](events.md).
+
 ## Conventions
 
 - Commands and queries are direct calls to a service; only reactions go through events.

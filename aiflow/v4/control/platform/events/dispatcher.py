@@ -22,7 +22,7 @@ _DUE_SQL = """
 SELECT d.event_id, d.listener, d.attempts, e.seq, e.id, e.type, e.version, e.occurred_at, e.aggregate, e.aggregate_id,
        e.correlation_id, e.causation_id, e.payload
 FROM domain_event_deliveries d JOIN domain_events e ON e.id = d.event_id
-WHERE d.status = 'pending' AND d.next_attempt_at <= %s
+WHERE d.status = 'pending' AND d.next_attempt_at <= %s AND (%s::text IS NULL OR d.event_id = %s)
   AND NOT EXISTS (SELECT 1 FROM domain_event_deliveries p JOIN domain_events pe ON pe.id = p.event_id
                   WHERE p.listener = d.listener AND p.status = 'pending' AND pe.aggregate = e.aggregate
                     AND pe.aggregate_id = e.aggregate_id AND pe.seq < e.seq)
@@ -43,18 +43,18 @@ class Dispatcher:
         self.on_dead = on_dead
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
-    def run_once(self, limit: int = 100) -> int:
-        """Attempt up to `limit` due deliveries; return how many were attempted."""
+    def run_once(self, limit: int = 100, event_id: str | None = None) -> int:
+        """Attempt up to `limit` due deliveries (of one event when `event_id` is given); return how many."""
         attempted = 0
-        while attempted < limit and self._deliver_next():
+        while attempted < limit and self._deliver_next(event_id):
             attempted += 1
         return attempted
 
-    def _deliver_next(self) -> bool:
+    def _deliver_next(self, event_id: str | None = None) -> bool:
         now = self.clock()
         dead: tuple[Envelope, str, str] | None = None
         with self.db.transaction():
-            row = self.db.one(_DUE_SQL, (now,))
+            row = self.db.one(_DUE_SQL, (now, event_id, event_id))
             if not row:
                 return False
             envelope = Envelope(id=row["id"], type=row["type"], version=row["version"], occurred_at=row["occurred_at"],

@@ -102,7 +102,8 @@ is always checked again without the preference.
 
 ## Cost of a pickup
 
-`POST /v1/work/claim` and `POST /v1/work/candidates` ask for the prior development run of a ticket only through
-`control/dev_history.py`, in one query (the latest run that delivered work, else the latest finished one), so a node that
-lacks the container runtime does not pay two queries per ticket and account (JAIF-449). On the 100/50/200 scale proof this
-removed about 9% of the database statements of a run (147,343 to 134,068).
+The container-runtime gate of `GET /v1/work/candidates` and `POST /v1/work/claim` reads the prior development run of a
+ticket through `control/dev_history.py`, in one query (the latest run that delivered work, else the latest finished one).
+Before, a node that lacks the container runtime paid two queries per ticket and account (JAIF-449). The verify and triage
+checks of `eligible` still call `last_dev` directly: one query each, only for the ticket they judge. On the 100/50/200 scale
+proof the change removed about 9% of the database statements of a run (147,343 to 134,068).

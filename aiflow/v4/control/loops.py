@@ -133,6 +133,48 @@ def _reconcile_epics(ctx: ApplicationContext, projects: list[str], changed_ticke
                 log.warning("could not reconcile epic %s: %s", epic["key"], e)
 
 
+def _mirror_versions(ctx: ApplicationContext, keys: list[str]) -> None:
+    """Mirror the Jira versions of each project."""
+    for project in keys:
+        for version in ctx.jira.project_versions(project):
+            ctx.db.run(
+                "INSERT INTO versions (id, project, name, released, release_date)"
+                " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (id) DO UPDATE SET project=EXCLUDED.project,"
+                " name=EXCLUDED.name, released=EXCLUDED.released, release_date=EXCLUDED.release_date",
+                (version["id"], project, version["name"], version["released"], version["release_date"]))
+
+
+def _mirror_ticket(ctx: ApplicationContext, t: dict, done_at) -> None:
+    """Upsert a ticket read from Jira, replace its Fix versions and record when they were attached."""
+    ctx.db.run(
+        "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by,"
+        " jira_created, jira_updated, done_at, fields, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
+        " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s,%(fields)s, now())"
+        " ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority,"
+        " labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description,"
+        " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, fields=EXCLUDED.fields,"
+        " done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
+        " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
+        " ELSE tickets.done_at END, synced_at=now()",
+        {**t, "done_at": done_at, "fields": J({"assignee": t.get("assignee")})})
+    # Replace the complete relationship for each ticket received from Jira, so removals are mirrored too.
+    ctx.db.run(
+        "WITH removed AS (DELETE FROM ticket_versions WHERE ticket_key=%s RETURNING ticket_key)"
+        " INSERT INTO ticket_versions (ticket_key, version_id)"
+        " SELECT %s, fix.version_id FROM unnest(%s::text[]) AS fix(version_id)"
+        " CROSS JOIN (SELECT count(*) FROM removed) AS deletion_done"
+        " ON CONFLICT (ticket_key, version_id) DO NOTHING",
+        (t["key"], t["key"], t["fix_versions"]))
+    # Jira change history: when each Fix version was attached, and the first move to In Progress.
+    for version_id, added_at in (t.get("fix_version_added") or {}).items():
+        ctx.db.run("INSERT INTO ticket_version_added (ticket_key, version_id, added_at) VALUES (%s,%s,%s)"
+                   " ON CONFLICT (ticket_key, version_id) DO UPDATE SET added_at=EXCLUDED.added_at",
+                   (t["key"], version_id, added_at))
+    if t.get("first_in_progress"):
+        ctx.db.run("UPDATE tickets SET first_in_progress_at=LEAST(first_in_progress_at, %s) WHERE key=%s",
+                   (t["first_in_progress"], t["key"]))
+
+
 def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
     configured = ctx.repo().projects
     # The control repo is authoritative: paused or removed projects must stop being queried on the next pass.
@@ -145,13 +187,7 @@ def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
     n = 0
     changed_ticket_keys: set[str] = set()
     first_seen_ticket_keys: set[str] = set()
-    for project in keys:
-        for version in ctx.jira.project_versions(project):
-            ctx.db.run(
-                "INSERT INTO versions (id, project, name, released, release_date)"
-                " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (id) DO UPDATE SET project=EXCLUDED.project,"
-                " name=EXCLUDED.name, released=EXCLUDED.released, release_date=EXCLUDED.release_date",
-                (version["id"], project, version["name"], version["released"], version["release_date"]))
+    _mirror_versions(ctx, keys)
     preexisting_ticket_keys = {
         row["key"]
         for project in keys
@@ -181,33 +217,7 @@ def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
         done_at = t.get("done_at")
         if t["status"] == "Done" and done_at is None:
             done_at = t["jira_updated"]
-        ctx.db.run(
-            "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by,"
-            " jira_created, jira_updated, done_at, fields, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
-            " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s,%(fields)s, now())"
-            " ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority,"
-            " labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description,"
-            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, fields=EXCLUDED.fields,"
-            " done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
-            " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
-            " ELSE tickets.done_at END, synced_at=now()",
-            {**t, "done_at": done_at, "fields": J({"assignee": t.get("assignee")})})
-        # Replace the complete relationship for each ticket received from Jira, so removals are mirrored too.
-        ctx.db.run(
-            "WITH removed AS (DELETE FROM ticket_versions WHERE ticket_key=%s RETURNING ticket_key)"
-            " INSERT INTO ticket_versions (ticket_key, version_id)"
-            " SELECT %s, fix.version_id FROM unnest(%s::text[]) AS fix(version_id)"
-            " CROSS JOIN (SELECT count(*) FROM removed) AS deletion_done"
-            " ON CONFLICT (ticket_key, version_id) DO NOTHING",
-            (t["key"], t["key"], t["fix_versions"]))
-        # Jira change history: when each Fix version was attached, and the first move to In Progress.
-        for version_id, added_at in (t.get("fix_version_added") or {}).items():
-            ctx.db.run("INSERT INTO ticket_version_added (ticket_key, version_id, added_at) VALUES (%s,%s,%s)"
-                       " ON CONFLICT (ticket_key, version_id) DO UPDATE SET added_at=EXCLUDED.added_at",
-                       (t["key"], version_id, added_at))
-        if t.get("first_in_progress"):
-            ctx.db.run("UPDATE tickets SET first_in_progress_at=LEAST(first_in_progress_at, %s) WHERE key=%s",
-                       (t["first_in_progress"], t["key"]))
+        _mirror_ticket(ctx, t, done_at)
         if not old:
             project_lifecycle.reopen_for_new_ticket(ctx, t["project"], t["key"])
         if t["type"] == "Epic" and t["status"] == "Done" and not old:  # a moved epic is reported by its listener

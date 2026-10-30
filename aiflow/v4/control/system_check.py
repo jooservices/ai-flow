@@ -611,6 +611,39 @@ def _validated_credential_statuses(raw: object, account_ids: list[str]) -> dict[
     return statuses
 
 
+def _clean_machine_rows(rows: object) -> list[dict[str, object]]:
+    if not isinstance(rows, list):
+        return []
+    cleaned = []
+    for item in rows:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        condition_id = item["id"]
+        if condition_id not in MACHINE_CONDITION_IDS:
+            continue
+        normalized = _machine_condition(condition_id, item.get("result"),
+                                        "online" if item.get("result") == "ready" else "offline")
+        if normalized is not None:
+            cleaned.append(normalized)
+    return cleaned
+
+
+def _rebuilt_credentials(account_ids: list[str], existing: list, credential_statuses: dict) -> list[dict[str, object]]:
+    """One credential condition per account, from the validated statuses or the older snapshot row."""
+    rebuilt = []
+    for index, account_id in enumerate(account_ids):
+        old = existing[index] if index < len(existing) else {}
+        if account_id in credential_statuses:
+            rebuilt.append(_credential_condition(account_id, credential_statuses[account_id]))
+        elif isinstance(old, dict) and old.get("result") == "ready":
+            rebuilt.append(_credential_condition(account_id, {"present": True, "valid": True}))
+        else:
+            rebuilt.append(condition(f"credential:{account_id}", f"Credentials · {account_id}",
+                                     "needs_action", "Credential status has not been confirmed.",
+                                     f"Sign in to AI account {account_id} on this machine."))
+    return rebuilt
+
+
 def _safe_readiness(readiness: object, account_ids: list[str] | None = None) -> dict:
     """Export only known snapshot fields and normalized conditions; discard raw node inputs."""
     if not isinstance(readiness, dict):
@@ -626,22 +659,6 @@ def _safe_readiness(readiness: object, account_ids: list[str] | None = None) -> 
             "machine_joined", "project_added", "upgrade", "heartbeat", "hourly", "manual", "heartbeat_lost"}:
         safe["trigger"] = trigger
     credential_statuses = _validated_credential_statuses(readiness.get("credential_statuses"), account_ids or [])
-
-    def clean_machine_rows(rows: object) -> list[dict[str, object]]:
-        if not isinstance(rows, list):
-            return []
-        cleaned = []
-        for item in rows:
-            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-                continue
-            condition_id = item["id"]
-            if condition_id not in MACHINE_CONDITION_IDS:
-                continue
-            normalized = _machine_condition(condition_id, item.get("result"),
-                                            "online" if item.get("result") == "ready" else "offline")
-            if normalized is not None:
-                cleaned.append(normalized)
-        return cleaned
 
     def clean_rows(rows: object) -> object:
         if not isinstance(rows, list):
@@ -680,7 +697,7 @@ def _safe_readiness(readiness: object, account_ids: list[str] | None = None) -> 
         return cleaned
 
     if "machine" in readiness:
-        safe["machine"] = clean_machine_rows(readiness.get("machine"))
+        safe["machine"] = _clean_machine_rows(readiness.get("machine"))
     if isinstance(readiness.get("projects"), dict):
         clean_projects = {}
         for project, rows in readiness["projects"].items():
@@ -692,17 +709,7 @@ def _safe_readiness(readiness: object, account_ids: list[str] | None = None) -> 
             if account_ids and has_credential_snapshot:
                 existing = rows[-len(account_ids):] if len(rows) >= len(account_ids) else rows
                 base = rows[:-len(account_ids)] if len(rows) >= len(account_ids) else []
-                rebuilt = []
-                for index, account_id in enumerate(account_ids):
-                    old = existing[index] if index < len(existing) else {}
-                    if account_id in credential_statuses:
-                        rebuilt.append(_credential_condition(account_id, credential_statuses[account_id]))
-                    elif isinstance(old, dict) and old.get("result") == "ready":
-                        rebuilt.append(_credential_condition(account_id, {"present": True, "valid": True}))
-                    else:
-                        rebuilt.append(condition(f"credential:{account_id}", f"Credentials · {account_id}",
-                                                 "needs_action", "Credential status has not been confirmed.",
-                                                 f"Sign in to AI account {account_id} on this machine."))
+                rebuilt = _rebuilt_credentials(account_ids, existing, credential_statuses)
                 clean_projects[project] = clean_rows(base) + rebuilt
             else:
                 clean_projects[project] = clean_rows(rows)
@@ -714,6 +721,46 @@ def _safe_readiness(readiness: object, account_ids: list[str] | None = None) -> 
             allowed = AUTO_FIXED_TOOL_IDS if field == "auto_fixed_tools" else MACHINE_CONDITION_IDS
             safe[field] = sorted({value for value in values if isinstance(value, str) and value in allowed})
     return safe
+
+
+def _keep_provider_baseline(project_results: dict, stored: dict) -> None:
+    # Heartbeats and upgrades refresh node-reported conditions before the background provider probe finishes.
+    # Keep the last verified provider snapshot during that gap so an upgrade cannot erase a healthy baseline
+    # and hide a newly revoked permission. With no baseline, the pending result remains fail-closed.
+    provider_condition = lambda item: (
+        item.get("id") in {"github-installation", "github-app-permissions", "jira-credentials",
+                            "jira-write-permissions", "jira-workflow-statuses"}
+        or str(item.get("id", "")).startswith(("repository-access:", "base-branch:"))
+    )
+    previous_projects = stored.get("projects") if isinstance(stored.get("projects"), dict) else {}
+    for project_key, rows in project_results.items():
+        old_rows = previous_projects.get(project_key, [])
+        old_by_id = {str(item.get("id")): item for item in old_rows if isinstance(item, dict)}
+        project_results[project_key] = [
+            old_by_id.get(str(item.get("id")), item) if provider_condition(item) else item for item in rows
+        ]
+
+
+def _alert_blocking_changes(ctx, node: str, trigger: str, row: dict, provider_checks: bool, previous: dict, current: dict) -> None:
+    """Notify only when a work-blocking condition changed, ignoring provider conditions that are still pending."""
+    for key, item in current.items():
+        old = previous.get(key)
+        changed = old is None or old.get("result") != item.get("result")
+        provider_pending = not provider_checks and key[1] in {
+            "github-installation", "github-app-permissions", "jira-credentials", "jira-write-permissions",
+            "jira-workflow-statuses",
+        } or (not provider_checks and key[1].startswith(("repository-access:", "base-branch:")))
+        if (not changed or provider_pending or not item.get("affects_work") or item.get("result") not in BLOCKING
+                or (trigger == "machine_joined" and row.get("last_heartbeat") is None)
+                or key[1] == "node-heartbeat"):
+            continue
+        scope, condition_id = key
+        title = f"System check: {node} · {item.get('name', condition_id)} needs attention"
+        detail = str(item.get("action") or item.get("detail") or "Review this condition in System check.")
+        notify.send("warning", title, detail, "/system-check", ctx=ctx)
+        ctx.events.emit("system_check.alert", project=scope if scope != "machine" else "", node=node,
+                        outcome=str(item.get("result")), reason=detail,
+                        data={"condition": condition_id, "trigger": trigger})
 
 
 def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions: list[dict] | None = None,
@@ -763,21 +810,7 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
         for key in project_keys
     }
     if not provider_checks and trigger in {"heartbeat", "upgrade"}:
-        # Heartbeats and upgrades refresh node-reported conditions before the background provider probe finishes.
-        # Keep the last verified provider snapshot during that gap so an upgrade cannot erase a healthy baseline
-        # and hide a newly revoked permission. With no baseline, the pending result remains fail-closed.
-        provider_condition = lambda item: (
-            item.get("id") in {"github-installation", "github-app-permissions", "jira-credentials",
-                                "jira-write-permissions", "jira-workflow-statuses"}
-            or str(item.get("id", "")).startswith(("repository-access:", "base-branch:"))
-        )
-        previous_projects = stored.get("projects") if isinstance(stored.get("projects"), dict) else {}
-        for project_key, rows in project_results.items():
-            old_rows = previous_projects.get(project_key, [])
-            old_by_id = {str(item.get("id")): item for item in old_rows if isinstance(item, dict)}
-            project_results[project_key] = [
-                old_by_id.get(str(item.get("id")), item) if provider_condition(item) else item for item in rows
-            ]
+        _keep_provider_baseline(project_results, stored)
     checked_at = datetime.now(timezone.utc).isoformat()
     result = {"node": node, "machine": machine, "projects": project_results,
               "checked_at": checked_at, "trigger": trigger,
@@ -792,26 +825,8 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
                     or current.get("last_heartbeat") != row.get("last_heartbeat")):
         return current.get("readiness") or result
 
-    previous = _condition_map(stored)
     current = _condition_map(result)
-    for key, item in current.items():
-        old = previous.get(key)
-        changed = old is None or old.get("result") != item.get("result")
-        provider_pending = not provider_checks and key[1] in {
-            "github-installation", "github-app-permissions", "jira-credentials", "jira-write-permissions",
-            "jira-workflow-statuses",
-        } or (not provider_checks and key[1].startswith(("repository-access:", "base-branch:")))
-        if (not changed or provider_pending or not item.get("affects_work") or item.get("result") not in BLOCKING
-                or (trigger == "machine_joined" and row.get("last_heartbeat") is None)
-                or key[1] == "node-heartbeat"):
-            continue
-        scope, condition_id = key
-        title = f"System check: {node} · {item.get('name', condition_id)} needs attention"
-        detail = str(item.get("action") or item.get("detail") or "Review this condition in System check.")
-        notify.send("warning", title, detail, "/system-check", ctx=ctx)
-        ctx.events.emit("system_check.alert", project=scope if scope != "machine" else "", node=node,
-                        outcome=str(item.get("result")), reason=detail,
-                        data={"condition": condition_id, "trigger": trigger})
+    _alert_blocking_changes(ctx, node, trigger, row, provider_checks, _condition_map(stored), current)
 
     ctx.db.run("UPDATE nodes SET readiness=%s, readiness_checked_at=now() WHERE name=%s", (J(result), node))
     if trigger != "heartbeat":

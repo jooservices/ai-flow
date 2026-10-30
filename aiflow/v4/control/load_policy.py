@@ -73,6 +73,22 @@ def _metric_name(metric: str) -> str:
             "disk_free_pct": "free disk"}.get(metric, metric)
 
 
+def _keep_unrecovered_holds(previous: dict, values: dict, limits: dict, hold_metrics: list[str]) -> None:
+    """Hysteresis: a metric that caused the current hold stays held until it clears its threshold by a margin."""
+    for metric in previous.get("hold_metrics", []) if previous.get("mode") == "held" else []:
+        if metric in hold_metrics:
+            continue
+        value = values.get(metric)
+        if value is None:
+            hold_metrics.append(metric)
+            continue
+        threshold = limits[metric]
+        margin = CPU_MARGIN if metric == "cpu_load_per_cpu" else PERCENT_MARGIN
+        recovered = value < max(0.0, threshold - margin) if metric != "disk_free_pct" else value > min(100.0, threshold + margin)
+        if not recovered:
+            hold_metrics.append(metric)
+
+
 def evaluate_machine(metrics: Any, limits_raw: Any, previous: Any = None,
                       at: datetime | None = None) -> dict[str, Any]:
     limits, values = machine_limits(limits_raw), measured(metrics)
@@ -87,19 +103,7 @@ def evaluate_machine(metrics: Any, limits_raw: Any, previous: Any = None,
         violated = value >= threshold if metric != "disk_free_pct" else value <= threshold
         if violated:
             hold_metrics.append(metric)
-    # Hysteresis applies only to the measurements that caused the current hold.
-    for metric in previous.get("hold_metrics", []) if previous.get("mode") == "held" else []:
-        if metric in hold_metrics:
-            continue
-        value = values.get(metric)
-        if value is None:
-            hold_metrics.append(metric)
-            continue
-        threshold = limits[metric]
-        margin = CPU_MARGIN if metric == "cpu_load_per_cpu" else PERCENT_MARGIN
-        recovered = value < max(0.0, threshold - margin) if metric != "disk_free_pct" else value > min(100.0, threshold + margin)
-        if not recovered:
-            hold_metrics.append(metric)
+    _keep_unrecovered_holds(previous, values, limits, hold_metrics)
     # Stable cause order makes the screen and event stream deterministic when several limits are crossed.
     order = ("cpu_load_per_cpu", "memory_used_pct", "disk_free_pct")
     hold_metrics = [metric for metric in order if metric in hold_metrics]

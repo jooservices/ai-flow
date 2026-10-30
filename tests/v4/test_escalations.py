@@ -1417,16 +1417,16 @@ def test_owner_resume_repairs_mirror_and_event_after_partial_jira_success(ctx, m
                "Choose the default export format.", "person", asked["decision"]["id"], reached_person=True)
     answer = esc._store_owner_answer(ctx.db, asked["decision"]["id"], "CSV",
                                      esc.triage_claim_repository.VERIFIED_JIRA_OWNER_SOURCE)
-    update_status = esc.ticket_repository.update_status
+    update_status = esc.TicketRepository.update_status
     failed = {"once": False}
 
-    def fail_mirror_once(db, ticket, status):
+    def fail_mirror_once(self, ticket, status):
         if ticket == key and status == "To Do" and not failed["once"]:
             failed["once"] = True
             raise RuntimeError("mirror write unavailable")
-        update_status(db, ticket, status)
+        update_status(self, ticket, status)
 
-    monkeypatch.setattr(esc.ticket_repository, "update_status", fail_mirror_once)
+    monkeypatch.setattr(esc.TicketRepository, "update_status", fail_mirror_once)
 
     assert esc.resume_waiting(ctx, answer, answer["decision"]) == []
     assert ctx.jira.status_of[key] == "To Do"

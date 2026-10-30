@@ -162,3 +162,13 @@ def test_owner_question_formatter_and_jira_gateway_stay_within_complexity_budget
     violations = [f"{function.name}: complexity {_complexity(function)}"
                   for function in (formatter, call) if _complexity(function) > 12]
     assert not violations, "owner escalation functions exceed the complexity budget: " + "; ".join(violations)
+
+
+def test_event_architecture_document_states_the_structure_and_is_linked():
+    doc = (ROOT / "docs/v4/event-architecture.md").read_text(encoding="utf-8").casefold()
+    for requirement in ("control/features/<name>/", "routes.py", "service.py", "repository.py", "models.py", "events.py",
+                        "listeners.py", "past tense", "outbox", "in_transaction", "idempotent", "walking skeleton",
+                        "claim path stays one atomic synchronous transaction", "adr-1", "no event sourcing"):
+        assert requirement.casefold() in doc, f"event architecture is missing {requirement!r}"
+    assert "event-architecture.md" in ARCHITECTURE.read_text(encoding="utf-8")
+    assert (ROOT / "deploy/v4/topics/event-architecture.md").exists()

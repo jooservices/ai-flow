@@ -4,6 +4,9 @@ This is the target structure for v4 changes. It preserves the current service bo
 extracted from the large `control/api.py` module. New work follows the target patterns below; existing routes may
 move incrementally, with behavior kept behind the same API contracts.
 
+The target feature structure and the event and listener design are in [Control plane structure: features, events and
+listeners](event-architecture.md).
+
 ## Layers and dependencies
 
 | Layer | Location | Responsibility |

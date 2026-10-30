@@ -82,6 +82,11 @@ def test_the_admission_rule_refuses_secrets_duplicates_and_incomplete_events():
             aggregate = "thing"
             aggregate_field = "thing_id"
             thing_id: str
+    with pytest.raises(TypeError, match="subclass of DomainEvent"):
+        @event
+        @dataclass(frozen=True)
+        class Plain:
+            type = "demo.plain"
     assert catalog.CATALOG["demo.thing_happened"] is cls
 
 

@@ -55,8 +55,9 @@ class Envelope:
 
 def event(cls: type[DomainEvent]) -> type[DomainEvent]:
     """Register a domain event class in the catalog, refusing what the admission rule of the architecture forbids."""
-    if not (dataclasses.is_dataclass(cls) and cls.__dataclass_params__.frozen):
-        raise TypeError(f"{cls.__name__} must be a frozen dataclass")
+    if not (isinstance(cls, type) and issubclass(cls, DomainEvent) and dataclasses.is_dataclass(cls)
+            and cls.__dataclass_params__.frozen):
+        raise TypeError(f"{getattr(cls, '__name__', cls)} must be a frozen dataclass subclass of DomainEvent")
     for required in ("type", "owner", "aggregate", "aggregate_field"):
         if not getattr(cls, required):
             raise ValueError(f"{cls.__name__} must set {required}")

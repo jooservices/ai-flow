@@ -70,6 +70,12 @@ tickets. `publish_for(ctx, event, deliver_now=True)` attempts the delivery right
 same request; if the resume fails, the delivery stays pending and the dispatcher retries it with backoff (on top of the existing
 `retry_resumptions`). The events are listed in [events.md](events.md).
 
+Audit as a listener: an event that overrides `DomainEvent.audit()` (returning an `Audit` row) gets its `write_audit` row from
+`platform/events/audit_ledger.py`, one in-transaction listener per such type, through the same `route_deps.audit`, so the
+ledger stays append-only and the row commits with the change. `DecisionAnswered` is the first: `POST /v1/decisions/{decision_id}/answer`
+no longer calls `audit()` itself, and the deadline default and the Jira answer path are now audited too. The remaining
+`audit()` calls move with their features (JAIF-478).
+
 ## Conventions
 
 - Commands and queries are direct calls to a service; only reactions go through events.

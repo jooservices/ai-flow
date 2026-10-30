@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ...platform.events import DomainEvent, event
+from ...platform.events import Audit, DomainEvent, event
 
 
 @event
@@ -21,3 +21,9 @@ class DecisionAnswered(DomainEvent):
     answered_by: str = ""
     waiting_tickets: tuple[str, ...] = ()
     skip_ticket: str = ""
+    ticket_key: str = ""
+    title: str = ""
+
+    def audit(self) -> Audit:
+        return Audit("escalation", "decision-answer", self.ticket_key, self.answered_by, f"D{self.decision_id} {self.title}",
+                     {"decision_id": self.decision_id})

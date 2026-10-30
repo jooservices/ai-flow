@@ -408,7 +408,9 @@ def answer_decision(ctx, decision_id: int, choice: str, note: str, by: str) -> d
         text = row["decision"]
         row = _store_owner_answer(ctx.db, decision_id, text, row["decided_by"] or by)
     publish_for(ctx, DecisionAnswered(decision_id=decision_id, answer=text, answered_by=by,
-                                      waiting_tickets=tuple(row.get("waiting_tickets") or ())), deliver_now=True)
+                                      waiting_tickets=tuple(row.get("waiting_tickets") or ()),
+                                      ticket_key=row.get("ticket_key") or "", title=row.get("title") or ""),
+                deliver_now=True)
     return escalation_repository.decision_by_id(ctx.db, decision_id)
 
 
@@ -551,7 +553,8 @@ def _record_owner_answer(ctx, ticket: str, row: dict, text: str) -> dict | None:
     raised = escalation_repository.latest_question_for_decision(ctx.db, ticket, row["id"])
     answer = decided["decision"]
     publish_for(ctx, DecisionAnswered(decision_id=row["id"], answer=answer, answered_by=decided.get("decided_by") or "",
-                                      waiting_tickets=tuple(row.get("waiting_tickets") or ()), skip_ticket=ticket),
+                                      waiting_tickets=tuple(row.get("waiting_tickets") or ()), skip_ticket=ticket,
+                                      ticket_key=row.get("ticket_key") or "", title=row.get("title") or ""),
                 deliver_now=True)
     return {"decision": decided, "answer": answer,
             "question": (raised or {}).get("question") or row["question"], "ticket": ticket}

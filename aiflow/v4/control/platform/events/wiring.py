@@ -22,7 +22,10 @@ _LOCK = threading.Lock()
 def _feature_installers():
     from ...features.tickets import listeners as tickets_listeners
     from ...features.escalation import listeners as escalation_listeners
-    return (tickets_listeners.register_listeners, escalation_listeners.register_listeners)
+    from . import audit_ledger
+    # the audit ledger goes last: it registers one listener for every event type that asks to be audited
+    return (tickets_listeners.register_listeners, escalation_listeners.register_listeners,
+            audit_ledger.register_listeners)
 
 
 def registry_for(ctx: Any) -> Registry:

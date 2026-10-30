@@ -135,7 +135,7 @@ def test_repo_inventory_is_imported_once_and_never_overwrites_screen_changes(cli
     assert inventory.import_control_repo(ctx.db, ControlRepo.load(control_repo))["imported"] is False
 
     # The changed repo files (a new account, other workers) are ignored; the database wins.
-    ctx._configured_repo = lambda: ControlRepo.load(control_repo)
+    ctx.configured_repo = lambda: ControlRepo.load(control_repo)
     repo = ctx.repo()
     assert repo.account("ghost-01") is None
     assert repo.account("codex-01").parallel == 4 and repo.account("codex-01").roles == ["dev"]
@@ -194,7 +194,6 @@ def test_production_repo_context_keeps_shared_account_overlay_after_import(ctx):
     base_repo().account("codex-01").session_limit = 3
     # Match build_ctx(): its repo already applies inventory and shared account state before create_app().
     ctx.repo = lambda: shared_accounts.overlay(inventory.apply(base_repo(), ctx.db), ctx.db)
-    ctx._shared_accounts = True
 
     app = create_app(ctx)
     app.state.sync_accounts()
@@ -210,7 +209,7 @@ def test_joined_machine_serves_its_project_after_the_import_without_the_node_fil
     owner_session(client, ctx)
     client.app.state.import_inventory()
     assert not (control_repo / "nodes" / "node1.yaml").exists()
-    ctx._configured_repo = lambda: ControlRepo.load(control_repo)
+    ctx.configured_repo = lambda: ControlRepo.load(control_repo)
     joined = join_node(client, "node1")
     assert joined.status_code == 200, joined.text
     assert heartbeat(client, "node1", joined.json()["node_token"])["projects"] == ["TESTWP"]

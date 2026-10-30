@@ -809,7 +809,7 @@ class ManagedAccountSignInStatusBody(BaseModel):
 def create_app(ctx: Ctx) -> FastAPI:
     from contextlib import asynccontextmanager
 
-    ctx._worker_resource_counts = licensing.ResourceCountsCache(ctx)
+    ctx.worker_resource_counts = licensing.ResourceCountsCache(ctx)
     runtime_repo_cache: ContextVar[ControlRepo | None] = ContextVar("aiflow_runtime_repo_cache", default=None)
     runtime_repo_cache_enabled: ContextVar[bool] = ContextVar("aiflow_runtime_repo_cache_enabled", default=False)
     capacity_history_lock = threading.Lock()
@@ -840,8 +840,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             state_snapshot_cache[include_signin] = (time.monotonic(), data)
             return data
 
-    configured_repo = getattr(ctx, "_configured_repo", ctx.repo)
-    ctx._configured_repo = configured_repo
+    configured_repo = ctx.configured_repo or ctx.repo
+    ctx.configured_repo = configured_repo
 
     def runtime_repo() -> ControlRepo:
         """Merge console-managed accounts over the control-repo snapshot for live worker scheduling."""
@@ -892,8 +892,6 @@ def create_app(ctx: Ctx) -> FastAPI:
             runtime_repo_cache_enabled.reset(enabled_token)
             runtime_repo_cache.reset(cache_token)
 
-    # `runtime_repo` also applies shared-account overlays. Keep a marker for code that checks the live view.
-    ctx._shared_accounts = True
     support_bundle.control_log_buffer(
         *(v if isinstance(v, str) else "" for v in (ctx.settings.support_log_dir, ctx.settings.o2_source))
     )

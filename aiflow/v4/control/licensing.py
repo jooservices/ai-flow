@@ -445,7 +445,7 @@ def enforce_work_entitlement(ctx, account_id: str, node: str, *, public_key: str
                              resource_counts_reader: Callable[[], dict[str, int]] | None = None) -> dict[str, Any]:
     """Return the active plan state after checking the machine and account that would start new work."""
     state = require_writable(ctx.db, public_key)
-    reader = resource_counts_reader or getattr(ctx, "_worker_resource_counts", None)
+    reader = resource_counts_reader or ctx.worker_resource_counts
     over_limit_grace(ctx, state, resource_counts_reader=reader)
     enforce_account_entitlement(ctx, account_id, public_key=public_key, state=state)
     enforce_machine_entitlement(ctx, node, public_key=public_key, state=state)

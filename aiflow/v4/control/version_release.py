@@ -295,7 +295,7 @@ def post_merge_resume(ctx, project: Any, version: dict[str, Any]) -> dict[str, A
 
 def _github_context_for_repository(ctx, project: Any):
     """Use the repository's selected connection for release reads and retry writes when the API supplies it."""
-    resolve = getattr(ctx, "github_connection_for_repository", None)
+    resolve = ctx.github_connection_for_repository
     if not callable(resolve):
         return ctx, ""
     gateway, connection = resolve(project.repo)
@@ -652,7 +652,7 @@ def reconcile_merge_backs(ctx, project: Any) -> int:
     The Jira version is already Released, so it no longer appears in `project_versions`; this durable path reads
     released rows from the registry and runs the same idempotent `merge_back` under the version lease.
     """
-    resolve = getattr(ctx, "github_connection_for_repository", None)
+    resolve = ctx.github_connection_for_repository
     if ctx.github is None and not callable(resolve):
         return 0
     done = 0

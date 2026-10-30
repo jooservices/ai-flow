@@ -41,7 +41,7 @@ def owner_session(client, ctx):
 
 
 def prepare_account_capacity(ctx, account: str, sessions: int = 4):
-    ctx._configured_repo().account(account).parallel = sessions
+    ctx.configured_repo().account(account).parallel = sessions
 
 
 def test_default_machine_limits_and_owner_can_save_machine_and_host_limits(client, ctx):

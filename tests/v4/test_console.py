@@ -1710,7 +1710,7 @@ def test_dashboard_quota_endpoint_is_safe_and_scoped_for_role_without_machines_a
     for account_id in ("claude-01", "codex-01", "opencode-01"):
         ctx.db.run("UPDATE accounts SET quota=%s,quota_source='run',quota_observed_at=now() WHERE id=%s", (J(quota), account_id))
     # This account is enabled on a machine outside the caller's project scope.
-    outside = next(account for account in ctx._configured_repo().accounts if account.id == "opencode-01")
+    outside = next(account for account in ctx.configured_repo().accounts if account.id == "opencode-01")
     outside.node = "outside-node"
 
     snapshot = client.get("/v1/state")

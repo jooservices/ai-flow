@@ -70,7 +70,8 @@ for a listener.
   change that contract.
 
 Code: `control/platform/events/` holds `catalog.py` (the `@event` decorator, `Envelope`, the admission checks: frozen
-dataclass, owner, aggregate, no secret-looking field, unique type) and `registry.py` (`@on(Event, delivery=...)`). The outbox,
-publisher and dispatcher follow (JAIF-461, JAIF-463).
+dataclass, owner, aggregate, no secret-looking field, unique type) and `registry.py` (`@on(Event, delivery=...)`). `publisher.py` writes an event to the outbox tables `domain_events` and
+`domain_event_deliveries` (migration 033; a separate table from the telemetry `events`) in the caller's transaction, one pending delivery
+per outbox listener, and runs in-transaction listeners before it returns. The dispatcher follows (JAIF-463).
 
 Walking skeleton: `ticket.moved` (JAIF-467) proves the platform before any wide roll-out.

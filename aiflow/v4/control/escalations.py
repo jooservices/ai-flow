@@ -31,7 +31,9 @@ from ..core.owner_escalation import owner_question_comment
 from ..core.text import normalize_adf_text, slug
 from . import tooling
 from . import ticket_lifecycle
+from .features.escalation.events import DecisionAnswered
 from .features.tickets.repository import TicketRepository
+from .platform.events.wiring import publish_for
 from .repositories import escalations as escalation_repository
 from .repositories import nodes as node_repository
 from .repositories import triage_claim as triage_claim_repository
@@ -405,7 +407,8 @@ def answer_decision(ctx, decision_id: int, choice: str, note: str, by: str) -> d
     else:
         text = row["decision"]
         row = _store_owner_answer(ctx.db, decision_id, text, row["decided_by"] or by)
-    resume_waiting(ctx, row, text)
+    publish_for(ctx, DecisionAnswered(decision_id=decision_id, answer=text, answered_by=by,
+                                      waiting_tickets=tuple(row.get("waiting_tickets") or ())), deliver_now=True)
     return escalation_repository.decision_by_id(ctx.db, decision_id)
 
 
@@ -547,7 +550,9 @@ def _record_owner_answer(ctx, ticket: str, row: dict, text: str) -> dict | None:
     clear_owner_labels(ctx, ticket)
     raised = escalation_repository.latest_question_for_decision(ctx.db, ticket, row["id"])
     answer = decided["decision"]
-    resume_waiting(ctx, {**decided, "waiting_tickets": row.get("waiting_tickets") or []}, answer, skip_ticket=ticket)
+    publish_for(ctx, DecisionAnswered(decision_id=row["id"], answer=answer, answered_by=decided.get("decided_by") or "",
+                                      waiting_tickets=tuple(row.get("waiting_tickets") or ()), skip_ticket=ticket),
+                deliver_now=True)
     return {"decision": decided, "answer": answer,
             "question": (raised or {}).get("question") or row["question"], "ticket": ticket}
 

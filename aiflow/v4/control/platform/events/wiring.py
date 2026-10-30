@@ -21,7 +21,8 @@ _LOCK = threading.Lock()
 
 def _feature_installers():
     from ...features.tickets import listeners as tickets_listeners
-    return (tickets_listeners.register_listeners,)
+    from ...features.escalation import listeners as escalation_listeners
+    return (tickets_listeners.register_listeners, escalation_listeners.register_listeners)
 
 
 def registry_for(ctx: Any) -> Registry:
@@ -35,8 +36,13 @@ def registry_for(ctx: Any) -> Registry:
         return registry
 
 
-def publish_for(ctx: Any, item: DomainEvent, **kwargs: str) -> Envelope:
-    return publish(ctx.db, item, registry=registry_for(ctx), **kwargs)
+def publish_for(ctx: Any, item: DomainEvent, *, deliver_now: bool = False, **kwargs: str) -> Envelope:
+    """Publish `item`. With `deliver_now`, its outbox listeners are attempted right away after the commit (a caller that
+    answers an HTTP request and must show the reaction's result); a failure is left for the dispatcher to retry."""
+    envelope = publish(ctx.db, item, registry=registry_for(ctx), **kwargs)
+    if deliver_now:
+        dispatcher_for(ctx).run_once(event_id=envelope.id)
+    return envelope
 
 
 def dispatcher_for(ctx: Any, **kwargs: Any) -> Dispatcher:

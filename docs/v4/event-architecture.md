@@ -47,6 +47,9 @@ named consumer. The telemetry types (`ctx.events.emit`) stay as log lines and ar
 The **claim path stays one atomic synchronous transaction**; it publishes `RunStarted` at its end and nothing in it waits
 for a listener.
 
+The full list of events with their owner, payload and listeners is generated into [events.md](events.md); a test fails when
+it is stale.
+
 ## Conventions
 
 - Commands and queries are direct calls to a service; only reactions go through events.

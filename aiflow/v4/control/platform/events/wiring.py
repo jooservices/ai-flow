@@ -24,13 +24,14 @@ def _feature_installers():
     from ...features.escalation import listeners as escalation_listeners
     from . import audit_ledger
     # the audit ledger goes last: it registers one listener for every event type that asks to be audited
+    from ...features.incidents import listeners as incident_listeners
     return (tickets_listeners.register_listeners, escalation_listeners.register_listeners,
-            audit_ledger.register_listeners)
+            incident_listeners.register_listeners, audit_ledger.register_listeners)
 
 
 def registry_for(ctx: Any) -> Registry:
     with _LOCK:
-        registry = ctx.event_registry
+        registry = getattr(ctx, "event_registry", None)  # a context double may not declare the field
         if registry is None:
             registry = Registry()
             for register in _feature_installers():

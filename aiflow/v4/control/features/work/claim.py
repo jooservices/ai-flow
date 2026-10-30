@@ -17,6 +17,8 @@ from ... import (capacity, claim_project, environment as environment_reports, es
 from ... import dev_history, triage_claim as triage_claim_service
 from ....core import handover
 from ..work.constants import utcnow
+from ...platform.events.wiring import publish_for
+from .events import RunStarted
 from ...db import J
 from ...route_deps import h
 
@@ -170,8 +172,9 @@ def claim(ctx, deps, body, node: str) -> Any:
                         reason=f"probation ticket for role {role_health.role_of(body.step)}")
     ctx.db.run("UPDATE accounts SET status='working', updated_at=now(), idle_since=NULL, cooldown_since=NULL WHERE id=%s",
                (acc.id,))
-    ctx.events.emit("run.claimed", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
-                    fence=c.fence, account=acc.id, provider=acc.provider, model=model, node=node)
+    with ctx.db.transaction():
+        publish_for(ctx, RunStarted(run_id=run_id, ticket_key=t["key"], project=t["project"], step=body.step, fence=c.fence,
+                                    account=acc.id, provider=acc.provider, model=model, node=node))
     extra: dict[str, Any] = {}
     if body.step == "dev":
         tooling.resolve_ticket(ctx, t["key"], node)

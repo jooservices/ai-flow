@@ -77,6 +77,7 @@ from .pr_comments import PRCommentBody
 from .application_context import Ctx
 from .features.work.constants import BACKOFF_SQL, PRIORITY, utcnow
 from .features.work.claim import claim as claim_work
+from .features.work.listeners import run_finished
 from .features.work.eligible import eligible as eligible_tickets
 
 log = logging.getLogger("aiflow4.api")
@@ -1107,9 +1108,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         except Exception as exc:  # noqa: BLE001 - learning must not block a review action
             log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
         ctx.leases.release(key, run_id, fence)
-        ctx.events.emit("run.finished", ticket=key, project=key.split("-", 1)[0], step="qa", run_id=run_id,
-                        fence=fence, account="reviewer-console", provider="human", node="control", outcome=outcome,
-                        reason=summary[:200])
+        run_finished(ctx, run_id=run_id, ticket_key=key, project=key.split("-", 1)[0], step="qa", fence=fence,
+                     account="reviewer-console", provider="human", node="control", outcome=outcome, reason=summary[:200])
 
     def reviewer_comment(ticket: str, run_id: str, fence: int, number: int, text: str,
                          source: str = "human-review") -> None:
@@ -4378,11 +4378,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                                      f" Run {run_id}, fence {body.fence}.")
             except Exception as e:  # noqa: BLE001
                 log.warning("worklog for %s failed: %s", run["ticket_key"], e)
-        ctx.events.emit("run.finished", ticket=run["ticket_key"], project=run["project"], step=run["step"], run_id=run_id,
-                        fence=body.fence, account=run["account_id"], provider=run["provider"], model=run["model"],
-                        node=node, duration_ms=dur, outcome=outcome, reason=error_kind or body.summary[:200],
-                        tokens_in=body.tokens_in, tokens_out=body.tokens_out, cost_usd=body.cost_usd,
-                        still_owner=still_owner, pr_url=body.pr_url)
+        run_finished(ctx, run_id=run_id, ticket_key=run["ticket_key"], project=run["project"], step=run["step"],
+                     fence=body.fence, account=run["account_id"], provider=run["provider"], model=run["model"], node=node,
+                     duration_ms=dur, outcome=outcome, reason=error_kind or body.summary[:200], usage_in=body.tokens_in,
+                     usage_out=body.tokens_out, cost_usd=body.cost_usd, still_owner=still_owner, pr_url=body.pr_url)
         try:  # quality by role: this result may switch the role off or settle a probation ticket
             if not late_result:
                 role_health.evaluate(ctx, run["account_id"])

@@ -58,6 +58,12 @@ it is stale.
   They derive from `HTTPException`, so existing `except HTTPException` handlers and FastAPI's response keep working while
   services stop importing FastAPI. `run_inbox.py` is the first module moved (it serves `POST /v1/master/actions`,
   `POST /v1/runs/{run_id}/heartbeat`, `POST /v1/runs/{run_id}/release` and `POST /v1/runs/{run_id}/result`, whose responses are unchanged); a module moves when it is touched.
+- Who may call a route is one parameter: `user: ConsoleUser | None = can("view.dashboard")` (`platform/auth.py`). With
+  console sign-in off it returns the session user if present, else None; with sign-in on it requires a signed session whose
+  role holds the permission (401, 403, audit of a refused write, licence check for a write) exactly as before. It moved
+  `GET /v1/analytics/daily`, `GET /v1/analytics/conflicts` and `GET /v1/analytics/usage/daily` first; other routes move when
+  touched. A separate transaction helper is not needed: `db.transaction()` nests with savepoints, and work that must happen
+  after a commit is an outbox listener.
 - Route models (pydantic) are separate from domain entities.
 - Behaviour-preserving moves: the route set (`application-context-route-snapshot.json`) and the REST audit stay unchanged.
 - A new feature starts from the scaffold: `uv run python -m aiflow.v4.core.scaffold_feature <name>` creates the folder,

@@ -1,0 +1,71 @@
+# Control plane structure: features, events and listeners
+
+Target structure of `aiflow/v4/control` (epic JAIF-445). It extends [the layer rules](architecture.md); read those first.
+The aim: a new reaction to something that happened is a new file, not an edit of a shared function.
+
+## Features
+
+A feature is a folder `control/features/<name>/` that owns one part of the business:
+
+| File | Holds | May import |
+| --- | --- | --- |
+| `routes.py` | FastAPI `router`, request and response models, `can("permission")`; one call to a service per route | its service, `platform` |
+| `service.py` | the use cases; no FastAPI, no `HTTPException`, no SQL; raises domain errors | its repository, its events, `platform`, `core` |
+| `repository.py` | all SQL of the aggregate; returns frozen dataclasses from `models.py`, never raw dicts | `platform.db`, `models` |
+| `models.py` | entities and value objects (frozen dataclasses) | nothing |
+| `events.py` | the domain events the feature publishes | `platform.events` |
+| `listeners.py` | `@on(OtherEvent)` reactions of this feature to events of any feature | its service, events of others |
+
+A feature never imports another feature's `service`, `repository` or `routes`. It may import another feature's `events`
+(to listen) and `models` (to read). Anything shared moves to `platform/` (`events`, `db`, `session`, `errors`, `settings`,
+`route_deps`) or `core/`. `control/app.py` is the composition root (under 300 lines): it builds the services and mounts
+the routers; it holds no route and no nested helper. The architecture test enforces these import rules.
+
+## Events
+
+A **domain event** is a fact in the past tense that already happened (`TicketMoved`, `DecisionAnswered`,
+`RunFinished`). It is a frozen dataclass with an envelope: `id`, `type`, `version`, `occurred_at`, `aggregate` (kind and
+id), `correlation_id`, `causation_id`; the payload carries ids and small values, never secrets or whole rows.
+
+Five small components, one module each in `platform/events/`:
+
+1. **catalog**: the event classes and their type names; one place lists every event and its owner.
+2. **publisher**: `publish(tx, event)` writes the event to the outbox in the same transaction as the change.
+3. **outbox**: rows in the existing `events` table (Postgres); no broker.
+4. **registry**: `@on(Event, delivery=...)` registers a listener at import time.
+5. **dispatcher**: delivers each event to its listeners per aggregate in order, with retry and backoff, a dead letter
+   that opens an incident, and a replay command.
+
+Two delivery modes: `in_transaction` (runs inside the publisher's transaction; for reactions that must commit with the
+change) and `outbox` (runs after commit; the default). Every listener is idempotent: it can see the same event twice.
+A listener failure never fails the command that published the event (outbox mode) and is visible as an incident.
+
+What is an event: a state change another feature, the audit trail, a notification or the console may care about. What is
+not: queries, commands, internal steps of one function. Start with about twelve events; add one only with a listener or a
+named consumer. The telemetry types (`ctx.events.emit`) stay as log lines and are not domain events.
+
+The **claim path stays one atomic synchronous transaction**; it publishes `RunStarted` at its end and nothing in it waits
+for a listener.
+
+## Conventions
+
+- Commands and queries are direct calls to a service; only reactions go through events.
+- A service takes only the repositories it uses (no god context). Domain errors (`NotFound`, `Conflict`, `Forbidden`,
+  `Invalid`) are mapped to HTTP in one place in `platform/errors.py`.
+- Route models (pydantic) are separate from domain entities.
+- Behaviour-preserving moves: the route set (`application-context-route-snapshot.json`) and the REST audit stay unchanged.
+- A new feature starts from the scaffold (JAIF-456), which creates the folder with tests.
+
+## Decisions
+
+- **ADR-1 Outbox in Postgres.** Events are rows written in the change's transaction, so a crash loses none. No broker:
+  one database already holds the state, and adding a queue adds an operations burden and a second source of truth.
+- **ADR-2 No event sourcing.** State stays in tables; events describe what happened and are not the source of truth.
+- **ADR-3 Admission rule.** An event needs a past-tense name, an owner, and a listener or named consumer. About twelve to
+  start, to measure cost against the scale proof before widening.
+- **ADR-4 Feature slices over layers.** Files that change together live together; a ticket touches one feature folder,
+  so parallel tickets stop conflicting in `api.py`.
+- **ADR-5 Keep the worker contract.** Worker and node talk to control only through the HTTP API; the refactor does not
+  change that contract.
+
+Walking skeleton: `ticket.moved` (JAIF-467) proves the platform before any wide roll-out.

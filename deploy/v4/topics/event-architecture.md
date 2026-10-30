@@ -1,0 +1,1 @@
+- [Control plane structure](../../../docs/v4/event-architecture.md): features with routes, service, repository, models, events and listeners; domain events with an outbox; the claim path stays one transaction.

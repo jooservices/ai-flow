@@ -11,6 +11,9 @@ This repository holds two generations of AI Flow. The current work is **v4**, a 
 - Run `uv run --frozen pytest tests/v4 -q`. The environment provides `AIFLOW4_TEST_REDIS_URL` and
   `AIFLOW4_TEST_DATABASE_URL` (shared test services: Redis keys are prefixed per test; each pytest session
   creates its own database on that PostgreSQL server (copied from `AIFLOW4_TEST_DATABASE_TEMPLATE` when set, a database that already carries pgvector) and drops it at the end, so parallel runs do not interfere).
+- New control-plane code follows `docs/v4/event-architecture.md`: a feature folder (`routes`, `service`, `repository`,
+  `models`, `events`, `listeners`), a reaction to a state change is a listener of a domain event, and `control/api.py`
+  does not grow. `tests/v4/test_feature_structure.py` enforces the import rules.
 - Do not add dependencies unless the ticket asks for them; `uv.lock` must stay consistent with `pyproject.toml`.
 - Document a new feature in its own file `docs/v4/<topic>.md` and add one line linking it under "Topics" in
   `deploy/v4/README.md`. Many tickets run in parallel: appending long sections to one shared file causes merge

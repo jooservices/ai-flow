@@ -390,7 +390,7 @@ def test_ci_check_maps_changed_api_lines_to_their_route_contract(monkeypatch):
 
 
 def test_changed_master_action_route_is_named_in_documentation():
-    api = "aiflow/v4/control/api.py"
+    api = "aiflow/v4/control/features/runs/routes.py"  # the master action routes moved out of api.py
     docs = "docs/v4/master.md"
     routes = docsite.api_routes_by_module()
     assert "/v1/master/actions" in routes[api]

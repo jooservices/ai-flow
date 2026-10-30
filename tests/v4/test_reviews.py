@@ -5,6 +5,7 @@ import pytest
 
 from conftest import add_ticket, join_node
 from aiflow.v4.control import api as control_api
+from aiflow.v4.control import notify as notify_module
 from aiflow.v4.control.db import J
 from aiflow.v4.control.loops import jira_sync
 from aiflow.v4.control.platform.events import wiring
@@ -87,7 +88,7 @@ def test_jira_sync_notifies_assignee_when_require_human_ticket_enters_review(ctx
     }}
     ctx.jira.search = lambda _jql: iter([issue])
     calls = []
-    monkeypatch.setattr(control_api.notify, "send", lambda severity, title, detail="", link="", recipient="", **kwargs:
+    monkeypatch.setattr(notify_module, "send", lambda severity, title, detail="", link="", recipient="", **kwargs:
                         calls.append((severity, title, detail, link, recipient)) or ["email"])
 
     assert jira_sync(ctx) == 1
@@ -106,7 +107,7 @@ def test_worker_transition_notifies_owner_when_assignee_is_missing(client, ctx, 
     headers = {"Authorization": f"Bearer {cc['node_token']}"}
     run = client.post("/v1/work/claim", json={"ticket": "TESTWP-82", "account": "claude-01"}, headers=headers).json()
     calls = []
-    monkeypatch.setattr(control_api.notify, "send", lambda severity, title, detail="", link="", recipient="", **kwargs:
+    monkeypatch.setattr(notify_module, "send", lambda severity, title, detail="", link="", recipient="", **kwargs:
                         calls.append(recipient) or ["email"])
 
     response = client.post("/v1/jira/TESTWP-82/transition",

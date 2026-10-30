@@ -1,0 +1,1 @@
+- [GitHub fenced routes](../../../docs/v4/github_fenced-routes.md): The fenced GitHub token, git proxy, pull request, merge, checks and review action routes.

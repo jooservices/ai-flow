@@ -357,7 +357,7 @@ def watchdog(ctx: ApplicationContext) -> None:
             except Exception as e:  # noqa: BLE001
                 log.warning("could not requeue orphan %s: %s", t["key"], e)
     # tickets whose dev runs keep failing (backoff in the API keeps them from spinning; a person should look)
-    from .api import BACKOFF_SQL
+    from .features.work.constants import BACKOFF_SQL
     streak_sql = BACKOFF_SQL.split("SELECT ticket_key, fails FROM streak")[0] + "SELECT ticket_key, fails FROM streak"
     stuck: dict[str, int] = {}
     for step in ("dev", "verify"):

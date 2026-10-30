@@ -5,17 +5,17 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from typing import Literal
 
 from .. import conflict_loss, route_deps
-from ..console_auth import has_permission
+from ..console_auth import ConsoleUser, has_permission
+from ..platform.auth import can
 
 router = APIRouter()
 
 
 @router.get("/v1/analytics/daily")
-def analytics_daily(request: Request, days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
+def analytics_daily(request: Request, days: int = Query(14, ge=1, le=90), project: str = "",
+                    user: ConsoleUser | None = can("view.dashboard")) -> dict:
     ctx = route_deps.context(request)
     from ..analytics import daily
-    user = (route_deps.console_user_for(request, "view.dashboard") if ctx.settings.console_login
-            else route_deps.optional_console_user(ctx, request))
     if user and user.project_keys is not None:
         if project:
             if project not in user.project_keys:
@@ -31,11 +31,10 @@ def analytics_daily(request: Request, days: int = Query(14, ge=1, le=90), projec
 
 @router.get("/v1/analytics/conflicts")
 def analytics_conflicts(request: Request, days: int = Query(14, ge=1, le=90),
-                        bucket: Literal["day", "week"] = "day", project: str = "") -> dict:
+                        bucket: Literal["day", "week"] = "day", project: str = "",
+                        user: ConsoleUser | None = can("view.dashboard")) -> dict:
     """Share of verifications lost to merge conflicts, the time spent on them and the trend."""
     ctx = route_deps.context(request)
-    user = (route_deps.console_user_for(request, "view.dashboard") if ctx.settings.console_login
-            else route_deps.optional_console_user(ctx, request))
     project_keys = user.project_keys if user and user.project_keys is not None else None
     if project and project_keys is not None and project not in project_keys:
         raise HTTPException(403, "not available for your role")
@@ -43,11 +42,10 @@ def analytics_conflicts(request: Request, days: int = Query(14, ge=1, le=90),
 
 
 @router.get("/v1/analytics/usage/daily")
-def analytics_usage_daily(request: Request, days: int = Query(14, ge=1, le=90)) -> dict:
+def analytics_usage_daily(request: Request, days: int = Query(14, ge=1, le=90),
+                          user: ConsoleUser | None = can("view.dashboard")) -> dict:
     ctx = route_deps.context(request)
     from ..analytics import daily_usage
-    user = (route_deps.console_user_for(request, "view.dashboard") if ctx.settings.console_login
-            else route_deps.optional_console_user(ctx, request))
     project_keys = user.project_keys if user and user.project_keys is not None else None
     return {"days": days, "group_by": "ai", "rows": daily_usage(ctx.db, days, project_keys)}
 

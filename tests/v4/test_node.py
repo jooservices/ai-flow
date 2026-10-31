@@ -654,7 +654,6 @@ def test_root_cleanup_refuses_a_worktree_replaced_by_a_symlink_after_the_scan(tm
 
 
 def test_root_cleanup_refuses_a_worktree_replaced_by_another_directory_after_the_scan(tmp_path, monkeypatch, caplog):
-    import shutil
     import time
 
     worktree = tmp_path / "work" / "TESTWP" / "TESTWP-4-done"
@@ -663,7 +662,7 @@ def test_root_cleanup_refuses_a_worktree_replaced_by_another_directory_after_the
 
     class Api:
         def call(self, method, path, body=None, retries=0):
-            shutil.rmtree(worktree)  # a new directory (new inode) takes the name
+            worktree.rename(tmp_path / "moved-away")  # kept alive, so the new directory cannot reuse its inode
             (worktree / "artifacts" / "reports" / "e2e").mkdir(parents=True)
             (worktree / "artifacts" / "keep.txt").write_text("replacement")
             return {"remove": ["TESTWP/TESTWP-4-done"]}

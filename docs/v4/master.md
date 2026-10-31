@@ -17,14 +17,14 @@ The fenced `GET /v1/master/context` snapshot contains:
 - Tickets in `Needs owner`, including whether they were already escalated.
 - Running ticket runs with elapsed time and the project's `work_minutes` target, warn and hard limits.
 - Offline nodes and accounts out of quota, failing their check, or temporarily paused by the master.
-- Repeated TESTFLOW failure reports from the fenced scan described in [Repeated flow failures](flow-bugs.md).
+- Repeated failure reports in the maintenance project from the fenced scan described in [Repeated flow failures](flow-bugs.md).
 
 The worker runs `prompts/v4/master.md`, returns a JSON action plan, and submits each action to
 `POST /v1/master/actions`. The control API checks the active run and fence, applies the owner escalation policy,
 records accepted and refused requests in the audit log, and performs only the safe actions listed below. Tool calls
 are denied for master runs, so all effects go through the control API. The master reviews the snapshot for tickets
 beyond the applicable project hard limit. Quota, authentication, offline-node and missing-tool symptoms stay
-incidents; they are not converted into TESTFLOW Bugs.
+incidents; they are not converted into Bugs in the maintenance project.
 
 ## Safe actions, escalation and audit
 
@@ -35,7 +35,7 @@ Allowed actions are:
 - `pause_account` with a temporary pause of up to 24 hours for an account with a quota or health issue.
 - `restart_run` after its project hard limit; the control plane releases the target run's lease, marks it lost and
   returns its ticket to To Do.
-- `open_bug` only for an eligible repeated TESTFLOW failure. The control API applies the threshold and tracker
+- `open_bug` only for an eligible repeated failure in the maintenance project. The control API applies the threshold and tracker
   deduplication from [Repeated flow failures](flow-bugs.md).
 
 Every accepted or refused request is recorded in `write_audit` and emitted as a `master.action` event with the

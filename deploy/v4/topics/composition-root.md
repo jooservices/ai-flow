@@ -1,0 +1,1 @@
+- [Composition root](../../../docs/v4/composition-root.md): api.py only assembles the control app; shared helpers live in app_helpers.py and gateway_helpers.py.

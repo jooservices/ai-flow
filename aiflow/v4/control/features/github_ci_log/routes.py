@@ -9,7 +9,7 @@ from fastapi import Depends, HTTPException, Query
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
-    from ...api import github_gateway  # noqa: PLC0415 - api imports this module
+    from ...gateway_helpers import github_gateway  # noqa: PLC0415 - api imports this module
     audit = deps.audit
     fenced = deps.fenced
     node_auth = deps.node_auth

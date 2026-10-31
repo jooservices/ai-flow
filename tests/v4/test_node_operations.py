@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from aiflow.v4.control import api as control_api
+from aiflow.v4.control import gateway_helpers
 from aiflow.v4.control.features.fleet import routes as fleet_routes
 from aiflow.v4.control.console_auth import ROLE_PERMISSIONS, issue_session
 from aiflow.v4 import cli
@@ -165,7 +166,7 @@ def test_join_command_requires_an_explicit_non_local_control_url_before_creating
 
 
 def test_join_control_url_accepts_an_operator_routed_private_address():
-    assert control_api.validated_join_control_url("http://10.44.0.10:18480/") == "http://10.44.0.10:18480"
+    assert gateway_helpers.validated_join_control_url("http://10.44.0.10:18480/") == "http://10.44.0.10:18480"
 
 
 def test_join_command_uses_a_single_use_token_and_never_accepts_ssh_password(client, ctx, tmp_path, monkeypatch):

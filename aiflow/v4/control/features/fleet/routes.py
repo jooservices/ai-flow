@@ -24,7 +24,7 @@ from ...features.work.constants import utcnow
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
-    from ...api import _issue_git_proxy_token, github_gateway, join_bootstrap_command, validated_join_control_url  # noqa: PLC0415 - api imports this module
+    from ...gateway_helpers import _issue_git_proxy_token, github_gateway, join_bootstrap_command, validated_join_control_url  # noqa: PLC0415 - api imports this module
     audit = deps.audit
     audit_in = deps.audit_in
     console_user = deps.console_user

@@ -195,7 +195,8 @@ def _github_project_conditions(ctx, project, trigger: str, provider_checks: bool
             out.append(condition(f"base-branch:{repository}", f"Base branch · {repository}", "needs_action",
                                  "The configured base branch has not been verified.", action))
         return out
-    from .api import github_connection_list, github_connection_used, github_connections, github_gateway
+    from .route_deps import github_connection_used
+    from .gateway_helpers import github_connection_list, github_connections, github_gateway
 
     try:
         connections = github_connection_list(ctx)

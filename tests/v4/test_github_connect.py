@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
@@ -72,7 +73,8 @@ def owner_sign_in(client, ctx, role="owner"):
 def patch_flow_gateway(monkeypatch):
     import aiflow.v4.control.api as api
     from aiflow.v4.control.features.projects import routes as project_routes
-    monkeypatch.setattr(api, "GitHubApp", FakeConnectGitHub)
+    from aiflow.v4.control import gateway_helpers
+    monkeypatch.setattr(gateway_helpers, "GitHubApp", FakeConnectGitHub)
     monkeypatch.setattr(project_routes, "GitHubApp", FakeConnectGitHub)  # the GitHub connection routes moved there
     return api
 
@@ -175,7 +177,7 @@ def test_new_app_manifest_round_trip_verifies_installation_and_audits_without_cr
             assert path == "/app-manifests/oneTimeCode/conversions"
             return ConversionResponse()
 
-    monkeypatch.setattr(api.httpx, "Client", ConversionClient)
+    monkeypatch.setattr(httpx, "Client", ConversionClient)
     start = client.get("/v1/integrations/github/manifest/start?organization=acme")
     assert start.status_code == 200
     assert "https://github.com/organizations/acme/settings/apps/new" in start.text

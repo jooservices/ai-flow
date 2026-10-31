@@ -300,7 +300,11 @@ def test_post_merge_worker_runs_only_the_check_mapped_to_its_criterion(tmp_path,
     assert complete[2]["checks"][0]["output"] == "[redacted]"
 
 
-def test_shared_release_account_is_a_candidate_on_its_secondary_machine(client, ctx):
+def test_shared_release_account_is_a_candidate_on_its_secondary_machine(client, ctx, monkeypatch):
+    # The heartbeat starts its readiness refresh in a background thread; run it inline so the candidate query below
+    # never races it (JAIF-511).
+    monkeypatch.setattr(system_check_api, "schedule_heartbeat_readiness",
+                        lambda run_ctx, node, trigger: system_check_api._refresh_heartbeat(run_ctx, node, trigger))
     configure(ctx)
     evidence(ctx, "TESTWP-231")
     secondary = node_headers(client, "node-secondary")

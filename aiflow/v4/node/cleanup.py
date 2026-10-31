@@ -31,9 +31,11 @@ def _artifact_dirs_are_real(pin: _WorktreePin) -> bool:
     change which inode was inspected."""
     parent = pin.fd
     opened: list[int] = []
+    # O_PATH needs no read permission, so a search-only root-owned level can still be inspected (Linux; elsewhere read)
+    flags = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
         for name in ("artifacts", "reports", "e2e"):
-            parent = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            parent = os.open(name, flags, dir_fd=parent)
             opened.append(parent)
         return True
     except OSError:

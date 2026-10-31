@@ -490,7 +490,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             candidates = {candidate["signature"] for candidate in flow_bug_candidates(ctx)
                           if candidate["creation_eligible"]}
             if not body.signature or body.signature not in candidates:
-                refuse_master_action("open_bug requires an eligible repeated TESTFLOW failure signature")
+                refuse_master_action("open_bug requires an eligible repeated flow failure signature")
             reports = process_flow_bugs(run)
             matching = next((report for report in reports if report.get("signature") == body.signature), None)
             if not matching:

@@ -464,10 +464,11 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 "autonomy": master_budget_state()}
 
     def create_flow_bug(run: dict, candidate: dict) -> dict | None:
-        """Open a TESTFLOW Bug for a detected pattern, record it before any further Jira call, and move it to Intake."""
+        """Open a Bug in the maintenance project for a detected pattern, record it, and move it to Intake."""
+        project = ctx.settings.maintenance_project
         run_lines = [f"- {item['id']} · {item['ticket']} · {item['step']} · node {item['node']} · release {item['release']}"
                      for item in candidate["runs"]]
-        reason = ("at least three matching failed runs across at least two TESTFLOW tickets in 30 minutes"
+        reason = ("at least three matching failed runs across at least two tickets in 30 minutes"
                   if len(candidate["runs"]) >= 3 and len(candidate["tickets"]) >= 2 else
                   "a ticket_stuck incident for this error pattern remained open over 30 minutes")
         description = ("Automatically detected by the AI Flow master cycle.\n\n"
@@ -483,7 +484,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
                        f"Suggested fix: {suggested_flow_fix(candidate)}")
         summary = f"[Flow bug] {candidate['pattern'].splitlines()[0]}"[:240]
         try:
-            ticket_key = ctx.jira.create_issue("TESTFLOW", summary, description, issuetype="Bug",
+            ticket_key = ctx.jira.create_issue(project, summary, description, issuetype="Bug",
                                                labels=["flow-bug"])
         except Exception as exc:  # Keep the monitoring snapshot available and retry detection next cycle.
             audit("jira", "flow_bug_create", "", str(run["id"]), run["fence"], run["account_id"], False,
@@ -499,15 +500,15 @@ def install(app, ctx, deps) -> SimpleNamespace:
                    " run_ids=EXCLUDED.run_ids, repeat_count=0, in_intake=false, updated_at=now()",
                    (candidate["signature"], ticket_key, run_ids))
         ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
-                   " VALUES (%s,'TESTFLOW','Created','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
+                   " VALUES (%s,%s,'Created','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
                    " type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
                    " description=EXCLUDED.description, synced_at=now()",
-                   (ticket_key, ["flow-bug"], summary, description))
+                   (ticket_key, project, ["flow-bug"], summary, description))
         audit("jira", "flow_bug_create", ticket_key, str(run["id"]), run["fence"], run["account_id"], True,
               "created", {"reason": reason, "signature": candidate["signature"], "run_ids": run_ids,
                           "tickets": candidate["tickets"], "labels": ["flow-bug"]})
         status = move_flow_bug_to_intake(run, ticket_key, candidate["signature"])
-        ctx.events.emit("flow_bug.created", ticket=ticket_key, project="TESTFLOW", run_id=str(run["id"]),
+        ctx.events.emit("flow_bug.created", ticket=ticket_key, project=project, run_id=str(run["id"]),
                         fence=run["fence"], account=run["account_id"], node=run["node"],
                         outcome=status or "created", reason=candidate["pattern"],
                         data={"signature": candidate["signature"], "run_ids": run_ids,
@@ -516,7 +517,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 "run_ids": run_ids, "in_intake": status == "Intake"}
 
     def process_flow_bugs(run: dict) -> list[dict]:
-        """Create or update detected TESTFLOW Bugs from this valid, fenced master cycle."""
+        """Create or update detected Bugs in the maintenance project from this valid, fenced master cycle."""
         if not ctx.jira:
             return []
         reports: list[dict] = []
@@ -559,9 +560,10 @@ def install(app, ctx, deps) -> SimpleNamespace:
                               run["account_id"], True, comment_id,
                               {"signature": candidate["signature"], "repeat_count": repeat_count,
                                "new_run_ids": [r["id"] for r in new_runs]})
-                        ctx.events.emit("flow_bug.repeated", ticket=ticket_key, project="TESTFLOW",
-                                        run_id=str(run["id"]), fence=run["fence"], account=run["account_id"],
-                                        node=run["node"], outcome="commented", reason=candidate["pattern"],
+                        ctx.events.emit("flow_bug.repeated", ticket=ticket_key,
+                                        project=ctx.settings.maintenance_project, run_id=str(run["id"]),
+                                        fence=run["fence"], account=run["account_id"], node=run["node"],
+                                        outcome="commented", reason=candidate["pattern"],
                                         data={"repeat_count": repeat_count, "new_run_ids": [r["id"] for r in new_runs]})
                         reports.append({"action": "repeated", "ticket": ticket_key,
                                         "repeat_count": repeat_count, "new_run_ids": [r["id"] for r in new_runs]})

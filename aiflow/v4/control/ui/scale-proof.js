@@ -25,7 +25,7 @@ function scaleProofPanel(sp, jiraSite) {
     h += '<span style="min-width:0"><div class="t">Release <span class="mono">' + scaleEsc(r.release || '(none)') + '</span> · run #' + scaleEsc(r.id) + ' · ' + scaleEsc(scaleWhen(r.created_at)) + ' · ' + scaleEsc(sc.projects || '?') + ' projects, ' + scaleEsc(sc.machines || '?') + ' machines, ' + scaleEsc(sc.sessions || '?') + ' sessions</div>';
     h += '<table class="runs" style="min-width:0"><thead><tr><th>Budget</th><th>Statistic</th><th>Limit</th><th>Measured</th><th></th></tr></thead><tbody>';
     (r.budgets || []).forEach(function (b) {
-      h += '<tr data-budget="' + scaleEsc(b.key) + '" data-state="' + (b.passed ? 'ok' : 'exceeded') + '"><td>' + scaleEsc(b.title) + '</td><td class="muted">' + scaleEsc(b.statistic) + '</td><td class="mono">' + scaleEsc(b.limit) + ' ' + scaleEsc(b.unit) + '</td><td class="mono">' + (b.measured == null ? '—' : scaleEsc(b.measured) + ' ' + scaleEsc(b.unit)) + '</td><td>' + scalePill(b.passed ? 'ok' : 'crit', b.passed ? 'ok' : 'exceeded') + '</td></tr>';
+      h += '<tr data-budget="' + scaleEsc(b.key) + '" data-state="' + (b.passed ? 'ok' : 'exceeded') + '"><td>' + scaleEsc(b.title) + '</td><td class="muted">' + scaleEsc(b.statistic) + '</td><td class="mono">' + scaleEsc(b.effective_limit || b.limit) + ' ' + scaleEsc(b.unit) + '</td><td class="mono">' + (b.measured == null ? '—' : scaleEsc(b.measured) + ' ' + scaleEsc(b.unit)) + '</td><td>' + scalePill(b.passed ? 'ok' : 'crit', b.passed ? 'ok' : 'exceeded') + '</td></tr>';
     });
     h += '</tbody></table>';
     if ((r.failures || []).length) h += '<ul class="d reasons">' + r.failures.map(function (f) { return '<li>' + scaleEsc(f) + '</li>'; }).join('') + '</ul>';

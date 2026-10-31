@@ -17,8 +17,10 @@ Docs: docs/v4/scale-proof.md.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -55,6 +57,39 @@ BUDGETS: tuple[Budget, ...] = (
 )
 BUDGET_BY_KEY = {b.key: b for b in BUDGETS}
 
+# The written limits are for the reference machine. A shared CI runner is several times slower and its speed varies
+# from run to run, so a run measures the speed of the machine it runs on (`cpu_probe`, before and after the scenario)
+# and the time budgets are multiplied by that factor: never below 1, so the reference machine keeps the written
+# limits, and never above MAX_SPEED_FACTOR, so a real regression is still caught on a slow runner.
+PROBE_ITERATIONS = 400_000
+PROBE_REFERENCE_S = 0.115  # median of cpu_probe() on an idle reference Mac
+MAX_SPEED_FACTOR = 3.0
+TIME_UNITS = ("s", "ms")
+
+
+def cpu_probe(repeats: int = 3) -> float:
+    """Seconds a fixed mixed hashing and dictionary workload takes here; the fastest of `repeats` runs."""
+    best = math.inf
+    for _ in range(repeats):
+        started = time.perf_counter()
+        digest, counts = b"x", {}
+        for i in range(PROBE_ITERATIONS):
+            digest = hashlib.sha256(digest).digest()
+            counts[i % 512] = counts.get(i % 512, 0) + digest[0]
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+def speed_factor(*probe_seconds: float) -> float:
+    """How much slower than the reference machine this one was (the slowest probe counts), within 1..MAX."""
+    slowest = max((s for s in probe_seconds if s and s > 0), default=0.0)
+    return round(min(MAX_SPEED_FACTOR, max(1.0, slowest / PROBE_REFERENCE_S)), 2)
+
+
+def calibration(before_s: float, after_s: float) -> dict[str, Any]:
+    return {"reference_s": PROBE_REFERENCE_S, "before_s": round(before_s, 4), "after_s": round(after_s, 4),
+            "factor": speed_factor(before_s, after_s), "max_factor": MAX_SPEED_FACTOR}
+
 
 def percentile(values: Iterable[float], q: float) -> float:
     """Nearest-rank percentile (q in 0..100); 0.0 for no samples."""
@@ -69,28 +104,42 @@ def describe(budgets: Iterable[Budget] = BUDGETS) -> list[dict[str, Any]]:
              "measures": b.measures} for b in budgets]
 
 
-def evaluate(measured: dict[str, float], budgets: Iterable[Budget] = BUDGETS) -> list[dict[str, Any]]:
-    """One verdict per budget. A budget with no measurement fails: unmeasured is not within budget."""
+def evaluate(measured: dict[str, float], budgets: Iterable[Budget] = BUDGETS,
+             factor: float = 1.0) -> list[dict[str, Any]]:
+    """One verdict per budget. A budget with no measurement fails: unmeasured is not within budget. Time budgets are
+    multiplied by `factor`, the speed of this machine against the reference one (1 on the reference machine)."""
     out = []
     for b in budgets:
         value = measured.get(b.key)
+        scale = factor if b.unit in TIME_UNITS else 1.0
+        limit = round(b.limit * scale, 3)
+        shown = f"{b.limit:g} {b.unit}" + (f" x {scale:g} for this machine = {limit:g} {b.unit}" if scale > 1 else "")
         if value is None:
             passed, message = False, f"{b.title}: {b.key} was not measured"
         else:
-            passed = value <= b.limit
+            passed = value <= limit
             message = (f"{b.title}: {b.key} {b.statistic} {value:.3f} {b.unit} "
-                       + (f"is within the budget of {b.limit:g} {b.unit}" if passed
-                          else f"exceeds the budget of {b.limit:g} {b.unit}"))
-        out.append({"key": b.key, "title": b.title, "limit": b.limit, "unit": b.unit, "statistic": b.statistic,
-                    "measured": None if value is None else round(float(value), 3), "passed": passed,
-                    "message": message})
+                       + (f"is within the budget of {shown}" if passed else f"exceeds the budget of {shown}"))
+        out.append({"key": b.key, "title": b.title, "limit": b.limit, "effective_limit": limit, "unit": b.unit,
+                    "statistic": b.statistic, "measured": None if value is None else round(float(value), 3),
+                    "passed": passed, "message": message})
     return out
+
+
+def _factor_of(report: dict[str, Any]) -> float:
+    """The speed factor a report claims, clamped so a report can never grant itself more than the maximum."""
+    try:
+        value = float((report.get("calibration") or {}).get("factor") or 1.0)
+    except (TypeError, ValueError):
+        value = 1.0
+    return min(MAX_SPEED_FACTOR, max(1.0, value))
 
 
 def finalize(report: dict[str, Any], budgets: Iterable[Budget] = BUDGETS) -> dict[str, Any]:
     """Recompute budgets, failures, findings and the verdict from `measurements` and `checks`."""
     measured = {key: (m or {}).get("value") for key, m in (report.get("measurements") or {}).items()}
-    verdicts = evaluate({k: v for k, v in measured.items() if isinstance(v, (int, float))}, budgets)
+    factor = _factor_of(report)
+    verdicts = evaluate({k: v for k, v in measured.items() if isinstance(v, (int, float))}, budgets, factor)
     checks = [c for c in report.get("checks") or [] if isinstance(c, dict)]
     failures = [v["message"] for v in verdicts if not v["passed"]]
     failures += [f"correctness: {c.get('name')}: {c.get('detail', '')}".rstrip(": ") for c in checks if not c.get("ok")]

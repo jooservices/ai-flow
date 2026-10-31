@@ -12,7 +12,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from aiflow.v4.core import testdb
-from aiflow.v4.node import agent
+from aiflow.v4.node import agent, cleanup
 from tests.v4.conftest import DATABASE_URL
 
 
@@ -106,7 +106,7 @@ def test_node_agent_sweeps_the_databases_named_in_the_project_env_files(admin, t
     (tmp_path / "TESTFLOW.env").write_text(f"OTHER=1\nAIFLOW4_TEST_DATABASE_URL='{DATABASE_URL}'\n")
     (tmp_path / "TESTWP.env").write_text("WP_TESTS_DB_HOST=x\n")
     assert agent._test_database_urls(str(tmp_path)) == [DATABASE_URL]
-    monkeypatch.setattr(agent, "_last_testdb_sweep", 0.0)
+    monkeypatch.setattr(cleanup, "_last_testdb_sweep", 0.0)
     real_sweep = testdb.sweep  # candidates limited to our own database: parallel sessions keep theirs
     monkeypatch.setattr(testdb, "sweep", lambda url: real_sweep(url, only={old}))
     assert agent.sweep_test_databases(str(tmp_path), every_s=600) >= 1

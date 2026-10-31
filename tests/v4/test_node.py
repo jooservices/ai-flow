@@ -4,7 +4,7 @@ import pwd
 import stat
 from types import SimpleNamespace
 
-from aiflow.v4.node import agent, operations
+from aiflow.v4.node import agent, cleanup, operations, release
 
 
 def test_reconcile_can_prepare_a_new_console_account_home(monkeypatch, tmp_path):
@@ -67,7 +67,7 @@ def test_node_tool_versions_report_success_without_output_as_missing(monkeypatch
 def test_scratch_cleanup_that_restores_disk_minimum_is_reported_as_fixed(monkeypatch):
     gib = 1024 ** 3
     free_space = iter((4 * gib, 6 * gib))
-    monkeypatch.setattr(agent, "_disk_free_bytes", lambda: next(free_space))
+    monkeypatch.setattr(cleanup, "_disk_free_bytes", lambda: next(free_space))
     monkeypatch.setattr(agent, "clean_scratch", lambda: 1)
     auto_fixed_conditions = set()
 
@@ -438,9 +438,9 @@ def test_self_update_rejects_bad_signature_reports_incident_and_does_not_install
 
     api = FakeAPI()
     subprocess_calls = []
-    monkeypatch.setattr(agent, "RELEASE_INCOMING_DIR", tmp_path)
-    monkeypatch.setattr(agent, "installed_release", lambda: "")
-    monkeypatch.setattr(agent, "verify_release_signature", lambda *_: (False, "invalid signature"))
+    monkeypatch.setattr(release, "RELEASE_INCOMING_DIR", tmp_path)
+    monkeypatch.setattr(release, "installed_release", lambda: "")
+    monkeypatch.setattr(release, "verify_release_signature", lambda *_: (False, "invalid signature"))
     monkeypatch.setattr(agent.subprocess, "run", lambda *args, **kwargs: subprocess_calls.append(args[0]))
     agent._update_tried.clear()
 
@@ -457,8 +457,8 @@ def test_self_update_reports_unavailable_manifest_or_signature_as_verification_f
     import hashlib
 
     subprocess_calls = []
-    monkeypatch.setattr(agent, "RELEASE_INCOMING_DIR", tmp_path)
-    monkeypatch.setattr(agent, "installed_release", lambda: "")
+    monkeypatch.setattr(release, "RELEASE_INCOMING_DIR", tmp_path)
+    monkeypatch.setattr(release, "installed_release", lambda: "")
     monkeypatch.setattr(agent.subprocess, "run", lambda *args, **kwargs: subprocess_calls.append(args[0]))
 
     for version, missing_asset, expected_detail in (
@@ -531,9 +531,9 @@ def test_self_update_schedules_install_only_after_checksum_and_signature_pass(tm
 
     api = FakeAPI()
     commands = []
-    monkeypatch.setattr(agent, "RELEASE_INCOMING_DIR", tmp_path)
-    monkeypatch.setattr(agent, "installed_release", lambda: "")
-    monkeypatch.setattr(agent, "verify_release_signature", lambda *_: (True, ""))
+    monkeypatch.setattr(release, "RELEASE_INCOMING_DIR", tmp_path)
+    monkeypatch.setattr(release, "installed_release", lambda: "")
+    monkeypatch.setattr(release, "verify_release_signature", lambda *_: (True, ""))
     monkeypatch.setattr(agent.subprocess, "run", lambda cmd, **kwargs: commands.append(cmd)
                         or SimpleNamespace(returncode=0, stdout="started", stderr=""))
     agent._update_tried.clear()
@@ -582,7 +582,7 @@ def test_node_removes_the_worktrees_the_control_plane_marks_finished(tmp_path, m
             assert sorted(body["dirs"]) == ["TESTWP/TESTWP-1-done", "TESTWP/TESTWP-2--intake", "TESTWP/TESTWP-2-open"]
             return {"remove": ["TESTWP/TESTWP-1-done", "TESTWP/TESTWP-2--intake", "TESTWP/not-listed"]}
 
-    monkeypatch.setattr(agent, "_last_sweep", 0.0)
+    monkeypatch.setattr(cleanup, "_last_sweep", 0.0)
     assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 2
     assert [p.name for p in work.iterdir()] == ["TESTWP-2-open"]
     assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 0  # at most every ten minutes
@@ -616,7 +616,7 @@ def test_node_clears_e2e_artifacts_in_a_root_container_before_removing_worktree(
         shutil.rmtree(worktree / "artifacts")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(agent, "_last_sweep", 0.0)
+    monkeypatch.setattr(cleanup, "_last_sweep", 0.0)
     monkeypatch.setattr(agent.subprocess, "run", fake_run)
 
     assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 1
@@ -647,7 +647,7 @@ def test_node_reports_worktree_and_reason_when_root_cleanup_cannot_remove_e2e_en
         commands.append(command)
         return SimpleNamespace(returncode=1, stdout="", stderr="Permission denied: locked-report.json")
 
-    monkeypatch.setattr(agent, "_last_sweep", 0.0)
+    monkeypatch.setattr(cleanup, "_last_sweep", 0.0)
     monkeypatch.setattr(agent.subprocess, "run", fake_run)
 
     assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 0
@@ -670,8 +670,8 @@ def test_develop_channel_installs_a_commit_build_only_when_the_node_opted_in(tmp
         c = FakeHTTP()
 
     commands = []
-    monkeypatch.setattr(agent, "RELEASE_INCOMING_DIR", tmp_path)
-    monkeypatch.setattr(agent, "installed_release", lambda: "")
+    monkeypatch.setattr(release, "RELEASE_INCOMING_DIR", tmp_path)
+    monkeypatch.setattr(release, "installed_release", lambda: "")
     monkeypatch.setattr(agent.subprocess, "run", lambda cmd, **kwargs: commands.append(cmd)
                         or SimpleNamespace(returncode=0, stdout="started", stderr=""))
 

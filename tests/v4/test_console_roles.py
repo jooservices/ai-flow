@@ -13,6 +13,7 @@ from aiflow.v4.control.console_auth import (CANONICAL_ROLES, ROLE_LABELS, ROLE_P
 from aiflow.v4.control.db import J
 from aiflow.v4.core.controlrepo import Project
 from conftest import add_ticket, join_node
+from aiflow.v4.control.ui import console_template
 
 
 SESSION_SECRET = "test-console-role-secret-with-at-least-32-bytes"
@@ -407,7 +408,7 @@ def test_administrator_view_as_is_signed_and_server_enforced_without_sign_out(ct
 
 
 def test_console_has_screen_paths_for_people_management_and_view_as():
-    page = (Path(__file__).resolve().parents[2] / "aiflow/v4/control/ui/console.html").read_text()
+    page = console_template()
     assert page.count("function renderUsers()") == 1
     assert "data-user-add" in page and "data-user-save" in page and "data-user-toggle" in page
     assert "id=\"view-as-role\"" in page and "/v1/console/view-as" in page

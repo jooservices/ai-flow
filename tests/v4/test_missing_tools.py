@@ -12,6 +12,7 @@ from aiflow.v4.core.toolchains import (CATALOG_TOOLS, known_requirements, parse_
 from aiflow.v4.node import agent, operations, probes
 from aiflow.v4.worker import dev
 from aiflow.v4.worker.dev import Claimed, build_prompt, machine_block
+from aiflow.v4.control.ui import console_template
 
 CC_TOOLS = {"git": "git version 2.43", "uv": "uv 0.5", "claude": "2.1.305", "opencode": "1.0", "php": "missing"}
 NODE1_TOOLS = {"git": "git version 2.43", "uv": "uv 0.5", "codex": "1.0", "codex-code-mode-host": "1.0", "php": "PHP 8.3.1", "composer": "2.8"}
@@ -450,7 +451,7 @@ def test_command_center_counts_tickets_waiting_for_each_tool(client, ctx):
     assert waits["php"]["projects"] == ["TESTWP"] and waits["php"]["machines"] == ["cc"]
     assert waits["php"]["tickets"][0]["requirement"] == "php"
     assert waits["php"]["tickets"][0]["since"] and "heartbeat" in waits["php"]["action"]
-    html = Path(tooling.__file__).with_name("ui").joinpath("console.html").read_text()
+    html = console_template()
     assert "Parked tickets" in html and "Parked since" in html and "System action" in html and "tool_waits" in html
 
 
@@ -565,7 +566,7 @@ def test_changed_check_commands_are_probed_again(client, ctx):
 
 
 def test_projects_screen_shows_checks_that_cannot_run():
-    html = Path(tooling.__file__).with_name("ui").joinpath("console.html").read_text()
+    html = console_template()
     assert "projectChecksCell" in html and "cannot run" in html and "<th>Checks</th>" in html
 
 

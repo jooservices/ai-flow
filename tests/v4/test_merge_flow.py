@@ -6,11 +6,11 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 from conftest import add_ticket
 from aiflow.v4.control import loops, merge_flow
 from aiflow.v4.control.db import J
+from aiflow.v4.control.ui import console_template
 
 PR_URL = "https://github.com/jooservices/test-aiflow-wp/pull/7"
 HEAD = "headsha7"
@@ -584,6 +584,6 @@ def test_ticket_details_show_the_pull_request_merge_commit_and_time_to_merge(cli
 
 
 def test_the_console_has_the_dashboard_list_and_the_ticket_merge_details():
-    page = (Path(merge_flow.__file__).parent / "ui" / "console.html").read_text(encoding="utf-8")
+    page = console_template()
     assert "/v1/dashboard/disagreements" in page and "Jira and GitHub disagree" in page
     assert "Approval to merge" in page and "Merge commit" in page and "Moves and their cause" in page

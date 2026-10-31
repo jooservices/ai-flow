@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import uuid
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from conftest import add_ticket, join_node
 from aiflow.v4.control.db import J
+from aiflow.v4.control.ui import console_template
 
 
 MASTER_SCOPE = "master:global"
@@ -205,7 +205,7 @@ def test_first_configured_senior_gets_master_role_when_control_repo_has_no_maste
 
 
 def test_command_center_has_master_budget_and_weekly_report_controls():
-    html = (Path(__file__).parents[2] / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
+    html = console_template()
     assert "function masterAutonomyPanel()" in html
     assert "data-master-budget" in html and "master-budget-save" in html
     assert "/v1/master/autonomy/budget" in html and "Weekly autonomy" in html

@@ -14,6 +14,7 @@ from conftest import DATABASE_URL, REDIS_URL, FakeJira
 from aiflow.v4.control import scale_harness, scale_proof
 from aiflow.v4.control.scale_harness import Scenario
 from aiflow.v4.control.scale_proof import BUDGETS, Budget, evaluate, finalize, percentile
+from aiflow.v4.control.ui import console_template
 
 ROOT = Path(__file__).resolve().parents[2]
 FULL = Scenario()
@@ -497,7 +498,7 @@ def test_command_center_lists_runs_budgets_and_tickets(client, ctx):
     assert 'data-ticket="TESTFLOW-900"' in html
     empty = run_script(DOM + "console.log(scaleProofPanel({runs: [], budgets: [], findings: []}));")
     assert "No scale proof run is attached" in empty
-    page = (ROOT / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
+    page = console_template()
     readiness = (ROOT / "aiflow/v4/control/ui/release-readiness.js").read_text(encoding="utf-8")
     assert "scaleProofPanel(d.scale_proof," in page and "release-readiness.js" in page and "scale_proof_failed" in readiness
 

@@ -14,6 +14,7 @@ from aiflow.v4.control.api import create_app
 from aiflow.v4.control.console_auth import COOKIE_NAME
 from aiflow.v4.control.ui import mount_ui
 from conftest import FakeGitHub, FakeJira
+from aiflow.v4.control.ui import console_template
 
 SECRET = "setup-wizard-session-secret-with-32-bytes"
 EMAIL = "First.Owner@Example.Test"
@@ -275,8 +276,7 @@ def test_sample_ticket_completes_only_after_jira_confirms_intake_and_then_locks_
     ctx.db.run("INSERT INTO accounts (id,provider,node,status) VALUES ('codex-done','codex','done-node','idle')")
     assert status(client)["completed"] is True
 
-    ui = Path(__file__).resolve().parents[2] / "aiflow/v4/control/ui"
-    console = (ui / "console.html").read_text()
+    console = console_template()
     assert "/ui/setup-progress.js" in console and "AIFlowSetup.panel()" in console
     # the panel script is added at run time, never through a static tag
     assert '<script src="/ui/setup-progress.js"' not in console and "src=\"/ui/setup-progress.js\"" not in console

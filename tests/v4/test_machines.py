@@ -10,7 +10,6 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from conftest import add_ticket, join_node
 from console_test_utils import console_script
@@ -57,7 +56,7 @@ def test_machine_screen_renders_machine_specs_account_controls_machine_usage_and
     if not node_js:
         import pytest
         pytest.skip("Node.js is needed to render the console screen")
-    script = console_script(Path("aiflow/v4/control/ui/console.html"))
+    script = console_script()
     driver = r'''
 var machinesView = {innerHTML: ''};
 document.querySelector = function (selector) { return selector === '#view-machines' ? machinesView : null; };

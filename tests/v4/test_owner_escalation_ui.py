@@ -1,16 +1,16 @@
 """The Command Center loads the owner-escalation renderer from its feature asset."""
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from aiflow.v4.control.ui import mount_ui
+from aiflow.v4.control.ui import console_template
 
 
 def test_owner_escalation_panel_asset_is_served_and_guides_ticket_answers_in_jira():
     app = FastAPI()
     mount_ui(app, object())
-    page = Path("aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
+    page = console_template()
     with TestClient(app) as client:
         response = client.get("/console-assets/owner-escalation.js")
 

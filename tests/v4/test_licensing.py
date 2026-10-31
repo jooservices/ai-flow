@@ -19,8 +19,8 @@ from aiflow.v4.control.console_auth import issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.control.ui import mount_ui
 from conftest import add_ticket, join_node
+from aiflow.v4.control.ui import console_template
 
-PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
 COMPOSE = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml"
 LICENSE_PUBLIC_KEY = Ed25519PrivateKey.generate().public_key().public_bytes(
     serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
@@ -85,7 +85,7 @@ def test_plan_defaults_and_console_licence_usage_export_path(client, ctx):
         "team": {"machines": 5, "ai_accounts": 12, "projects": 25, "users": 25},
         "business": {"machines": 50, "ai_accounts": 100, "projects": 250, "users": 250},
     }
-    page = PAGE.read_text()
+    page = console_template()
     assert 'data-view="licensing">Licence</button>' in page
     assert 'id="license-warning"' in page and "14-day grace period" in page
     assert "state.sync_warnings" in page
@@ -374,7 +374,7 @@ def test_no_licence_configured_means_no_limits_and_no_incident(client, ctx):
     state = licensing.snapshot(ctx.db, "")
     assert state["licence_required"] is False and state["limits_enforced"] is False and state["status"] == "active"
     assert client.get("/v1/licensing/status").json()["licence_required"] is False
-    assert "No licence required" in PAGE.read_text()
+    assert "No licence required" in console_template()
     offer = client.get("/v1/work/candidates", params={"account": "opencode-01"},
                        headers={"Authorization": f"Bearer {node}"})
     assert "reason" not in offer.json()

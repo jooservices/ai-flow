@@ -16,6 +16,7 @@ from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.worker.quota_cli import _ready_for_slash_command, parse_quota_text, read_quota
 from conftest import add_ticket, join_node
+from aiflow.v4.control.ui import console_template
 
 
 def node_headers(client, name="cc"):
@@ -422,7 +423,7 @@ def test_worker_quota_cli_uses_an_isolated_helper_process(tmp_path, monkeypatch)
 
 def test_settings_view_and_documentation_expose_the_refresh_controls():
     root = Path(__file__).resolve().parents[2]
-    console = (root / "aiflow/v4/control/ui/console.html").read_text()
+    console = console_template()
     settings = (root / "aiflow/v4/control/ui/quota_refresh_settings.js").read_text()
     docs = (root / "docs/v4/quota-refresh.md").read_text()
     readme = (root / "deploy/v4/README.md").read_text()

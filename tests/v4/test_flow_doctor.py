@@ -17,6 +17,7 @@ from aiflow.v4.control import escalations, flow_doctor, role_health, shared_acco
 from aiflow.v4.control.db import DB, J
 from aiflow.v4.core.controlrepo import Account
 from tests.v4.conftest import add_ticket, join_node
+from aiflow.v4.control.ui import console_template
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -945,7 +946,7 @@ def test_dashboard_exposes_findings_actions_role_reason_and_intervention_totals(
     data = state.json()
     assert "role_coverage" in data["flow_doctor"] and data["flow_doctor"]["findings"]
     assert data["operator_interventions"]["last_24h"] == 1
-    html = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
+    html = console_template()
     panel = (ROOT / "aiflow/v4/control/ui/flow-doctor.js").read_text()
     assert 'src="/console-assets/flow-doctor.js"' in html
     assert "Flow doctor" in panel and "Operator interventions" in panel and "Last 7 days" in panel

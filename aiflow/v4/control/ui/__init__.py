@@ -30,9 +30,14 @@ CONSOLE_PAGE_PATHS = (
 )
 
 
+def console_template() -> str:
+    """The console page before the Security, System check and policy extensions are injected."""
+    return (HERE / "console.html").read_text(encoding="utf-8")
+
+
 def build_console_page() -> str:
     """Compose the console with its independently maintained Security and System check views."""
-    html = (HERE / "console.html").read_text(encoding="utf-8")
+    html = console_template()
     tab_marker = '      <button class="tab" role="tab" id="tab-licensing"'
     view_marker = '  <section class="view" id="view-licensing"'
     security_tab_marker = '      <button class="tab" role="tab" id="tab-notifications"'

@@ -11,6 +11,7 @@ from conftest import add_open_escalation, add_ticket, join_node, report_account_
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control import quota as quota_reporting, route_deps
 from aiflow.v4.control.db import J
+from aiflow.v4.control.ui import console_template
 
 
 def join(client, name, ip="", *, heartbeat=True):
@@ -271,7 +272,7 @@ def test_sync_accounts_restores_projects_for_configured_node_rows_without_join_t
 
 
 def test_command_center_shows_copyable_join_command_and_device_code_sign_in_guide(client):
-    page = Path("aiflow/v4/control/ui/console.html").read_text()
+    page = console_template()
     docs = " ".join(Path("docs/v4/node-join.md").read_text().split())
     assert "Join a node" in page and "join-command" in page and "Show one-time command" in page
     assert "--token ' + d.token" not in page and "AIFLOW4_JOIN_TOKEN" not in page

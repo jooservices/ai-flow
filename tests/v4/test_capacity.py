@@ -1,7 +1,5 @@
 """Ticket estimation, quota-aware routing, weekly capacity and estimate error reporting."""
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-import re
 import uuid
 
 import pytest
@@ -10,9 +8,9 @@ from conftest import add_ticket, join_node
 from aiflow.v4.control import capacity, quota as quota_reporting
 from aiflow.v4.control.db import J
 from aiflow.v4.control.ui import mount_ui
+from aiflow.v4.control.ui import console_template
 
 
-PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
 UTC = timezone.utc
 
 
@@ -320,7 +318,7 @@ def test_estimates_update_with_new_runs_and_completed_ticket_error_is_reported(c
 
 
 def test_dashboard_exposes_capacity_plan_assignment_reason_and_estimate_error_ui():
-    page = PAGE.read_text()
+    page = console_template()
     assert "fetch('/v1/capacity'" in page
     assert "function capacityPanel()" in page
     assert "Capacity plan" in page and "Why tickets were assigned" in page and "Estimate error" in page

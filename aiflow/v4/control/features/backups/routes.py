@@ -7,13 +7,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .bodies import BackupConfigBody
+from .events import BackupConfigured, BackupKeyDownloaded, BackupRunRequested
 from fastapi import HTTPException, Request
 from fastapi.responses import (StreamingResponse)
+from ...platform.events.wiring import publish_for
 from ....core import backups as control_backups
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
-    audit = deps.audit
     console_user = deps.console_user
     # --- encrypted backups and disaster recovery ----------------------------------------------------------
     def backup_config(include_history: bool = True) -> dict:
@@ -74,12 +75,14 @@ def install(app, ctx, deps) -> SimpleNamespace:
             prefix = "/".join(part for part in body.s3_prefix.strip().split("/") if part and part not in {".", ".."})
             region = body.s3_region.strip() or "us-east-1"
             path_value = "/srv/aiflow/backups"
-        ctx.db.run("UPDATE control_backup_config SET schedule=%s,destination_kind=%s,destination_path=%s,s3_endpoint=%s,"
-                   "s3_bucket=%s,s3_prefix=%s,s3_region=%s,retention_days=%s,updated_at=now() WHERE id=true",
-                   (body.schedule, body.destination_kind, path_value, endpoint, bucket, prefix, region,
-                    body.retention_days))
-        audit("backup", "configure", "", "", None, user.subject, True, "backup settings updated",
-              {"schedule": body.schedule, "destination": body.destination_kind, "retention_days": body.retention_days})
+        with ctx.db.transaction():
+            ctx.db.run("UPDATE control_backup_config SET schedule=%s,destination_kind=%s,destination_path=%s,s3_endpoint=%s,"
+                       "s3_bucket=%s,s3_prefix=%s,s3_region=%s,retention_days=%s,updated_at=now() WHERE id=true",
+                       (body.schedule, body.destination_kind, path_value, endpoint, bucket, prefix, region,
+                        body.retention_days))
+            publish_for(ctx, BackupConfigured(actor=user.subject, schedule=body.schedule,
+                                               destination=body.destination_kind,
+                                               retention_days=body.retention_days))
         return backup_config()
 
     @app.post("/v1/backups/key")
@@ -101,7 +104,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             raise
         except OSError as exc:
             raise HTTPException(503, "the backup encryption key could not be created") from exc
-        audit("backup", "download_key", "", "", None, user.subject, True, "one-time backup key download")
+        publish_for(ctx, BackupKeyDownloaded(actor=user.subject))
         return StreamingResponse(iter([key]), media_type="application/octet-stream",
                                   headers={"Content-Disposition": 'attachment; filename="aiflow4-backup-key"',
                                            "Cache-Control": "no-store", "Pragma": "no-cache",
@@ -110,8 +113,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
     @app.post("/v1/backups/run")
     def backup_request(request: Request) -> dict:
         user = console_user(request, "backup.manage", target="backup", action="run_now")
-        ctx.db.run("UPDATE control_backup_config SET backup_requested_at=now(),updated_at=now() WHERE id=true")
-        audit("backup", "run_now", "", "", None, user.subject, True, "backup queued")
+        with ctx.db.transaction():
+            ctx.db.run("UPDATE control_backup_config SET backup_requested_at=now(),updated_at=now() WHERE id=true")
+            publish_for(ctx, BackupRunRequested(actor=user.subject))
         return {"queued": True}
 
     return SimpleNamespace(backup_config=backup_config, backup_status=backup_status, backup_configure=backup_configure, backup_key_download=backup_key_download, backup_request=backup_request)

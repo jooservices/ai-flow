@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from aiflow.v4.control.features.tickets import events as _tickets_events  # noqa: F401  (registers TicketMoved)
+from aiflow.v4.control.features.backups import events as _backups_events  # noqa: F401  (registers the backups events)
 from aiflow.v4.control.platform.events import CATALOG, docgen
 
 DOC = Path(__file__).resolve().parents[2] / "docs/v4/events.md"

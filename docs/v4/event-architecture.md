@@ -76,7 +76,8 @@ ledger stays append-only and the row commits with the change. `DecisionAnswered`
 no longer calls `audit()` itself, and the deadline default and the Jira answer path are now audited too. The backups routes
 (`PUT /v1/backups/config`, `POST /v1/backups/key`, `POST /v1/backups/run`) moved too. The scale-proof result route and
 the business change-request and stakeholder routes moved too. The knowledge routes
-moved too (JAIF-478). The console view-as, notification and licensing routes moved too (JAIF-478). The remaining
+moved too (JAIF-478). The console view-as, notification and licensing routes moved too (JAIF-478). The accepted fleet
+writes (join command, work acceptance and check-probe credential) moved too (JAIF-478). The remaining
 `audit()` calls move with their features (JAIF-478). An `Audit` row may carry `run_id` and `fence` for a fenced write; only
 accepted writes are events, a refused write keeps calling `audit()` with `accepted=False`.
 

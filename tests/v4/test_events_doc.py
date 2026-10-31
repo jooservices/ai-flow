@@ -8,6 +8,7 @@ from aiflow.v4.control.features.scale_proof import events as _scale_proof_events
 from aiflow.v4.control.features.business import events as _business_events  # noqa: F401  (registers the business events)
 from aiflow.v4.control.features.knowledge import events as _knowledge_events  # noqa: F401  (registers the knowledge events)
 from aiflow.v4.control.features.console import events as _console_events  # noqa: F401  (registers console audit events)
+from aiflow.v4.control.features.fleet import events as _fleet_events  # noqa: F401  (registers fleet audit events)
 from aiflow.v4.control.platform.events import CATALOG, docgen
 
 DOC = Path(__file__).resolve().parents[2] / "docs/v4/events.md"

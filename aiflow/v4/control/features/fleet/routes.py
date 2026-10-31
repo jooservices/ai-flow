@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from ...system_check_api import HeartbeatBody
 from .bodies import CheckProbeBody, CheckProbeTokenBody, ConfirmBody, JoinBody, JoinCommandBody, JoinInspectBody, JoinTokenBody, ManagedAccountCreateBody, ManagedAccountSignInStatusBody, ManagedAccountUpdateBody, NodeOperationBody, NodeOperationCheckpointBody, NodeOperationResultBody
+from .events import CheckProbeTokenIssued, NodeJoinCommandCreated, NodeWorkAcceptanceChanged
 from urllib.parse import urlsplit
 from fastapi import Depends, HTTPException, Request
 from ....core.controlrepo import Account, ControlRepo
@@ -19,6 +20,7 @@ from ... import (flow_doctor_api, licensing, load_policy, load_policy_api,
                log_viewer, quota_refresh, runtime_settings, system_check_api, tooling)
 from ... import environment as environment_reports
 from ...db import J
+from ...platform.events.wiring import publish_for
 from ...route_deps import github_connection_used, h
 from ...features.work.constants import utcnow
 
@@ -347,9 +349,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
         except HTTPException as exc:
             audit("node", "join_command", name, "", None, user.subject, False, str(exc.detail))
             raise
-        audit("node", "join_command", name, "", None, user.subject, True, "one-time join command created",
-              {"expires_at": expires_at.isoformat(), "role": role, "project": project,
-               "ssh_password_saved": False})
+        publish_for(ctx, NodeJoinCommandCreated(node=name, actor=user.subject, expires_at=expires_at.isoformat(),
+                                                role=role, project=project))
         command = join_bootstrap_command(token, control)
         ctx.events.emit("node.join_command.created", node=name, outcome="created",
                         reason="one-time token expires in five minutes", data={"actor": user.subject})
@@ -606,11 +607,12 @@ def install(app, ctx, deps) -> SimpleNamespace:
         row = ctx.db.one("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,))
         if not row:
             raise HTTPException(404, "machine is not registered")
-        ctx.db.run("UPDATE nodes SET accepting_work=%s,status=CASE WHEN last_heartbeat > now()-interval '75 seconds'"
-                   " THEN CASE WHEN %s THEN 'online' ELSE 'draining' END ELSE status END WHERE name=%s",
-                   (accepting_work, accepting_work, name))
-        audit("node", action, name, "", None, user.subject, True,
-              "accepting new work" if accepting_work else "stopping new work", {})
+        with ctx.db.transaction():
+            ctx.db.run("UPDATE nodes SET accepting_work=%s,status=CASE WHEN last_heartbeat > now()-interval '75 seconds'"
+                       " THEN CASE WHEN %s THEN 'online' ELSE 'draining' END ELSE status END WHERE name=%s",
+                       (accepting_work, accepting_work, name))
+            publish_for(ctx, NodeWorkAcceptanceChanged(node=name, actor=user.subject,
+                                                       accepting_work=accepting_work))
         ctx.events.emit("node.work_acceptance_changed", node=name, outcome=action,
                         reason="accepting new work" if accepting_work else "new work disabled")
         return {"node": name, "accepting_work": accepting_work}
@@ -708,15 +710,14 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 "purpose": "check_probe", "connection": connection_id, "repo": body.repo.lower(),
                 "node": node, "project": body.project, "expires": int(expires.timestamp()),
             })
-            audit("github", "check_probe_token", "", "", None, node, True, "read-only relay capability issued",
-                  {"repo": body.repo, "project": body.project, "connection": connection_id,
-                   "expires": expires.isoformat(), "transport": "control"})
+            publish_for(ctx, CheckProbeTokenIssued(node=node, repo=body.repo, project=body.project,
+                                                   connection=connection_id, expires=expires.isoformat(),
+                                                   transport="control"))
             return {"token": token, "expires_at": expires.isoformat(),
                     "transport_url": f"{ctx.settings.control_url.rstrip('/')}/v1/github/git/{body.repo}.git"}
         token, expires = github.token(body.repo.split("/", 1)[-1], {"contents": "read", "metadata": "read"})
-        audit("github", "check_probe_token", "", "", None, node, True, "issued",
-              {"repo": body.repo, "project": body.project, "connection": connection_id,
-               "expires": expires.isoformat()})
+        publish_for(ctx, CheckProbeTokenIssued(node=node, repo=body.repo, project=body.project,
+                                               connection=connection_id, expires=expires.isoformat(), transport=""))
         return {"token": token, "expires_at": expires.isoformat()}
 
     @app.post("/v1/nodes/{name}/check-probes")

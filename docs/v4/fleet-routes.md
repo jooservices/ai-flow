@@ -23,3 +23,7 @@ The nodes, machines and managed-account routes live in `aiflow/v4/control/featur
 
 The other fleet routes (`POST /v1/nodes/join`, `POST /v1/nodes/{name}/heartbeat`, `POST /v1/machines/{name}/accounts`) are described in
 `docs/v4/event-architecture.md`. See that file for how `install(app, ctx, deps)` wires the routes.
+
+Audit: the accepted join-command, work-acceptance and check-probe-token writes publish `NodeJoinCommandCreated`,
+`NodeWorkAcceptanceChanged` and `CheckProbeTokenIssued`; the audit ledger writes their existing rows in the event
+transaction. Refused writes still call `audit()` with `accepted=False`.

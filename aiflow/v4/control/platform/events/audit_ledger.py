@@ -1,7 +1,9 @@
 """The audit ledger as a listener: an event that overrides `DomainEvent.audit()` gets its write-audit row here.
 
 One in-transaction listener per such event type, so the row commits with the change and the ledger stays append-only (it
-goes through the same `route_deps.audit` as before). A route no longer calls `audit()` for an event that audits itself."""
+goes through the same `route_deps.audit` as before). A route no longer calls `audit()` for an event that audits itself.
+Only accepted writes are events: the row is always `accepted=True`; a refused write is not a state change and keeps
+calling `audit()` (with `accepted=False`) where it is refused."""
 from __future__ import annotations
 
 from typing import Any
@@ -21,7 +23,7 @@ def register_listeners(ctx: Any, registry: Registry) -> None:
         def write(envelope: Envelope, item: DomainEvent) -> None:
             entry = item.audit()
             if entry is not None:
-                route_deps.audit(ctx, entry.target, entry.action, entry.ticket, "", None, entry.actor, True,
-                                 entry.result, entry.payload)
+                route_deps.audit(ctx, entry.target, entry.action, entry.ticket, entry.run_id, entry.fence, entry.actor,
+                                 True, entry.result, entry.payload)
 
         registry.on(CATALOG[event_type], delivery=IN_TRANSACTION, name=f"audit.{event_type}")(write)

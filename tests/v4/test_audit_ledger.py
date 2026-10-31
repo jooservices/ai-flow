@@ -41,6 +41,31 @@ def test_an_event_that_audits_itself_writes_one_audit_row_in_its_transaction(ctx
                    "accepted": True, "result": "checked", "payload": {"widget": "W-1"}}
 
 
+def test_a_fenced_event_writes_its_run_id_and_fence_into_the_row(ctx, db):
+    from aiflow.v4.control.platform.events import CATALOG
+
+    @event
+    @dataclass(frozen=True)
+    class FencedWrite(DomainEvent):
+        type = "demo.fenced_write"
+        owner = "demo"
+        aggregate = "run"
+        aggregate_field = "run_id"
+        run_id: str
+
+        def audit(self) -> Audit:
+            return Audit("demo", "fenced", "T-1", "account-1", "ok", {}, run_id=self.run_id, fence=7)
+
+    try:
+        registry = Registry()
+        audit_ledger.register_listeners(ctx, registry)
+        publish(db, FencedWrite(run_id="run-1"), registry=registry)
+        row = db.one("SELECT run_id, fence, accepted FROM write_audit WHERE target='demo' AND action='fenced'")
+        assert row == {"run_id": "run-1", "fence": 7, "accepted": True}
+    finally:
+        CATALOG.pop("demo.fenced_write", None)
+
+
 def test_the_audit_row_rolls_back_with_the_change(ctx, db, audited_event):
     registry = Registry()
     audit_ledger.register_listeners(ctx, registry)

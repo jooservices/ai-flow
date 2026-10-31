@@ -77,7 +77,8 @@ no longer calls `audit()` itself, and the deadline default and the Jira answer p
 (`PUT /v1/backups/config`, `POST /v1/backups/key`, `POST /v1/backups/run`) moved too. The scale-proof result route and
 the business change-request and stakeholder routes moved too. The knowledge routes
 moved too (JAIF-478). The console view-as, notification and licensing routes moved too (JAIF-478). The remaining
-`audit()` calls move with their features (JAIF-478).
+`audit()` calls move with their features (JAIF-478). An `Audit` row may carry `run_id` and `fence` for a fenced write; only
+accepted writes are events, a refused write keeps calling `audit()` with `accepted=False`.
 
 `Events` (telemetry log) is split by responsibility: `events.py` writes the registry row and hands the event over; shipping to
 OpenObserve (queue, thread, capped backoff, delivery incident) is `openobserve_shipper.OpenObserveShipper`, reached as

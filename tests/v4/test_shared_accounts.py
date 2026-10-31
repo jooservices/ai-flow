@@ -128,12 +128,12 @@ def test_account_exists_apart_from_machines_and_node_agent_reports_its_provider_
         "link": "http://insecure.test", "code": "ABCD-2345"}, headers=node1).status_code == 422
 
     # The node agent launches the provider CLI in the account's private home and relays its device handoff.
-    from aiflow.v4.node import agent
+    from aiflow.v4.node import agent, provider_sign_in
     provider_cli = ('print("Open https://claude.example.test/device and enter code ABCD-2345 "'
                     '+ "token sk-test-credential")')
-    monkeypatch.setattr(agent, "ensure_account_home", lambda *_args: True)
-    monkeypatch.setattr(agent, "SIGN_IN_COMMANDS", {"claude": [sys.executable, "-c", provider_cli]})
-    monkeypatch.setattr(agent, "_SIGN_IN_RUN_AS", [])
+    monkeypatch.setattr(provider_sign_in, "ensure_account_home", lambda *_args: True)
+    monkeypatch.setattr(provider_sign_in, "SIGN_IN_COMMANDS", {"claude": [sys.executable, "-c", provider_cli]})
+    monkeypatch.setattr(provider_sign_in, "_SIGN_IN_RUN_AS", [])
 
     heartbeat_desired = {}
     prompt_reports = []
@@ -661,7 +661,7 @@ def test_failed_sign_in_can_be_retried_with_a_fresh_request(client, ctx):
     import threading
     from unittest.mock import patch
 
-    from aiflow.v4.node import agent
+    from aiflow.v4.node import agent, provider_sign_in
     sign_in(client, ctx)
     node1 = join(client, "node1")
     client.post("/v1/shared-accounts", json={"id": "shared-01", "provider": "claude"})
@@ -672,7 +672,7 @@ def test_failed_sign_in_can_be_retried_with_a_fresh_request(client, ctx):
     dead.join()  # the provider login exited without success: its thread is dead
     active = {"shared-01": (first["request_id"], threading.Event(), dead)}
     started = []
-    with patch.object(agent, "run_provider_sign_in", lambda *a, **k: started.append(a[2]["request_id"])):
+    with patch.object(provider_sign_in, "run_provider_sign_in", lambda *a, **k: started.append(a[2]["request_id"])):
         agent.sync_provider_sign_ins(None, "node1", [first], active)
         assert started == []  # same attempt: not restarted by itself
         retried = client.post("/v1/shared-accounts/shared-01/machines/node1/signin")

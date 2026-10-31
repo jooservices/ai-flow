@@ -227,11 +227,11 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     handoff = next(item for item in requested.json()["desired"]["sign_ins"] if item["account"] == account_id)
     assert handoff["provider"] == "codex" and handoff["request_id"]
     assert account_id not in requested.json()["desired"]["accounts"]
-    from aiflow.v4.node import agent
+    from aiflow.v4.node import agent, provider_sign_in
     provider_cli = "print('Open https://auth.openai.com/codex/device and enter code ABCD-EFGH')"
-    monkeypatch.setattr(agent, "ensure_account_home", lambda *_args: True)
-    monkeypatch.setattr(agent, "SIGN_IN_COMMANDS", {"codex": [sys.executable, "-c", provider_cli]})
-    monkeypatch.setattr(agent, "_SIGN_IN_RUN_AS", [])
+    monkeypatch.setattr(provider_sign_in, "ensure_account_home", lambda *_args: True)
+    monkeypatch.setattr(provider_sign_in, "SIGN_IN_COMMANDS", {"codex": [sys.executable, "-c", provider_cli]})
+    monkeypatch.setattr(provider_sign_in, "_SIGN_IN_RUN_AS", [])
 
     class NodeAPI:
         def call(self, method, path, body=None, **_kwargs):

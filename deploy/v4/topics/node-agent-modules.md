@@ -1,0 +1,1 @@
+- [Node agent modules](../../../docs/v4/node-agent-modules.md): node loop responsibilities stay in `agent.py`; audit forwarding, provider sign-in, cleanup, and release updates have separate modules

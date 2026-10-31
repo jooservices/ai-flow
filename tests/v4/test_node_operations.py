@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import io
 import shlex
-import subprocess
 import tarfile
 import threading
 from pathlib import Path

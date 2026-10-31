@@ -11,7 +11,7 @@ from aiflow.v4.control import api as control_api
 from aiflow.v4.control import db as control_db
 from aiflow.v4.control import rollout
 from aiflow.v4.control.loops import fleet_rollout, watchdog
-from aiflow.v4.node import agent
+from aiflow.v4.node import agent, release
 
 OLD, NEW = "v4.2.0", "v4.3.0"
 REPO = Path(__file__).resolve().parents[2]
@@ -449,9 +449,9 @@ def test_node_rollback_reinstalls_the_previous_release_through_the_verified_path
             raise AssertionError("nothing to report")
 
     verified, commands = [], []
-    monkeypatch.setattr(agent, "RELEASE_INCOMING_DIR", tmp_path)
-    monkeypatch.setattr(agent, "installed_release", lambda: NEW)
-    monkeypatch.setattr(agent, "verify_release_signature", lambda tar, bundle, v: verified.append(v) or (True, ""))
+    monkeypatch.setattr(release, "RELEASE_INCOMING_DIR", tmp_path)
+    monkeypatch.setattr(release, "installed_release", lambda: NEW)
+    monkeypatch.setattr(release, "verify_release_signature", lambda tar, bundle, v: verified.append(v) or (True, ""))
     monkeypatch.setattr(agent.subprocess, "run", lambda cmd, **kw: commands.append(cmd) or type("R", (), {
         "returncode": 0, "stderr": "", "stdout": ""})())
     agent._update_tried.clear()

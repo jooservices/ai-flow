@@ -136,6 +136,12 @@ class ProviderRoutingEligibilityService:
         self.quota_forecast_at_risk = quota_forecast_at_risk
         self.quota_peer_accounts = quota_peer_accounts
         self._peer_lock = threading.Lock()
+        # Single flight: when a cached answer expires, one poll rebuilds it. The preference is advisory (a claim is
+        # checked again without it), so the other polls keep using the previous answer meanwhile instead of waiting;
+        # only the first build, or one after reset_cache(), is waited for.
+        self._snapshot_build = threading.Lock()
+        self._offer_builds: dict[tuple[str, str], threading.Lock] = {}
+        self._last_takeable: dict[str, set[tuple[str, str]]] = {}
         self._peer_offers: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
         self._snapshot_cache: dict[str, Any] | None = None
         self.pipeline = EligibilityPipeline()
@@ -147,15 +153,28 @@ class ProviderRoutingEligibilityService:
     def _shared_peer_offers(self, account: str, node: str) -> list[dict[str, Any]]:
         """A peer's offers, shared by the worker polls of the same second: headroom is advisory, and probing every
         peer on every poll made ticket pickup miss its budget at 100 projects, 50 machines and 200 sessions."""
-        key, now = (account, node), time.monotonic()
+        key = (account, node)
         with self._peer_lock:
             cached = self._peer_offers.get(key)
-            if cached and now - cached[0] < PEER_OFFERS_TTL_S:
+            if cached and time.monotonic() - cached[0] < PEER_OFFERS_TTL_S:
                 return cached[1]
-        offers = self.peer_candidates(account, node, routing=False, capacity_routing=True)
-        with self._peer_lock:
-            self._peer_offers[key] = (now, offers)
-        return offers
+            build = self._offer_builds.setdefault(key, threading.Lock())
+        if cached and not build.acquire(blocking=False):
+            return cached[1]  # another poll is refreshing these offers; the previous ones are good enough meanwhile
+        if not cached:
+            build.acquire()
+        try:
+            now = time.monotonic()
+            with self._peer_lock:
+                cached = self._peer_offers.get(key)
+                if cached and now - cached[0] < PEER_OFFERS_TTL_S:
+                    return cached[1]
+            offers = self.peer_candidates(account, node, routing=False, capacity_routing=True)
+            with self._peer_lock:
+                self._peer_offers[key] = (now, offers)
+            return offers
+        finally:
+            build.release()
 
     def peer_candidates(self, account: str, node: str, *, routing: bool = False,
                         capacity_routing: bool = True) -> list[dict[str, Any]]:
@@ -195,52 +214,81 @@ class ProviderRoutingEligibilityService:
         with self._peer_lock:
             self._snapshot_cache = None
             self._peer_offers.clear()
+            self._last_takeable.clear()
 
     def _snapshot(self) -> dict[str, Any]:
         """The routing state, ready accounts, online machines and the per-machine answers shared by every worker poll
         of the same two seconds (the preference is advisory; a claim is checked again without it)."""
-        now = time.monotonic()
         with self._peer_lock:
             cached = self._snapshot_cache
-            if cached and now - cached["at"] < SNAPSHOT_TTL_S:
+            if cached and time.monotonic() - cached["at"] < SNAPSHOT_TTL_S:
                 return cached
-        accounts = self.ctx.repo().accounts
-        ready_accounts = self.account_repository.ready_ids()
-        ready_accounts.intersection_update(account.id for account in accounts if not account.paused)
-        snapshot = {"at": now, "accounts": accounts, "ready": ready_accounts, "state": self.state(),
-                    "online": shared_accounts.online_nodes(self.ctx.db), "capacity": {}, "compatible": {},
-                    "takeable": {}}
-        with self._peer_lock:
-            self._snapshot_cache = snapshot
-        return snapshot
+        if cached and not self._snapshot_build.acquire(blocking=False):
+            return cached  # another poll is rebuilding the snapshot; the previous one is good enough meanwhile
+        if not cached:
+            self._snapshot_build.acquire()
+        try:
+            now = time.monotonic()
+            with self._peer_lock:
+                cached = self._snapshot_cache
+                if cached and now - cached["at"] < SNAPSHOT_TTL_S:
+                    return cached
+            accounts = self.ctx.repo().accounts
+            ready_accounts = self.account_repository.ready_ids()
+            ready_accounts.intersection_update(account.id for account in accounts if not account.paused)
+            snapshot = {"at": now, "accounts": accounts, "ready": ready_accounts, "state": self.state(),
+                        "online": shared_accounts.online_nodes(self.ctx.db), "capacity": {}, "compatible": {},
+                        "takeable": {}, "lock": threading.RLock()}
+            with self._peer_lock:
+                self._snapshot_cache = snapshot
+            return snapshot
+        finally:
+            self._snapshot_build.release()
 
     def _takeable(self, snapshot: dict[str, Any], provider: str) -> set[tuple[str, str]]:
         """The (ticket, step) offers a ready account of `provider` can take now, on a machine that can work."""
         cached = snapshot["takeable"].get(provider)
         if cached is not None:
             return cached
-        keys: set[tuple[str, str]] = set()
-        for peer in snapshot["accounts"]:
-            if peer.provider != provider or peer.id not in snapshot["ready"]:
-                continue
-            for machine in peer.machines:
-                if (machine in snapshot["online"] and self._machine_compatible(snapshot, machine)
-                        and self._machine_can_take(snapshot, peer, machine)):
-                    keys.update((item["key"], item["step"]) for item in self._shared_peer_offers(peer.id, machine))
-        snapshot["takeable"][provider] = keys
-        return keys
+        lock = snapshot["lock"]
+        if not lock.acquire(blocking=False):
+            stale = self._last_takeable.get(provider)
+            if stale is not None:
+                return stale  # another poll is computing it for this snapshot; the previous answer will do
+            lock.acquire()
+        try:
+            cached = snapshot["takeable"].get(provider)
+            if cached is not None:
+                return cached
+            keys: set[tuple[str, str]] = set()
+            for peer in snapshot["accounts"]:
+                if peer.provider != provider or peer.id not in snapshot["ready"]:
+                    continue
+                for machine in peer.machines:
+                    if (machine in snapshot["online"] and self._machine_compatible(snapshot, machine)
+                            and self._machine_can_take(snapshot, peer, machine)):
+                        keys.update((item["key"], item["step"])
+                                    for item in self._shared_peer_offers(peer.id, machine))
+            snapshot["takeable"][provider] = self._last_takeable[provider] = keys
+            return keys
+        finally:
+            lock.release()
 
     def _machine_can_take(self, snapshot: dict[str, Any], peer: Any, machine: str) -> bool:
         key = (peer.id, machine)
         if key not in snapshot["capacity"]:
-            snapshot["capacity"][key] = bool(
-                shared_accounts.may_take(self.ctx.db, peer, machine, as_peer=True)[0]
-                and load_policy.claim_limits(self.ctx, machine)["allowed"])  # an overloaded machine offers no work
+            with snapshot["lock"]:
+                if key not in snapshot["capacity"]:
+                    snapshot["capacity"][key] = bool(
+                        shared_accounts.may_take(self.ctx.db, peer, machine, as_peer=True)[0]
+                        and load_policy.claim_limits(self.ctx, machine)["allowed"])  # overloaded: no work offered
         return snapshot["capacity"][key]
 
     def _machine_compatible(self, snapshot: dict[str, Any], machine: str) -> bool:
         if machine not in snapshot["compatible"]:
-            snapshot["compatible"][machine] = self.node_compatible(machine)
+            with snapshot["lock"]:
+                if machine not in snapshot["compatible"]:
+                    snapshot["compatible"][machine] = self.node_compatible(machine)
         return snapshot["compatible"][machine]
 
     def _run(self, pipeline: "EligibilityPipeline", account: Any,

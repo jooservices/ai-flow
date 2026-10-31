@@ -72,6 +72,21 @@ A budget over its limit, a budget without a measurement, or a failed correctness
 names the budget and the measured value, for example
 `Console views load: console_page_load p95 per view, worst view 3.200 s exceeds the budget of 2 s`.
 
+### Budgets follow the speed of the machine (JAIF-450)
+
+The written limits are for the reference machine, an idle Mac. A shared CI runner is several times slower and its speed
+changes from run to run: the same code measured 7.6 s pickup p95 on a Mac, 23 s to 35 s on the runner, so a fixed limit was
+red or green by luck. Each run now measures the speed of the machine it runs on: `cpu_probe` times a fixed hashing and
+dictionary workload (the fastest of three runs) before and after the scenario. The factor is the slower probe divided by the
+reference time (`PROBE_REFERENCE_S`, 0.115 s), never below 1 and never above 3 (`MAX_SPEED_FACTOR`), and every time budget
+is multiplied by it. On the reference machine the factor is 1 and the limits are exactly the written ones; the local gate
+and a developer's Mac therefore keep the strict limits. The cap keeps a real regression visible on a slow runner.
+
+The report carries `calibration` (reference, both probe times, factor) and each budget verdict carries `effective_limit`;
+the message names both limits, for example `... exceeds the budget of 30 s x 2 for this machine = 60 s`, and the panel shows
+the effective limit. `finalize` recomputes the verdicts from the recorded factor and clamps it, so a report cannot grant itself
+a looser limit than the cap.
+
 ## Correctness at this size
 
 The run also fails when behaviour is wrong at 100/50/200: every ready ticket picked exactly once, held tickets never
@@ -203,4 +218,4 @@ The check "every ready ticket is picked once" failed in about one CI run in thre
 marked a finished ticket `Done` after it had posted the result and the release, while a real worker moves the ticket in Jira
 before it reports the result. On a slow runner a concurrent claim could pick the ticket inside that window. The harness now marks the
 ticket first (and puts it back when the result or the release fails), so a duplicate pick is a real fencing defect again and not
-a harness race. The console page-load budget is a separate source of flakes and is still open.
+a harness race. The console page-load budget flaked for another reason, the speed of the runner; it is calibrated as described under Budgets.

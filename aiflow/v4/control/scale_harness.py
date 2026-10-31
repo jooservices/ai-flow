@@ -646,6 +646,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
     from .api import create_app
     from .console_auth import COOKIE_NAME, csrf_token, issue_session
     from .ui import mount_ui
+    probe_before = scale_proof.cpu_probe()
     started = time.perf_counter()
     ctx = build_context(db, leases, workdir, sc, jira)
     app = create_app(ctx)
@@ -974,6 +975,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                      "peak_inflight_app_requests": request_activity["peak_inflight"],
                      "worker_route_p95_ms": {path: round(percentile(values, 95), 3)
                                               for path, values in worker_route_latencies.items()}},
+        "calibration": scale_proof.calibration(probe_before, scale_proof.cpu_probe()),
         "measurements": measured, "checks": checks,
         "errors": errors, "duration_s": round(time.perf_counter() - started, 1)}
     return scale_proof.finalize(report, budgets), ctx

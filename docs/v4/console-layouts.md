@@ -28,7 +28,7 @@ large enough for a finger. Dragging and the size buttons are optional: the arrow
 
 ## Block identifiers
 
-Blocks have stable identifiers: the `data-block` attribute in `aiflow/v4/control/ui/console.html`, listed with their
+Blocks have stable identifiers: the `data-block` attribute in the console sources in `aiflow/v4/control/ui/console/`, listed with their
 titles and default sizes in `PAGES` of `aiflow/v4/control/layouts.py`. A test checks that the two agree. To add a block
 to a page, mark it with `data-block="<id>"` as a direct child of the view (or of a `.dash-section`) and add it to
 `PAGES`.

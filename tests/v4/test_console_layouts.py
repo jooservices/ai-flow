@@ -15,7 +15,7 @@ from aiflow.v4.control.console_auth import ROLE_PERMISSIONS, issue_session
 from aiflow.v4.control.ui import console_template
 
 SECRET = "test-console-layout-secret-with-at-least-32-bytes"
-PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
+ASSETS = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui"
 BOOT = "/* ---------- boot ---------- */"
 STUBS = """
 var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {},
@@ -47,9 +47,9 @@ def ids(blocks: list[dict]) -> list[str]:
 # --- the page list and the console markup agree -------------------------------------------------------------------
 def test_every_block_of_the_registry_is_marked_in_the_console_and_the_other_way_round():
     html = console_template()
-    doctor_asset = (PAGE.parent / "flow-doctor.js").read_text()
-    escalation_asset = (PAGE.parent / "owner_escalation.js").read_text()
-    routing_asset = (PAGE.parent / "provider-routing.js").read_text()
+    doctor_asset = (ASSETS / "flow-doctor.js").read_text()
+    escalation_asset = (ASSETS / "owner_escalation.js").read_text()
+    routing_asset = (ASSETS / "provider-routing.js").read_text()
     marked = set(re.findall(r'data-block="([a-z-]+)"', html + doctor_asset + escalation_asset + routing_asset))
     registered = {block for _, blocks in layouts.PAGES.values() for block, _, _ in blocks}
     # Work board reuses the Delivery board markup; it has no layout of its own.
@@ -110,7 +110,7 @@ console.log(JSON.stringify({{
 
 
 def test_dashboard_has_one_page_wide_layout_grid_for_both_sections():
-    html = (PAGE.parent / "layout.js").read_text()
+    html = (ASSETS / "layout.js").read_text()
     assert "data-layout-section=" not in console_template()
     assert "root.querySelectorAll('[data-block]')" in html
     assert "Arrange all Dashboard blocks together" in console_template()
@@ -233,7 +233,7 @@ def run_js(driver: str) -> object:
         pytest.skip("Node.js is needed to run the console script")
     script = re.search(r"<script>\n(.*?)</script>", console_template(), re.S).group(1)
     script = script[:script.index(BOOT)]
-    assets = PAGE.parent
+    assets = ASSETS
     script += (assets / "layout.js").read_text() + (assets / "security.js").read_text()
     result = subprocess.run([node, "-"], input=STUBS + script + driver + "\n})();\n", text=True, capture_output=True)
     assert result.returncode == 0, result.stderr

@@ -12,8 +12,12 @@ from datetime import datetime
 from typing import Any
 
 REPO = "jooservices/ai-flow"
-HOT_FILES = ("aiflow/v4/control/api.py", "aiflow/v4/control/ui/console.html")
+HOT_FILES = ("aiflow/v4/control/api.py", "aiflow/v4/control/ui/console/")  # a trailing slash counts a folder
 UPDATE_PREFIXES = ("Merge branch", "Merge remote-tracking branch")
+
+
+def _is_file(path: Any, name: str) -> bool:
+    return path == name or (name.endswith("/") and str(path or "").startswith(name))
 
 
 def _time(value: str) -> datetime:
@@ -36,7 +40,8 @@ def compute(prs: list[dict[str, Any]], runs: list[dict[str, Any]]) -> dict[str, 
     for run in runs:
         attempts[run["head_branch"]] = attempts.get(run["head_branch"], 0) + int(run.get("run_attempt") or 1)
     ci = [attempts[p["headRefName"]] for p in prs if p.get("headRefName") in attempts]
-    touched = {name: sum(1 for p in prs if any(f.get("path") == name for f in p.get("files", []))) for name in HOT_FILES}
+    touched = {name: sum(1 for p in prs if any(_is_file(f.get("path"), name) for f in p.get("files", [])))
+               for name in HOT_FILES}
     count = len(prs)
     return {
         "pull_requests": count,

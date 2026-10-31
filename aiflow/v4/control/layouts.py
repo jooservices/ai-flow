@@ -1,7 +1,7 @@
 """Per-person console layouts (docs/v4/console-layouts.md).
 
 Every section of a console page that shows several sections is a *block* with a stable identifier (the
-``data-block`` attribute in ``ui/console.html``). A person can reorder, resize, hide and reset the blocks of each page.
+``data-block`` attribute in ``ui/console/``). A person can reorder, resize, hide and reset the blocks of each page.
 The layout is stored on the server (table ``console_layouts``, keyed by the person's email and the page), so it follows
 the person to another browser or computer.
 

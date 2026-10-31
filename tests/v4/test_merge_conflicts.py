@@ -14,6 +14,7 @@ import pytest
 from conftest import add_ticket, join_node
 from aiflow.v4.control import conflict_loss, hotfiles, merge_flow, merge_queue
 from aiflow.v4.control.db import J
+from aiflow.v4.control.ui import console_template
 from aiflow.v4.core import topics
 from aiflow.v4.worker import verify
 from aiflow.v4.worker.gitops import Git
@@ -705,7 +706,7 @@ def test_conflicts_endpoint_reads_the_runs_and_the_console_shows_it(client, ctx)
     assert data["current"]["conflicts"] == 1 and data["current"]["verifications"] == 2
     assert data["current"]["share_percent"] == 50.0 and data["current"]["seconds"] == 600
     assert client.get("/v1/analytics/conflicts", params={"project": "NOPE"}).json()["current"]["verifications"] == 0
-    page = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
+    page = console_template()
     assert "/v1/analytics/conflicts" in page and "Lost to merge conflicts" in page and "c.definition" in page
 
 

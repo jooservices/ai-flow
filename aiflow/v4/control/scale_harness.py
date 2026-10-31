@@ -50,7 +50,7 @@ REQUIRED_JIRA_STATUSES = ("Backlog", "Intake", "To Do", "In Progress", "In Verif
 PRIORITIES = ("Highest", "High", "Medium", "Low")
 HISTORY_STATUSES = (("Done", 70), ("In Progress", 10), ("In Verify", 10), ("Needs owner", 5))
 EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
-# Every top-level console tab in console.html, with the additional data calls its initial view requests.
+# Every top-level console tab in the console page, with the additional data calls its initial view requests.
 # Common calls mirror the real browser boot sequence; view-specific calls mirror setView/load* handlers.
 COMMON_CALLS = (
     "/v1/console/session", "/v1/console/preferences", "/v1/console/layouts", "/v1/state", "/v1/services",

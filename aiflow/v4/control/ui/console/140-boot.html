@@ -1,0 +1,22 @@
+/* ---------- boot ---------- */
+loadPrefs();
+syncMenuVisibility();
+showView();
+render();
+if (S.view === 'knowledge') loadKnowledge(true);
+if (S.view === 'backup') loadBackups(true);
+if (S.view === 'projects') loadProjectList();
+if (S.view === 'security') loadSecurity();
+if (S.view === 'integrations') {
+  var githubResult = new URLSearchParams(location.search).get('github');
+  if (githubResult === 'connected') S.integrations.notice = 'GitHub is connected.';
+  if (githubResult === 'error') S.integrations.error = 'GitHub could not complete the connection. Return to Integrations and try again.';
+  loadIntegrations();
+}
+if (S.view === 'notifications') loadNotifications();
+poll(); pollServices(); pollAnalytics(); pollConflicts(); pollDashboardUsage(); pollConsoleSession(); pollReviews(); pollDashboardWaiting();
+setInterval(tick, 1000);
+})();
+</script>
+</body>
+</html>

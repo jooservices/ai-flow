@@ -25,6 +25,8 @@ class Audit:
     actor: str
     result: str
     payload: dict[str, Any] = field(default_factory=dict)
+    run_id: str = ""  # a fenced write names its run and fence; an owner or console write leaves both empty
+    fence: int | None = None
 
 
 @dataclass(frozen=True)

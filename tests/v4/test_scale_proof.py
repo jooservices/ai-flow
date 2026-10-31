@@ -73,7 +73,7 @@ def test_scenario_behaves_correctly_at_this_size(proof):
     report, _ = proof
     names = {c["name"] for c in report["checks"]}
     assert {"every_ready_ticket_picked_once", "held_tickets_not_picked", "blocked_tickets_wait_for_blocker",
-            "claims_on_serving_machines", "one_fence_per_fresh_ticket", "lease_exclusive", "no_run_left_working",
+            "claims_on_serving_machines", "fences_grow_per_ticket", "lease_exclusive", "no_run_left_working",
             "fleet_fully_visible", "picker_lists_every_project", "active_runs_visible", "measurement_overlap",
             "measurement_active_threshold"} <= names
     assert [c for c in report["checks"] if not c["ok"]] == []

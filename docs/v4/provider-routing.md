@@ -100,6 +100,14 @@ routing state, ready accounts and machine capacity by the polls of the next two 
 pickup stays within its 30-second budget (6 s without provider routing, 9 s with it, measured on the scale proof) at 100 projects, 50 machines and 200 sessions. Headroom is advisory: a claim
 is always checked again without the preference.
 
+Sharing is single flight (JAIF-438): when a shared answer expires, one poll recomputes it and the other polls keep
+using the previous answer meanwhile instead of repeating the work or waiting for it. This applies to the snapshot, the
+peer offers and the offers a provider can take (`_last_takeable`); only the first computation, or one after
+`reset_cache()`, is waited for. Before, every poll that found an answer expired recomputed it at the same time. On the
+100/50/200 scale proof on a Mac the p95 of ticket pickup went from 14.1 s to 7.6 s (median 3.8 s to 2.1 s, whole run
+45 s to 37 s); the project picker is unchanged. Sampling the threads showed 59% of the time inside `eligible`, 39% of it
+in the headroom check; that share is now spread over many small queries.
+
 ## Cost of a pickup
 
 The container-runtime gate of `GET /v1/work/candidates` and `POST /v1/work/claim` reads the prior development run of a

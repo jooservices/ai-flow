@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 
 from ..worker.client import ControlClient
+from ..worker.container_pin import _WorktreePin
+from ..worker.container_policy import ContainerPolicyError
 
 log = logging.getLogger("aiflow4.node")
 
@@ -22,34 +24,61 @@ _last_testdb_sweep = 0.0
 
 _last_clean = 0.0
 
-def _remove_e2e_artifacts_as_root(worktree: Path) -> None:
+def _artifact_dirs_are_real(pin: _WorktreePin) -> bool:
+    """True when artifacts/reports/e2e exist below the pinned directory as real directories (no symlink at any level).
+
+    Every step is opened relative to the previous descriptor with O_NOFOLLOW, so a swap after this check cannot
+    change which inode was inspected."""
+    parent = pin.fd
+    opened: list[int] = []
+    try:
+        for name in ("artifacts", "reports", "e2e"):
+            parent = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            opened.append(parent)
+        return True
+    except OSError:
+        return False
+    finally:
+        for fd in opened:
+            os.close(fd)
+
+
+def _remove_e2e_artifacts_as_root(worktree: Path, identity: tuple[int, int] | None = None) -> None:
     """Use a disposable root container to clear generated artifacts before host-side worktree removal.
 
     The container sees only this worktree and removes its artifacts directory, which is disposable because
     the worktree itself has already been approved for deletion. Removing the directory inside the container
     also handles root-owned, read-only directory entries that the node agent cannot chmod or unlink.
-    """
-    artifacts = worktree / "artifacts"
-    e2e = artifacts / "reports" / "e2e"
-    if not e2e.is_dir() or any(part.is_symlink() for part in (artifacts, artifacts / "reports", e2e)):
-        return
 
-    source = str(worktree.resolve(strict=True))
-    if "," in source:
-        raise OSError("worktree path contains a comma and cannot be mounted safely")
-    command = [
-        "docker", "run", "--rm", "--pull=missing", "--user=0:0", "--network=none", "--read-only",
-        "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE", "--cap-add=FOWNER",
-        "--mount", f"type=bind,source={source},target=/worktree",
-        _WORKTREE_CLEANUP_IMAGE, "rm", "-rf", "--", "/worktree/artifacts",
-    ]
+    The directory is pinned (JAIF-515): `identity` is the (device, inode) seen when the sweep scanned it, the open
+    descriptor is checked against it, and the container mounts that descriptor instead of the path, so a run that
+    replaces the directory (for example by a symlink) after the scan makes the cleanup refuse instead of letting
+    root delete the artifacts of another directory."""
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
-    except subprocess.TimeoutExpired as exc:
-        raise OSError("root cleanup container timed out after 120 seconds") from exc
-    if result.returncode:
-        detail = (result.stderr or result.stdout or f"exit status {result.returncode}").strip().splitlines()
-        raise OSError(f"root cleanup container failed: {detail[0][:240] if detail else result.returncode}")
+        pin = _WorktreePin(worktree, expected_identity=identity)
+    except (ContainerPolicyError, OSError) as exc:
+        raise OSError(f"worktree changed after the scan, root cleanup refused: {exc}") from exc
+    try:
+        if not _artifact_dirs_are_real(pin):
+            return
+        pin.assert_current()
+        command = [
+            "docker", "run", "--rm", "--pull=missing", "--user=0:0", "--network=none", "--read-only",
+            "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE", "--cap-add=FOWNER",
+            "--mount", f"type=bind,source={pin.proc_path},target=/worktree",
+            _WORKTREE_CLEANUP_IMAGE, "rm", "-rf", "--", "/worktree/artifacts",
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired as exc:
+            raise OSError("root cleanup container timed out after 120 seconds") from exc
+        if result.returncode:
+            detail = (result.stderr or result.stdout or f"exit status {result.returncode}").strip().splitlines()
+            raise OSError(f"root cleanup container failed: {detail[0][:240] if detail else result.returncode}")
+    except ContainerPolicyError as exc:
+        raise OSError(f"worktree changed during root cleanup: {exc}") from exc
+    finally:
+        pin.close()
 
 def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow", min_age_s: int = 600) -> int:
     """Remove the worktrees of finished tickets (Done) and spent per-run checkouts: the control plane decides
@@ -59,7 +88,8 @@ def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow"
         return 0
     _last_sweep = time.time()
     work = Path(srv_root) / "work"
-    found = {}
+    found: dict[str, Path] = {}
+    identities: dict[str, tuple[int, int]] = {}
     for project in work.iterdir() if work.is_dir() else []:
         if not project.is_dir():
             continue
@@ -67,6 +97,8 @@ def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow"
             try:
                 if d.is_dir() and not d.is_symlink() and time.time() - d.stat().st_mtime > min_age_s:
                     found[f"{project.name}/{d.name}"] = d
+                    info = d.lstat()
+                    identities[f"{project.name}/{d.name}"] = (info.st_dev, info.st_ino)
             except OSError:
                 pass
     if not found:
@@ -78,7 +110,10 @@ def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow"
         if path is None:
             continue
         try:
-            _remove_e2e_artifacts_as_root(path)
+            _remove_e2e_artifacts_as_root(path, identities.get(entry))
+            current = os.lstat(path)
+            if (current.st_dev, current.st_ino) != identities.get(entry):
+                raise OSError("worktree changed after the scan, removal refused")
             for root, _dirs, _files in os.walk(path, topdown=True, followlinks=False):
                 os.chmod(root, 0o700)  # read-only triage checkouts
             shutil.rmtree(path)

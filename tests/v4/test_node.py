@@ -611,7 +611,8 @@ def test_node_clears_e2e_artifacts_in_a_root_container_before_removing_worktree(
         assert command[:2] == ["docker", "run"]
         assert "--user=0:0" in command
         assert "--network=none" in command and "--read-only" in command
-        assert any(f"source={worktree.resolve()},target=/worktree" in arg for arg in command)
+        assert any(arg.startswith(f"type=bind,source=/proc/{os.getpid()}/fd/") and arg.endswith(",target=/worktree")
+                   for arg in command)
         assert command[-4:] == ["rm", "-rf", "--", "/worktree/artifacts"]
         shutil.rmtree(worktree / "artifacts")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -622,6 +623,70 @@ def test_node_clears_e2e_artifacts_in_a_root_container_before_removing_worktree(
     assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 1
     assert len(commands) == 1 and commands[0][1]["timeout"] == 120
     assert not worktree.exists()
+
+
+def test_root_cleanup_refuses_a_worktree_replaced_by_a_symlink_after_the_scan(tmp_path, monkeypatch, caplog):
+    import time
+
+    worktree = tmp_path / "work" / "TESTWP" / "TESTWP-3-done"
+    (worktree / "artifacts" / "reports" / "e2e").mkdir(parents=True)
+    victim = tmp_path / "victim"
+    (victim / "artifacts" / "reports" / "e2e").mkdir(parents=True)
+    (victim / "artifacts" / "keep.txt").write_text("another directory")
+    os.utime(worktree, (time.time() - 3600,) * 2)
+
+    class Api:
+        def call(self, method, path, body=None, retries=0):
+            # the sweep answers after the scan: the run that owns the worktree swaps it for a symlink meanwhile
+            import shutil as _shutil
+            _shutil.rmtree(worktree)
+            worktree.symlink_to(victim, target_is_directory=True)
+            return {"remove": ["TESTWP/TESTWP-3-done"]}
+
+    commands = []
+    monkeypatch.setattr(cleanup, "_last_sweep", 0.0)
+    monkeypatch.setattr(agent.subprocess, "run", lambda command, **kw: commands.append(command))
+
+    assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 0
+    assert commands == []
+    assert (victim / "artifacts" / "keep.txt").is_file() and victim.is_dir()
+    assert "TESTWP/TESTWP-3-done" in caplog.text and "root cleanup refused" in caplog.text
+
+
+def test_root_cleanup_refuses_a_worktree_replaced_by_another_directory_after_the_scan(tmp_path, monkeypatch, caplog):
+    import shutil
+    import time
+
+    worktree = tmp_path / "work" / "TESTWP" / "TESTWP-4-done"
+    (worktree / "artifacts" / "reports" / "e2e").mkdir(parents=True)
+    os.utime(worktree, (time.time() - 3600,) * 2)
+
+    class Api:
+        def call(self, method, path, body=None, retries=0):
+            shutil.rmtree(worktree)  # a new directory (new inode) takes the name
+            (worktree / "artifacts" / "reports" / "e2e").mkdir(parents=True)
+            (worktree / "artifacts" / "keep.txt").write_text("replacement")
+            return {"remove": ["TESTWP/TESTWP-4-done"]}
+
+    commands = []
+    monkeypatch.setattr(cleanup, "_last_sweep", 0.0)
+    monkeypatch.setattr(agent.subprocess, "run", lambda command, **kw: commands.append(command))
+
+    assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 0
+    assert commands == [] and (worktree / "artifacts" / "keep.txt").is_file()
+    assert "root cleanup refused" in caplog.text
+
+
+def test_root_cleanup_skips_the_container_when_an_artifacts_level_is_a_symlink(tmp_path):
+    worktree = tmp_path / "wt"
+    (worktree / "artifacts").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere" / "e2e"
+    elsewhere.mkdir(parents=True)
+    (worktree / "artifacts" / "reports").symlink_to(elsewhere.parent, target_is_directory=True)
+    pin_identity = (os.stat(worktree).st_dev, os.stat(worktree).st_ino)
+
+    cleanup._remove_e2e_artifacts_as_root(worktree, pin_identity)  # returns without running docker (would fail here)
+    assert elsewhere.is_dir()
 
 
 def test_node_reports_worktree_and_reason_when_root_cleanup_cannot_remove_e2e_entry(tmp_path, monkeypatch, caplog):

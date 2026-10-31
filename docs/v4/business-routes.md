@@ -30,4 +30,8 @@ Routes that stay in `control/api.py` and are named here only because their handl
 - `POST /v1/scale-proof/results`
 - `PUT /v1/backups/config`
 
+Audit: `POST /v1/business/{key}/change-requests` publishes `ChangeRequestFiled` (`business.change_request_filed`).
+The stakeholder verdict route publishes `StakeholderAccepted` (`business.stakeholder_accepted`) or
+`StakeholderBugFiled` (`business.stakeholder_bug_filed`); each event writes its existing audit row.
+
 See `docs/v4/event-architecture.md` for how `install(app, ctx, deps)` registers them.

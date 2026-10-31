@@ -10,17 +10,18 @@ from types import SimpleNamespace
 from ...state_schema import STATE_RESPONSE_SCHEMA
 
 from .bodies import ChangeRequestBody, StakeholderVerdictBody
+from .events import ChangeRequestFiled, StakeholderAccepted, StakeholderBugFiled
 from typing import Any
 from fastapi import Depends, Header, HTTPException, Query, Request
 from ... import (business)
 from ...console_auth import (has_permission)
 from ...stakeholder_screenshot import decode_screenshot
+from ...platform.events.wiring import publish_for
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
     from ...api import log  # noqa: PLC0415 - api imports this module
     from ...gateway_helpers import github_gateway  # noqa: PLC0415 - api imports this module
-    audit = deps.audit
     state_snapshot_lock = threading.Lock()
     state_snapshot_cache: dict[bool, tuple[float, dict[str, Any]]] = {}
 
@@ -72,9 +73,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
         if not ctx.jira:
             raise HTTPException(503, "Jira is unavailable")
         created = business.create(ctx, project, title, description, epic)
-        audit("jira", "create", created["key"], "", None, business.ACTOR, True, created["status"],
-              {"project": project, "type": "Story", "labels": [business.LABEL], "epic": epic,
-               "chars": len(description)})
+        publish_for(ctx, ChangeRequestFiled(project=project, actor=business.ACTOR, ticket=created["key"],
+                                            status=created["status"], epic=epic, chars=len(description),
+                                            labels=[business.LABEL]))
         ctx.events.emit("business.change_request", ticket=created["key"], project=project, outcome=created["status"],
                         reason=title[:200])
         return created
@@ -150,8 +151,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             except Exception as exc:  # Jira adapters and HTTP clients can raise different transport exceptions.
                 log.warning("Stakeholder acceptance comment failed for %s", target)
                 raise HTTPException(502, "Jira could not record the acceptance") from exc
-            audit("jira", "stakeholder_acceptance", target, "", None, sender, True, comment_id,
-                  {"project": key, "change": body.change_key, "environment": body.environment})
+            publish_for(ctx, StakeholderAccepted(project=key, actor=sender, ticket=target, comment_id=comment_id,
+                                                 change=body.change_key, environment=body.environment))
             ctx.events.emit("stakeholder.acceptance", ticket=target, project=key, outcome="accepted",
                             account=sender, reason=body.environment)
             return {"ok": True, "verdict": body.verdict, "ticket": target, "comment_id": comment_id}
@@ -173,14 +174,15 @@ def install(app, ctx, deps) -> SimpleNamespace:
         except Exception as exc:  # Never tell the stakeholder a partial Jira write succeeded.
             log.warning("Stakeholder UAT issue creation failed for project %s", key)
             raise HTTPException(502, "Jira could not record the UAT feedback") from exc
-        ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
-                   " VALUES (%s,%s,'Intake','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
-                   " status='Intake', type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
-                   " description=EXCLUDED.description, synced_at=now()",
-                   (issue_key, key, ["uat-bug"], summary, description))
-        audit("jira", "stakeholder_bug", issue_key, "", None, sender, True, status,
-              {"project": key, "change": body.change_key, "environment": body.environment,
-               "screenshot": bool(screenshot)})
+        with ctx.db.transaction():
+            ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
+                       " VALUES (%s,%s,'Intake','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
+                       " status='Intake', type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
+                       " description=EXCLUDED.description, synced_at=now()",
+                       (issue_key, key, ["uat-bug"], summary, description))
+            publish_for(ctx, StakeholderBugFiled(project=key, actor=sender, ticket=issue_key, status=status,
+                                                 change=body.change_key, environment=body.environment,
+                                                 screenshot=bool(screenshot)))
         ctx.events.emit("stakeholder.feedback", ticket=issue_key, project=key, outcome="created",
                         account=sender, reason=body.environment, data={"related": body.change_key})
         return {"ok": True, "verdict": body.verdict, "key": issue_key, "status": status}

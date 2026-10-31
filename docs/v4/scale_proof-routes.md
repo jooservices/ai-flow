@@ -30,4 +30,8 @@ Routes that stay in `control/api.py` and are named here only because their handl
 - `POST /v1/stakeholder/{key}/verdict`
 - `PUT /v1/backups/config`
 
+Audit: `POST /v1/scale-proof/results` publishes `ScaleProofRecorded` (`scale_proof.result_filed`).
+The in-transaction audit listener writes the existing `write_audit` row.
+The event and row commit in one transaction.
+
 See `docs/v4/event-architecture.md` for how `install(app, ctx, deps)` registers them.

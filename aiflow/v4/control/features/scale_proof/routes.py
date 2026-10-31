@@ -5,12 +5,13 @@ as `deps`; the names the routes define for the rest of the app are returned."""
 from types import SimpleNamespace
 
 from .bodies import ScaleProofBody
+from .events import ScaleProofRecorded
 from fastapi import Depends, HTTPException
 from ... import (scale_proof)
+from ...platform.events.wiring import publish_for
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
-    audit = deps.audit
     owner_auth = deps.owner_auth
     # --- scale proof: budgets, runs attached to releases, tickets for findings (docs/v4/scale-proof.md) ---------
     @app.get("/v1/scale-proof")
@@ -27,8 +28,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
         run_id = scale_proof.record(ctx, report, body.release, body.source)
         tickets = scale_proof.file_tickets(ctx, run_id)
         run = ctx.db.one("SELECT release, passed, report FROM scale_proof_runs WHERE id=%s", (run_id,))
-        audit("aiflow-control", "scale-proof-result", "", "", None, actor, True,
-              "passed" if run["passed"] else "failed", {"run_id": run_id, "release": run["release"]})
+        publish_for(ctx, ScaleProofRecorded(run_id=run_id, release=run["release"], actor=actor,
+                                            passed=bool(run["passed"])))
         return {"run_id": run_id, "release": run["release"], "passed": run["passed"], "blocked": not run["passed"],
                 "failures": run["report"]["failures"], "tickets": tickets}
 

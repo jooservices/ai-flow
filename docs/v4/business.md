@@ -5,7 +5,7 @@ for people who follow the work by epic, answer questions, and ask for changes. I
 
 ## Access
 
-`GET /business` serves the same page (`aiflow/v4/control/ui/console.html`) with the same access as `/cc` and
+`GET /business` serves the same page (assembled from `aiflow/v4/control/ui/console/`) with the same access as `/cc` and
 `/delivery`: there is no login, no role and no node token. The Traefik router of the control API forwards
 `/business` like the other console paths. Signing in by role is a separate ticket.
 

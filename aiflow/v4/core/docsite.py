@@ -29,12 +29,13 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[3]
 GUIDE = ROOT / "docs" / "guide"
 CONTROL = ROOT / "aiflow" / "v4" / "control"
-UI = CONTROL / "ui" / "console.html"
+UI_DIR = CONTROL / "ui"
+CONSOLE_SOURCES = UI_DIR / "console"  # the console page, as files joined by console/manifest.txt
 SITE_ENV = "AIFLOW4_DOCS_SITE"
 API_PAGE = "reference/api.md"
 SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto"})
 
-# Console screens (`id="view-<name>"` in console.html) touched by each named renderer or screen helper.
+# Console screens (`id="view-<name>"` in the console page) touched by each named renderer or screen helper.
 SCREEN_PAGE = "screens/{view}.md"
 # JAIF-249's required feature document also serves as the System check screen guide, keeping the change in
 # `docs/v4/` while preserving the Console Help target and the documentation-site screen coverage.
@@ -378,10 +379,17 @@ def incident_kinds(source_root: Path = ROOT / "aiflow" / "v4") -> set[str]:
     return kinds
 
 
-def console_views(page: Path = UI) -> list[str]:
-    """Screens of the console: the `view-*` sections of console.html."""
-    views = re.findall(r'<section class="view" id="view-([a-z-]+)"', page.read_text(encoding="utf-8"))
-    extension = page.with_name("system-check.js")
+def console_page_text(ui_dir: Path = UI_DIR) -> str:
+    """The console page: its source files joined in manifest order."""
+    sources = ui_dir / "console"
+    names = (sources / "manifest.txt").read_text(encoding="utf-8").split()
+    return "".join((sources / name).read_text(encoding="utf-8") for name in names)
+
+
+def console_views(ui_dir: Path = UI_DIR) -> list[str]:
+    """Screens of the console: the `view-*` sections of the console page."""
+    views = re.findall(r'<section class="view" id="view-([a-z-]+)"', console_page_text(ui_dir))
+    extension = ui_dir / "system-check.js"
     if extension.is_file() and "system-check" not in views:
         views.append("system-check")
     return views
@@ -1181,7 +1189,7 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
 
 
 def _function_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
-    """Return 1-based line spans for top-level JavaScript function declarations in console.html."""
+    """Return 1-based line spans for top-level JavaScript function declarations in the console page."""
     spans = {}
     for start, line in enumerate(lines):
         match = re.match(r"function\s+([A-Za-z_$][\w$]*)\s*\([^\n]*", line)
@@ -1214,32 +1222,55 @@ def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str])
     return changed
 
 
+def _console_page_at(ref: str) -> str:
+    """The console page as committed at `ref`: the joined sources, or the single page of an older commit."""
+    prefix = UI_DIR.relative_to(ROOT).as_posix()
+
+    def show(path: str, check: bool = True) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "show", f"{ref}:{path}"], cwd=ROOT, text=True, capture_output=True,
+                              check=check)
+
+    manifest = show(f"{prefix}/console/manifest.txt", check=False)
+    if manifest.returncode != 0:
+        return show(f"{prefix}/console.html").stdout
+    return "".join(show(f"{prefix}/console/{name}").stdout for name in manifest.stdout.split())
+
+
+def _console_diff(base_source: str, source: str) -> str:
+    """`git diff -U0` between two assembled console pages (git exits 1 when they differ)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        old, new = Path(tmp) / "console.old", Path(tmp) / "console.new"
+        old.write_text(base_source, encoding="utf-8")
+        new.write_text(source, encoding="utf-8")
+        result = subprocess.run(["git", "diff", "--no-index", "-U0", "--", str(old), str(new)], cwd=ROOT,
+                                text=True, capture_output=True, check=False)
+    if result.returncode not in (0, 1):
+        raise subprocess.CalledProcessError(result.returncode, "git diff --no-index")
+    return result.stdout
+
+
 def changed_views(base: str) -> set[str]:
     """Screens whose section or JavaScript renderer changed; fail when a UI hunk cannot be mapped."""
-    rel = UI.relative_to(ROOT).as_posix()
-    diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", rel], cwd=ROOT, text=True,
-                          capture_output=True, check=True).stdout
     extension_views = set()
     for name, views in UI_EXTENSION_VIEWS.items():
-        extension_rel = UI.with_name(name).relative_to(ROOT).as_posix()
+        extension_rel = (UI_DIR / name).relative_to(ROOT).as_posix()
         extension_diff = subprocess.run(["git", "diff", "--quiet", f"{base}...HEAD", "--", extension_rel],
                                         cwd=ROOT, check=False)
         if extension_diff.returncode == 1:
             extension_views |= views
         elif extension_diff.returncode != 0:
             raise subprocess.CalledProcessError(extension_diff.returncode, extension_diff.args)
-    # Diff coordinates refer to HEAD. During a merge, the worktree/index can already contain upstream edits that
-    # shift those coordinates, so map against the exact file version used by the diff.
-    source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
-    lines = source.splitlines()
-    # `base...HEAD` diffs from the merge base, so old-side hunk coordinates belong to that tree rather than
-    # the possibly advanced base branch. Resolve against the same tree to keep screen mapping stable after merges.
+    # `base...HEAD` diffs from the merge base. The console is several files, so both sides are assembled from the
+    # git objects of their commit (not from the worktree, which can already hold upstream edits during a merge) and
+    # compared as one page: hunk coordinates then refer to the assembled page on both sides.
     merge_base = subprocess.run(["git", "merge-base", base, "HEAD"], cwd=ROOT, text=True,
                                 capture_output=True, check=True).stdout.strip()
-    base_source = subprocess.run(["git", "show", f"{merge_base}:{rel}"], cwd=ROOT, text=True,
-                                 capture_output=True, check=True).stdout
+    source = _console_page_at("HEAD")
+    base_source = _console_page_at(merge_base)
+    lines = source.splitlines()
     base_lines = base_source.splitlines()
-    all_views = set(console_views(UI))
+    diff = _console_diff(base_source, source)
+    all_views = set(console_views(UI_DIR))
     asset_diff = subprocess.run(["git", "diff", "--name-only", f"{base}...HEAD", "--", "aiflow/v4/control/ui/"],
                                 cwd=ROOT, text=True, capture_output=True, check=True).stdout
     touched: set[str] = set().union(*(SCREEN_ASSET_VIEWS.get(path.strip(), ())
@@ -1419,7 +1450,8 @@ def main(argv: list[str] | None = None) -> int:
         views = None
         api_files = [f for f in files if f.endswith(".py") and f.startswith("aiflow/v4/control/")]
         changed_routes = changed_api_routes(args.base, api_files) if api_files else None
-        if UI.relative_to(ROOT).as_posix() in files:
+        console_prefix = CONSOLE_SOURCES.relative_to(ROOT).as_posix() + "/"
+        if any(f.startswith(console_prefix) or f.endswith("/ui/console.html") for f in files):
             try:
                 views = changed_views(args.base)
             except ValueError as exc:

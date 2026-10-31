@@ -28,7 +28,7 @@ master AI's `incident_open` action only accepts these kinds (control answers 400
 incident has a page.
 
 The CI check (`docsite check`) ties documentation to the change. A change in `aiflow/v4/control/ui/` needs the
-changed screen page under `docs/guide/screens/`. For `console.html`, the check maps edits inside a view section and
+changed screen page under `docs/guide/screens/`. For the console page (the sources in `aiflow/v4/control/ui/console/`, compared as one assembled page), the check maps edits inside a view section and
 JavaScript renderers such as `renderProjects` to their screen pages. Shared Help links, first-use hints and Help
 plumbing map to every screen; an edit to one hint maps to that screen. The renderer map lives in
 `SCREEN_RENDERER_VIEWS` in `aiflow/v4/core/docsite.py`. If a UI change cannot be mapped, the check fails until its
@@ -66,7 +66,7 @@ site to `/app/docs-site`.
   serves the site at `/help/` from `docs-site/` of the release (or `$AIFLOW4_DOCS_SITE`; from a source checkout it
   builds a copy on first use). The console login protects it like any other path.
 - Each screen shows a short first-use hint with a link to its page; **Got it** hides it for that screen in that browser.
-- Adding a screen means adding a `view-<name>` section, an entry in `HINTS` in `console.html` and
+- Adding a screen means adding a `view-<name>` section, an entry in `HINTS` in the console page and
   `docs/guide/screens/<name>.md`; the tests fail otherwise.
 
 ## CI check

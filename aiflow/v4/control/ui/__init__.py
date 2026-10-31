@@ -30,9 +30,19 @@ CONSOLE_PAGE_PATHS = (
 )
 
 
+CONSOLE_SOURCES = HERE / "console"
+
+
+def console_source_names() -> list[str]:
+    """The console source files in page order (`console/manifest.txt`, one file name per line)."""
+    return (CONSOLE_SOURCES / "manifest.txt").read_text(encoding="utf-8").split()
+
+
 def console_template() -> str:
-    """The console page before the Security, System check and policy extensions are injected."""
-    return (HERE / "console.html").read_text(encoding="utf-8")
+    """The console page before the Security, System check and policy extensions are injected: the console
+    sources joined in manifest order. Each source is a verbatim slice of the page, so editing one file edits
+    exactly its lines of the served page."""
+    return "".join((CONSOLE_SOURCES / name).read_text(encoding="utf-8") for name in console_source_names())
 
 
 def build_console_page() -> str:

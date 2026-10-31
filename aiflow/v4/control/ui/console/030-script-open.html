@@ -1,0 +1,52 @@
+<script src="/console-assets/quota-refresh-settings.js"></script><script>
+(function () {
+document.documentElement.classList.add('role-loading');
+'use strict';
+/* AI Flow v4 console: Command Center, Delivery, Business, Human review, Stakeholder, Knowledge and Backup, rendered from the live registry (/v1/state every 5 s,
+   /v1/services every 15 s, /v1/tickets/<key> for the ticket drawer). No sample data: what you see is what the
+   control plane knows. */
+
+var POLL_MS = 5000, SVC_MS = 15000, STALE_S = 20, ANALYTICS_MS = 60000, ANALYTICS_DAYS = 14;
+var PREFS_KEY = 'aiflow4-delivery';
+var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function $(s, r) { return (r || document).querySelector(s); }
+function $$(s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+function pad(n) { return String(n).padStart(2, '0'); }
+function mmss(sec) { if (sec == null) return '—'; sec = Math.max(0, Math.floor(sec)); var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60; return h ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s); }
+function ago(sec) { if (sec == null) return 'never'; sec = Math.max(0, Math.round(sec)); if (sec < 60) return sec + ' s ago'; if (sec < 3600) return Math.floor(sec / 60) + ' min ago'; if (sec < 86400) return Math.floor(sec / 3600) + ' h ' + Math.floor(sec % 3600 / 60) + ' min ago'; return Math.floor(sec / 86400) + ' d ago'; }
+function nodeLastSeen(n) {
+  if (!n.last_heartbeat) return 'never';
+  var age = (n.heartbeat_age_s || 0) + since();
+  var seen = when(n.last_heartbeat) + ' (' + ago(age) + ')';
+  return n.status === 'offline' ? 'last seen ' + seen : seen;
+}
+function tok(n) { n = Number(n || 0); return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(Math.round(n)); }
+function gib(b) { return b == null ? '—' : (b / 1073741824).toFixed(1) + ' GiB'; }
+function pctText(v) { var n = v == null || v === '' ? NaN : Number(v); return isFinite(n) ? n.toFixed(0) + '%' : '—'; }
+function usd(v) { v = Number(v || 0); return v ? '$' + v.toFixed(v < 1 ? 3 : 2) : '—'; }
+function tone(p) { return p >= 90 ? 'crit' : p >= 75 ? 'warn' : 'ok'; }
+function hhmm(iso) { if (!iso) return '—'; var d = new Date(iso); return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()); }
+function when(iso) { if (!iso) return '—'; var d = new Date(iso); var today = new Date(); var same = d.toDateString() === today.toDateString(); return (same ? '' : (d.getMonth() + 1) + '/' + d.getDate() + ' ') + pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+function epochWhen(sec) { return sec ? when(new Date(sec * 1000).toISOString()) : '—'; }
+function quotaWhen(value) {
+  if (typeof value === 'number' || /^\d+(?:\.\d+)?$/.test(String(value || ''))) return epochWhen(Number(value));
+  return when(value);
+}
+function quotaDateMs(value) {
+  return (typeof value === 'number' || /^\d+(?:\.\d+)?$/.test(String(value || '')))
+    ? Number(value) * 1000 : new Date(value).getTime();
+}
+
+var ICON = {
+  close: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>',
+  ok: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5 10 17l9-10"></path></svg>',
+  fail: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"></path></svg>',
+  pend: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="7"></circle></svg>',
+  search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="m20 20-4-4"></path></svg>',
+  ext: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"></path></svg>',
+  info: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v6M12 7.5v.01"></path></svg>',
+  warn: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 2.8 19.5h18.4z"></path><path d="M12 10v4.5M12 17.2v.01"></path></svg>',
+  theme: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor"></path></svg>'
+};
+

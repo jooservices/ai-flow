@@ -25,7 +25,8 @@ HOT_FILES: tuple[str, ...] = (
     # Oversized files present in the develop baseline (JAIF-273). The old-flow paths stay covered without changing
     # those files; the v4 giant-file check reports their baseline size and prevents further growth.
     "aiflow/supervisor.py",
-    "aiflow/v4/control/ui/console.html",
+    "aiflow/v4/control/ui/console.html",  # the console page as tickets name it; its sources are the next line
+    "aiflow/v4/control/ui/console/*",
     "aiflow/v4/control/api.py",
     "aiflow/v4/worker/containers.py",
     "tests/test_supervisor.py",

@@ -4,7 +4,7 @@
 `gh` and prints four measures of how hard it is to change this code: lead time (opened to merged), branch-update commits
 (a pull request that had to take `develop` again, which is what a conflict or a lost race looks like), CI attempts per
 pull request (workflow runs plus re-runs), and how many pull requests touch the hot files `control/api.py` and
-`control/ui/console.html`. The calculation is pure and tested; only the fetch calls `gh`.
+`control/ui/console/` (the console page sources; before the split, `console.html`). The calculation is pure and tested; only the fetch calls `gh`.
 
 ## Baseline before the refactor (epic JAIF-445), 29 October 2026, last 100 merged pull requests
 

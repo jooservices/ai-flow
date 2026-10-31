@@ -18,8 +18,8 @@ from aiflow.v4 import VERSION
 from aiflow.v4.control.console_auth import COOKIE_NAME, ROLE_PERMISSIONS, issue_session
 from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS, build_console_page
 from aiflow.v4.core.settings import Settings
+from aiflow.v4.control.ui import console_template
 
-PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
 BOOT = "/* ---------- boot ---------- */"
 STUBS = """
 var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {},
@@ -45,7 +45,7 @@ def run_script(driver: str, prelude: str = STUBS) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to run the console script")
-    script = console_script(PAGE)
+    script = console_script()
     result = subprocess.run([node_js, "-"], input=prelude + script + driver + "\n})();\n",
                             text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
@@ -62,7 +62,7 @@ def render_drawer(node: dict, console_user: dict | None = None, operations: list
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console drawer")
-    script = console_script(PAGE)
+    script = console_script()
     if console_user and "permissions" not in console_user:
         console_user = {**console_user, "permissions": LEAD_PERMISSIONS if console_user.get("role") == "lead"
                         else OWNER_PERMISSIONS}
@@ -85,7 +85,7 @@ def render_sa(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the SA dashboard")
-    script = console_script(PAGE)
+    script = console_script()
     driver = f"""
 var saView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-sa' ? saView : null; }};
@@ -103,7 +103,7 @@ def render_knowledge(data: dict, history: dict | None = None, user: dict | None 
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Knowledge view")
-    script = console_script(PAGE)
+    script = console_script()
     driver = f"""
 var knowledgeView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-knowledge' ? knowledgeView : null; }};
@@ -126,7 +126,7 @@ def render_projects(projects: list[dict], catalog: dict, preflight: dict | None 
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Projects screen")
-    script = console_script(PAGE)
+    script = console_script()
     driver = f"""
 var projectsView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-projects' ? projectsView : null; }};
@@ -169,7 +169,7 @@ def render_dashboard(state: dict, analytics: list[dict] | None = None,
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console Dashboard")
-    script = console_script(PAGE)
+    script = console_script()
     project_key = (state.get("projects") or [{}])[0].get("key")
     report = weekly_report or {"week_start": "2026-10-19", "trend": [], "finished_without_person": [],
                                "needed_person": [], "repeated_failures": []}
@@ -201,7 +201,7 @@ def render_machine_overview(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Command Center")
-    script = console_script(PAGE)
+    script = console_script()
     driver = f"""
 var machineOverview = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-machines' ? machineOverview : null; }};
@@ -223,7 +223,7 @@ def render_machines(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Machines and AI view")
-    script = console_script(PAGE)
+    script = console_script()
     driver = f"""
 var machines = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-machines' ? machines : null; }};
@@ -1333,7 +1333,7 @@ def test_ticket_cards_business_change_requests_and_drawer_show_selected_reposito
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console")
-    script = console_script(PAGE)
+    script = console_script()
     driver = r"""
 var ticket = {key: 'JOOWP-4', project: 'JOOWP', summary: 'MCP change', status: 'To Do', type: 'Story',
   priority: 'Medium', labels: [], blocked_by: [], repository: 'jooservices/wordpress-mcp', parent_key: 'JOOWP-306'};
@@ -1355,7 +1355,7 @@ def test_board_card_shows_already_done_reason_and_clickable_pull_request():
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console")
-    script = console_script(PAGE)
+    script = console_script()
     driver = r"""
 var ticket = {key: 'TESTWP-9', project: 'TESTWP', summary: 'Already implemented', status: 'In Verify', type: 'Bug',
   priority: 'Medium', labels: [], blocked_by: [], last_run: {outcome: 'done', account: 'claude-01', duration_s: 12,
@@ -1507,7 +1507,7 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
     assert 'data-dashboard-panel="work" hidden' in ai_tab
     assert 'data-dashboard-panel="ai"' in ai_tab and 'class="provider-chart"' in ai_tab
     assert "Share of usage · last 14 days" in ai_tab and "Quota by AI" in ai_tab
-    assert '.provider-chart text{fill:var(--muted)' in PAGE.read_text()
+    assert '.provider-chart text{fill:var(--muted)' in console_template()
 
     # JAIF-255: escalations per week by class and project, the share without a person, the register and amendments
     for text in ("Escalations and owner decisions", "66.7% resolved without a person", "falling since last week",
@@ -1865,7 +1865,7 @@ def test_work_board_filters_epic_ai_state_and_ticket_text():
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Work board")
-    script = console_script(PAGE)
+    script = console_script()
     driver = r"""
 var body = {innerHTML: ''};
 document.querySelector = function (selector) { return selector === '#work-body' ? body : null; };

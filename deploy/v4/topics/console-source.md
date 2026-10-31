@@ -1,0 +1,1 @@
+- [Console page source](../../../docs/v4/console-source.md): tests and tools read the console through `console_template()`, not by file path, so the page can be split into sources (JAIF-507)

@@ -2,7 +2,6 @@
 import asyncio
 import os
 import stat
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +17,7 @@ from aiflow.v4.control.console_auth import COOKIE_NAME, has_permission, issue_se
 from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS, mount_ui
 from aiflow.v4.control.db import J
 from aiflow.v4.core.settings import Settings
+from aiflow.v4.control.ui import console_template
 
 SECRET = "s" * 40
 EMAIL = "admin@example.test"
@@ -97,7 +97,7 @@ def test_users_screen_creates_accounts_and_shows_the_licence_limit_refusal(ctx, 
     assert "Users limit of 2 reached" in refused.json()["detail"]
     assert "Raise the user limit in the Licence screen" in refused.json()["detail"]
 
-    console = (Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html").read_text()
+    console = console_template()
     assert "adminRequest('/v1/console/users'" in console and "temporaryPassword" in console
     assert has_permission("owner", "users.manage")
 
@@ -262,7 +262,7 @@ def test_sa_session_gets_endpoint_access_from_the_shared_permission_table(ctx):
 
 
 def test_console_ui_uses_session_permission_identifiers_for_controls():
-    html = (Path(login.__file__).parent / "ui" / "console.html").read_text(encoding="utf-8")
+    html = console_template()
     assert "function consoleCan(permission)" in html
     assert "S.consoleUser && S.consoleUser.permissions" in html
     assert "permissions.indexOf('*') >= 0 || permissions.indexOf(permission) >= 0" in html

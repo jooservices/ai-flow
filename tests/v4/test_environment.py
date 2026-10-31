@@ -10,12 +10,13 @@ from fastapi.testclient import TestClient
 from conftest import add_ticket, join_node
 from test_intake import REWRITE, Api, FakeAdapter, FakeGit, claim, iclient, run_worker  # noqa: F401 - fixtures
 from test_projects import owner_sign_in, prepare_project_control
-from aiflow.v4.control import api as control_api, environment as environment_reports, escalations
+from aiflow.v4.control import environment as environment_reports, escalations
 from aiflow.v4.core import settings as core_settings
 from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.environment import (find_server_wording, items_of, parse_items, parse_missing_environment, redact)
 from aiflow.v4.worker import dev, intake, verify
 from aiflow.v4.worker.dev import Claimed
+from aiflow.v4.control.ui import console_template
 
 ENVIRONMENT = [
     {"name": "WP_BASE_URL", "kind": "base_url", "value": "http://site.example.test:8080", "runs": ["dev", "verify"]},
@@ -234,7 +235,7 @@ def test_projects_screen_saves_the_environment_to_the_control_repository(client,
 
 
 def test_the_console_has_the_environment_screens():
-    html = (control_api.Path(control_api.__file__).parent / "ui" / "console.html").read_text(encoding="utf-8")
+    html = console_template()
     for needle in ("project-environment", "Missing environment items", "Tickets that name servers", "/v1/environment/scan"):
         assert needle in html
     assert "criterion.text || ''" in html and "result.criteria || []" in html and "c.check_result || {}" in html

@@ -1668,9 +1668,9 @@ def test_command_center_and_weekly_report_show_the_escalation_numbers(client, ct
     assert len(overview["register"]["decisions"]) >= 5  # the seeded decisions
     report = client.get("/v1/master/report").json()["escalations"]
     assert report["top_causes"][0]["fix"] and report["this_week"]["share_without_person_pct"] == 66.7
-    from aiflow.v4.control.ui import __file__ as ui_init
+    from aiflow.v4.control.ui import __file__ as ui_init, console_template
     ui_dir = Path(ui_init).parent
-    page = (ui_dir / "console.html").read_text()
+    page = console_template()
     renderer = (ui_dir / "owner_escalation.js").read_text()
     assert "Escalations and owner decisions" in renderer and "/console-assets/owner-escalation.js" in page
     assert "/v1/escalations" in page and "/v1/decisions/" in page

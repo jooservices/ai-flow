@@ -13,7 +13,6 @@ from aiflow.v4.control import load_policy, role_health
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 
 
-PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
 ROOT = Path(__file__).resolve().parents[2]
 
 

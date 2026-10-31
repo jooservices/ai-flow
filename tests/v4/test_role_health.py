@@ -6,7 +6,6 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
@@ -14,6 +13,7 @@ from conftest import add_ticket, join_node
 from aiflow.v4.control import notify, role_health
 from aiflow.v4.control.console_auth import issue_session
 from aiflow.v4.control.db import J
+from aiflow.v4.control.ui import console_template
 
 SECRET = "test-console-role-secret-with-at-least-32-bytes"
 EASY = "Fix the rounding.\nAcceptance criteria:\n- AC1: total is rounded\n- AC2: a unit test covers it"
@@ -533,7 +533,7 @@ def test_metrics_per_account_and_role(client, ctx, alerts):
 
 
 def test_console_shows_the_role_health_panel_and_form():
-    page = (Path(role_health.__file__).parent / "ui" / "console.html").read_text()
+    page = console_template()
     for marker in ("AI quality by role", "roleHealthPanel", "success_rate", "cost_per_finished_ticket", "rework_rounds",
                    "id=\"rh-window\"", "id=\"rh-percent\"", "/v1/role-health/settings", "Switch the role off above",
                    "Failure counts and involved tickets appear above", "white-space:pre-wrap"):

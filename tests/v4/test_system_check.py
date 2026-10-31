@@ -606,7 +606,7 @@ def test_projects_readiness_escapes_node_condition_names_and_actions():
     if not node:
         pytest.skip("Node.js is needed to render the Projects readiness panel")
     root = Path(__file__).resolve().parents[2]
-    script = console_script(root / "aiflow/v4/control/ui/console.html")
+    script = console_script()
     extension = (root / "aiflow/v4/control/ui/system-check.js").read_text(encoding="utf-8")
     prelude = """
 var projectsView = {innerHTML: '', insertAdjacentHTML: function (_position, html) { this.innerHTML += html; }};

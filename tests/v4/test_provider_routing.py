@@ -16,6 +16,7 @@ from aiflow.v4.control.loops import watchdog
 from aiflow.v4.control.repositories.accounts import AccountRepository
 from aiflow.v4.control.repositories.provider_routing import ProviderRoutingRepository
 from aiflow.v4.core.controlrepo import Account
+from aiflow.v4.control.ui import console_template
 
 SESSION_SECRET = "test-console-session-secret-at-least-32-bytes"
 
@@ -587,7 +588,7 @@ def test_routing_explanations_stay_available_per_ticket_beyond_thirty_claims(cli
 def test_machines_screen_has_the_routing_panel():
     from pathlib import Path
     root = Path(__file__).parents[2] / "aiflow/v4/control/ui"
-    html = (root / "console.html").read_text()
+    html = console_template()
     ui = (root / "__init__.py").read_text()
     feature = (root / "provider-routing.js").read_text()
     assert 'src="/console-assets/licensing-notice.js"' in html

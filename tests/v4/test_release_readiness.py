@@ -6,8 +6,10 @@ import uuid
 from conftest import add_ticket
 from test_business import DOM, STATE, business
 from test_console import run_script
+
 from aiflow.v4.control import release_readiness
 from aiflow.v4.control.loops import jira_sync
+from aiflow.v4.control.ui import console_template
 
 VERSION = {"id": "100", "name": "1.0", "released": False, "release_date": None}
 
@@ -191,7 +193,6 @@ console.log(JSON.stringify({{cc: readinessPanel({json.dumps(READINESS)}, 'en', '
 
 
 def test_command_center_renders_the_readiness_panel():
-    from test_console import PAGE
-    page = PAGE.read_text()
+    page = console_template()
     render_cc = page[page.index("function renderCC()"):page.index("function renderNodeJoin(")]
     assert "progressPanel(d.release_progress || [], 'en', 'p-ready', true)" in render_cc

@@ -3,9 +3,8 @@ Delivery view draws it as a table and an inline SVG chart."""
 import re
 import uuid
 from datetime import datetime, time, timedelta, timezone
-from pathlib import Path
+from aiflow.v4.control.ui import console_template
 
-PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
 
 
 def day(back: int) -> datetime:
@@ -135,7 +134,7 @@ def test_daily_usage_groups_real_tokens_and_cost_by_provider_and_utc_day(client,
 
 
 def test_delivery_view_has_analytics_panel_with_table_and_inline_svg_chart():
-    page = PAGE.read_text()
+    page = console_template()
     assert "/v1/analytics/daily?days=' + ANALYTICS_DAYS" in page and "ANALYTICS_DAYS = 14" in page
     assert "h += analyticsPanel();" in re.search(r"function renderDBody\(\)(.*?)\n}\n", page, re.S).group(1)
     panel = re.search(r"function analyticsPanel\(\)(.*?)\n}\n", page, re.S).group(1)

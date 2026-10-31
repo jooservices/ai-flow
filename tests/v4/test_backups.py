@@ -25,6 +25,7 @@ from psycopg.rows import dict_row
 from aiflow.v4.control.console_auth import issue_session
 from aiflow.v4.control.db import DB
 from aiflow.v4.core import backups
+from aiflow.v4.control.ui import console_template
 
 
 SESSION_SECRET = "backup-test-session-secret-that-is-long-enough"
@@ -450,7 +451,7 @@ def test_control_restore_service_keeps_backup_and_secret_mounts():
         assert f"/etc/aiflow/secrets/{secret}:/etc/aiflow/secrets/{secret}" in mounts
     repository = next(mount for mount in mounts if "/aiflow-control:/" in mount)
     assert repository == "/srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro"
-    ui = (root / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
+    ui = console_template()
     assert "-v /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control-restore" in ui
 
 

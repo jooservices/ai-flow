@@ -5,13 +5,13 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
-
-CONSOLE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
-SRC = CONSOLE.read_text(encoding="utf-8")
 from console_test_utils import console_script
+
+from aiflow.v4.control.ui import console_template
+
+SRC = console_template()
 
 STUBS = """
 var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {},
@@ -90,7 +90,7 @@ assert.strictEqual(safeHref('/o2/'), '/o2/');
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_board_card_rejects_unsafe_already_done_pull_request_url():
-    script = console_script(CONSOLE)
+    script = console_script()
     driver = r"""
 var ticket = {key: 'TESTWP-10', project: 'TESTWP', summary: 'Already implemented', status: 'In Verify', type: 'Bug',
   priority: 'Medium', labels: [], blocked_by: [], last_run: {outcome: 'done', account: 'claude-01', duration_s: 12,

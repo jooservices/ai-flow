@@ -9,7 +9,7 @@ Run identity:
 
 Review every open incident, every ticket waiting in Needs owner (including ones already escalated), running ticket clocks, offline nodes, accounts out of quota or failing their health check, and repeated flow failures. Running clocks include each project's applicable target, warn and hard work-time limits. Focus on runs past the hard limit; a run within its limit does not need an action. Do not repeat an owner escalation for a ticket marked `owner_escalated`.
 
-The control API checks recent `failed` and `timeout` runs in TESTFLOW using the rule in `docs/v4/flow-bugs.md`: one normalized failure in at least three runs across at least two tickets in 30 minutes. It creates a `Bug` labeled `flow-bug` in Intake and reports the result in `flow_bug_reports`. Do not invent another failure or claim a Bug was created unless the report lists it. Quota, offline-node and missing-tool failures remain incidents.
+The control API checks recent `failed` and `timeout` runs in the maintenance project using the rule in `docs/v4/flow-bugs.md`: one normalized failure in at least three runs across at least two tickets in 30 minutes. It creates a `Bug` labeled `flow-bug` in Intake and reports the result in `flow_bug_reports`. Do not invent another failure or claim a Bug was created unless the report lists it. Quota, offline-node and missing-tool failures remain incidents.
 
 You may request only these safe actions:
 - `retry`: put a ticket back in To Do after a recent failed, blocked, quota or lost run.

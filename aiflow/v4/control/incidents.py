@@ -2,7 +2,7 @@
 
 Incidents are opened once per (kind, subject) while the condition holds, closed when it clears, and people are
 alerted on open (critical and warning) and on resolve. The master cycle also uses the run history and long-lived
-ticket_stuck incidents to identify repeatable TESTFLOW failures that deserve a flow-bug ticket.
+ticket_stuck incidents to identify repeatable failures in the maintenance project that deserve a flow-bug ticket.
 """
 from __future__ import annotations
 
@@ -64,13 +64,15 @@ def flow_error_pattern(error_kind: str, summary: str) -> tuple[str, str] | None:
 
 
 def flow_bug_candidates(ctx) -> list[dict]:
-    """Find repeated TESTFLOW failures and eligible ticket_stuck incidents older than 30 minutes."""
+    """Find repeated failures in the maintenance project and eligible ticket_stuck incidents older than 30 minutes."""
+    project = ctx.settings.maintenance_project
     tracked_signatures = {row["signature"] for row in ctx.db.all("SELECT signature FROM flow_bug_tracker")}
     runs = ctx.db.all(
         "SELECT r.id, r.ticket_key, r.project, r.step, r.error_kind, r.outcome, r.summary, r.node, r.started_at,"
         " coalesce(n.release_version, '') AS release_version FROM runs r LEFT JOIN nodes n ON n.name=r.node"
-        " WHERE r.project='TESTFLOW' AND r.status<>'running' AND r.outcome IN ('failed','timeout')"
+        " WHERE r.project=%s AND r.status<>'running' AND r.outcome IN ('failed','timeout')"
         " AND coalesce(r.ended_at,r.started_at) >= now() - interval '30 minutes' ORDER BY r.started_at",
+        (project,),
     )
     candidates: dict[str, dict] = {}
 
@@ -95,15 +97,16 @@ def flow_bug_candidates(ctx) -> list[dict]:
 
     for incident in ctx.db.all(
         "SELECT id, subject, opened_at FROM incidents WHERE kind='ticket_stuck' AND closed_at IS NULL"
-        " AND subject LIKE 'TESTFLOW-%' AND opened_at <= now() - interval '30 minutes'",
+        " AND starts_with(subject, %s) AND opened_at <= now() - interval '30 minutes'",
+        (f"{project}-",),
     ):
         run = ctx.db.one(
             "SELECT r.id, r.ticket_key, r.project, r.step, r.error_kind, r.outcome, r.summary, r.node, r.started_at,"
             " coalesce(n.release_version, '') AS release_version FROM runs r LEFT JOIN nodes n ON n.name=r.node"
-            " WHERE r.project='TESTFLOW' AND r.ticket_key=%s AND r.status<>'running'"
+            " WHERE r.project=%s AND r.ticket_key=%s AND r.status<>'running'"
             " AND r.outcome IN ('failed','timeout') AND r.started_at > %s - interval '1 day' AND r.started_at <= %s"
             " ORDER BY r.started_at DESC LIMIT 1",
-            (incident["subject"], incident["opened_at"], incident["opened_at"]))
+            (project, incident["subject"], incident["opened_at"], incident["opened_at"]))
         if run:
             add_run(run, incident["id"])
 

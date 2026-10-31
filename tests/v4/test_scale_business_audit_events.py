@@ -24,6 +24,8 @@ def assert_event_and_audit(db, event_type, *, target, action, ticket, actor, res
 
 
 def test_scale_proof_result_publishes_one_event_and_writes_the_same_audit_row(client, db):
+    # the context variable survives from an earlier request of the same process; this route names no connection
+    route_deps.github_connection_used.set("")
     response = client.post("/v1/scale-proof/results", json={"release": "v4.7.0", "report": synthetic()},
                            headers=OWNER)
 

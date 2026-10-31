@@ -334,7 +334,7 @@ def _restart_stale_runs(ctx) -> None:
 
 def _release_backoff(ctx) -> None:
     """Make an expired retry visible to normal routing and record the handoff once per failed run."""
-    from .api import BACKOFF_SQL
+    from .features.work.constants import BACKOFF_SQL
 
     cooling = {step: {row["ticket_key"] for row in ctx.db.all(BACKOFF_SQL, {"step": step})}
                for step in ("dev", "verify")}

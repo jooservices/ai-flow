@@ -191,7 +191,7 @@ def workable_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
     """Tickets a worker could take right now ignoring who and where: To Do and aiflow-ready with every blocker
     Done, or In Verify; not on hold, not in retry backoff, not leased. `older_than_min` keeps only tickets that
     have been waiting that long (a ticket that just became ready is not a stall)."""
-    from .api import BACKOFF_SQL
+    from .features.work.constants import BACKOFF_SQL
     cooling = {step: {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": step})} for step in ("dev", "verify")}
     held = set(ctx.leases.held_keys())
     done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status='Done'")}
@@ -254,7 +254,7 @@ def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -
         reasons.append(f"parked tickets {shown}{extra} waiting for {requirement}; {system_action(requirement)}")
 
     # Backoff is a deliberate pause, but it still names the tickets that have no run available now.
-    from .api import BACKOFF_SQL
+    from .features.work.constants import BACKOFF_SQL
     cooling_tickets = {r["ticket_key"] for step in ("dev", "verify")
                        for r in ctx.db.all(BACKOFF_SQL, {"step": step})}
     cooling_tickets.intersection_update(ticket_keys)

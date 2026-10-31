@@ -351,6 +351,23 @@ def _github_project_conditions(ctx, project, trigger: str, provider_checks: bool
     return out
 
 
+def _jira_auth_blocked(auth) -> dict[str, object] | None:
+    """The credential condition when the stored Jira credential is known to be unusable, otherwise None."""
+    if auth is None:
+        return None
+    try:
+        state = auth.state()
+    except Exception:  # noqa: BLE001 - credential store details are not safe to display
+        state = {}
+    if not (isinstance(state, dict) and state.get("usable") is False):
+        return None
+    if state.get("reason") == "needs_reconnect":
+        return condition("jira-credentials", "Jira credentials", "needs_action",
+                         "Jira credential is invalid.", "Reconnect Jira on the Integrations screen.")
+    return condition("jira-credentials", "Jira credentials", "needs_action", "Jira credential is missing.",
+                     "Connect Jira on the Integrations screen.")
+
+
 def _check_jira_credential(ctx) -> dict[str, object]:
     """Check Jira credentials with a read-only request and expose only missing/valid/invalid state."""
     jira = getattr(ctx, "jira", None)
@@ -359,18 +376,9 @@ def _check_jira_credential(ctx) -> dict[str, object]:
                          "Connect Jira on the Integrations screen.")
 
     auth = getattr(ctx, "jira_auth", None)
-    if auth is not None:
-        try:
-            state = auth.state()
-        except Exception:  # noqa: BLE001 - credential store details are not safe to display
-            state = {}
-        if isinstance(state, dict) and state.get("usable") is False:
-            if state.get("reason") == "needs_reconnect":
-                return condition("jira-credentials", "Jira credentials", "needs_action",
-                                 "Jira credential is invalid.",
-                                 "Reconnect Jira on the Integrations screen.")
-            return condition("jira-credentials", "Jira credentials", "needs_action", "Jira credential is missing.",
-                             "Connect Jira on the Integrations screen.")
+    blocked = _jira_auth_blocked(auth)
+    if blocked is not None:
+        return blocked
 
     try:
         jira.projects()

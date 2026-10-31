@@ -124,28 +124,33 @@ def _readme_with_version(content: str, snapshot: dict[str, Any]) -> str:
     return block + ("\n\n" + content if content else "\n")
 
 
+def _update_json_manifest(basename: str, content: str, number: str) -> str:
+    """Set the top-level version of a JSON manifest (and the root package of a lock file), keeping its indent."""
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return content
+    changed = False
+    if isinstance(data, dict) and "version" in data:
+        data["version"] = number
+        changed = True
+    if (basename == "package-lock.json" and isinstance(data, dict)
+            and isinstance(data.get("packages"), dict) and isinstance(data["packages"].get(""), dict)
+            and "version" in data["packages"][""]):
+        data["packages"][""]["version"] = number
+        changed = True
+    if changed:
+        indent = 4 if re.search(r"\n {4}\"", content) else 2
+        return json.dumps(data, ensure_ascii=False, indent=indent) + "\n"
+    return content
+
+
 def _update_manifest(path: str, content: str, version_name: str) -> str:
     """Update an existing top-level version value in a supported project manifest, preserving other data."""
     number = release_version_number(version_name)
     basename = path.rsplit("/", 1)[-1].lower()
     if basename in {"package.json", "composer.json", "package-lock.json"}:
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            return content
-        changed = False
-        if isinstance(data, dict) and "version" in data:
-            data["version"] = number
-            changed = True
-        if (basename == "package-lock.json" and isinstance(data, dict)
-                and isinstance(data.get("packages"), dict) and isinstance(data["packages"].get(""), dict)
-                and "version" in data["packages"][""]):
-            data["packages"][""]["version"] = number
-            changed = True
-        if changed:
-            indent = 4 if re.search(r"\n {4}\"", content) else 2
-            return json.dumps(data, ensure_ascii=False, indent=indent) + "\n"
-        return content
+        return _update_json_manifest(basename, content, number)
 
     if basename in {"pyproject.toml", "cargo.toml", "setup.cfg", "chart.yaml"}:
         lines = content.splitlines(keepends=True)
@@ -834,6 +839,18 @@ def _failed_checks(ctx, project: Any, version: dict[str, Any], tracker: str, run
     return {"released": False, "status": "failed", "bugs": bugs}
 
 
+def _open_blocker(ctx, prior: dict[str, Any]) -> str:
+    """The key of the follow-up Task from the previous identical failure that is still not Done, or an empty string."""
+    task = ""
+    for blocker in prior.get("blockers") or []:
+        try:
+            if ctx.jira.status(blocker["key"]) != "Done":
+                task = str(blocker["key"])
+        except Exception:  # noqa: BLE001 - unknown status: create a fresh follow-up
+            pass
+    return task
+
+
 def publish_failed(ctx, project: Any, version: dict[str, Any], run: dict, exc: Exception) -> dict[str, Any]:
     """Park a version after a GitHub/Jira publication error behind one blocking follow-up Task.
 
@@ -864,14 +881,7 @@ def publish_failed(ctx, project: Any, version: dict[str, Any], run: dict, exc: E
     last = _last_failure(ctx, tracker)
     prior = (last["payload"] or {}) if last and last["action"] == "jira-release-publish-failed" else {}
     same_error = prior.get("error") == error
-    task = ""
-    if same_error:
-        for blocker in prior.get("blockers") or []:
-            try:
-                if ctx.jira.status(blocker["key"]) != "Done":
-                    task = str(blocker["key"])
-            except Exception:  # noqa: BLE001 - unknown status: create a fresh follow-up below
-                pass
+    task = _open_blocker(ctx, prior) if same_error else ""
     payload: dict[str, Any] = {"error": error, "version_id": version["id"]}
     try:
         created = not task

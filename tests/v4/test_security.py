@@ -57,8 +57,13 @@ def enrol(client, admin_password, email=ADMIN, step_offset=-30):
     """Turn on two-factor for ADMIN on a signed-in client; returns (totp secret, recovery codes)."""
     assert sign_in(client, admin_password, email).status_code == 200
     secret = client.post("/v1/security/mfa/setup").json()["secret"]
-    # the enrolment code is from the previous time step so the current and next steps are still unused
-    r = client.post("/v1/security/mfa/enable", json={"code": mfa.totp_code(secret, time.time() + step_offset)})
+    # the enrolment code is from the previous time step so the current and next steps are still unused. A clock that
+    # crosses a 30-second boundary between making the code and verifying it moves that step out of the accepted window,
+    # so the code is made again (the second attempt cannot cross another boundary).
+    for _attempt in range(3):
+        r = client.post("/v1/security/mfa/enable", json={"code": mfa.totp_code(secret, time.time() + step_offset)})
+        if r.status_code == 200:
+            break
     assert r.status_code == 200, r.text
     return secret, r.json()["recovery_codes"]
 

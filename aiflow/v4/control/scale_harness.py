@@ -33,6 +33,7 @@ import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
+from itertools import pairwise
 from threading import Barrier, Condition, Event, Lock, Thread
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -1033,6 +1034,11 @@ def _measure_peak(client, ctx, sc: Scenario, live: list, errors: list[str],
     return measured, checks
 
 
+def _fences_strictly_grow(runs_in_start_order: list[dict[str, Any]]) -> bool:
+    fences = [int(run.get("fence") or 0) for run in runs_in_start_order]
+    return all(a < b for a, b in pairwise(fences))
+
+
 def _checks(client, ctx, sc, pl, sessions, hosts, headers, peak_checks, pickup) -> list[dict[str, Any]]:
     db = ctx.db
     out = [{"name": n, "ok": ok, "detail": d} for n, (ok, d) in peak_checks.items()]
@@ -1080,10 +1086,13 @@ def _checks(client, ctx, sc, pl, sessions, hosts, headers, peak_checks, pickup) 
              len(state.get("accounts", [])))
     visible_sessions = sum(int(account.get("session_limit") or 1) for account in state.get("accounts", []))
     invalid_fences = [r["ticket_key"] for r in runs if r.get("fence") is None or int(r["fence"]) < 1]
-    first_fences = [key for key, attempts in per_ticket.items()
-                    if int(min(attempts, key=lambda run: run["started_at"]).get("fence") or 0) != 1]
-    check("one_fence_per_fresh_ticket", not invalid_fences and not first_fences,
-          f"{len(invalid_fences)} runs had a non-positive fence; {len(first_fences)} fresh tickets did not start at fence 1")
+    # A claim bumps the fence before the hot-file and session-limit checks, and a refused claim releases the lease
+    # but keeps the bump, so a ticket's first run may legitimately start above fence 1. What must hold is that
+    # fences are positive and strictly grow with every later run of the same ticket.
+    unordered_fences = [key for key, attempts in per_ticket.items()
+                        if not _fences_strictly_grow(sorted(attempts, key=lambda run: run["started_at"]))]
+    check("fences_grow_per_ticket", not invalid_fences and not unordered_fences,
+          f"{len(invalid_fences)} runs had a non-positive fence; {len(unordered_fences)} tickets had fences that did not grow")
     expected_accounts = len({s["id"] for s in sessions})
     check("fleet_fully_visible", sizes == (sc.projects, sc.machines, expected_accounts)
           and visible_sessions == len(sessions),

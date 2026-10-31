@@ -29,7 +29,8 @@ from ... import inventory
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
-    from ...api import ProjectCreateBody, declare_project_services, github_connection_list, github_connections, github_control_gateway, github_gateway, log  # noqa: PLC0415 - api imports this module
+    from ...api import ProjectCreateBody, log  # noqa: PLC0415 - api imports this module
+    from ...gateway_helpers import declare_project_services, github_connection_list, github_connections, github_control_gateway, github_gateway  # noqa: PLC0415 - api imports this module
     audit = deps.audit
     console_user = deps.console_user
     fenced = deps.fenced

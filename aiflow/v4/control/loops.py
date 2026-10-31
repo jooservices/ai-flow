@@ -523,19 +523,20 @@ def fleet_rollout(ctx: ApplicationContext) -> dict | None:
 
 def version_release_scan(ctx: ApplicationContext) -> int:
     """Refresh live Jira version membership and audit which configured versions are ready or blocked."""
-    from . import api as control_api
-    control_api.github_gateway(ctx)  # merge-back retries for released versions need GitHub
+    from .gateway_helpers import github_gateway
+    github_gateway(ctx)  # merge-back retries for released versions need GitHub
     return version_release.scan(ctx)
 
 
 def reconcile_loop(ctx: ApplicationContext, stop: threading.Event) -> None:
     """Compare every ticket that has a pull request with GitHub, a pass every merge_flow.RECONCILE_EVERY_S."""
+    from .gateway_helpers import github_gateway
     from . import api as control_api
     while not stop.is_set():
         started = time.monotonic()
         try:
             if ctx.leases.leader("pr_reconcile", OWNER, 60_000):
-                control_api.github_gateway(ctx)  # connect GitHub when the secret store has a connection
+                github_gateway(ctx)  # connect GitHub when the secret store has a connection
                 merge_flow.reconcile(ctx)
         except Exception as e:  # noqa: BLE001
             log.exception("reconcile loop error: %s", e)
@@ -544,6 +545,7 @@ def reconcile_loop(ctx: ApplicationContext, stop: threading.Event) -> None:
 
 
 def run_loops(ctx: ApplicationContext, stop: threading.Event | None = None) -> None:
+    from .gateway_helpers import github_gateway
     from . import support_bundle
 
     support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
@@ -580,7 +582,7 @@ def run_loops(ctx: ApplicationContext, stop: threading.Event | None = None) -> N
                 ba_chat.poll(ctx)
                 last_ba_chat = now
             if now - last_merge >= merge_flow.MERGE_EVERY_S and ctx.leases.leader("merge_ready", OWNER, 60_000):
-                control_api.github_gateway(ctx)  # connect GitHub when the secret store has a connection
+                github_gateway(ctx)  # connect GitHub when the secret store has a connection
                 for key in merge_flow.merge_ready(ctx):
                     log.info("merged %s", key)
                 last_merge = now

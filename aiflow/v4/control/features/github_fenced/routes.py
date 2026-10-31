@@ -27,11 +27,12 @@ from ...features.work.constants import utcnow
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
-    from ...api import _git_proxy_credential, _issue_git_proxy_token, _receive_pack_target, _verify_git_proxy_token, github_gateway, github_gateway_for_connection, log  # noqa: PLC0415 - api imports this module
+    from ...api import log  # noqa: PLC0415 - api imports this module
+    from ...gateway_helpers import _git_proxy_credential, _issue_git_proxy_token, _receive_pack_target, _verify_git_proxy_token, github_gateway, github_gateway_for_connection  # noqa: PLC0415 - api imports this module
 
     def _github_git_upstream(*args, **kwargs):
-        from ... import api as _api  # noqa: PLC0415 - looked up when called, so tests may patch it
-        return _api._github_git_upstream(*args, **kwargs)
+        from ... import gateway_helpers as _helpers  # noqa: PLC0415 - looked up when called, so tests may patch it
+        return _helpers._github_git_upstream(*args, **kwargs)
 
     audit = deps.audit
     console_user = deps.console_user

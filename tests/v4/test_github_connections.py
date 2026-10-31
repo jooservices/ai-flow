@@ -14,7 +14,8 @@ from conftest import FakeGitHub, add_ticket, join_node
 from test_projects import owner_sign_in, prepare_project_control, worker_headers
 from test_reviews import add_review_run
 import aiflow.v4.control.api as api
-from aiflow.v4.control.api import github_gateway
+from aiflow.v4.control import gateway_helpers
+from aiflow.v4.control.gateway_helpers import github_gateway
 from aiflow.v4.control.github import GitHubApp, GitHubError
 from aiflow.v4.control.github_connections import GitHubConnections
 from aiflow.v4.control.system_check import blocking_reasons
@@ -192,7 +193,7 @@ def test_repository_uses_its_own_connection_and_unreachable_repository_is_refuse
         with pytest.raises(HTTPException) as refused:
             github_gateway(ctx, stranger)
         assert refused.value.status_code == 409 and "can reach" in refused.value.detail
-    registry = api.github_connections(ctx)
+    registry = gateway_helpers.github_connections(ctx)
     registry.assign("person/tool", "default")  # assigned connection does not reach it: refused, not guessed
     with pytest.raises(HTTPException) as refused:
         github_gateway(ctx, "person/tool")
@@ -204,7 +205,7 @@ def test_repository_uses_its_own_connection_and_unreachable_repository_is_refuse
 def test_review_rejection_comments_and_closes_pr_through_the_assigned_connection(client, ctx, secrets_dir):
     owner_sign_in(client, ctx)
     connection = add_token(client).json()["id"]
-    api.github_connections(ctx).assign("person/tool", connection)
+    gateway_helpers.github_connections(ctx).assign("person/tool", connection)
     gateway = github_gateway(ctx, "person/tool")
     gateway.pr_by_number[42] = {"number": 42, "state": "open", "merged": False}
 
@@ -231,7 +232,7 @@ def test_check_probe_uses_assigned_connection_and_relays_token_credentials_read_
     connection = add_token(client).json()["id"]
     project = ctx.repo().projects["TESTWP"]
     project.repositories = [{"repo": "person/tool", "base": "develop", "checks": ["pytest"]}]
-    api.github_connections(ctx).assign("person/tool", connection)
+    gateway_helpers.github_connections(ctx).assign("person/tool", connection)
     node = join_node(client, "cc")
     assert node.status_code == 200
     headers = {"Authorization": f"Bearer {node.json()['node_token']}"}
@@ -252,7 +253,7 @@ def test_check_probe_uses_assigned_connection_and_relays_token_credentials_read_
         import httpx
         return httpx.Response(200, headers={"Content-Type": "application/x-git-upload-pack-result"}, content=b"pack")
 
-    monkeypatch.setattr(api, "_github_git_upstream", relay)
+    monkeypatch.setattr(gateway_helpers, "_github_git_upstream", relay)
     basic = "Basic " + base64.b64encode(f"x-access-token:{credential['token']}".encode()).decode()
     clone = client.get("/v1/github/git/person/tool.git/info/refs", params={"service": "git-upload-pack"},
                        headers={"Authorization": basic})
@@ -305,7 +306,7 @@ def test_routes_projects_and_github_operations_after_removing_the_default_app(
     config["repo"] = "person/tool"
     config["repositories"] = [{"repo": "person/tool", "base": "develop", "checks": []}]
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
-    api.github_connections(ctx).assign("person/tool", connection)
+    gateway_helpers.github_connections(ctx).assign("person/tool", connection)
 
     removed = client.delete("/v1/integrations/github/connections/default")
     assert removed.status_code == 200, removed.text
@@ -353,13 +354,13 @@ def test_projects_screen_shows_and_changes_the_connection_of_each_repository(cli
     unreachable = client.put("/v1/projects/TESTWP/repositories", json={"repositories": [
         {"repo": "person/tool", "connection": "default"}], "epic_repositories": {}})
     assert unreachable.status_code == 422 and "cannot reach" in unreachable.text
-    assert api.github_connections(ctx).assignments() == {}
+    assert gateway_helpers.github_connections(ctx).assignments() == {}
 
     saved = client.put("/v1/projects/TESTWP/repositories", json={"repositories": [
         {"repo": "jooservices/test-aiflow-wp", "connection": "default"},
         {"repo": "person/tool", "connection": conn}], "epic_repositories": {}})
     assert saved.status_code == 200, saved.text
-    assert api.github_connections(ctx).assignments() == {"jooservices/test-aiflow-wp": "default", "person/tool": conn}
+    assert gateway_helpers.github_connections(ctx).assignments() == {"jooservices/test-aiflow-wp": "default", "person/tool": conn}
     config = yaml.safe_load((control_repo / "projects/TESTWP.yaml").read_text())
     assert "connection" not in json.dumps(config)  # the control repo never learns about credentials
     reloaded = client.get("/v1/projects/TESTWP/repositories").json()
@@ -378,7 +379,7 @@ def test_projects_editor_recovers_a_stale_assignment_with_the_only_reachable_con
     config["repo"] = "person/tool"
     config["repositories"] = [{"repo": "person/tool", "base": "develop", "checks": []}]
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
-    api.github_connections(ctx).assign("person/tool", "default")  # the previous App no longer reaches it
+    gateway_helpers.github_connections(ctx).assign("person/tool", "default")  # the previous App no longer reaches it
 
     loaded = client.get("/v1/projects/TESTWP/repositories")
     assert loaded.status_code == 200, loaded.text
@@ -393,7 +394,7 @@ def test_projects_editor_recovers_a_stale_assignment_with_the_only_reachable_con
         "connection": repo["connection"],  # exactly the connection shown in the editor
     }], "epic_repositories": {}})
     assert saved.status_code == 200, saved.text
-    assert api.github_connections(ctx).assignments()["person/tool"] == connection
+    assert gateway_helpers.github_connections(ctx).assignments()["person/tool"] == connection
 
 
 def test_commands_use_assigned_token_connection_through_repository_transfer_relay_and_audit_writes(
@@ -437,7 +438,7 @@ def test_commands_use_assigned_token_connection_through_repository_transfer_rela
         import httpx
         return httpx.Response(200, headers={"Content-Type": "application/x-git-upload-pack-result"}, content=b"pack")
 
-    monkeypatch.setattr(api, "_github_git_upstream", relay)
+    monkeypatch.setattr(gateway_helpers, "_github_git_upstream", relay)
     basic = lambda value: {"Authorization": "Basic " + base64.b64encode(
         f"x-access-token:{value}".encode()).decode()}
     clone = client.get("/v1/github/git/person/tool.git/info/refs", params={"service": "git-upload-pack"},
@@ -489,7 +490,7 @@ def test_commands_use_assigned_token_connection_through_repository_transfer_rela
 
 def test_new_app_connection_is_added_beside_the_existing_one(client, ctx, secrets_dir):
     owner_sign_in(client, ctx)
-    registry = api.github_connections(ctx)
+    registry = gateway_helpers.github_connections(ctx)
     conn = registry.save_app(None, "Second App", {"id": "55", "slug": "second", "name": "Second",
                                                     "account_login": "acme", "account_type": "Organization",
                                                     "installation_id": 9}, "-----BEGIN RSA PRIVATE KEY-----\nx\n")
@@ -558,7 +559,7 @@ def test_remote_branch_cleanup_uses_assigned_connection_and_audits_it(client, ct
     assert claim_response.status_code == 200, claim_response.text
     claimed = claim_response.json()
     run = {"run_id": claimed["run_id"], "fence": claimed["fence"]}
-    personal = {c.id: c.gateway for c in api.github_connection_list(ctx)}[conn]
+    personal = {c.id: c.gateway for c in gateway_helpers.github_connection_list(ctx)}[conn]
     personal.branch_heads[("person/tool", "TESTWP-51-work")] = "abc"
 
     wrong = client.post("/v1/github/delete-branch", json={**run, "branch": "develop"}, headers=headers)

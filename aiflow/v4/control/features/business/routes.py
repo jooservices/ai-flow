@@ -7,6 +7,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+from ...state_schema import STATE_RESPONSE_SCHEMA
+
 from .bodies import ChangeRequestBody, StakeholderVerdictBody
 from typing import Any
 from fastapi import Depends, Header, HTTPException, Query, Request
@@ -16,7 +18,8 @@ from ...stakeholder_screenshot import decode_screenshot
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
-    from ...api import STATE_RESPONSE_SCHEMA, github_gateway, log  # noqa: PLC0415 - api imports this module
+    from ...api import log  # noqa: PLC0415 - api imports this module
+    from ...gateway_helpers import github_gateway  # noqa: PLC0415 - api imports this module
     audit = deps.audit
     state_snapshot_lock = threading.Lock()
     state_snapshot_cache: dict[bool, tuple[float, dict[str, Any]]] = {}

@@ -24,7 +24,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
         from ...api import RELEASES  # noqa: PLC0415 - read when a route runs, so tests may patch it
         return RELEASES
 
-    from ...api import github_gateway, github_gateway_for_connection, log  # noqa: PLC0415 - api imports this module
+    from ...api import log  # noqa: PLC0415 - api imports this module
+    from ...gateway_helpers import github_gateway, github_gateway_for_connection  # noqa: PLC0415 - api imports this module
     account_master_paused = deps.account_master_paused
     bot_identity = deps.bot_identity
     fenced = deps.fenced

@@ -273,7 +273,7 @@ def declare_undeclared_services(ctx) -> list[str]:
     """Flow doctor: a ticket parked on a test service its project does not declare is never left parked. The service
     is declared for the project (machines prepare and report it on the next heartbeats and the wait ends); when that
     cannot be done, one alert per project says what to declare. Returns the projects declared."""
-    from .api import declare_project_services
+    from .gateway_helpers import declare_project_services
     from .incidents import close_incident, open_incident
 
     declared: list[str] = []

@@ -123,8 +123,8 @@ def latest_pr(db, key: str) -> dict[str, Any] | None:
 
 
 def _gateway(ctx, ref: dict[str, Any]):
-    from . import api
-    gateway = api.github_gateway(ctx, ref["repository"])
+    from .gateway_helpers import github_gateway
+    gateway = github_gateway(ctx, ref["repository"])
     if gateway is None:
         raise RuntimeError("GitHub is not connected")
     return gateway

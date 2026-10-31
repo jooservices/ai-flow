@@ -39,7 +39,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
         from .api import RELEASES  # noqa: PLC0415 - read when a route runs, so tests may patch it
         return RELEASES
 
-    from .api import github_gateway, log  # noqa: PLC0415 - api imports this module
+    from .api import log  # noqa: PLC0415 - api imports this module
+    from .gateway_helpers import github_gateway  # noqa: PLC0415 - api imports this module
     _identity: list[tuple[str, str, str]] = []
 
     def bot_identity() -> tuple[str, str]:

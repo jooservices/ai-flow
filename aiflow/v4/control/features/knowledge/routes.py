@@ -12,7 +12,8 @@ from ... import (knowledge)
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
-    from ...api import github_control_gateway, log  # noqa: PLC0415 - api imports this module
+    from ...api import log  # noqa: PLC0415 - api imports this module
+    from ...gateway_helpers import github_control_gateway  # noqa: PLC0415 - api imports this module
     audit = deps.audit
     console_user = deps.console_user
     owner_auth = deps.owner_auth

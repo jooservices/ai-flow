@@ -14,6 +14,11 @@ from aiflow.v4.control.ui import console_template
 MASTER_SCOPE = "master:global"
 
 
+@pytest.fixture
+def flow_bug_maintenance_project(ctx):
+    ctx.settings.maintenance_project = "TESTFLOW"
+
+
 def join(client, name):
     response = join_node(client, name)
     assert response.status_code == 200
@@ -213,7 +218,7 @@ def test_command_center_has_master_budget_and_weekly_report_controls():
 
 def test_master_snapshot_contains_incidents_owner_queue_all_project_clocks_offline_and_quota(client, ctx):
     cc = ready(client, "cc", "claude-01")
-    node1 = ready(client, "node1", "codex-01")
+    ready(client, "node1", "codex-01")
     master = claim_master(client, cc, "claude-01").json()
     add_ticket(ctx.db, "TESTWP-201", status="Needs owner")
     add_ticket(ctx.db, "TESTWP-207", status="Needs owner", labels=("aiflow-hold",))
@@ -728,7 +733,7 @@ def test_master_worker_forwards_category_so_protected_requests_escalate(client, 
     assert attempted["accepted"] and "explicitly requested" in attempted["result"]
 
 
-def test_repeated_testflow_failures_create_a_fenced_flow_bug_in_intake(client, ctx):
+def test_repeated_testflow_failures_create_a_fenced_flow_bug_in_intake(client, ctx, flow_bug_maintenance_project):
     cc = ready(client, "cc", "claude-01")
     ready(client, "node1", "codex-01")
     master = claim_master(client, cc, "claude-01").json()
@@ -770,7 +775,8 @@ def test_repeated_testflow_failures_create_a_fenced_flow_bug_in_intake(client, c
     assert len(ctx.jira.created) == 1
 
 
-def test_repeated_signature_reuses_open_flow_bug_and_comments_only_for_new_runs(client, ctx):
+def test_repeated_signature_reuses_open_flow_bug_and_comments_only_for_new_runs(client, ctx,
+                                                                                flow_bug_maintenance_project):
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
     for key in ("TESTFLOW-110", "TESTFLOW-111", "TESTFLOW-110"):
@@ -796,7 +802,8 @@ def test_repeated_signature_reuses_open_flow_bug_and_comments_only_for_new_runs(
     assert len(ctx.jira.created) == 1 and len(ctx.jira.comments) == 1
 
 
-def test_open_flow_bug_comments_on_one_recurrence_after_original_runs_age_out(client, ctx):
+def test_open_flow_bug_comments_on_one_recurrence_after_original_runs_age_out(client, ctx,
+                                                                              flow_bug_maintenance_project):
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
     original_ids = [
@@ -821,7 +828,8 @@ def test_open_flow_bug_comments_on_one_recurrence_after_original_runs_age_out(cl
     assert "Repeat count: 1" in ctx.jira.comments[0][1] and recurring_id in ctx.jira.comments[0][1]
 
 
-def test_failed_intake_move_keeps_the_created_flow_bug_and_is_retried_without_a_second_issue(client, ctx):
+def test_failed_intake_move_keeps_the_created_flow_bug_and_is_retried_without_a_second_issue(
+        client, ctx, flow_bug_maintenance_project):
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
     for key in ("TESTFLOW-115", "TESTFLOW-116", "TESTFLOW-115"):
@@ -856,7 +864,7 @@ def test_failed_intake_move_keeps_the_created_flow_bug_and_is_retried_without_a_
     assert len(ctx.jira.created) == 1 and len(calls) == 2
 
 
-def test_ticket_stuck_incident_open_over_30_minutes_creates_flow_bug(client, ctx):
+def test_ticket_stuck_incident_open_over_30_minutes_creates_flow_bug(client, ctx, flow_bug_maintenance_project):
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
     run_id = failed_flow_run(ctx, "TESTFLOW-120", "verify worker error: git checkout failed while preparing review",
@@ -876,7 +884,8 @@ def test_ticket_stuck_incident_open_over_30_minutes_creates_flow_bug(client, ctx
     assert "incident" in issue["description"] and "open over 30 minutes" in issue["description"]
 
 
-def test_old_ticket_stuck_incident_does_not_claim_a_failure_started_after_it_opened(client, ctx):
+def test_old_ticket_stuck_incident_does_not_claim_a_failure_started_after_it_opened(
+        client, ctx, flow_bug_maintenance_project):
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
     from aiflow.v4.control.incidents import open_incident
@@ -899,7 +908,7 @@ def test_old_ticket_stuck_incident_does_not_claim_a_failure_started_after_it_ope
     ("node_tools", "node1:TESTFLOW", "failed", "infra", "required tool composer is missing on node1"),
 ])
 def test_quota_offline_and_missing_tool_incidents_never_create_flow_bugs(
-        client, ctx, kind, subject, outcome, error_kind, summary):
+        client, ctx, flow_bug_maintenance_project, kind, subject, outcome, error_kind, summary):
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
     from aiflow.v4.control.incidents import open_incident

@@ -7,14 +7,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .bodies import KnowledgeApprovalBody, KnowledgeBody, KnowledgeItemActionBody, KnowledgeItemBody, KnowledgeRestoreBody
+from .events import KnowledgeItemModerated, KnowledgeItemSaved, PolicyMerged, PolicyProposed, ResourceCommitted
 from fastapi import Depends, HTTPException, Request
 from ... import (knowledge)
+from ...platform.events.wiring import publish_for
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
     from ...api import log  # noqa: PLC0415 - api imports this module
     from ...gateway_helpers import github_control_gateway  # noqa: PLC0415 - api imports this module
-    audit = deps.audit
     console_user = deps.console_user
     owner_auth = deps.owner_auth
     # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
@@ -34,8 +35,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
                                        title=body.title, content=body.content, actor=user.subject)
         except knowledge.Invalid as exc:
             raise HTTPException(422, str(exc)) from exc
-        audit("knowledge", "item_save", str(item["id"]), "", None, user.subject, True, "saved",
-              {"kind": body.kind, "project": body.project, "scope": body.scope})
+        publish_for(ctx, KnowledgeItemSaved(resource=str(item["id"]), actor=user.subject, item_id=str(item["id"]),
+                                            kind=body.kind, project=body.project, scope=body.scope))
         return knowledge._pack_item(item)
 
     @app.post("/v1/knowledge/items/{item_id}/{action}")
@@ -49,8 +50,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
                                            scope=body.scope or None, epic=body.epic)
         except knowledge.Invalid as exc:
             raise HTTPException(422 if "not found" not in str(exc) else 404, str(exc)) from exc
-        audit("knowledge", "item_" + action, str(item_id), "", None, user.subject, True, "updated",
-              {"item_id": item_id})
+        publish_for(ctx, KnowledgeItemModerated(resource=str(item_id), actor=user.subject, item_id=item_id,
+                                                action=action))
         return knowledge._pack_item(item)
 
     # --- Knowledge screen: versioned control-repo resources -------------------------------------------------
@@ -81,15 +82,18 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 pr = github.create_control_pr(repo_name, branch, base, f"Policy: {title}",
                                                   f"Policy {action} for `{resource_id}` proposed by {actor}.\n\n"
                                                   "Merge only after owner approval in the AI Flow Knowledge screen.")
-                ctx.db.run("INSERT INTO managed_resource_proposals (resource_type,resource_id,title,content,archived,"
-                           "base_title,base_content,base_archived,base_version,actor,action,branch,pr_number,pr_url)"
-                           " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                           (kind, resource_id, title, content, archived, current["title"] if current else "",
-                            current["content"] if current else "", current["archived"] if current else False,
-                            current["version"] if current else 0, actor, action, branch, int(pr["number"]),
-                            str(pr.get("html_url") or "")))
-                audit("aiflow-control", "policy-pr", "", "", None, actor, True, str(pr["html_url"]),
-                      {"type": kind, "id": resource_id, "branch": branch, "pr": int(pr["number"]), "commit": sha})
+                with ctx.db.transaction():
+                    ctx.db.run("INSERT INTO managed_resource_proposals (resource_type,resource_id,title,content,archived,"
+                               "base_title,base_content,base_archived,base_version,actor,action,branch,pr_number,pr_url)"
+                               " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                               (kind, resource_id, title, content, archived, current["title"] if current else "",
+                                current["content"] if current else "", current["archived"] if current else False,
+                                current["version"] if current else 0, actor, action, branch, int(pr["number"]),
+                                str(pr.get("html_url") or "")))
+                    publish_for(ctx, PolicyProposed(resource=resource_id, actor=actor, kind=kind,
+                                                   resource_id=resource_id, branch=branch,
+                                                   pr_number=int(pr["number"]), pr_url=str(pr["html_url"]),
+                                                   commit=sha))
                 ctx.events.emit("resource.policy_proposed", project=resource_id if resource_id != "default" else "",
                                 account=actor, outcome="pending", reason=f"PR #{pr['number']}",
                                 data={"type": kind, "id": resource_id})
@@ -105,8 +109,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             raise HTTPException(502, "control repo could not save the resource") from e
         row = knowledge.save_current(ctx.db, kind=kind, resource_id=resource_id, title=title, content=content,
                                      archived=archived, actor=actor, action=action, path=path, commit_sha=sha)
-        audit("aiflow-control", "resource-commit", "", "", None, actor, True, sha,
-              {"type": kind, "id": resource_id, "version": row["version"], "path": path})
+        publish_for(ctx, ResourceCommitted(resource=resource_id, actor=actor, kind=kind, resource_id=resource_id,
+                                           resource_version=row["version"], path=path, commit=sha))
         ctx.events.emit("resource.changed", account=actor, outcome=action, reason=f"{kind}/{resource_id}",
                         data={"type": kind, "id": resource_id, "version": row["version"], "commit": sha})
         return row
@@ -172,10 +176,12 @@ def install(app, ctx, deps) -> SimpleNamespace:
             content=proposal["content"], archived=proposal["archived"], actor=proposal["actor"],
             action=proposal["action"], path=knowledge.path_for("policy", proposal["resource_id"]),
             commit_sha=str(merged.get("sha") or ""), approved_by=owner)
-        ctx.db.run("UPDATE managed_resource_proposals SET status='merged',merged_at=now(),approved_by=%s WHERE id=%s",
-                   (owner, proposal_id))
-        audit("aiflow-control", "policy-merge", "", "", None, owner, True, str(merged.get("sha") or ""),
-              {"id": proposal["resource_id"], "pr": proposal["pr_number"], "version": resource["version"]})
+        with ctx.db.transaction():
+            ctx.db.run("UPDATE managed_resource_proposals SET status='merged',merged_at=now(),approved_by=%s WHERE id=%s",
+                       (owner, proposal_id))
+            publish_for(ctx, PolicyMerged(resource=proposal["resource_id"], actor=owner,
+                                          resource_id=proposal["resource_id"], pr_number=proposal["pr_number"],
+                                          resource_version=resource["version"], commit=str(merged.get("sha") or "")))
         ctx.events.emit("resource.policy_merged", project=proposal["resource_id"] if proposal["resource_id"] != "default" else "",
                         account=owner, outcome="merged", reason=f"PR #{proposal['pr_number']}",
                         data={"type": "policy", "id": proposal["resource_id"], "version": resource["version"]})

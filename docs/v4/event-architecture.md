@@ -75,7 +75,8 @@ Audit as a listener: an event that overrides `DomainEvent.audit()` (returning an
 ledger stays append-only and the row commits with the change. `DecisionAnswered` is the first: `POST /v1/decisions/{decision_id}/answer`
 no longer calls `audit()` itself, and the deadline default and the Jira answer path are now audited too. The backups routes
 (`PUT /v1/backups/config`, `POST /v1/backups/key`, `POST /v1/backups/run`) moved too. The scale-proof result route and
-the business change-request and stakeholder routes moved too. The remaining
+the business change-request and stakeholder routes moved too. The knowledge routes
+moved too (JAIF-478). The remaining
 `audit()` calls move with their features (JAIF-478).
 
 `Events` (telemetry log) is split by responsibility: `events.py` writes the registry row and hands the event over; shipping to

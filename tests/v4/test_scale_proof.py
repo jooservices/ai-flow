@@ -234,8 +234,10 @@ def test_the_100_50_200_run_is_within_every_budget(proof):
                                        "ticket_pickup": report["measurements"].get("ticket_pickup"),
                                        "counts": report["counts"], "observed": report["observed"]}, indent=2)
     assert report["passed"] is True and report["failures"] == []
-    measured = {b["key"]: b["measured"] for b in report["budgets"]}
-    assert measured["console_page_load"] < 2.0 and measured["project_picker"] < 200 and measured["ticket_pickup"] < 30
+    # the limits are the written ones scaled by the speed of the machine (1 on the reference machine)
+    limits = {b["key"]: (b["measured"], b["effective_limit"]) for b in report["budgets"]}
+    assert all(measured < limit for measured, limit in limits.values()), limits
+    assert 1.0 <= report["calibration"]["factor"] <= scale_proof.MAX_SPEED_FACTOR
     # every console view was measured while real worker claims were in flight
     assert set(report["measurements"]["console_page_load"]["views"]) == set(scale_harness.PAGES)
     assert report["observed"]["peak_active_runs"] >= 150

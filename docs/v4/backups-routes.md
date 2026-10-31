@@ -8,6 +8,12 @@ The encrypted-backup configuration, status, key download and run-now routes. The
 - `POST /v1/backups/run`
 - `PUT /v1/backups/config`
 
+## Audit
+
+These writes are audited through `backup.configured`, `backup.key_downloaded` and `backup.run_requested` by the audit ledger listener.
+The audit row is field-for-field identical to the row written before.
+Configure and run audit rows now commit with their changes.
+
 Routes that stay in `control/api.py` and are named here only because their handlers call code the docs check watches; they did not move:
 
 - `GET /v1/business/{key}/change-requests`

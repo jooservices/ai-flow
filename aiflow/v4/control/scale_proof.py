@@ -128,8 +128,9 @@ def evaluate(measured: dict[str, float], budgets: Iterable[Budget] = BUDGETS,
 
 def _factor_of(report: dict[str, Any]) -> float:
     """The speed factor a report claims, clamped so a report can never grant itself more than the maximum."""
+    calibration = report.get("calibration")
     try:
-        value = float((report.get("calibration") or {}).get("factor") or 1.0)
+        value = float((calibration if isinstance(calibration, dict) else {}).get("factor") or 1.0)
     except (TypeError, ValueError):
         value = 1.0
     return min(MAX_SPEED_FACTOR, max(1.0, value))

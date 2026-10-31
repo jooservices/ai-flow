@@ -46,6 +46,13 @@ def test_the_slowest_of_the_two_probes_decides_and_the_report_records_them():
     assert info["reference_s"] == scale_proof.PROBE_REFERENCE_S and info["max_factor"] == scale_proof.MAX_SPEED_FACTOR
 
 
-def test_the_probe_is_a_fixed_cpu_workload_close_to_its_reference_on_this_machine():
+def test_the_probe_measures_a_positive_duration():
+    # no ceiling: a slow machine must pass this test (it is exactly what the probe exists to measure)
     seconds = scale_proof.cpu_probe(repeats=1)
-    assert 0 < seconds < scale_proof.PROBE_REFERENCE_S * 30
+    assert 0 < seconds < float("inf")
+
+
+def test_a_report_with_a_calibration_that_is_not_a_mapping_is_not_scaled():
+    for bad in (["fast"], "fast", 3, True):
+        report = {"measurements": MEASURED, "calibration": bad}
+        assert scale_proof.finalize(report)["budgets"][2]["effective_limit"] == 30.0

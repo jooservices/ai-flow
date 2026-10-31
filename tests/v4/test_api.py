@@ -9,6 +9,7 @@ from pathlib import Path
 
 from conftest import add_open_escalation, add_ticket, join_node, report_account_credentials
 from aiflow.v4.control import api as control_api
+from aiflow.v4.control import quota as quota_reporting, route_deps
 from aiflow.v4.control.db import J
 
 
@@ -56,7 +57,7 @@ def test_join_tokens_bind_node_role_and_project_and_can_only_be_redeemed_once(cl
     expired = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": "node-expired",
                                                          "role": "worker", "project": "TESTWP"}).json()["token"]
     ctx.db.run("UPDATE node_join_tokens SET expires_at=now()-interval '1 second' WHERE token_hash=%s",
-               (control_api.h(expired),))
+               (route_deps.h(expired),))
     assert client.post("/v1/nodes/join", json={"join_token": expired}).status_code == 403
     assert client.post("/v1/nodes/join-tokens/inspect", json={"join_token": expired}).status_code == 403
 
@@ -690,7 +691,7 @@ def test_at_risk_account_falls_back_to_its_own_work_when_no_peer_is_available(cl
     add_ticket(ctx.db, "TESTWP-QUOTA-SOLO")
     ctx.db.run("UPDATE accounts SET quota_at_risk=true WHERE id='claude-01'")
     # Routing reads the watchdog's stored flag and must not rebuild the historical quota assessment per poll.
-    monkeypatch.setattr(control_api.quota_reporting, "account_assessment",
+    monkeypatch.setattr(quota_reporting, "account_assessment",
                         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("history queried per poll")))
 
     tickets = client.get("/v1/work/candidates?account=claude-01", headers=headers).json()["tickets"]

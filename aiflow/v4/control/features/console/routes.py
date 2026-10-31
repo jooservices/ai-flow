@@ -5,6 +5,8 @@ as `deps`; the names the routes define for the rest of the app are returned."""
 from types import SimpleNamespace
 
 from .bodies import ConsoleUserCreateBody, ConsoleUserDisabledBody, ConsoleUserUpdateBody, LicenseKeyBody, OfflineLicenseBody, PlanLimitsBody, ViewAsBody
+from .events import (LicenceActivated, LicenceLimitsUpdated, NotificationChannelDeleted, NotificationChannelSaved,
+                     NotificationPreferencesSaved, ViewAsStarted, ViewAsStopped)
 from fastapi import HTTPException, Request
 from fastapi.responses import (JSONResponse, PlainTextResponse)
 from ...audit import record_console_user_change as audit_user, record_console_user_roles_change as audit_user_roles
@@ -13,11 +15,11 @@ from ...console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LAB
                            verify_session)
 from ... import notify
 from ...features.work.constants import utcnow
+from ...platform.events.wiring import publish_for
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
     from ...api import log  # noqa: PLC0415 - api imports this module
-    audit = deps.audit
     audit_in = deps.audit_in
     console_user = deps.console_user
     optional_console_user = deps.optional_console_user
@@ -162,8 +164,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         from ...login import SESSION_TTL_S
         token = issue_session(user.subject, user.assigned_roles, int(utcnow().timestamp()) + SESSION_TTL_S,
                               ctx.settings.console_session_secret, view_as=role, sid=user.sid)
-        audit("console", "view_as", "", "", None, user.subject, True, "Administrator viewing as role",
-              {"role": role})
+        publish_for(ctx, ViewAsStarted(actor=user.subject, role=role))
         response = JSONResponse({"viewing_as": role, "role_label": ROLE_LABELS[role]})
         app.state.set_session_cookies(response, token, SESSION_TTL_S)  # keeps the session id and the CSRF token in step
         return response
@@ -177,8 +178,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         from ...login import SESSION_TTL_S
         token = issue_session(user.subject, user.assigned_roles, int(utcnow().timestamp()) + SESSION_TTL_S,
                               ctx.settings.console_session_secret, sid=user.sid)
-        audit("console", "view_as_stop", "", "", None, user.subject, True, "Administrator returned to own role",
-              {"previous_role": user.view_as or ""})
+        publish_for(ctx, ViewAsStopped(actor=user.subject, previous_role=user.view_as or ""))
         response = JSONResponse({"viewing_as": None})
         app.state.set_session_cookies(response, token, SESSION_TTL_S)
         return response
@@ -264,9 +264,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             channel = notify.save_channel(ctx.db, payload)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
-        audit("notifications", "channel_save", "", "", None, user.subject, True,
-              "notification channel saved", {"channel_id": channel["id"], "kind": channel["kind"],
-                                               "enabled": channel["enabled"]})
+        publish_for(ctx, NotificationChannelSaved(actor=user.subject, channel_id=channel["id"],
+                                                   kind=channel["kind"], enabled=channel["enabled"]))
         return {"channel": channel}
 
     @app.delete("/v1/notifications/channels/{channel_id}")
@@ -274,8 +273,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         user = notification_admin(request, "write")
         if not notify.delete_channel(ctx.db, channel_id):
             raise HTTPException(404, "notification channel was not found")
-        audit("notifications", "channel_delete", "", "", None, user.subject, True,
-              "notification channel deleted", {"channel_id": channel_id})
+        publish_for(ctx, NotificationChannelDeleted(actor=user.subject, channel_id=channel_id))
         return {"deleted": True}
 
     @app.put("/v1/notifications/preferences")
@@ -285,10 +283,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
             preferences = notify.save_preferences(ctx.db, await notification_json(request))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
-        audit("notifications", "preferences_save", "", "", None, user.subject, True,
-              "notification routing preferences saved",
-              {"route_count": sum(len(ids) for ids in preferences["routes"].values()),
-               "quiet_hours_enabled": bool(preferences["quiet_start"] and preferences["quiet_end"])})
+        publish_for(ctx, NotificationPreferencesSaved(
+            actor=user.subject, route_count=sum(len(ids) for ids in preferences["routes"].values()),
+            quiet_hours_enabled=bool(preferences["quiet_start"] and preferences["quiet_end"])))
         return {"preferences": preferences}
 
     @app.post("/v1/notifications/channels/{channel_id}/test")
@@ -322,8 +319,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
                                               ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
-        audit("licensing", "license_activate", "", "", None, user.subject, True, "activated online",
-              {"source": "online", "plan": state["plan"]})
+        publish_for(ctx, LicenceActivated(actor=user.subject, source="online", plan=state["plan"]))
         return state
 
     @app.post("/v1/licensing/offline")
@@ -333,8 +329,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             state = licensing.activate(ctx.db, body.license_file, ctx.settings.license_public_key, "offline")
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
-        audit("licensing", "license_activate", "", "", None, user.subject, True, "activated offline",
-              {"source": "offline", "plan": state["plan"]})
+        publish_for(ctx, LicenceActivated(actor=user.subject, source="offline", plan=state["plan"]))
         return state
 
     @app.put("/v1/licensing/limits")
@@ -344,8 +339,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             state = licensing.save_limits(ctx.db, body.plan, body.limits, ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
-        audit("licensing", "license_limits", "", "", None, user.subject, True, "limits updated",
-              {"plan": body.plan, "limits": body.limits})
+        publish_for(ctx, LicenceLimitsUpdated(actor=user.subject, plan=body.plan, limits=body.limits))
         return state
 
     @app.get("/v1/licensing/usage")

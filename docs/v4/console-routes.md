@@ -32,3 +32,10 @@ See `docs/v4/event-architecture.md` for how `install(app, ctx, deps)` registers 
 
 The System check readiness export of `POST /v1/support/bundles` was moved into `_readiness_export` in `control/support_bundle.py`
 (a size offset for the new `install` function); the route and its output are unchanged.
+
+## Audit
+
+View-as writes publish `console.view_as_started` and `console.view_as_stopped`.
+Notification writes publish `notifications.channel_saved`, `notifications.channel_deleted` and `notifications.preferences_saved`.
+Licensing writes publish `licensing.license_activated` and `licensing.limits_updated`.
+User-management audit rows stay as they were.

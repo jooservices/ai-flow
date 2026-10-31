@@ -12,6 +12,12 @@ The memory, learned-knowledge and Knowledge screen resource routes. They live in
 - `POST /v1/knowledge/resources`
 - `POST /v1/knowledge/resources/{kind}/{resource_id}/restore`
 
+Audit
+
+The item save, item moderation, policy proposal, resource commit, and policy merge writes publish audited domain events:
+`knowledge.item_saved`, `knowledge.item_moderated`, `knowledge.policy_proposed`, `knowledge.resource_committed`, and
+`knowledge.policy_merged`. The audit listener writes the same `write_audit` row as before.
+
 Routes that stay in `control/api.py` and are named here only because their handlers call code the docs check watches; they did not move:
 
 - `GET /v1/backups`

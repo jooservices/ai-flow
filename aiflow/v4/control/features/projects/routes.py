@@ -10,6 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .bodies import EnvironmentRemovalBody, GitHubConnectionTokenBody, GitHubInstallationBody, ProjectEnvironmentBody, ProjectPauseBody, ProjectPreflightBody, ProjectRepositoriesBody, ProjectServicesBody
+from .events import (EnvironmentRemovalsRecorded, GitHubAppConnected, GitHubAppImportVerified,
+                     GitHubAppInstallOpened, GitHubConnectionAssigned, GitHubConnectionRemoved,
+                     GitHubInstallationSettingsOpened, GitHubManifestCreated, GitHubManifestStarted,
+                     GitHubRepositoryAccessChanged, GitHubRepositorySnapshotRecorded,
+                     GitHubTokenConnectionAdded, GitHubTokenConnectionReplaced)
 from typing import Any
 from urllib.parse import quote, urlsplit
 import yaml
@@ -22,6 +27,7 @@ from ....core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_to
 from ....core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from ... import (licensing, system_check, system_check_api, tooling)
 from ... import environment as environment_reports
+from ...platform.events.wiring import publish_for
 from ...github import GitHubApp
 from ...github_connect import GitHubSecretStore, app_metadata
 from ...github_connections import DEFAULT_ID, Connection, verify_token
@@ -51,17 +57,14 @@ def install(app, ctx, deps) -> SimpleNamespace:
         if hasattr(gateway, "_refresh_config"):
             gateway._refresh_config()
         if previous is None:
-            audit("github", "repository_snapshot", "", "", None, actor, True,
-                  "GitHub installation repositories recorded", {"count": len(names), "source": source})
+            publish_for(ctx, GitHubRepositorySnapshotRecorded(actor=actor, count=len(names), source=source))
             return
         old_by_key = {name.lower(): name for name in previous}
         new_by_key = {name.lower(): name for name in names}
         added = sorted(new_by_key[key] for key in new_by_key.keys() - old_by_key.keys())
         removed = sorted(old_by_key[key] for key in old_by_key.keys() - new_by_key.keys())
         if added or removed:
-            audit("github", "repositories_changed", "", "", None, actor, True,
-                  "GitHub installation repository access changed",
-                  {"added": added, "removed": removed, "source": source})
+            publish_for(ctx, GitHubRepositoryAccessChanged(actor=actor, added=added, removed=removed, source=source))
             ctx.events.emit("github.repositories_changed", account=getattr(gateway, "org", ""),
                             outcome="updated", reason=source, data={"added": added, "removed": removed})
 
@@ -125,10 +128,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
             connection_id = github_connections(ctx).save_app(None if target == "new" else target, "",
                                                              active_meta, private_key)
         store.delete_pending(pending_id)
-        audit("github", "connect", "", "", None, actor, True, "GitHub App connected",
-              {"app_id": str(active_meta.get("id") or ""), "installation_id": installation_id,
-               "account": account_login, "repositories": len(repositories), "source": source,
-               "connection": connection_id})
+        publish_for(ctx, GitHubAppConnected(actor=actor, app_id=str(active_meta.get("id") or ""),
+                                            installation_id=installation_id, account=account_login,
+                                            repositories=len(repositories), source=source, connection=connection_id))
         ctx.events.emit("github.connected", account=account_login, outcome="connected", reason=source)
         return {"account": account_login, "account_type": account_type, "installation_id": installation_id,
                 "connection": connection_id,
@@ -223,8 +225,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
         label = body.label.strip() or f"{gateway.org} access token"
         connection_id = github_connections(ctx).add_token(label, body.token.strip(), gateway.org,
                                                            gateway.meta.get("account_type", ""))
-        audit("github", "add_token_connection", "", "", None, user.subject, True, "access token connection added",
-              {"connection": connection_id, "account": gateway.org})
+        publish_for(ctx, GitHubTokenConnectionAdded(actor=user.subject, connection=connection_id,
+                                                    account=gateway.org))
         ctx.events.emit("github.connected", account=gateway.org, outcome="connected", reason="token")
         return connection_view(find_connection(connection_id))
 
@@ -251,8 +253,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             raise HTTPException(422, "GitHub did not accept this token for that account") from exc
         github_connections(ctx).replace_token(connection_id, body.token.strip(), gateway.org,
                                               gateway.meta.get("account_type", ""))
-        audit("github", "replace_token_connection", "", "", None, user.subject, True, "access token replaced",
-              {"connection": connection_id, "account": gateway.org})
+        publish_for(ctx, GitHubTokenConnectionReplaced(actor=user.subject, connection=connection_id,
+                                                       account=gateway.org))
         return connection_view(find_connection(connection_id))
 
     @app.delete("/v1/integrations/github/connections/{connection_id}")
@@ -271,8 +273,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             ctx.github = None
         else:
             registry.remove(connection_id)
-        audit("github", "remove_connection", "", "", None, user.subject, True, "connection removed",
-              {"connection": connection_id})
+        publish_for(ctx, GitHubConnectionRemoved(actor=user.subject, connection=connection_id))
         return {"removed": connection_id}
 
     @app.get("/v1/integrations/github/manifest/start", response_class=HTMLResponse)
@@ -286,8 +287,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         state = store.new_id()
         store.create_pending(state, {"phase": "manifest", "actor": user.subject, "connection": target_connection(connection),
                                      "expected_owner": organization, "source": "manifest"})
-        audit("github", "manifest_start", "", "", None, user.subject, True, "GitHub App manifest started",
-              {"organization": organization})
+        publish_for(ctx, GitHubManifestStarted(actor=user.subject, organization=organization))
         callback = base + "/v1/integrations/github/manifest/callback"
         setup = callback.removesuffix("/manifest/callback") + "/setup?state=" + state
         manifest = {"name": f"AI Flow {organization}", "url": base + "/cc", "description": "AI Flow GitHub integration",
@@ -335,8 +335,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             meta = app_metadata(converted)
             store.update_pending(state, record, meta, pem)
             actor = str(record.get("actor") or "github-manifest")
-            audit("github", "manifest_created", "", "", None, actor, True, "GitHub App created",
-                  {"app_id": str(meta.get("id") or ""), "organization": record.get("expected_owner", "")})
+            publish_for(ctx, GitHubManifestCreated(actor=actor, app_id=str(meta.get("id") or ""),
+                                                   organization=record.get("expected_owner", "")))
             return RedirectResponse(github_install_url(str(meta["slug"])), status_code=303)
         except Exception as exc:  # no provider response or callback credential is copied into logs
             log.warning("GitHub manifest callback failed (%s)", type(exc).__name__)
@@ -414,8 +414,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 raise ValueError("GitHub App slug is missing")
             record["app"] = app_metadata(details)
             store.update_pending(pending_id, record, app_metadata(details), pem)
-            audit("github", "import_app", "", "", None, user.subject, True, "GitHub App credentials verified",
-                  {"app_id": app_id})
+            publish_for(ctx, GitHubAppImportVerified(actor=user.subject, app_id=app_id))
             return {"pending_id": pending_id,
                     "app": {"id": str(details.get("id") or ""), "name": str(details.get("name") or "GitHub App"),
                             "slug": str(details.get("slug") or "")},
@@ -464,8 +463,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         except Exception as exc:
             audit("github", "open_app_install", "", "", None, user.subject, False, "GitHub App import expired")
             raise HTTPException(404, "GitHub App import expired; start again") from exc
-        audit("github", "open_app_install", "", "", None, user.subject, True, "GitHub App installation opened",
-              {"app_id": str(meta.get("id") or "")})
+        publish_for(ctx, GitHubAppInstallOpened(actor=user.subject, app_id=str(meta.get("id") or "")))
         return RedirectResponse(github_install_url(str(meta["slug"])), status_code=303)
 
     @app.post("/v1/integrations/github/imports/{pending_id}/connect")
@@ -499,9 +497,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
         account = str(meta.get("account_login") or getattr(gateway, "org", "") or ctx.settings.github_org)
         account_type = str(meta.get("account_type") or "Organization")
         url = github_installation_settings(account, account_type, int(installation_id))
-        audit("github", "open_installation_settings", "", "", None, user.subject, True,
-              "GitHub repository settings opened",
-              {"app_id": str(meta.get("id") or ""), "installation_id": int(installation_id), "account": account})
+        publish_for(ctx, GitHubInstallationSettingsOpened(actor=user.subject,
+                                                          app_id=str(meta.get("id") or ""),
+                                                          installation_id=int(installation_id), account=account))
         return RedirectResponse(url, status_code=303)
 
     # --- Projects screen: owner-managed project definitions in aiflow-control -------------------------------
@@ -852,9 +850,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             raise HTTPException(502, "could not save repository settings to aiflow-control") from exc
         for lowered, connection in chosen.items():
             github_connections(ctx).assign(repos[lowered]["repo"], connection)
-            audit("github", "assign_connection", "", "", None, user.subject, True,
-                  f"{repos[lowered]['repo']} uses connection {connection}",
-                  {"repo": repos[lowered]["repo"], "connection": connection, "project": key})
+            publish_for(ctx, GitHubConnectionAssigned(actor=user.subject, repo=repos[lowered]["repo"],
+                                                      connection=connection, project=key))
         refresh_projects()
         project_audit("save_project_repositories", key, user.subject, True,
                       commit or "bot commit created", {"epic_repositories": mappings,
@@ -949,8 +946,10 @@ def install(app, ctx, deps) -> SimpleNamespace:
             raise HTTPException(403, "only an intake run records removed wording")
         environment_reports.record_removal(ctx, run, body.removed, body.needs)
         tickets = environment_reports.open_need_tickets(ctx, run, body.needs)
-        audit("environment", "removals", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
-              f"{len(body.removed)} removed, {len(tickets)} environment ticket(s)", {"needs": len(body.needs)})
+        publish_for(ctx, EnvironmentRemovalsRecorded(run_id=body.run_id, fence=body.fence,
+                                                     ticket=run["ticket_key"], actor=run["account_id"],
+                                                     removed=len(body.removed), tickets=len(tickets),
+                                                     needs=len(body.needs)))
         return {"ok": True, "environment_tickets": tickets}
 
     @app.post("/v1/projects/preflight")

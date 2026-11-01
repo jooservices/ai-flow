@@ -65,6 +65,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Control API audit against the HTTP standard](../../docs/v4/api-rest-audit.md): every route with its findings and a proposed resource-oriented design, kept complete by a test
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
 - [Master autonomy](../../docs/v4/master.md): budgeted fenced monitoring, safe actions, owner escalations, invalid-plan recovery and a weekly Command Center report
+- [Master action steps](../../docs/v4/master-action-steps.md): named policy, denial, escalation and action steps preserve the fenced master route behavior
 - [Ticket timeline routes](../../docs/v4/route-module-tickets.md): the ticket timeline routes are served from their own router module
 - [Rework loop limit](../../docs/v4/rework-loop-limit.md): allow three rework returns by default, block the fourth with per-round reasons, and honor project overrides
 - [Owner question deadline](../../docs/v4/escalation-deadline.md): an unanswered question with a reversible recommendation is applied after 12 hours

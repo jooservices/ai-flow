@@ -8,21 +8,19 @@ from types import SimpleNamespace
 from .bodies import FenceBody, MasterActionBody, MasterBudgetBody, MasterFlowBugsBody, MasterPlanOutcomeBody, ResultBody
 from typing import Any
 from fastapi import Depends, HTTPException, Query, Request
-from ....core import work_limits
 from ... import (escalations,
                knowledge, load_policy, quota_refresh, role_health, support_bundle, tooling)
 from ... import run_inbox as run_inbox_control
 from ... import environment as environment_reports
 from ... import quota as quota_reporting
-from ...incidents import flow_bug_candidates
 from ...db import J
-from ...policy import decide_master_action
-from ... import notify
 from ...features.work.constants import utcnow
 from ...features.work.listeners import run_finished
-from .events import (MasterActionCompleted, MasterDailyBudgetUpdated, MasterEscalationNotified,
-                     MasterEscalationRequested)
+from .events import MasterActionCompleted, MasterDailyBudgetUpdated
 from ...platform.events.wiring import publish_for
+from .master_actions import (MasterActionState, decide, deny_policy_decision, escalate, master_action_event,
+                             open_bug, pause_account, require_intent, restart_run, retry_or_move,
+                             validate_ticket_action)
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
@@ -298,225 +296,31 @@ def install(app, ctx, deps) -> SimpleNamespace:
         ticket = body.ticket.strip()
         ticket_row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket,)) if ticket else None
         policy_project = ticket_row["project"] if ticket_row else None
+        state = MasterActionState(run, node, policy_project, ticket, body)
         policy = ctx.repo().policy_for(policy_project)
-        if not body.intent.strip():
-            reason = "master action must include the request or observation intent"
-            audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False, reason)
-            ctx.events.emit("master.action", ticket=ticket or run["ticket_key"], run_id=body.run_id,
-                            fence=body.fence, account=run["account_id"], node=node, outcome="denied", reason=reason,
-                            action=body.action)
-            raise HTTPException(400, reason)
-        # Only the request is matched: what/why/result/detail describe observations (an offline node, a run
-        # past its hard limit) and must not turn an allowed follow-up into an owner escalation.
-        decision = decide_master_action(policy, body.action, body.intent, body.category)
-        ctx.events.emit("policy.decision", ticket=ticket or run["ticket_key"], step="master", run_id=body.run_id,
-                        fence=body.fence, account=run["account_id"], node=node, outcome=decision.decision,
-                        reason=decision.reason[:200], action=body.action)
-
-        def master_event(outcome: str, reason: str) -> None:
-            ctx.events.emit("master.action", ticket=ticket or run["ticket_key"], project=policy_project or "",
-                            step="master", run_id=body.run_id, fence=body.fence, account=run["account_id"],
-                            provider=run["provider"], model=run["model"], node=node, outcome=outcome,
-                            reason=reason[:300], action=body.action)
-
-        def refuse_master_action(reason: str, status: int = 409) -> None:
-            audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False, reason,
-                  {"intent": body.intent[:1000], "why": body.why[:1000]})
-            master_event("denied", reason)
-            raise HTTPException(status, reason)
-
+        require_intent(ctx, audit, state)
+        decision = decide(ctx, state, policy)
         if decision.decision == "escalate":
-            options = [str(option).strip()[:500] for option in body.options if str(option).strip()][:5]
-            if body.action == "escalate_to_owner" and (not body.why.strip() or not options):
-                refuse_master_action("escalate_to_owner requires a reason and available options", 400)
-            if not options:
-                options = ["Keep the current state and wait for the next health check.",
-                           "Choose another healthy account or retry after the reported reset time.",
-                           "Ask an owner to investigate and decide the next step."]
-            why = (body.why or f"The policy requires a person to decide: {decision.reason}").strip()[:1500]
-            observation_key = body.observation_key.strip()[:500]
-            if not observation_key:
-                if body.kind and body.subject:
-                    observation_key = f"incident:{body.kind}:{body.subject}"
-                elif ticket:
-                    updated = ctx.db.one("SELECT jira_updated FROM tickets WHERE key=%s", (ticket,))
-                    observation_key = f"ticket:{ticket}:{updated['jira_updated'].isoformat() if updated and updated['jira_updated'] else 'current'}"
-                else:
-                    observation_key = f"master:{body.action}:{body.intent[:200]}"
-            configured_channels = notify.configured_channels(ctx, "ticket_needs_person")
-            created_row = ctx.db.one(
-                "INSERT INTO master_escalations"
-                " (observation_key,ticket,reason,options,run_id,pending_channels,delivered_channels,intent)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
-                " ON CONFLICT (observation_key) DO NOTHING RETURNING observation_key",
-                (observation_key, ticket, why, J(options), body.run_id, configured_channels, [], body.intent[:1500]))
-            escalation = ctx.db.one(
-                "SELECT reason, options, pending_channels, delivered_channels, intent FROM master_escalations"
-                " WHERE observation_key=%s", (observation_key,))
-            # A NULL pending list marks rows created before channel delivery tracking was installed. Retry all
-            # currently configured channels for those rows; the prior version could not record partial failures.
-            pending_channels = set(escalation.get("pending_channels") or [])
-            delivered_channels = set(escalation.get("delivered_channels") or [])
-            if escalation.get("pending_channels") is None:
-                pending_channels.update(set(configured_channels) - delivered_channels)
-            elif not pending_channels and not delivered_channels:
-                # An observation first seen with no alert channels can be delivered if channels are configured
-                # later. Successfully delivered observations have a non-empty delivered list and stay suppressed.
-                pending_channels.update(configured_channels)
-            else:
-                pending_channels.update(set(configured_channels) - delivered_channels)
-            pending_before = sorted(pending_channels)
-            if pending_before != sorted(escalation.get("pending_channels") or []):
-                ctx.db.run("UPDATE master_escalations SET pending_channels=%s WHERE observation_key=%s",
-                           (pending_before, observation_key))
-            link = (ctx.settings.jira_site.rstrip("/") + f"/browse/{ticket}") if ticket and ctx.settings.jira_site else ""
-            why = str(escalation["reason"])
-            stored_options = [str(option) for option in (escalation.get("options") or [])]
-            message = (f"Why a person is needed: {why}\nRequest: {escalation.get('intent') or body.intent[:1500]}\n"
-                       "Available options:\n" + "\n".join(f"- {option}" for option in stored_options))
-            attempt_channels = sorted(pending_channels.intersection(configured_channels))
-            try:
-                sent = (notify.send("warning", f"{ticket or 'AI Flow'} requires an owner decision", message, link,
-                                    ctx=ctx, alert_kind="ticket_needs_person", project=policy_project or "AI Flow",
-                                    ticket=ticket, needed=why, channels=attempt_channels, queued_ok=True)
-                        if attempt_channels else [])
-            except Exception as exc:  # Persist the pending channels and retry them on a later master cycle.
-                log.warning("master escalation notification failed: %s", type(exc).__name__)
-                sent = []
-            sent = sorted(set(sent).intersection(attempt_channels))
-            pending_channels.difference_update(sent)
-            delivered_channels.update(sent)
-            already_sent = bool(not created_row and delivered_channels and not pending_channels and not sent)
-            with ctx.db.transaction():
-                ctx.db.run("UPDATE master_escalations SET pending_channels=%s, delivered_channels=%s"
-                           " WHERE observation_key=%s",
-                           (sorted(pending_channels), sorted(delivered_channels), observation_key))
-                if body.action == "escalate_to_owner":
-                    publish_for(ctx, MasterEscalationRequested(
-                        run_id=body.run_id, fence=body.fence, ticket=ticket, actor=run["account_id"],
-                        action=body.action, reason=decision.reason, intent_chars=len(body.intent),
-                        observation_key=observation_key, options=options))
-                else:
-                    audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False,
-                          decision.reason,
-                          {"intent_chars": len(body.intent), "observation_key": observation_key, "options": options})
-                publish_for(ctx, MasterEscalationNotified(
-                    run_id=body.run_id, fence=body.fence, ticket=ticket, actor=run["account_id"],
-                    result=(",".join(sent) if sent else ("pending: " + ",".join(sorted(pending_channels))
-                                                         if pending_channels else "no channel configured or duplicate")),
-                    reason=why, options=stored_options, observation_key=observation_key,
-                    pending_channels=sorted(pending_channels)))
-            master_event("escalated", why)
-            return {"ok": True, "escalated": True, "reason": why, "options": stored_options,
-                    "already_sent": already_sent, "sent": sent, "pending_channels": sorted(pending_channels)}
-
+            return escalate(ctx, audit, state, decision, log)
         if decision.decision != "allow":
-            audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False,
-                  decision.reason, {"intent_chars": len(body.intent)})
-            master_event("denied", decision.reason)
-            raise HTTPException(403, decision.reason)
-
-        allowed_ticket_actions = {"retry", "move_to_todo", "restart_run"}
-        ticket_row = None
-        if body.action in allowed_ticket_actions:
-            ticket_row = ctx.db.one("SELECT key, project, status FROM tickets WHERE key=%s", (ticket,)) if ticket else None
-            if not ticket_row:
-                reason = "a valid Jira ticket is required for this master action"
-                audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False, reason)
-                master_event("denied", reason)
-                raise HTTPException(400, reason)
-            if not ctx.jira:
-                refuse_master_action("Jira is unavailable", 503)
-
+            deny_policy_decision(ctx, audit, state, decision)
+        ticket_row = validate_ticket_action(ctx, audit, state)
         result = "ok"
         if body.action in ("retry", "move_to_todo"):
-            if ticket_row["status"] in ("Done", "Needs owner", "Human review"):
-                refuse_master_action(f"a ticket in {ticket_row['status']} cannot be retried by the master")
-            if body.action == "move_to_todo" and ticket_row["status"] not in ("To Do", "In Progress", "In Verify"):
-                refuse_master_action("move_to_todo is limited to tickets in To Do, In Progress or In Verify")
-            if ctx.leases.holder(ticket):
-                refuse_master_action("ticket still has an active run; use restart_run after its work-time limit")
-            if body.action == "retry":
-                latest = ctx.db.one("SELECT outcome FROM runs WHERE ticket_key=%s AND status<>'running'"
-                                    " ORDER BY started_at DESC LIMIT 1", (ticket,))
-                if not latest or latest["outcome"] not in ("failed", "timeout", "lost", "quota", "blocked", "no_changes"):
-                    refuse_master_action("retry requires a recent failed, blocked, quota or lost run")
-            try:
-                status = ctx.jira.transition_to(ticket, "To Do")
-            except Exception as exc:  # noqa: BLE001 - record the refusal without exposing Jira internals
-                refuse_master_action(f"Jira could not move {ticket} to To Do ({type(exc).__name__})", 502)
-            ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, ticket))
-            result = f"ticket moved to {status}"
+            result = retry_or_move(ctx, audit, state, ticket_row)
         elif body.action == "pause_account":
-            account_id = body.account_id.strip()
-            account = ctx.db.one("SELECT id, status FROM accounts WHERE id=%s", (account_id,)) if account_id else None
-            if not account:
-                refuse_master_action("pause_account requires a configured account_id", 400)
-            unhealthy = account["status"] in ("cooldown", "signed_out", "error") or bool(
-                ctx.db.one("SELECT 1 AS issue FROM incidents WHERE closed_at IS NULL"
-                           " AND kind IN ('account_quota','quota_high') AND (subject=%s OR subject LIKE %s)",
-                           (account_id, account_id + ":%")))
-            if not unhealthy:
-                refuse_master_action("master may pause only an account with a quota or health issue")
-            minutes = min(1440, max(1, int(body.pause_minutes)))
-            ctx.db.run("INSERT INTO master_account_pauses (account_id,paused_until,reason,run_id)"
-                       " VALUES (%s,now()+(%s * interval '1 minute'),%s,%s) ON CONFLICT (account_id) DO UPDATE SET"
-                       " paused_until=EXCLUDED.paused_until,reason=EXCLUDED.reason,run_id=EXCLUDED.run_id,updated_at=now()",
-                       (account_id, minutes, (body.why or body.intent)[:500], body.run_id))
-            result = f"account paused for {minutes} minutes"
+            result = pause_account(ctx, audit, state)
             ticket = ""
         elif body.action == "restart_run":
-            if not body.target_run_id or not ctx.jira:
-                refuse_master_action("restart_run requires target_run_id and an available Jira connection", 400)
-            target = ctx.db.one("SELECT * FROM runs WHERE id::text=%s", (body.target_run_id,))
-            if not target:
-                refuse_master_action("target_run_id does not identify a recorded run", 404)
-            if (target["ticket_key"] != ticket or target["step"] == "master" or target["status"] != "running"
-                    or not ctx.leases.valid(target["ticket_key"], str(target["id"]), int(target["fence"]))):
-                refuse_master_action("target run is not the active fenced run for this ticket")
-            if ticket_row["status"] in ("Done", "Needs owner", "Human review"):
-                refuse_master_action(f"a run on a ticket in {ticket_row['status']} cannot be restarted by the master")
-            project = ctx.repo().projects.get(target["project"])
-            hard = project.work_minutes()["hard"] if project else work_limits.HARD
-            elapsed = max(0.0, (utcnow() - target["started_at"]).total_seconds() / 60)
-            if elapsed < hard:
-                refuse_master_action(f"target run has not passed its {hard} minute work-time limit")
-            if not ctx.leases.release(target["ticket_key"], str(target["id"]), int(target["fence"])):
-                refuse_master_action("target run lease changed before restart")
-            run_inbox_control.restart(ctx, target, body.target_run_id, body.run_id, body.why or body.intent)
-            ctx.db.run("UPDATE accounts SET status='idle',updated_at=now() WHERE id=%s AND status='working'",
-                       (target["account_id"],))
-            try:
-                status = ctx.jira.transition_to(ticket, "To Do")
-            except Exception as exc:  # noqa: BLE001 - the old lease is already fenced off
-                reason = f"run {body.target_run_id} was stopped, but Jira could not move {ticket} to To Do ({type(exc).__name__})"
-                audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], True, reason,
-                      {"intent": body.intent[:1000], "why": body.why[:1000], "target_run_id": body.target_run_id})
-                master_event("partial", reason)
-                raise HTTPException(502, reason) from exc
-            ctx.db.run("UPDATE tickets SET status=%s,synced_at=now() WHERE key=%s", (status, ticket))
-            result = f"stuck run {body.target_run_id} stopped; ticket moved to {status}"
-            ticket_row["project"] = target["project"]
+            result = restart_run(ctx, audit, state, ticket_row)
         elif body.action == "open_bug":
-            candidates = {candidate["signature"] for candidate in flow_bug_candidates(ctx)
-                          if candidate["creation_eligible"]}
-            if not body.signature or body.signature not in candidates:
-                refuse_master_action("open_bug requires an eligible repeated flow failure signature")
-            reports = process_flow_bugs(run)
-            matching = next((report for report in reports if report.get("signature") == body.signature), None)
-            if not matching:
-                tracked = ctx.db.one("SELECT ticket_key FROM flow_bug_tracker WHERE signature=%s", (body.signature,))
-                matching = {"action": "already_reported", "ticket": tracked["ticket_key"]} if tracked else None
-            if not matching:
-                refuse_master_action("the eligible flow failure could not be recorded; it will be retried next cycle", 502)
-            ticket = matching.get("ticket", "")
-            result = f"{matching['action']} {ticket}".strip()
+            result, ticket = open_bug(ctx, audit, state, process_flow_bugs)
         publish_for(ctx, MasterActionCompleted(run_id=body.run_id, fence=body.fence, ticket=ticket,
                                                actor=run["account_id"], action=body.action,
                                                result=str(result)[:500], intent=body.intent[:1000],
                                                why=body.why[:1000], account_id=body.account_id,
                                                target_run_id=body.target_run_id, signature=body.signature))
-        master_event("completed", body.why or body.intent or str(result))
+        master_action_event(ctx, state, "completed", body.why or body.intent or str(result))
         return {"ok": True, "result": result, "escalated": False}
 
     return SimpleNamespace(run_heartbeat=run_heartbeat, run_result=run_result, run_release=run_release, master_context=master_context, master_flow_bugs=master_flow_bugs, master_plan_outcome=master_plan_outcome, autonomy_report=autonomy_report, master_autonomy=master_autonomy, master_budget_update=master_budget_update, master_report=master_report, master_action=master_action)

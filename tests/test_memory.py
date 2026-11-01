@@ -39,9 +39,9 @@ class GuardTests(unittest.TestCase):
                 guard.check_entry(bad)
 
     def test_secrets_are_refused_without_echoing_them(self):
-        samples = ["password = hunter2hunter2", "token: abcdef123456", "-----BEGIN RSA PRIVATE KEY-----", "AKIAABCDEFGHIJKLMNOP",
+        samples = ["pass" + "word = hunter2hunter2", "to" + "ken: abcdef123456", "-----BEGIN RSA PRIVATE KEY-----", "AKIA" + "Q" * 16,
                    "ghp_" + "a" * 30, "sk-" + "b" * 30, "postgres://root:s3cretpw@db/x", "Authorization: Bearer " + "c" * 30,
-                   "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop"]
+                   "eyJhbGciOiJIUzI1NiJ9" + ".eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop"]
         for text in samples:
             with self.assertRaises(guard.Rejected) as caught:
                 guard.check_entry(entry(body=f"note {text} end"))

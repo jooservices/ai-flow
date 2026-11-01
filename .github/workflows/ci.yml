@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  merge_group:
   pull_request:
     branches: [master, develop]
   push:
@@ -94,7 +95,7 @@ jobs:
 
   giant-files:
     name: Giant files
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -111,7 +112,7 @@ jobs:
 
   quality:
     name: Code quality
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -306,7 +307,7 @@ jobs:
   # that touches install, deploy, control or node code ...
   acceptance-fast:
     name: Clean-install acceptance (fast)
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -333,7 +334,7 @@ jobs:
       - name: Does the pull request touch install, deploy, control or node code?
         id: touched
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
           if git diff --name-only "$BASE" HEAD | grep -E '^(aiflow/v4/(install|control|node)/|deploy/v4/|tests/v4/test_clean_install_acceptance\.py|\.github/workflows/)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"

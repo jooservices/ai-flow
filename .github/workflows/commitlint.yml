@@ -1,6 +1,7 @@
 name: Commitlint
 
 on:
+  merge_group:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
@@ -48,6 +49,7 @@ jobs:
             }
 
       - name: Validate PR commits
+        if: github.event_name == 'pull_request'
         uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6.2.1
         with:
           configFile: .github/commitlint.config.mjs

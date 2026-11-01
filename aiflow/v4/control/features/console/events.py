@@ -121,3 +121,56 @@ class LicenceLimitsUpdated(DomainEvent):
     def audit(self) -> Audit:
         return Audit("licensing", "license_limits", "", self.actor, "limits updated",
                      {"plan": self.plan, "limits": self.limits})
+
+
+@event
+@dataclass(frozen=True)
+class ConsoleUserAdded(DomainEvent):
+    type = "console.user_added"
+    owner = "console"
+    aggregate = "console_user"
+    aggregate_field = "email"
+
+    actor: str
+    email: str
+    roles: list[str]
+    project_keys: list[str]
+
+    def audit(self) -> Audit:
+        return Audit("console", "user_add", "", self.actor, "Person added",
+                     {"email": self.email, "roles": self.roles, "project_keys": self.project_keys})
+
+
+@event
+@dataclass(frozen=True)
+class ConsoleUserUpdated(DomainEvent):
+    type = "console.user_updated"
+    owner = "console"
+    aggregate = "console_user"
+    aggregate_field = "email"
+
+    actor: str
+    email: str
+    roles: list[str]
+    project_keys: list[str]
+
+    def audit(self) -> Audit:
+        return Audit("console", "user_update", "", self.actor, "Person updated",
+                     {"email": self.email, "roles": self.roles, "project_keys": self.project_keys})
+
+
+@event
+@dataclass(frozen=True)
+class ConsoleUserDisabledChanged(DomainEvent):
+    type = "console.user_disabled_changed"
+    owner = "console"
+    aggregate = "console_user"
+    aggregate_field = "email"
+
+    actor: str
+    email: str
+    disabled: bool
+
+    def audit(self) -> Audit:
+        return Audit("console", "user_disable" if self.disabled else "user_enable", "", self.actor,
+                     "Person disabled" if self.disabled else "Person enabled", {"email": self.email})

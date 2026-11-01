@@ -10,7 +10,9 @@ from types import SimpleNamespace
 
 from ...system_check_api import HeartbeatBody
 from .bodies import CheckProbeBody, CheckProbeTokenBody, ConfirmBody, JoinBody, JoinCommandBody, JoinInspectBody, JoinTokenBody, ManagedAccountCreateBody, ManagedAccountSignInStatusBody, ManagedAccountUpdateBody, NodeOperationBody, NodeOperationCheckpointBody, NodeOperationResultBody
-from .events import CheckProbeTokenIssued, NodeJoinCommandCreated, NodeWorkAcceptanceChanged
+from .events import (AiAccountAdded, AiAccountManagementChanged, AiAccountRemoved, AiAccountSignInCompleted,
+                     AiAccountSignInRestarted, CheckProbeTokenIssued, NodeJoinCommandCreated, NodeJoined,
+                     NodeOperationQueued, NodeRemoved, NodeWorkAcceptanceChanged)
 from urllib.parse import urlsplit
 from fastapi import Depends, HTTPException, Request
 from ....core.controlrepo import Account, ControlRepo
@@ -67,7 +69,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         except licensing.LicenseError as exc:
             raise HTTPException(423, str(exc)) from None
         token = secrets.token_urlsafe(32)
-        with ctx.db.pool.connection() as conn:
+        with ctx.db.transaction() as conn:
             row = conn.execute(
                 "WITH grant_row AS (UPDATE node_join_tokens SET used_at=now()"
                 " WHERE token_hash=%s AND used_at IS NULL AND expires_at>now()"
@@ -84,8 +86,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 " RETURNING name,role,projects,dynamic",
                 (h(body.join_token), body.name, body.name, body.ip, h(token))).fetchone()
             if row:
-                audit_in(conn, "node", "join", row["name"], "", None, "node-agent", True, "node joined",
-                         {"ip_present": bool(body.ip), "role": row["role"], "project": row["projects"][0]})
+                publish_for(ctx, NodeJoined(node=row["name"], ip_present=bool(body.ip), role=row["role"],
+                                            project=row["projects"][0]))
         if not row:
             raise HTTPException(403, "invalid, expired, or used join token")
         ctx.events.emit("node.joined", node=row["name"], reason=f"{row['role']} · {row['projects'][0]}")
@@ -399,7 +401,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             raise HTTPException(422, "invalid machine name")
         roles = [JOB_ROLES[job] for job in dict.fromkeys(body.jobs)]
         request_id = str(uuid.uuid4())
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             lock_machine_capacity(connection, name)
             licensing.lock_resource_admission(connection)
             node = connection.execute("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,)).fetchone()
@@ -429,9 +431,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
             connection.execute("INSERT INTO accounts (id,provider,node,tier,roles,status)"
                                " VALUES (%s,%s,%s,'middle',%s,'signed_out')",
                                (account_id, body.provider, name, roles))
-            audit_in(connection, "ai-account", "add", account_id, "", None, user.subject, True,
-                     "account added; sign-in pending", {"node": name, "provider": body.provider, "name": body.name.strip(),
-                                                         "sessions": body.sessions, "jobs": account_jobs(roles)})
+            publish_for(ctx, AiAccountAdded(account=account_id, actor=user.subject, node=name, provider=body.provider,
+                                            name=body.name.strip(), sessions=body.sessions,
+                                            jobs=account_jobs(roles)))
         ctx.events.emit("account.added", account=account_id, provider=body.provider, node=name,
                         outcome="sign_in_queued", reason="provider sign-in started on the machine")
         return {"account": account_id, "name": body.name.strip(), "node": name, "provider": body.provider,
@@ -445,7 +447,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             raise HTTPException(404, "AI account is not registered")
         if body.sessions is None and body.jobs is None and body.action is None:
             raise HTTPException(422, "choose sessions, jobs, pause, or resume")
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             lock_machine_capacity(connection, account.node)
             repo = ctx.repo()
             account = repo.account(account_id)
@@ -465,7 +467,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             connection.execute("UPDATE shared_accounts SET roles=%s WHERE id=%s", (roles, account_id))
             action = body.action or "update"
             payload = {"sessions": sessions, "jobs": account_jobs(roles), "paused": paused}
-            audit_in(connection, "ai-account", action, account_id, "", None, user.subject, True, "updated", payload)
+            publish_for(ctx, AiAccountManagementChanged(account=account_id, actor=user.subject, action=action,
+                                                        sessions=sessions, jobs=payload["jobs"], paused=paused))
         ctx.events.emit("account.management_changed", account=account_id, node=account.node,
                         outcome=action, reason="account settings updated", data=payload)
         return {"account": account_id, **payload}
@@ -479,7 +482,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         if ctx.db.one("SELECT 1 AS active FROM runs WHERE account_id=%s AND status='running' LIMIT 1", (account_id,)):
             raise HTTPException(409, "account has an active session; wait for it to finish before signing in again")
         request_id = str(uuid.uuid4())
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             save_managed_account(account, list(account.roles or []), max(1, int(account.parallel or 1)),
                                  account.paused, connection=connection)
             connection.execute("UPDATE managed_ai_accounts SET sign_in_request_id=%s,sign_in_status='queued',"
@@ -488,9 +491,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
                                (request_id, account_id))
             connection.execute("UPDATE accounts SET status='signed_out',last_error='',updated_at=now() WHERE id=%s",
                                (account_id,))
-            audit_in(connection, "ai-account", "sign_in_again", account_id, "", None, user.subject, True,
-                     "provider sign-in queued on the machine", {"provider": account.provider,
-                                                                  "node": account.node})
+            publish_for(ctx, AiAccountSignInRestarted(account=account_id, actor=user.subject,
+                                                      provider=account.provider, node=account.node))
         ctx.events.emit("account.sign_in_started", account=account_id, provider=account.provider,
                         node=account.node, outcome="queued", reason="owner requested provider sign-in again")
         return {"account": account_id, "status": "queued", "sign_in_url": "", "code": ""}
@@ -548,7 +550,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
     def complete_account_sign_in(account_id: str, request: Request) -> dict:
         user = console_user(request, {"nodes.manage"}, target="ai-account", action="sign_in_complete",
                             node=account_id)
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             row = connection.execute(
                 "SELECT m.node,m.provider,m.sign_in_status,a.status,a.last_probe_at,m.sign_in_started_at"
                 " FROM managed_ai_accounts m JOIN accounts a ON a.id=m.id"
@@ -565,8 +567,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
                                "sign_in_status='idle',sign_in_request_id='',sign_in_expires_at=NULL,"
                                "sign_in_started_at=NULL,updated_at=now() WHERE id=%s",
                                (account_id,))
-            audit_in(connection, "ai-account", "sign_in_complete", account_id, "", None, user.subject, True,
-                     "provider account check succeeded", {"node": row["node"], "provider": row["provider"]})
+            publish_for(ctx, AiAccountSignInCompleted(account=account_id, actor=user.subject, node=row["node"],
+                                                      provider=row["provider"]))
         ctx.events.emit("account.sign_in_completed", account=account_id, provider=row["provider"],
                         node=row["node"], outcome="ready", reason="owner confirmed the successful provider check")
         return {"account": account_id, "signed_in": True}
@@ -583,14 +585,13 @@ def install(app, ctx, deps) -> SimpleNamespace:
         active = ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id=%s AND status='running'", (account_id,))
         if active and active["n"]:
             raise HTTPException(409, "account has an active session; wait for it to finish before removing it")
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             connection.execute("INSERT INTO managed_ai_accounts (id,provider,node,tier,roles,removed_at)"
                                " VALUES (%s,%s,%s,%s,%s,now()) ON CONFLICT (id) DO UPDATE SET removed_at=now(),"
                                "updated_at=now()", (account.id, account.provider, account.node, account.tier,
                                                      account.roles))
             connection.execute("DELETE FROM accounts WHERE id=%s", (account_id,))
-            audit_in(connection, "ai-account", "remove", account_id, "", None, user.subject, True,
-                     "account removed from machine", {"node": account.node})
+            publish_for(ctx, AiAccountRemoved(account=account_id, actor=user.subject, node=account.node))
         ctx.events.emit("account.removed", account=account_id, provider=account.provider, node=account.node,
                         outcome="removed", reason="removed from Machines and AI screen")
         return {"account": account_id, "removed": True}
@@ -629,7 +630,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         active = ctx.db.one("SELECT count(*) AS n FROM runs WHERE node=%s AND status='running'", (name,))
         if active and active["n"]:
             raise HTTPException(409, "machine has active sessions; wait for them to finish before removing it")
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             connection.execute("UPDATE nodes SET removed_at=now(),accepting_work=false,token_hash='',status='offline'"
                                " WHERE name=%s", (name,))
             connection.execute("UPDATE managed_ai_accounts SET removed_at=now(),updated_at=now() WHERE node=%s",
@@ -637,7 +638,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             connection.execute("DELETE FROM accounts WHERE node=%s", (name,))
             connection.execute("UPDATE node_join_tokens SET used_at=now() WHERE node_name=%s AND used_at IS NULL",
                                (name,))
-            audit_in(connection, "node", "remove", name, "", None, user.subject, True, "machine removed", {})
+            publish_for(ctx, NodeRemoved(node=name, actor=user.subject))
         ctx.events.emit("node.removed", node=name, outcome="removed", reason="removed from Machines and AI screen")
         return {"node": name, "removed": True}
 
@@ -666,9 +667,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
         with ctx.db.transaction() as connection:
             connection.execute("INSERT INTO node_operations (id,node,action,actor,payload) VALUES (%s,%s,%s,%s,%s)",
                                (operation_id, name, body.action, user.subject, J(payload)))
-            audit_in(connection, "node", body.action, name, operation_id, None, user.subject, True, "queued",
-                     {"operation_id": operation_id, "components": components,
-                      "service_count": len(payload["services"])})
+            publish_for(ctx, NodeOperationQueued(node=name, actor=user.subject, action=body.action,
+                                                 operation_id=operation_id, components=components,
+                                                 service_count=len(payload["services"])))
         ctx.events.emit("node.operation.queued", node=name, outcome="queued",
                         reason=f"{body.action}: {', '.join(components) or 'services'}",
                         data={"operation_id": operation_id, "action": body.action, "actor": user.subject})

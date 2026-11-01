@@ -38,4 +38,4 @@ The System check readiness export of `POST /v1/support/bundles` was moved into `
 View-as writes publish `console.view_as_started` and `console.view_as_stopped`.
 Notification writes publish `notifications.channel_saved`, `notifications.channel_deleted` and `notifications.preferences_saved`.
 Licensing writes publish `licensing.license_activated` and `licensing.limits_updated`.
-User-management audit rows stay as they were.
+User-management writes publish `console.user_added`, `console.user_updated` and `console.user_disabled_changed`; their transaction now comes from `ctx.db.transaction()`, so the event and the change commit together.

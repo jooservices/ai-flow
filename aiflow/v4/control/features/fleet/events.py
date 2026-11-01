@@ -66,3 +66,152 @@ class CheckProbeTokenIssued(DomainEvent):
             payload["transport"] = "control"
             return Audit("github", "check_probe_token", "", self.node, "read-only relay capability issued", payload)
         return Audit("github", "check_probe_token", "", self.node, "issued", payload)
+
+
+@event
+@dataclass(frozen=True)
+class NodeJoined(DomainEvent):
+    type = "node.agent_joined"
+    owner = "fleet"
+    aggregate = "node"
+    aggregate_field = "node"
+
+    node: str
+    ip_present: bool
+    role: str
+    project: str
+
+    def audit(self) -> Audit:
+        return Audit("node", "join", self.node, "node-agent", "node joined",
+                     {"ip_present": self.ip_present, "role": self.role, "project": self.project})
+
+
+@event
+@dataclass(frozen=True)
+class AiAccountAdded(DomainEvent):
+    type = "ai_account.added"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+    node: str
+    provider: str
+    name: str
+    sessions: int
+    jobs: list[str]
+
+    def audit(self) -> Audit:
+        return Audit("ai-account", "add", self.account, self.actor, "account added; sign-in pending",
+                     {"node": self.node, "provider": self.provider, "name": self.name,
+                      "sessions": self.sessions, "jobs": self.jobs})
+
+
+@event
+@dataclass(frozen=True)
+class AiAccountManagementChanged(DomainEvent):
+    type = "ai_account.management_changed"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+    action: str
+    sessions: int
+    jobs: list[str]
+    paused: bool
+
+    def audit(self) -> Audit:
+        return Audit("ai-account", self.action, self.account, self.actor, "updated",
+                     {"sessions": self.sessions, "jobs": self.jobs, "paused": self.paused})
+
+
+@event
+@dataclass(frozen=True)
+class AiAccountSignInRestarted(DomainEvent):
+    type = "ai_account.sign_in_restarted"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+    provider: str
+    node: str
+
+    def audit(self) -> Audit:
+        return Audit("ai-account", "sign_in_again", self.account, self.actor,
+                     "provider sign-in queued on the machine", {"provider": self.provider, "node": self.node})
+
+
+@event
+@dataclass(frozen=True)
+class AiAccountSignInCompleted(DomainEvent):
+    type = "ai_account.sign_in_completed"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+    node: str
+    provider: str
+
+    def audit(self) -> Audit:
+        return Audit("ai-account", "sign_in_complete", self.account, self.actor,
+                     "provider account check succeeded", {"node": self.node, "provider": self.provider})
+
+
+@event
+@dataclass(frozen=True)
+class AiAccountRemoved(DomainEvent):
+    type = "ai_account.removed"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+    node: str
+
+    def audit(self) -> Audit:
+        return Audit("ai-account", "remove", self.account, self.actor, "account removed from machine",
+                     {"node": self.node})
+
+
+@event
+@dataclass(frozen=True)
+class NodeRemoved(DomainEvent):
+    type = "node.managed_removed"
+    owner = "fleet"
+    aggregate = "node"
+    aggregate_field = "node"
+
+    node: str
+    actor: str
+
+    def audit(self) -> Audit:
+        return Audit("node", "remove", self.node, self.actor, "machine removed", {})
+
+
+@event
+@dataclass(frozen=True)
+class NodeOperationQueued(DomainEvent):
+    type = "node.operation_queued"
+    owner = "fleet"
+    aggregate = "node"
+    aggregate_field = "node"
+
+    node: str
+    actor: str
+    action: str
+    operation_id: str
+    components: list[str]
+    service_count: int
+
+    def audit(self) -> Audit:
+        return Audit("node", self.action, self.node, self.actor, "queued",
+                     {"operation_id": self.operation_id, "components": self.components,
+                      "service_count": self.service_count}, run_id=self.operation_id, fence=None)

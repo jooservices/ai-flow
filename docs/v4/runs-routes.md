@@ -54,5 +54,7 @@ Routes that call the functions split out above and are named for the docs check:
 
 Successful `PUT /v1/master/autonomy/budget` and `POST /v1/master/actions` requests publish `master.daily_budget_updated`
 and `master.action_completed`; the audit ledger listener writes the same accepted `write_audit` rows as before. The
-budget update and its event share a transaction. Refused actions and the existing escalation and partial-result audits
-remain direct `audit()` calls.
+budget update and its event share a transaction. An accepted `escalate_to_owner` action publishes
+`master.escalation_requested` and `master.escalation_notified`; they commit with the update of the escalation's delivered
+channels. A refused action, an escalation action other than `escalate_to_owner` and the partial-result audit that is
+followed by an error remain direct `audit()` calls.

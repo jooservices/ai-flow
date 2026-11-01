@@ -20,7 +20,8 @@ from ...policy import decide_master_action
 from ... import notify
 from ...features.work.constants import utcnow
 from ...features.work.listeners import run_finished
-from .events import MasterActionCompleted, MasterDailyBudgetUpdated
+from .events import (MasterActionCompleted, MasterDailyBudgetUpdated, MasterEscalationNotified,
+                     MasterEscalationRequested)
 from ...platform.events.wiring import publish_for
 
 
@@ -385,18 +386,26 @@ def install(app, ctx, deps) -> SimpleNamespace:
             sent = sorted(set(sent).intersection(attempt_channels))
             pending_channels.difference_update(sent)
             delivered_channels.update(sent)
-            ctx.db.run("UPDATE master_escalations SET pending_channels=%s, delivered_channels=%s"
-                       " WHERE observation_key=%s",
-                       (sorted(pending_channels), sorted(delivered_channels), observation_key))
             already_sent = bool(not created_row and delivered_channels and not pending_channels and not sent)
-            audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"],
-                  body.action == "escalate_to_owner", decision.reason,
-                  {"intent_chars": len(body.intent), "observation_key": observation_key, "options": options})
-            audit("notify", "master-escalation", ticket, body.run_id, body.fence, run["account_id"], True,
-                  ",".join(sent) if sent else ("pending: " + ",".join(sorted(pending_channels))
-                                                if pending_channels else "no channel configured or duplicate"),
-                  {"reason": why, "options": stored_options, "observation_key": observation_key,
-                   "pending_channels": sorted(pending_channels)})
+            with ctx.db.transaction():
+                ctx.db.run("UPDATE master_escalations SET pending_channels=%s, delivered_channels=%s"
+                           " WHERE observation_key=%s",
+                           (sorted(pending_channels), sorted(delivered_channels), observation_key))
+                if body.action == "escalate_to_owner":
+                    publish_for(ctx, MasterEscalationRequested(
+                        run_id=body.run_id, fence=body.fence, ticket=ticket, actor=run["account_id"],
+                        action=body.action, reason=decision.reason, intent_chars=len(body.intent),
+                        observation_key=observation_key, options=options))
+                else:
+                    audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False,
+                          decision.reason,
+                          {"intent_chars": len(body.intent), "observation_key": observation_key, "options": options})
+                publish_for(ctx, MasterEscalationNotified(
+                    run_id=body.run_id, fence=body.fence, ticket=ticket, actor=run["account_id"],
+                    result=(",".join(sent) if sent else ("pending: " + ",".join(sorted(pending_channels))
+                                                         if pending_channels else "no channel configured or duplicate")),
+                    reason=why, options=stored_options, observation_key=observation_key,
+                    pending_channels=sorted(pending_channels)))
             master_event("escalated", why)
             return {"ok": True, "escalated": True, "reason": why, "options": stored_options,
                     "already_sent": already_sent, "sent": sent, "pending_channels": sorted(pending_channels)}

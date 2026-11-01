@@ -14,10 +14,8 @@ import fcntl
 import json
 import os
 import pwd
-import selectors
 import secrets
 import shutil
-import signal
 import shlex
 import socket
 import socketserver
@@ -32,9 +30,11 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from ..adapters.base import RunSpec, scratch_root
+from . import container_client as _container_client
+from . import container_commands as _container_commands
+from . import container_compose as _container_compose
+from . import container_exec as _container_exec
 from .container_pin import _WorktreePin  # noqa: F401 - re-exported
 from .container_policy import (ACTIVE_CONTAINER_LIMIT, _SAFE_NAME, ContainerPolicyError, _compose_bind_source,  # noqa: F401 - re-exported
                                _inside_directory, _inside_file, _normalize_mount, _short_compose_volume,
@@ -118,42 +118,69 @@ def _run_as_engine(argv: list[str], *, timeout: int = 20, env: dict[str, str] | 
     return subprocess.run(base, capture_output=True, text=True, timeout=timeout, env=worker_env)
 
 
+def _engine_podman_info() -> dict[str, Any] | None:
+    info = _run_as_engine(["podman", "info", "--format", "json"], timeout=20)
+    if info.returncode:
+        return None
+    data = json.loads(info.stdout)
+    if ((data.get("host") or {}).get("security") or {}).get("rootless") is not True:
+        return None
+    return data
+
+
+def _engine_storage_ready(data: dict[str, Any]) -> tuple[Path, Path] | None:
+    graphroot_value = str((data.get("store") or {}).get("graphRoot") or "")
+    if not graphroot_value:
+        return None
+    graphroot = Path(graphroot_value)
+    if not graphroot.is_dir():
+        return None
+    if not _private_to_engine(graphroot) or not _private_to_engine(Path(_engine_identity()[2])):
+        return None
+    engine_home = Path(_engine_identity()[2])
+    if not _project_quota_mount(graphroot) or not _project_quota_mount(engine_home):
+        return None
+    return graphroot, engine_home
+
+
+def _engine_capacity_ready(graphroot: Path, engine_home: Path) -> bool:
+    usage, runtime_usage = shutil.disk_usage(graphroot), shutil.disk_usage(engine_home)
+    if usage.total < TOTAL_STORAGE_LIMIT + RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE:
+        return False
+    if runtime_usage.total < RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE:
+        return False
+    if runtime_usage.free < RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE:
+        return False
+    return True
+
+
+def _compose_provider_version() -> list[str] | None:
+    provider = _run_as_engine(["podman-compose", "--version"], timeout=15)
+    if provider.returncode:
+        return None
+    versions = (provider.stdout or provider.stderr).strip().splitlines()
+    return versions or None
+
+
 def _engine_container_runtime_version() -> str:
     """Check Podman and its storage from the engine account without probing worker UID transitions."""
     try:
-        info = _run_as_engine(["podman", "info", "--format", "json"], timeout=20)
-        if info.returncode:
-            return "missing"
-        data = json.loads(info.stdout)
-        host = data.get("host") or {}
-        if (host.get("security") or {}).get("rootless") is not True:
+        data = _engine_podman_info()
+        if data is None:
             return "missing"
         namespaces = _run_as_engine(["podman", "unshare", "true"], timeout=20)
         if namespaces.returncode:
             return "missing"
-        store = data.get("store") or {}
-        graphroot = str(store.get("graphRoot") or "")
-        if not graphroot or not Path(graphroot).is_dir():
+        storage = _engine_storage_ready(data)
+        if storage is None:
             return "missing"
-        if not _private_to_engine(Path(graphroot)) or not _private_to_engine(Path(_engine_identity()[2])):
-            return "missing"
-        engine_home = Path(_engine_identity()[2])
-        if not _project_quota_mount(Path(graphroot)) or not _project_quota_mount(engine_home):
-            return "missing"
-        provider = _run_as_engine(["podman-compose", "--version"], timeout=15)
-        if provider.returncode:
-            return "missing"
+        versions = _compose_provider_version()
         podman_version = str((data.get("version") or {}).get("Version") or "")
-        compose_version = (provider.stdout or provider.stderr).strip().splitlines()
-        if not podman_version or not compose_version:
+        if not podman_version or not versions:
             return "missing"
-        usage = shutil.disk_usage(graphroot)
-        runtime_usage = shutil.disk_usage(engine_home)
-        if (usage.total < TOTAL_STORAGE_LIMIT + RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE
-                or runtime_usage.total < RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE
-                or runtime_usage.free < RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE):
+        if not _engine_capacity_ready(*storage):
             return "missing"
-        return f"rootless Podman {podman_version}; {compose_version[0][:60]}; XFS project quota"
+        return f"rootless Podman {podman_version}; {versions[0][:60]}; XFS project quota"
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
         return "missing"
 
@@ -298,45 +325,60 @@ def _quota_marker_data(graphroot: Path, worktree_root: Path) -> dict[str, Any] |
         return None
 
 
-def _prepare_storage_quotas(graphroot: Path, worktree_root: Path) -> bool:
-    """Configure shared quotas once per boot and probe each filesystem used by a run before advertising support."""
+def _quota_preflight(graphroot: Path, worktree_root: Path) -> tuple[Path, dict[str, Any]] | None:
     if os.geteuid() != 0 or not shutil.which("xfs_quota") or not shutil.which("setfacl"):
-        return False
+        return None
     engine_home = Path(_engine_identity()[2])
     expected = _quota_marker_data(graphroot, worktree_root)
-    if (expected is None or not _project_quota_mount(graphroot) or not _project_quota_mount(worktree_root)
-            or not _project_quota_mount(engine_home)):
+    if expected is None or not _project_quota_mount(graphroot) or not _project_quota_mount(worktree_root):
+        return None
+    if not _project_quota_mount(engine_home) or not _probe_runtime_directory_quota(engine_home):
+        return None
+    return engine_home, expected
+
+
+def _write_quota_marker(expected: dict[str, Any]) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".aiflow-container-quota-", dir=QUOTA_MARKER.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(expected, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, QUOTA_MARKER)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _configure_shared_quotas(graphroot: Path, worktree_root: Path, expected: dict[str, Any]) -> bool:
+    try:
+        marker = json.loads(QUOTA_MARKER.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        marker = None
+    if marker == expected:
+        return (_set_project_limit(graphroot, IMAGE_CACHE_PROJECT_ID, IMAGE_CACHE_LIMIT)
+                and _acl_supported(worktree_root))
+    if not _configure_project_quota(graphroot, IMAGE_CACHE_PROJECT_ID, IMAGE_CACHE_LIMIT):
         return False
-    if not _probe_runtime_directory_quota(engine_home):
+    if not _probe_worktree_quota(worktree_root) or not _acl_supported(worktree_root):
         return False
+    _write_quota_marker(expected)
+    return True
+
+
+def _prepare_storage_quotas(graphroot: Path, worktree_root: Path) -> bool:
+    """Configure shared quotas once per boot and probe each filesystem used by a run before advertising support."""
+    preflight = _quota_preflight(graphroot, worktree_root)
+    if preflight is None:
+        return False
+    _, expected = preflight
     try:
         QUOTA_LOCK.parent.mkdir(parents=True, exist_ok=True)
         lock_fd = os.open(QUOTA_LOCK, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
         with os.fdopen(lock_fd, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                marker = json.loads(QUOTA_MARKER.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                marker = None
-            if marker == expected:
-                return (_set_project_limit(graphroot, IMAGE_CACHE_PROJECT_ID, IMAGE_CACHE_LIMIT)
-                        and _acl_supported(worktree_root))
-            if not _configure_project_quota(graphroot, IMAGE_CACHE_PROJECT_ID, IMAGE_CACHE_LIMIT):
-                return False
-            if not _probe_worktree_quota(worktree_root) or not _acl_supported(worktree_root):
-                return False
-            fd, temporary = tempfile.mkstemp(prefix=".aiflow-container-quota-", dir=QUOTA_MARKER.parent)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    json.dump(expected, stream, sort_keys=True)
-                    stream.write("\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.chmod(temporary, 0o644)
-                os.replace(temporary, QUOTA_MARKER)
-            finally:
-                Path(temporary).unlink(missing_ok=True)
-            return True
+            return _configure_shared_quotas(graphroot, worktree_root, expected)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
 
@@ -356,367 +398,41 @@ def prune_image_cache() -> bool:
 
 
 def _run_argv(argv: list[str], root: Path, cwd: Path, *, map_source=None) -> list[str]:
-    if not argv or argv[0] != "run":
-        raise ContainerPolicyError("only docker build, compose up/run, and mounted docker run are supported")
-    i, mounts, image_seen = 1, [], False
-    normalized_mounts: list[tuple[int, str]] = []
-    value_options = {"--name", "--workdir", "-w", "--env", "-e", "--publish", "-p", "--expose",
-                     "--entrypoint", "--user", "-u", "--label", "--platform", "--network", "--hostname",
-                     "--dns", "--pull", "--memory", "--cpus"}
-    flags = {"--rm", "-i", "--interactive", "-t", "--tty", "--init"}
-    i = 1
-    while i < len(argv):
-        arg = argv[i]
-        if not image_seen:
-            if arg in flags:
-                i += 1
-            elif arg in {"-v", "--volume", "--mount"}:
-                if i + 1 >= len(argv):
-                    raise ContainerPolicyError("mount option needs a value")
-                mount_value = argv[i + 1]
-                normalized_value = "mount=" + mount_value if arg == "--mount" else mount_value
-                mounts.append(normalized_value)
-                normalized = _normalize_mount(normalized_value, root, exact_worktree=True, base=cwd,
-                                              map_source=map_source)
-                normalized_mounts.append((i + 1, normalized[6:] if arg == "--mount" else normalized))
-                i += 2
-            elif arg.startswith("--mount="):
-                mounts.append("mount=" + arg.split("=", 1)[1])
-                normalized = _normalize_mount("mount=" + arg.split("=", 1)[1], root,
-                                              exact_worktree=True, base=cwd, map_source=map_source)
-                normalized_mounts.append((i, "--mount=" + normalized[6:]))
-                i += 1
-            elif arg in value_options:
-                if i + 1 >= len(argv):
-                    raise ContainerPolicyError(f"{arg} needs a value")
-                if arg == "--label" and argv[i + 1].partition("=")[0] == "aiflow4.run":
-                    raise ContainerPolicyError("the aiflow4.run label is reserved for broker cleanup")
-                if arg == "--network" and argv[i + 1] == "host":
-                    raise ContainerPolicyError("host networking is not allowed")
-                if arg == "--network" and argv[i + 1] not in {"default", "bridge", "none"}:
-                    raise ContainerPolicyError("only the run-local default, bridge, or no network is allowed")
-                i += 2
-            elif arg.startswith("--network="):
-                if arg.split("=", 1)[1] not in {"default", "bridge", "none"}:
-                    raise ContainerPolicyError("only the run-local default, bridge, or no network is allowed")
-                i += 1
-            elif arg.startswith("-"):
-                raise ContainerPolicyError(f"docker run option is not allowed: {arg}")
-            else:
-                image_seen = True
-                i += 1
-        else:
-            i += 1
-    if not image_seen or len(mounts) != 1:
-        raise ContainerPolicyError("docker run needs exactly one bind mount of this worktree")
-    if len(_active_containers()) >= ACTIVE_CONTAINER_LIMIT:
-        raise ContainerPolicyError("the node container limit is full; retry after a run cleans up")
-    # Do not allow detached containers: the broker must watch their disk use until they exit.
-    normalized = list(argv)
-    for index, value in normalized_mounts:
-        normalized[index] = value
-    return ["run", "--storage-opt", f"size={CONTAINER_LAYER_LIMIT}", "--rm", *normalized[1:]]
+    return _container_commands.run_argv(
+        argv, root, cwd, map_source=map_source, normalize_mount=_normalize_mount,
+        active_containers=_active_containers, active_limit=ACTIVE_CONTAINER_LIMIT,
+        layer_limit=CONTAINER_LAYER_LIMIT)
 
 
 def _build_argv(argv: list[str], root: Path, cwd: Path, *, map_path=None) -> list[str]:
-    if not argv or argv[0] != "build":
-        raise ContainerPolicyError("only docker build is supported")
-    i, contexts = 1, []
-    value_options = {"-f", "--file", "-t", "--tag", "--target", "--platform", "--build-arg", "--progress",
-                     "--network"}
-    flags = {"--pull", "--no-cache", "--quiet"}
-    options = list(argv)
-    while i < len(options):
-        arg = options[i]
-        if arg in flags:
-            i += 1
-        elif arg in value_options:
-            if i + 1 >= len(options):
-                raise ContainerPolicyError(f"{arg} needs a value")
-            value = options[i + 1]
-            if arg in {"-f", "--file"}:
-                validated = _inside_file(value, root, base=cwd)
-                if map_path:
-                    options[i + 1] = str(map_path(validated))
-            if arg == "--network" and value == "host":
-                raise ContainerPolicyError("host networking during build is not allowed")
-            if arg == "--network" and value not in {"default", "none"}:
-                raise ContainerPolicyError("only the default or no build network is allowed")
-            i += 2
-        elif arg.startswith("--network="):
-            if arg.split("=", 1)[1] not in {"default", "none"}:
-                raise ContainerPolicyError("only the default or no build network is allowed")
-            i += 1
-        elif arg.startswith("-"):
-            raise ContainerPolicyError(f"docker build option is not allowed: {arg}")
-        else:
-            validated = _inside_directory(arg, root, base=cwd)
-            options[i] = str(map_path(validated)) if map_path else str(validated)
-            contexts.append(options[i])
-            i += 1
-    if len(contexts) != 1:
-        raise ContainerPolicyError("docker build needs exactly one local worktree context")
-    # The context was replaced above by its validated canonical path (or the pinned fd path).
-    return ["build", "--storage-opt", f"size={BUILD_LIMIT}", *options[1:]]
+    return _container_commands.build_argv(
+        argv, root, cwd, map_path=map_path, inside_file=_inside_file,
+        inside_directory=_inside_directory, build_limit=BUILD_LIMIT)
 
 
 def _compose_snapshot(data: dict[str, Any], compose_file: Path, project_dir: Path, root: Path,
                      runtime_dir: Path, map_worktree_path=None) -> Path:
-    """Write the validated compose model to broker storage with all worktree paths pinned to the open directory."""
-    def mapped(path: Path) -> str:
-        return str(map_worktree_path(path) if map_worktree_path else path)
-
-    for section in ("secrets", "configs"):
-        for entry in (data.get(section) or {}).values():
-            if isinstance(entry, dict) and entry.get("file"):
-                entry["file"] = mapped(_inside_file(str(entry["file"]), root, base=project_dir))
-    for service in (data.get("services") or {}).values():
-        if not isinstance(service, dict):
-            continue
-        if service.get("build"):
-            build = service["build"]
-            build = {"context": build} if isinstance(build, str) else build
-            context = _inside_directory(str(build.get("context") or "."), root, base=project_dir)
-            build["context"] = mapped(context)
-            if build.get("dockerfile"):
-                dockerfile = _inside_file(str(context / str(build["dockerfile"])), root)
-                build["dockerfile"] = mapped(dockerfile)
-            service["build"] = build
-        env_files = service.get("env_file") or []
-        if isinstance(env_files, (str, dict)):
-            env_files = [env_files]
-        normalized_env_files = []
-        for item in env_files:
-            if isinstance(item, dict):
-                item = dict(item)
-                item["path"] = mapped(_inside_file(str(item.get("path") or ""), root, base=project_dir))
-                normalized_env_files.append(item)
-            else:
-                normalized_env_files.append(mapped(_inside_file(str(item), root, base=project_dir)))
-        if service.get("env_file"):
-            service["env_file"] = normalized_env_files
-        normalized_volumes = []
-        for volume in service.get("volumes") or []:
-            if isinstance(volume, str):
-                parts = volume.split(":")
-                source = parts[0]
-                if _compose_bind_source(source):
-                    source_path = Path(source) if Path(source).is_absolute() else project_dir / source
-                    bind: dict[str, Any] = {"type": "bind", "source": mapped(_validate_bind(str(source_path), root)),
-                                            "target": parts[1]}
-                    if len(parts) == 3:
-                        bind["read_only"] = parts[2] == "ro"
-                    normalized_volumes.append(bind)
-                else:
-                    normalized_volumes.append(volume)
-            elif isinstance(volume, dict) and str(volume.get("type") or "volume") == "bind":
-                volume = dict(volume)
-                source = str(volume.get("source") or "")
-                source_path = Path(source) if Path(source).is_absolute() else project_dir / source
-                volume["source"] = mapped(_validate_bind(str(source_path), root))
-                normalized_volumes.append(volume)
-            else:
-                normalized_volumes.append(volume)
-        if "volumes" in service:
-            service["volumes"] = normalized_volumes
-
-    snapshot = runtime_dir / f"compose-input-{secrets.token_hex(6)}.yaml"
-    snapshot.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-    uid, gid, _ = _engine_identity()
-    os.chown(snapshot, uid, gid)
-    snapshot.chmod(0o600)
-    return snapshot
+    return _container_compose.compose_snapshot(
+        data, compose_file, project_dir, root, runtime_dir, map_worktree_path=map_worktree_path,
+        inside_file=_inside_file, inside_directory=_inside_directory, engine_identity=_engine_identity,
+        compose_bind_source=_compose_bind_source, validate_bind=_validate_bind)
 
 
-def _compose_env_snapshot(env_files: list[Path], project_dir: Path, runtime_dir: Path, read_worktree_file) -> Path:
-    """Write the env file Compose interpolates from: the given files, else the project's default .env, else none."""
-    def read(path: Path) -> str:
-        try:
-            text = read_worktree_file(path) if read_worktree_file else path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ContainerPolicyError("compose environment file could not be read") from exc
-        return text if not text or text.endswith("\n") else text + "\n"
-
-    sources = list(env_files)
-    default = project_dir / ".env"
-    if not sources and os.path.lexists(default):
-        if default.is_symlink():
-            raise ContainerPolicyError("the compose .env file must not be a symbolic link")
-        sources = [default]
-    snapshot = runtime_dir / f"compose-env-{secrets.token_hex(6)}.env"
-    snapshot.write_text("".join(read(path) for path in sources), encoding="utf-8")
-    uid, gid, _ = _engine_identity()
-    os.chown(snapshot, uid, gid)
-    snapshot.chmod(0o600)
-    return snapshot
+def _compose_env_snapshot(env_files: list[Path], project_dir: Path, runtime_dir: Path,
+                          read_worktree_file) -> Path:
+    return _container_compose.compose_env_snapshot(
+        env_files, project_dir, runtime_dir, read_worktree_file, engine_identity=_engine_identity)
 
 
 def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
                      project_name: str, *, map_worktree_path=None,
                      read_worktree_file=None) -> tuple[list[str], list[Path], str]:
-    if not argv or argv[0] != "compose":
-        raise ContainerPolicyError("only docker compose up and run are supported")
-    i, files, env_files, project_dir, project_args = 1, [], [], None, []
-    while i < len(argv):
-        arg = argv[i]
-        if arg in {"-f", "--file", "--env-file", "--project-directory"}:
-            if i + 1 >= len(argv):
-                raise ContainerPolicyError(f"{arg} needs a value")
-            value = argv[i + 1]
-            if arg in {"-f", "--file"}:
-                files.append(_inside_file(value, root, base=cwd))
-                project_args.extend(["-f", str(files[-1])])
-            elif arg == "--env-file":
-                env_files.append(_inside_file(value, root, base=cwd))
-            else:
-                project_dir = _inside_directory(value, root, base=cwd)
-            i += 2
-        elif arg.startswith("--file=") or arg.startswith("--env-file=") or arg.startswith("--project-directory="):
-            name, value = arg.split("=", 1)
-            if name == "--file":
-                files.append(_inside_file(value, root, base=cwd))
-                project_args.extend(["-f", str(files[-1])])
-            elif name == "--env-file":
-                env_files.append(_inside_file(value, root, base=cwd))
-            else:
-                project_dir = _inside_directory(value, root, base=cwd)
-            i += 1
-        elif arg in {"-p", "--project-name"}:
-            raise ContainerPolicyError("compose project names are assigned per run")
-        elif arg.startswith("--project-name="):
-            raise ContainerPolicyError("compose project names are assigned per run")
-        elif arg in {"--profile", "--ansi", "--progress"}:
-            if i + 1 >= len(argv):
-                raise ContainerPolicyError(f"{arg} needs a value")
-            if arg == "--profile":
-                project_args.extend([arg, argv[i + 1]])
-            i += 2
-        elif arg.startswith("--profile=") or arg.startswith("--ansi=") or arg.startswith("--progress="):
-            if arg.startswith("--profile="):
-                project_args.append(arg)
-            i += 1
-        else:
-            break
-    if not files:
-        default = next((cwd / name for name in ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
-                        if (cwd / name).is_file()), None)
-        if default is None:
-            raise ContainerPolicyError("no compose file was found in the worktree")
-        files.append(_inside_file(str(default), root))
-        project_args.extend(["-f", str(files[-1])])
-    project_dir = project_dir or files[0].parent
-    if not _within(project_dir, root):
-        raise ContainerPolicyError("compose project directory must be inside the worktree")
-    service_count = 0
-    all_services: dict[str, dict[str, Any]] = {}
-    all_volumes: set[str] = set()
-    compose_documents: list[tuple[Path, dict[str, Any]]] = []
-    for index, compose_file in enumerate(files):
-        try:
-            content = (read_worktree_file(compose_file) if read_worktree_file
-                       else compose_file.read_text(encoding="utf-8"))
-            data = yaml.safe_load(content)
-        except (OSError, yaml.YAMLError) as exc:
-            raise ContainerPolicyError("compose file could not be read") from exc
-        count = _validate_compose_document(data, compose_file, project_dir, root, require_services=index == 0)
-        service_count = max(service_count, count)
-        all_services.update((data.get("services") or {}) if isinstance(data, dict) else {})
-        all_volumes.update((data.get("volumes") or {}) if isinstance(data, dict) else {})
-        compose_documents.append((compose_file, data))
-    service_count = len(all_services)
-    if not service_count:
-        raise ContainerPolicyError("compose file does not define services")
-    if service_count > ACTIVE_CONTAINER_LIMIT:
-        raise ContainerPolicyError(f"compose may define at most {ACTIVE_CONTAINER_LIMIT} services")
-    if len(all_volumes) > ACTIVE_CONTAINER_LIMIT:
-        raise ContainerPolicyError(f"compose may declare at most {ACTIVE_CONTAINER_LIMIT} named volumes")
-    if len(_active_containers()) + service_count > ACTIVE_CONTAINER_LIMIT:
-        raise ContainerPolicyError("the node container limit is full; retry after a run cleans up")
-    if i >= len(argv) or argv[i] not in {"up", "run"}:
-        raise ContainerPolicyError("only docker compose up and run are supported")
-    subcommand, tail = argv[i], argv[i + 1:]
-    if subcommand == "run":
-        # Compose run may start dependency services; reserve the entire file's service count and remove its runner.
-        if not tail:
-            raise ContainerPolicyError("docker compose run needs a service")
-        safe_flags = {"--rm", "--build", "--no-deps", "--quiet-pull", "-T", "--no-TTY",
-                      "--service-ports", "--use-aliases"}
-        value_flags = {"--entrypoint", "--env", "-e", "--user", "-u", "--workdir", "-w"}
-        option_index = 0
-        while option_index < len(tail) and tail[option_index].startswith("-"):
-            option = tail[option_index]
-            if option in safe_flags:
-                option_index += 1
-            elif option in value_flags:
-                if option_index + 1 >= len(tail):
-                    raise ContainerPolicyError(f"{option} needs a value")
-                option_index += 2
-            elif any(option.startswith(flag + "=") for flag in value_flags if flag.startswith("--")):
-                option_index += 1
-            else:
-                raise ContainerPolicyError(f"compose run option is not allowed: {option}")
-        if option_index == len(tail):
-            raise ContainerPolicyError("docker compose run needs a service")
-        if not any(item == "--rm" for item in tail):
-            tail = ["--rm", *tail]
-        service_index = 0
-        while service_index < len(tail) and tail[service_index].startswith("-"):
-            if tail[service_index] in {"--entrypoint", "--env", "-e", "--user", "-u", "--workdir", "-w"}:
-                service_index += 2
-            else:
-                service_index += 1
-        if service_index >= len(tail) or tail[service_index] not in all_services:
-            raise ContainerPolicyError("docker compose run must name a service in this compose project")
-    else:
-        if len(tail) > 0 and tail[0].startswith("-"):
-            safe = {"-d", "--detach", "--abort-on-container-exit", "--build", "--no-build", "--pull",
-                    "--remove-orphans", "--force-recreate",
-                    "--no-recreate", "--no-deps", "--wait", "--quiet-pull", "--renew-anon-volumes", "--timestamps"}
-            i_tail = 0
-            while i_tail < len(tail):
-                item = tail[i_tail]
-                if item in safe:
-                    i_tail += 1
-                elif item in {"--timeout", "-t"}:
-                    i_tail += 2
-                elif item.startswith("--timeout="):
-                    i_tail += 1
-                elif item.startswith("-"):
-                    raise ContainerPolicyError(f"compose up option is not allowed: {item}")
-                else:
-                    if item not in all_services:
-                        raise ContainerPolicyError("compose up may name only configured services")
-                    i_tail += 1
-    snapshot_files = [_compose_snapshot(data, compose_file, project_dir, root, runtime_dir,
-                                       map_worktree_path=map_worktree_path)
-                      for compose_file, data in compose_documents]
-    snapshots = dict(zip(files, snapshot_files))
-    for index, option in enumerate(project_args[:-1]):
-        if option == "-f":
-            project_args[index + 1] = str(snapshots[Path(project_args[index + 1])])
-    # podman-compose has no --project-directory, and it would read an implicit <project>/.env through a path the run
-    # can swap for a symlink. Always hand it an explicit snapshot read through the pinned worktree instead.
-    env_snapshot = _compose_env_snapshot(env_files, project_dir, runtime_dir, read_worktree_file)
-    snapshot_files.append(env_snapshot)
-    project_args.extend(["--env-file", str(env_snapshot)])
-    override = runtime_dir / f"compose-{secrets.token_hex(6)}.yaml"
-    service_names = list(all_services)
-    services_override: dict[str, dict[str, Any]] = {}
-    for name in service_names:
-        services_override[name] = {"storage_opt": {"size": CONTAINER_LAYER_LIMIT}}
-        services_override[name]["labels"] = {"aiflow4.run": project_name}
-        service = all_services.get(name) or {}
-        if service.get("build"):
-            services_override[name]["build"] = {"storage_opt": {"size": BUILD_LIMIT}}
-    override_data: dict[str, Any] = {"services": services_override}
-    # Named volumes live in the rootless default store. Podman's size= mount option needs root, so their growth is
-    # bounded by the polled graphroot ceiling (_runtime_storage_limit_reached) instead of a per-volume quota.
-    override.write_text(yaml.safe_dump(override_data, sort_keys=False), encoding="utf-8")
-    uid, gid, _ = _engine_identity()
-    os.chown(override, uid, gid)
-    override.chmod(0o600)
-    project_args.extend(["-f", str(override), "-p", project_name])
-    return [*project_args, subcommand, *tail], snapshot_files, subcommand
+    return _container_compose.compose_command(
+        argv, root, cwd, runtime_dir, project_name, map_worktree_path=map_worktree_path,
+        read_worktree_file=read_worktree_file, inside_file=_inside_file, inside_directory=_inside_directory,
+        validate_document=_validate_compose_document, within=_within, active_containers=_active_containers,
+        compose_snapshot=_compose_snapshot, env_snapshot=_compose_env_snapshot, engine_identity=_engine_identity,
+        container_layer_limit=CONTAINER_LAYER_LIMIT, build_limit=BUILD_LIMIT)
 
 
 def _active_containers() -> list[str]:
@@ -729,15 +445,42 @@ def _active_containers() -> list[str]:
         raise ContainerPolicyError("could not check the rootless container limit") from exc
 
 
+def _podman_ids(argv: list[str], timeout: int = 30) -> list[str]:
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    return [item for item in result.stdout.splitlines() if item] if result.returncode == 0 else []
+
+
+def _remove_containers(container_ids: list[str]) -> None:
+    if not container_ids:
+        return
+    subprocess.run(["podman", "stop", "--time", "1", *container_ids], capture_output=True, timeout=30)
+    subprocess.run(["podman", "rm", "--force", "--volumes", *container_ids], capture_output=True, timeout=30)
+
+
+def _compose_resource_names(resource: str, project_name: str) -> list[str]:
+    result = subprocess.run(["podman", resource, "ls", "-q", "--filter",
+                             f"label=io.podman.compose.project={project_name}"],
+                            capture_output=True, text=True, timeout=30)
+    return [item for item in result.stdout.splitlines() if item] if result.returncode == 0 else []
+
+
+def _remove_compose_resource(resource: str, project_name: str) -> None:
+    names = _compose_resource_names(resource, project_name)
+    if names:
+        subprocess.run(["podman", resource, "rm", *names], capture_output=True, timeout=30)
+
+
+def _cleanup_compose_containers(project_name: str) -> None:
+    container_ids = _podman_ids(["podman", "ps", "-aq", "--filter", f"label=aiflow4.run={project_name}"])
+    _remove_containers(container_ids)
+
+
 def _stop_run_containers(project_name: str) -> None:
     """Stop any run-owned containers left behind after the broker interrupts a container command."""
     try:
-        result = subprocess.run(["podman", "ps", "--all", "--quiet", "--filter",
-                                 f"label=aiflow4.run={project_name}"], capture_output=True, text=True, timeout=30)
-        ids = [item for item in result.stdout.splitlines() if item] if result.returncode == 0 else []
-        if ids:
-            subprocess.run(["podman", "stop", "--time", "1", *ids], capture_output=True, timeout=30)
-            subprocess.run(["podman", "rm", "--force", "--volumes", *ids], capture_output=True, timeout=30)
+        container_ids = _podman_ids(["podman", "ps", "--all", "--quiet", "--filter",
+                                    f"label=aiflow4.run={project_name}"])
+        _remove_containers(container_ids)
     except (OSError, subprocess.TimeoutExpired):
         pass
 
@@ -790,27 +533,7 @@ def _runtime_storage_limit_reached() -> bool:
 
 
 def _broker_invocation(worktree: Path, engine_home: str) -> tuple[list[str], str]:
-    """Build an isolated launch for the installed broker, with no import path through a project checkout."""
-    root = worktree.resolve(strict=True)
-    module_file = Path(__file__).resolve(strict=True)
-    if _within(module_file, root):
-        raise RuntimeError("safe-container-runtime broker code must be installed outside the project worktree")
-    trusted_root = module_file.parents[3]
-    home = Path(engine_home).resolve(strict=True)
-    if _within(home, root):
-        raise RuntimeError("safe-container-runtime needs a trusted engine working directory")
-    bootstrap = (
-        "import importlib, os, pathlib, sys; "
-        f"worktree=pathlib.Path({str(root)!r}); expected=pathlib.Path({str(module_file)!r}); "
-        "definitely_under=lambda value: (lambda path: path == worktree or worktree in path.parents)("
-        "pathlib.Path(value or os.getcwd()).resolve()); "
-        "sys.path[:]=[entry for entry in sys.path if not definitely_under(entry)]; "
-        f"sys.path.insert(0, {str(trusted_root)!r}); "
-        "module=importlib.import_module('aiflow.v4.worker.containers'); "
-        "assert pathlib.Path(module.__file__).resolve() == expected; "
-        "raise SystemExit(module._broker_main())"
-    )
-    return [sys.executable, "-I", "-c", bootstrap, "--broker"], str(home)
+    return _container_client.broker_invocation(worktree, engine_home, __file__, _within)
 
 
 def _execute(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: Path,
@@ -848,150 +571,15 @@ def _cleanup_compose_files(runtime_dir: Path) -> None:
 def _execute_locked(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: Path,
                     project_name: str, stop_event: threading.Event | None = None,
                     worktree_pin: _WorktreePin | None = None) -> tuple[int, str, str]:
-    if worktree_pin:
-        worktree_pin.assert_current()
-    root, run_cwd = (worktree_pin.path if worktree_pin else worktree.resolve(strict=True)), cwd.resolve(strict=True)
-    if not _within(run_cwd, root):
-        raise ContainerPolicyError("container working directory must stay inside the worktree")
-    map_worktree_path = worktree_pin.map_path if worktree_pin else None
-    engine_cwd = map_worktree_path(run_cwd) if map_worktree_path else run_cwd
-    backend = "podman"
-    if argv and argv[0] == "build":
-        podman_argv = _build_argv(argv, root, run_cwd, map_path=map_worktree_path)
-        compose_files: list[Path] = []
-    elif argv and argv[0] == "run":
-        podman_argv = _run_argv(argv, root, run_cwd, map_source=map_worktree_path)
-        compose_files = []
-    elif argv and argv[0] == "compose":
-        podman_argv, compose_files, _ = _compose_command(argv, root, run_cwd, runtime_dir, project_name,
-                                                          map_worktree_path=map_worktree_path,
-                                                          read_worktree_file=worktree_pin.read_text if worktree_pin else None)
-        backend = "podman-compose"
-    else:
-        raise ContainerPolicyError("only docker build, compose up/run, and mounted docker run are supported")
-    if argv[0] == "run":
-        podman_argv[1:1] = ["--label", f"aiflow4.run={project_name}"]
-    graphroot = _graphroot()
-    usage = _directory_size(graphroot)
-    if usage >= IMAGE_CACHE_LIMIT:
-        subprocess.run(["podman", "image", "prune", "--all", "--filter", f"until={IMAGE_PRUNE_AGE}", "--force"],
-                       capture_output=True, timeout=300)
-        usage = _directory_size(graphroot)
-    if usage >= IMAGE_CACHE_LIMIT:
-        raise ContainerPolicyError("container image cache reached its enforced storage limit")
-    if shutil.disk_usage(graphroot).free < TOTAL_STORAGE_LIMIT - usage + 4 * 1024**3:
-        subprocess.run(["podman", "image", "prune", "--all", "--filter", f"until={IMAGE_PRUNE_AGE}", "--force"],
-                       capture_output=True, timeout=300)
-        usage = _directory_size(graphroot)
-        if shutil.disk_usage(graphroot).free < TOTAL_STORAGE_LIMIT - usage + 4 * 1024**3:
-            raise ContainerPolicyError("container runtime stopped before its storage limit and disk reserve")
-    storage_root = worktree_pin.proc_path if worktree_pin else root
-    worktree_usage = _worktree_storage_size(storage_root)
-    if worktree_usage >= WORKTREE_STORAGE_LIMIT:
-        raise ContainerPolicyError("container worktree reached its enforced storage limit")
-    if shutil.disk_usage(storage_root).free < WORKTREE_STORAGE_LIMIT - worktree_usage + STORAGE_DISK_RESERVE:
-        raise ContainerPolicyError("worktree filesystem cannot preserve its storage limit and disk reserve")
-    if worktree_pin:
-        worktree_pin.assert_current()
-    command = ([backend, *podman_argv] if backend == "podman-compose" else ["podman", *podman_argv])
-    proc = subprocess.Popen(command, cwd=str(engine_cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            start_new_session=True)
-    selector = selectors.DefaultSelector()
-    if proc.stdout:
-        selector.register(proc.stdout, selectors.EVENT_READ)
-    output = bytearray()
-    try:
-        while proc.poll() is None:
-            if worktree_pin and not worktree_pin.is_current():
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    proc.wait()
-                _stop_run_containers(project_name)
-                output.extend(b"container worktree path was replaced; command stopped\n")
-                return 125, output.decode(errors="replace"), ""
-            if stop_event is not None and stop_event.is_set():
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    proc.wait()
-                _stop_run_containers(project_name)
-                output.extend(b"container command stopped because its AI run ended\n")
-                return 125, output.decode(errors="replace"), ""
-            if (_directory_size(graphroot) >= IMAGE_CACHE_LIMIT
-                    or shutil.disk_usage(graphroot).free <= STORAGE_DISK_RESERVE):
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    proc.wait()
-                _stop_run_containers(project_name)
-                output.extend(b"aiflow container storage cap reached; command stopped\n")
-                return 125, output.decode(errors="replace"), ""
-            if _worktree_storage_limit_reached(root):
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    proc.wait()
-                _stop_run_containers(project_name)
-                output.extend(b"aiflow container worktree storage cap reached; command stopped\n")
-                return 125, output.decode(errors="replace"), ""
-            for ready, _ in selector.select(timeout=0.2):
-                chunk = os.read(ready.fd, 65536)
-                if chunk:
-                    output.extend(chunk)
-                    if len(output) > 16 * 1024 * 1024:
-                        del output[:len(output) - 16 * 1024 * 1024]
-        if proc.stdout:
-            while chunk := os.read(proc.stdout.fileno(), 65536):
-                output.extend(chunk)
-                if len(output) > 16 * 1024 * 1024:
-                    del output[:len(output) - 16 * 1024 * 1024]
-        if worktree_pin and not worktree_pin.is_current():
-            _stop_run_containers(project_name)
-            output.extend(b"container worktree path was replaced; command stopped\n")
-            return 125, output.decode(errors="replace"), ""
-        return proc.returncode or 0, output.decode(errors="replace"), ""
-    finally:
-        selector.close()
-        if proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.wait()
-            _stop_run_containers(project_name)
+    return _container_exec.execute_locked(
+        argv, cwd, worktree, runtime_dir=runtime_dir, project_name=project_name, stop_event=stop_event,
+        worktree_pin=worktree_pin, build_argv=_build_argv, run_argv=_run_argv,
+        compose_command=_compose_command, graphroot=_graphroot, directory_size=_directory_size,
+        worktree_storage_size=_worktree_storage_size, disk_usage=shutil.disk_usage,
+        worktree_storage_limit_reached=_worktree_storage_limit_reached,
+        stop_run_containers=_stop_run_containers, cache_limit=IMAGE_CACHE_LIMIT,
+        total_limit=TOTAL_STORAGE_LIMIT, worktree_limit=WORKTREE_STORAGE_LIMIT,
+        disk_reserve=STORAGE_DISK_RESERVE, image_prune_age=IMAGE_PRUNE_AGE)
 
 
 class _BrokerHandler(socketserver.StreamRequestHandler):
@@ -1002,64 +590,94 @@ class _BrokerHandler(socketserver.StreamRequestHandler):
             peer_pid, peer_uid, _ = struct.unpack("3i", creds)
             raw = self.rfile.readline(128 * 1024)
             request = json.loads(raw)
-            if request.get("action") == "bind":
-                if peer_uid != 0 or not isinstance(request.get("pid"), int):
-                    raise ContainerPolicyError("only the worker supervisor can bind a run process")
-                server.bind_run(request["pid"])
-                response = {"ok": True}
-            elif request.get("action") == "shutdown":
-                if peer_uid != 0:
-                    raise ContainerPolicyError("only the worker supervisor can stop this broker")
-                response = {"ok": True}
-                server.stop_requested.set()
-                server.cancel_commands.set()
-                def shutdown() -> None:
-                    try:
-                        server.commands_idle.wait()
-                        server.cleanup()
-                    finally:
-                        server.shutdown()
-                threading.Thread(target=shutdown, daemon=True).start()
-            else:
-                if not secrets.compare_digest(str(request.get("token", "")), server.token):
-                    raise ContainerPolicyError("container broker token is invalid")
-                supervised = request.get("action") == "supervise"
-                if supervised:
-                    # The worker supervisor starts run services (the WordPress site) before the AI process exists.
-                    if peer_uid != 0:
-                        raise ContainerPolicyError("only the worker supervisor can start run services")
-                elif not _is_child_of(peer_pid, server.allowed_root_pid):
-                    raise ContainerPolicyError("container command is not from this run")
-                if not server.worktree_pin.is_current():
-                    server.worktree_replaced.set()
-                    server.storage_exceeded.set()
-                    raise ContainerPolicyError("container worktree path was replaced during the run")
-                if server.storage_exceeded.is_set():
-                    if server.worktree_replaced.is_set():
-                        raise ContainerPolicyError("container worktree path was replaced during the run")
-                    raise ContainerPolicyError("this run reached its enforced container storage limit")
-                argv = request.get("argv")
-                if not isinstance(argv, list) or any(not isinstance(item, str) or "\x00" in item for item in argv):
-                    raise ContainerPolicyError("container argv is invalid")
-                cwd = Path(str(request.get("cwd") or ""))
-                if not _within(cwd, server.worktree):
-                    raise ContainerPolicyError("container working directory must stay inside the worktree")
-                if argv and argv[0] == "compose":
-                    server.compose_used = True
-                server.begin_command()
-                try:
-                    result, stdout, stderr = _execute([str(item) for item in argv], cwd, server.worktree,
-                                                      runtime_dir=server.runtime_dir, project_name=server.project_name,
-                                                      stop_event=server.cancel_commands,
-                                                      worktree_pin=server.worktree_pin)
-                finally:
-                    server.end_command()
-                response = {"ok": True, "code": result, "stdout": stdout, "stderr": stderr}
+            response = _dispatch_broker_request(server, peer_pid, peer_uid, request)
         except ContainerPolicyError as exc:
             response = {"ok": False, "code": 125, "error": str(exc)}
         except Exception as exc:  # keep paths, command output, and environment values out of broker errors
             response = {"ok": False, "code": 125, "error": f"container runtime failed ({type(exc).__name__})"}
         self.wfile.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
+
+
+def _shutdown_broker_after_commands(server: _BrokerServer) -> None:
+    try:
+        server.commands_idle.wait()
+        server.cleanup()
+    finally:
+        server.shutdown()
+
+
+def _handle_broker_bind(server: _BrokerServer, peer_uid: int, request: dict[str, Any]) -> dict[str, bool]:
+    if peer_uid != 0 or not isinstance(request.get("pid"), int):
+        raise ContainerPolicyError("only the worker supervisor can bind a run process")
+    server.bind_run(request["pid"])
+    return {"ok": True}
+
+
+def _handle_broker_shutdown(server: _BrokerServer, peer_uid: int) -> dict[str, bool]:
+    if peer_uid != 0:
+        raise ContainerPolicyError("only the worker supervisor can stop this broker")
+    server.stop_requested.set()
+    server.cancel_commands.set()
+    threading.Thread(target=_shutdown_broker_after_commands, args=(server,), daemon=True).start()
+    return {"ok": True}
+
+
+def _authorize_broker_command(server: _BrokerServer, peer_pid: int, peer_uid: int,
+                              request: dict[str, Any]) -> None:
+    if not secrets.compare_digest(str(request.get("token", "")), server.token):
+        raise ContainerPolicyError("container broker token is invalid")
+    if request.get("action") == "supervise":
+        if peer_uid != 0:
+            raise ContainerPolicyError("only the worker supervisor can start run services")
+    elif not _is_child_of(peer_pid, server.allowed_root_pid):
+        raise ContainerPolicyError("container command is not from this run")
+
+
+def _validate_broker_command(server: _BrokerServer, request: dict[str, Any]) -> tuple[list[str], Path]:
+    if not server.worktree_pin.is_current():
+        server.worktree_replaced.set()
+        server.storage_exceeded.set()
+        raise ContainerPolicyError("container worktree path was replaced during the run")
+    if server.storage_exceeded.is_set():
+        if server.worktree_replaced.is_set():
+            raise ContainerPolicyError("container worktree path was replaced during the run")
+        raise ContainerPolicyError("this run reached its enforced container storage limit")
+    argv = request.get("argv")
+    if not isinstance(argv, list) or any(not isinstance(item, str) or "\x00" in item for item in argv):
+        raise ContainerPolicyError("container argv is invalid")
+    cwd = Path(str(request.get("cwd") or ""))
+    if not _within(cwd, server.worktree):
+        raise ContainerPolicyError("container working directory must stay inside the worktree")
+    if argv and argv[0] == "compose":
+        server.compose_used = True
+    return argv, cwd
+
+
+def _execute_broker_command(server: _BrokerServer, argv: list[str], cwd: Path) -> dict[str, Any]:
+    server.begin_command()
+    try:
+        result, stdout, stderr = _execute([str(item) for item in argv], cwd, server.worktree,
+                                          runtime_dir=server.runtime_dir, project_name=server.project_name,
+                                          stop_event=server.cancel_commands, worktree_pin=server.worktree_pin)
+    finally:
+        server.end_command()
+    return {"ok": True, "code": result, "stdout": stdout, "stderr": stderr}
+
+
+def _dispatch_broker_command(server: _BrokerServer, peer_pid: int, peer_uid: int,
+                             request: dict[str, Any]) -> dict[str, Any]:
+    _authorize_broker_command(server, peer_pid, peer_uid, request)
+    argv, cwd = _validate_broker_command(server, request)
+    return _execute_broker_command(server, argv, cwd)
+
+
+def _dispatch_broker_request(server: _BrokerServer, peer_pid: int, peer_uid: int,
+                             request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("action") == "bind":
+        return _handle_broker_bind(server, peer_uid, request)
+    if request.get("action") == "shutdown":
+        return _handle_broker_shutdown(server, peer_uid)
+    return _dispatch_broker_command(server, peer_pid, peer_uid, request)
 
 
 class _BrokerServer(socketserver.ThreadingUnixStreamServer):
@@ -1117,63 +735,55 @@ class _BrokerServer(socketserver.ThreadingUnixStreamServer):
             self._cleaned = True
             if not self.compose_used:
                 return
-            containers = subprocess.run(["podman", "ps", "-aq", "--filter", f"label=aiflow4.run={self.project_name}"],
-                                        capture_output=True, text=True, timeout=30)
-            ids = [item for item in containers.stdout.splitlines() if item] if containers.returncode == 0 else []
-            if ids:
-                subprocess.run(["podman", "stop", "--time", "1", *ids], capture_output=True, timeout=30)
-                subprocess.run(["podman", "rm", "--force", "--volumes", *ids], capture_output=True, timeout=30)
-            volumes = subprocess.run(["podman", "volume", "ls", "-q", "--filter",
-                                      f"label=io.podman.compose.project={self.project_name}"],
-                                     capture_output=True, text=True, timeout=30)
-            names = [item for item in volumes.stdout.splitlines() if item] if volumes.returncode == 0 else []
-            if names:
-                subprocess.run(["podman", "volume", "rm", *names], capture_output=True, timeout=30)
-            networks = subprocess.run(["podman", "network", "ls", "-q", "--filter",
-                                       f"label=io.podman.compose.project={self.project_name}"],
-                                      capture_output=True, text=True, timeout=30)
-            names = [item for item in networks.stdout.splitlines() if item] if networks.returncode == 0 else []
-            if names:
-                subprocess.run(["podman", "network", "rm", *names], capture_output=True, timeout=30)
+            _cleanup_compose_containers(self.project_name)
+            _remove_compose_resource("volume", self.project_name)
+            _remove_compose_resource("network", self.project_name)
 
 
 def _proc_identity(pid: int) -> int | None:
-    """Return Linux's process start tick so PID reuse cannot keep an orphan broker alive."""
-    try:
-        fields = Path(f"/proc/{pid}/stat").read_text().split(")", 1)[1].split()
-        return int(fields[19])
-    except (OSError, ValueError, IndexError):
-        return None
+    return _container_client.proc_identity(pid)
 
 
-def _watch_run(server: _BrokerServer) -> None:
-    """Enforce worktree storage limits and clean up if the worker or run exits unexpectedly."""
+def _wait_for_run_binding(server: _BrokerServer) -> bool:
     while not server.bound_event.wait(0.25):
         if server.stop_requested.is_set():
-            return
-    if server.allowed_root_pid is None or server.run_start_time is None:
+            return False
+    return True
+
+
+def _stop_for_replaced_worktree(server: _BrokerServer) -> bool:
+    worktree_pin = getattr(server, "worktree_pin", None)
+    if not worktree_pin or worktree_pin.is_current():
+        return False
+    server.worktree_replaced.set()
+    server.storage_exceeded.set()
+    server.cancel_commands.set()
+    server.commands_idle.wait()
+    server.cleanup()
+    server.shutdown()
+    return True
+
+
+def _check_run_storage(server: _BrokerServer) -> None:
+    worktree_pin = getattr(server, "worktree_pin", None)
+    if not server.compose_used or server.storage_exceeded.is_set():
         return
+    storage_root = worktree_pin.proc_path if worktree_pin else server.worktree
+    if not (_worktree_storage_limit_reached(storage_root) or _runtime_storage_limit_reached()):
+        return
+    server.storage_exceeded.set()
+    server.cancel_commands.set()
+    server.commands_idle.wait()
+    server.cleanup()
+
+
+def _watch_bound_run(server: _BrokerServer) -> None:
     while not server.stop_requested.wait(0.5):
-        # The worker supervisor binds first (site start); the AI process rebinds when it starts.
-        pid, start_time = server.allowed_root_pid, server.run_start_time
-        if _proc_identity(pid) != start_time:
+        if _proc_identity(server.allowed_root_pid) != server.run_start_time:
             break
-        worktree_pin = getattr(server, "worktree_pin", None)
-        if worktree_pin and not worktree_pin.is_current():
-            server.worktree_replaced.set()
-            server.storage_exceeded.set()
-            server.cancel_commands.set()
-            server.commands_idle.wait()
-            server.cleanup()
-            server.shutdown()
+        if _stop_for_replaced_worktree(server):
             return
-        if server.compose_used and not server.storage_exceeded.is_set():
-            storage_root = worktree_pin.proc_path if worktree_pin else server.worktree
-            if (_worktree_storage_limit_reached(storage_root) or _runtime_storage_limit_reached()):
-                server.storage_exceeded.set()
-                server.cancel_commands.set()
-                server.commands_idle.wait()
-                server.cleanup()
+        _check_run_storage(server)
     if server.stop_requested.is_set():
         return
     server.cancel_commands.set()
@@ -1184,55 +794,26 @@ def _watch_run(server: _BrokerServer) -> None:
         server.shutdown()
 
 
+def _watch_run(server: _BrokerServer) -> None:
+    """Enforce worktree storage limits and clean up if the worker or run exits unexpectedly."""
+    if not _wait_for_run_binding(server):
+        return
+    if server.allowed_root_pid is None or server.run_start_time is None:
+        return
+    # The supervisor binds first; the AI process may rebind when it starts.
+    _watch_bound_run(server)
+
+
 def _is_child_of(pid: int, root_pid: int | None) -> bool:
-    if not root_pid:
-        return False
-    seen: set[int] = set()
-    while pid > 1 and pid not in seen:
-        if pid == root_pid:
-            return True
-        seen.add(pid)
-        try:
-            status = Path(f"/proc/{pid}/stat").read_text()
-            tail = status[status.rfind(")") + 2:].split()
-            pid = int(tail[1])
-        except (OSError, ValueError, IndexError):
-            return False
-    return False
+    return _container_client.is_child_of(pid, root_pid)
 
 
 def _send(socket_path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(1800)
-    try:
-        sock.connect(socket_path)
-        sock.sendall((json.dumps(payload, separators=(",", ":")) + "\n").encode())
-        with sock.makefile("rb") as stream:
-            return json.loads(stream.readline(16 * 1024 * 1024))
-    finally:
-        sock.close()
+    return _container_client.send(socket_path, payload)
 
 
 def client_main() -> int:
-    """Entry point for the run-local `docker` and `docker-compose` shims."""
-    socket_path, token = os.environ.get("AIFLOW4_CONTAINER_SOCKET", ""), os.environ.get("AIFLOW4_CONTAINER_TOKEN", "")
-    if not socket_path or not token:
-        print("safe container runtime is not active for this run", file=sys.stderr)
-        return 125
-    argv = sys.argv[1:]
-    if Path(sys.argv[0]).name == "docker-compose":
-        argv = ["compose", *argv]
-    try:
-        response = _send(socket_path, {"token": token, "argv": argv, "cwd": os.getcwd()})
-    except (OSError, ValueError, TimeoutError):
-        print("safe container runtime broker is unavailable", file=sys.stderr)
-        return 125
-    if not response.get("ok"):
-        print(str(response.get("error") or "container command denied"), file=sys.stderr)
-        return int(response.get("code", 125))
-    sys.stdout.write(str(response.get("stdout") or ""))
-    sys.stderr.write(str(response.get("stderr") or ""))
-    return int(response.get("code", 125))
+    return _container_client.client_main(_send)
 
 
 def _broker_main() -> int:

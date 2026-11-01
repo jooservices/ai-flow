@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 from fastapi import Depends, HTTPException, Query
 
+from .events import GitHubCiLogRead
+from ...platform.events.wiring import publish_for
+
 
 def install(app, ctx, deps) -> SimpleNamespace:
     from ...gateway_helpers import github_gateway  # noqa: PLC0415 - api imports this module
@@ -64,8 +67,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
             refuse("requested commit is not the current head of the run's pull request")
         sha = sha or pull_request_sha
         log_tail = github.failing_job_log(repository, sha, lines)
-        audit("github", "ci-log", run["ticket_key"], run_id, fence, run["account_id"], True,
-              log_tail.get("job") or "no failing job", {"sha": sha[:12], "lines": lines})
+        publish_for(ctx, GitHubCiLogRead(run_id=run_id, fence=fence, ticket=run["ticket_key"],
+                                         actor=run["account_id"], job=log_tail.get("job") or "",
+                                         sha=sha[:12], lines=lines))
         return {"sha": sha, **log_tail}
 
 

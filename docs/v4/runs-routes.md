@@ -49,3 +49,10 @@ Routes that call the functions split out above and are named for the docs check:
 - `POST /v1/projects`
 - `POST /v1/system-check/run`
 - `POST /v1/version-releases/{version_id}/complete`
+
+## Audit
+
+Successful `PUT /v1/master/autonomy/budget` and `POST /v1/master/actions` requests publish `master.daily_budget_updated`
+and `master.action_completed`; the audit ledger listener writes the same accepted `write_audit` rows as before. The
+budget update and its event share a transaction. Refused actions and the existing escalation and partial-result audits
+remain direct `audit()` calls.

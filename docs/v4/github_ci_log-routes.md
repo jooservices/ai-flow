@@ -38,3 +38,8 @@ Routes that stay in `control/api.py` and are named here only because their handl
 - `PUT /v1/master/autonomy/budget`
 
 See `docs/v4/event-architecture.md` for how `install(app, ctx, deps)` registers them.
+
+## Audit
+
+A successful `GET /v1/github/ci-log` publishes `github.ci_log_read`; the audit ledger listener writes the same accepted
+`write_audit` row, including the run and fence. Refused requests keep their direct `audit(..., accepted=False)` call.

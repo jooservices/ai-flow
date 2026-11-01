@@ -20,6 +20,8 @@ from ...policy import decide_master_action
 from ... import notify
 from ...features.work.constants import utcnow
 from ...features.work.listeners import run_finished
+from .events import MasterActionCompleted, MasterDailyBudgetUpdated
+from ...platform.events.wiring import publish_for
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
@@ -274,13 +276,13 @@ def install(app, ctx, deps) -> SimpleNamespace:
     @app.put("/v1/master/autonomy/budget")
     def master_budget_update(body: MasterBudgetBody, request: Request) -> dict:
         user = console_user(request, "console.write", target="master", action="daily-budget-update")
-        ctx.db.run("INSERT INTO master_settings (singleton,daily_budget_minutes,updated_by) VALUES (true,%s,%s)"
-                   " ON CONFLICT (singleton) DO UPDATE SET daily_budget_minutes=EXCLUDED.daily_budget_minutes,"
-                   " updated_by=EXCLUDED.updated_by,updated_at=now()",
-                   (body.daily_budget_minutes, user.subject))
-        audit("master", "daily-budget-update", "", "", None, user.subject, True,
-              f"daily budget set to {body.daily_budget_minutes} minutes",
-              {"daily_budget_minutes": body.daily_budget_minutes})
+        with ctx.db.transaction():
+            ctx.db.run("INSERT INTO master_settings (singleton,daily_budget_minutes,updated_by) VALUES (true,%s,%s)"
+                       " ON CONFLICT (singleton) DO UPDATE SET daily_budget_minutes=EXCLUDED.daily_budget_minutes,"
+                       " updated_by=EXCLUDED.updated_by,updated_at=now()",
+                       (body.daily_budget_minutes, user.subject))
+            publish_for(ctx, MasterDailyBudgetUpdated(actor=user.subject,
+                                                       daily_budget_minutes=body.daily_budget_minutes))
         return {"budget": master_budget_state()}
 
     @app.get("/v1/master/report")
@@ -500,9 +502,11 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 refuse_master_action("the eligible flow failure could not be recorded; it will be retried next cycle", 502)
             ticket = matching.get("ticket", "")
             result = f"{matching['action']} {ticket}".strip()
-        audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], True, str(result)[:500],
-              {"intent": body.intent[:1000], "why": body.why[:1000], "account_id": body.account_id,
-               "target_run_id": body.target_run_id, "signature": body.signature})
+        publish_for(ctx, MasterActionCompleted(run_id=body.run_id, fence=body.fence, ticket=ticket,
+                                               actor=run["account_id"], action=body.action,
+                                               result=str(result)[:500], intent=body.intent[:1000],
+                                               why=body.why[:1000], account_id=body.account_id,
+                                               target_run_id=body.target_run_id, signature=body.signature))
         master_event("completed", body.why or body.intent or str(result))
         return {"ok": True, "result": result, "escalated": False}
 

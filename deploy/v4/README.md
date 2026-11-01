@@ -150,6 +150,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Ticket estimates and AI capacity planning](../../docs/v4/capacity-planning.md): estimate tokens, time and rework ranges from completed work, route by quota headroom, and show next-week capacity and estimate error
 - [Backup and restore](../../docs/v4/backup-restore.md): encrypted daily or weekly backups of the database, stored secrets, control repository settings and knowledge, with a one-time key and isolated weekly restore tests
 - [Project report build](../../docs/v4/report_build-structure.md): named builders for each section of the project and epic progress report
+- [Master run structure](../../docs/v4/master_run-structure.md): named steps of one fenced master cycle and how to add a step
 
 ## Tools on a node
 

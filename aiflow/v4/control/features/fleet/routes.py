@@ -578,8 +578,6 @@ def install(app, ctx, deps) -> SimpleNamespace:
                                (account_id,))
             publish_for(ctx, AiAccountSignInCompleted(account=account_id, actor=user.subject, node=row["node"],
                                                       provider=row["provider"]))
-        ctx.events.emit("account.sign_in_completed", account=account_id, provider=row["provider"],
-                        node=row["node"], outcome="ready", reason="owner confirmed the successful provider check")
         return {"account": account_id, "signed_in": True}
 
     @app.delete("/v1/accounts/{account_id}")

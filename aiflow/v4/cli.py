@@ -466,7 +466,7 @@ def run_ba_chat(a: argparse.Namespace, s: Settings) -> int:
     return 0
 
 
-def run_canary(a: argparse.Namespace, s: Settings) -> int:
+def run_canary(a: argparse.Namespace, s: Settings) -> None:
     from datetime import datetime, timezone
     from .control.canary import (Thresholds, decide, measure_registry, record_promotion,
                                  record_rollback, retry_pending_flow_bugs)
@@ -484,12 +484,12 @@ def run_canary(a: argparse.Namespace, s: Settings) -> int:
             print(json.dumps(result, separators=(",", ":")))
         finally:
             db.close()
-        return 0
+        return
     ctx = build_ctx(s)
     try:
         if a.canary_action == "retry-tickets":
             print(json.dumps(retry_pending_flow_bugs(ctx), separators=(",", ":")))
-            return 0
+            return
         measurements = json.loads(a.measurements)
         if a.canary_action == "record-rollback":
             result = record_rollback(ctx, node=a.node, target=a.target, previous=a.previous,
@@ -502,7 +502,6 @@ def run_canary(a: argparse.Namespace, s: Settings) -> int:
     finally:
         ctx.db.close()
         ctx.leases.r.close()
-    return 0
 
 
 def run_node(a: argparse.Namespace, s: Settings) -> int:
@@ -571,8 +570,8 @@ def main(argv: list[str] | None = None) -> int:
     a = build_parser().parse_args(argv)
     handler = _COMMANDS.get(a.cmd, run_unknown)
     if a.cmd in _SETTINGS_FREE_COMMANDS:
-        return handler(a)
-    return handler(a, Settings.from_env())
+        return handler(a) or 0
+    return handler(a, Settings.from_env()) or 0
 
 
 def wait_for_control_stores(settings) -> None:

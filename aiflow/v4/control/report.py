@@ -123,54 +123,52 @@ def _requirement_coverage(tickets: list[dict], latest_verify: dict[str, dict], r
     return {"insufficient_tasks": bool(gaps), "gaps": gaps, "tickets": rows}
 
 
-def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str, Any]:
-    """Summarize completed tickets and all recorded run history for a project or epic."""
-    all_tickets = ctx.db.all(
+def load_project_tickets(ctx, project_key: str) -> list[dict]:
+    """Read every ticket in the project, ordered by key."""
+    return ctx.db.all(
         "SELECT key, project, status, type, summary, description, parent_key, labels, jira_created, jira_updated, done_at"
         " FROM tickets WHERE project=%s ORDER BY key", (project_key,))
-    by_key = {t["key"]: t for t in all_tickets}
+
+
+def build_project_close_suggestion(all_tickets: list[dict]) -> dict[str, Any]:
+    """Suggest closure only when the project has epics and every epic is Done."""
     project_epics = [ticket for ticket in all_tickets if ticket["type"] == "Epic"]
     done_epics = sum(ticket["status"] == "Done" for ticket in project_epics)
-    project_close_suggestion = {
+    return {
         "suggested": bool(project_epics) and done_epics == len(project_epics),
         "epics_done": done_epics,
         "epics_total": len(project_epics),
     }
-    if epic_key:
-        epic = by_key.get(epic_key)
-        if not epic or epic["type"] != "Epic":
-            raise ReportNotFound(f"unknown epic {epic_key} in project {project_key}")
-    tickets = [t for t in all_tickets if t["type"] != "Epic" and
-               (not epic_key or _under_epic(t, epic_key, by_key))]
-    ticket_keys = [t["key"] for t in tickets]
-    if not ticket_keys:
-        return {
-            "project": project_key, "epic": epic_key,
-            "period": {"start": None, "end": None, "days": None},
-            "tickets": {"total": 0, "done": 0, "in_progress": 0, "needs_owner": 0, "done_by_type": {}},
-            "lead_time": _duration_stats([]), "ai_time": {**_duration_stats([]), "total_seconds": 0},
-            "runs_by_outcome": {}, "rework_rounds": {"count": 0, "tickets": []},
-            "usage": {"tokens_in": 0, "tokens_out": 0, "tokens_total": 0, "cost_usd": 0.0,
-                      "by_account": [], "by_model": []},
-            "incidents_opened": {"count": 0, "items": []}, "owner_needed": {"count": 0, "tickets": []},
-            "slowest_tickets": [],
-            "requirement_coverage": _requirement_coverage(tickets, {}, {}, {}, {}, epic_key),
-            "project_close_suggestion": project_close_suggestion,
-            "lessons": ["No lessons can be inferred from the recorded project history yet."],
-        }
-    completed = [t for t in tickets if t["status"] == "Done"]
-    done_at = {t["key"]: t["done_at"] or t["jira_updated"] for t in completed}
-    done_by_type = dict(sorted(Counter(t["type"] for t in completed).items()))
-    starts = [t["jira_created"] for t in tickets if t["jira_created"]]
-    ends = [done_at[t["key"]] for t in completed if done_at[t["key"]]]
-    period_start = min(starts) if starts else None
-    period_end = max(ends) if ends else None
-    period_days = round((period_end - period_start).total_seconds() / 86400, 2) if period_start and period_end else None
 
-    runs = ctx.db.all(
+
+def require_epic(by_key: dict[str, dict], project_key: str, epic_key: str) -> None:
+    """Reject a key that is missing or is not an Epic in this project."""
+    epic = by_key.get(epic_key)
+    if not epic or epic["type"] != "Epic":
+        raise ReportNotFound(f"unknown epic {epic_key} in project {project_key}")
+
+
+def tickets_in_scope(all_tickets: list[dict], epic_key: str | None, by_key: dict[str, dict]) -> list[dict]:
+    """Non-epic tickets, limited to descendants of the epic when one was requested."""
+    return [ticket for ticket in all_tickets if ticket["type"] != "Epic" and
+            (not epic_key or _under_epic(ticket, epic_key, by_key))]
+
+
+def completion_times(completed: list[dict]) -> dict[str, Any]:
+    """Completion instant for each Done ticket: done_at, otherwise jira_updated."""
+    return {ticket["key"]: ticket["done_at"] or ticket["jira_updated"] for ticket in completed}
+
+
+def load_runs(ctx, ticket_keys: list[str]) -> list[dict]:
+    """Recorded runs for the scoped tickets, oldest start first."""
+    return ctx.db.all(
         "SELECT ticket_key, step, account_id, provider, model, status, outcome, started_at, ended_at,"
         " tokens_in, tokens_out, cost_usd FROM runs WHERE ticket_key = ANY(%s) ORDER BY started_at",
         (ticket_keys,))
+
+
+def summarize_runs(runs: list[dict]) -> dict[str, Any]:
+    """Sum outcomes, token usage and recorded AI seconds for each run."""
     run_outcomes: Counter[str] = Counter()
     account_totals: dict[str, dict] = {}
     model_totals: dict[tuple[str, str], dict] = {}
@@ -204,7 +202,21 @@ def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str
         if run["ended_at"]:
             seconds = max(0.0, (run["ended_at"] - run["started_at"]).total_seconds())
             ai_seconds_by_ticket[run["ticket_key"]] += seconds
+    return {
+        "run_outcomes": run_outcomes,
+        "account_totals": account_totals,
+        "model_totals": model_totals,
+        "total_in": total_in,
+        "total_out": total_out,
+        "total_cost": total_cost,
+        "ai_seconds_by_ticket": ai_seconds_by_ticket,
+        "usage_by_ticket": usage_by_ticket,
+    }
 
+
+def completion_samples(completed: list[dict], done_at: dict[str, Any],
+                       ai_seconds_by_ticket: dict[str, float]) -> tuple[list[float], list[dict], list[float]]:
+    """Lead-time samples, slowest rows and AI-time samples for completed tickets."""
     lead_values = []
     slowest = []
     ai_values = []
@@ -218,62 +230,131 @@ def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str
                             "done_at": _iso(end)})
         if ticket["key"] in ai_seconds_by_ticket:
             ai_values.append(ai_seconds_by_ticket[ticket["key"]])
+    return lead_values, slowest, ai_values
 
-    rework = ctx.db.all(
-        "SELECT ticket_key, count(*) AS rounds FROM runs WHERE ticket_key = ANY(%s)"
-        " AND step='verify' AND outcome='rework' GROUP BY ticket_key ORDER BY ticket_key", (ticket_keys,))
-    rework_tickets = [{"key": r["ticket_key"], "rounds": int(r["rounds"])} for r in rework]
-    rework_by_ticket = {r["key"]: r["rounds"] for r in rework_tickets}
-    latest_verify = {r["ticket_key"]: r for r in ctx.db.all(
-        "SELECT DISTINCT ON (ticket_key) ticket_key, status, outcome, details, ended_at FROM runs"
-        " WHERE ticket_key = ANY(%s) AND step='verify' AND status='finished'"
-        " ORDER BY ticket_key, started_at DESC, ended_at DESC", (ticket_keys,))}
+
+def lead_time_by_ticket(completed: list[dict], done_at: dict[str, Any]) -> dict[str, float]:
+    """Rounded lead time for each completed ticket that has both timestamps."""
     lead_by_ticket = {}
     for ticket in completed:
         start, end = ticket["jira_created"], done_at[ticket["key"]]
         if start and end:
             lead_by_ticket[ticket["key"]] = round(max(0.0, (end - start).total_seconds()), 1)
-    coverage = _requirement_coverage(tickets, latest_verify, rework_by_ticket, usage_by_ticket,
-                                     lead_by_ticket, epic_key)
+    return lead_by_ticket
+
+
+def load_rework(ctx, ticket_keys: list[str]) -> tuple[list[dict], dict[str, int]]:
+    """Verify runs whose outcome is rework, as rows and as a count per ticket."""
+    rework = ctx.db.all(
+        "SELECT ticket_key, count(*) AS rounds FROM runs WHERE ticket_key = ANY(%s)"
+        " AND step='verify' AND outcome='rework' GROUP BY ticket_key ORDER BY ticket_key", (ticket_keys,))
+    rework_tickets = [{"key": row["ticket_key"], "rounds": int(row["rounds"])} for row in rework]
+    return rework_tickets, {row["key"]: row["rounds"] for row in rework_tickets}
+
+
+def load_latest_verify(ctx, ticket_keys: list[str]) -> dict[str, dict]:
+    """Latest finished verify run for each scoped ticket."""
+    return {row["ticket_key"]: row for row in ctx.db.all(
+        "SELECT DISTINCT ON (ticket_key) ticket_key, status, outcome, details, ended_at FROM runs"
+        " WHERE ticket_key = ANY(%s) AND step='verify' AND status='finished'"
+        " ORDER BY ticket_key, started_at DESC, ended_at DESC", (ticket_keys,))}
+
+
+def load_owner_needed(ctx, ticket_keys: list[str], tickets: list[dict], by_key: dict[str, dict]) -> list[dict]:
+    """Tickets moved to Needs owner, still in that status, or carrying the needs-owner label."""
     owner_rows = ctx.db.all(
         "SELECT ticket, count(*) AS requests FROM write_audit WHERE ticket = ANY(%s) AND accepted=true"
         " AND action='transition' AND (result='Needs owner' OR payload->>'to'='Needs owner')"
         " GROUP BY ticket ORDER BY ticket", (ticket_keys,))
-    owner_keys = {r["ticket"] for r in owner_rows}
-    owner_keys.update(t["key"] for t in tickets if t["status"] == "Needs owner" or "needs-owner" in t["labels"])
-    owner_needed = [{"key": key, "summary": by_key[key]["summary"]} for key in sorted(owner_keys)]
+    owner_keys = {row["ticket"] for row in owner_rows}
+    owner_keys.update(ticket["key"] for ticket in tickets
+                      if ticket["status"] == "Needs owner" or "needs-owner" in ticket["labels"])
+    return [{"key": key, "summary": by_key[key]["summary"]} for key in sorted(owner_keys)]
 
+
+def load_incidents(ctx, ticket_keys: list[str]) -> list[dict]:
+    """Incidents for the scoped tickets. opened_at is rendered on the row the query returned."""
     incidents = ctx.db.all(
         "SELECT id, opened_at, severity, kind, subject AS ticket, title, detail FROM incidents"
         " WHERE subject = ANY(%s) ORDER BY opened_at", (ticket_keys,))
     for item in incidents:
         item["opened_at"] = _iso(item["opened_at"])
-    ai_total = sum(ai_seconds_by_ticket.values())
-    slowest.sort(key=lambda row: (-row["lead_time_seconds"], row["key"]))
-    report = {
-        "project": project_key, "epic": epic_key,
-        "project_close_suggestion": project_close_suggestion,
-        "period": {"start": _iso(period_start), "end": _iso(period_end), "days": period_days},
-        "tickets": {"total": len(tickets), "done": len(completed), "in_progress": sum(
-            t["status"] in {"In Progress", "In Verify", "Human review"} for t in tickets),
-            "needs_owner": sum(t["status"] == "Needs owner" for t in tickets), "done_by_type": done_by_type},
-        "lead_time": _duration_stats(lead_values),
-        "ai_time": {**_duration_stats(ai_values), "total_seconds": round(ai_total, 1)},
-        "runs_by_outcome": dict(sorted(run_outcomes.items())),
-        "rework_rounds": {"count": sum(r["rounds"] for r in rework_tickets), "tickets": rework_tickets},
-        "usage": {"tokens_in": total_in, "tokens_out": total_out, "tokens_total": total_in + total_out,
-                  "cost_usd": round(total_cost, 6),
-                  "by_account": sorted(account_totals.values(), key=lambda x: x["account"]),
-                  "by_model": sorted(model_totals.values(), key=lambda x: (x["provider"], x["model"]))},
-        "incidents_opened": {"count": len(incidents), "items": incidents},
-        "owner_needed": {"count": len(owner_needed), "tickets": owner_needed},
-        "slowest_tickets": slowest[:5],
-        "requirement_coverage": coverage,
+    return incidents
+
+
+def build_period(tickets: list[dict], completed: list[dict], done_at: dict[str, Any]) -> dict[str, Any]:
+    """Earliest creation through latest completion, in days."""
+    starts = [ticket["jira_created"] for ticket in tickets if ticket["jira_created"]]
+    ends = [done_at[ticket["key"]] for ticket in completed if done_at[ticket["key"]]]
+    period_start = min(starts) if starts else None
+    period_end = max(ends) if ends else None
+    period_days = round((period_end - period_start).total_seconds() / 86400, 2) if period_start and period_end else None
+    return {"start": _iso(period_start), "end": _iso(period_end), "days": period_days}
+
+
+def build_ticket_summary(tickets: list[dict], completed: list[dict]) -> dict[str, Any]:
+    """Ticket counts for the scope, including done totals by type."""
+    return {
+        "total": len(tickets), "done": len(completed),
+        "in_progress": sum(ticket["status"] in {"In Progress", "In Verify", "Human review"} for ticket in tickets),
+        "needs_owner": sum(ticket["status"] == "Needs owner" for ticket in tickets),
+        "done_by_type": dict(sorted(Counter(ticket["type"] for ticket in completed).items())),
     }
+
+
+def build_lead_time(lead_values: list[float]) -> dict[str, float | int | None]:
+    """Median and p90 lead time for completed tickets that have both timestamps."""
+    return _duration_stats(lead_values)
+
+
+def build_ai_time(ai_values: list[float], ai_seconds_by_ticket: dict[str, float]) -> dict[str, Any]:
+    """Median and p90 AI time on completed tickets, plus every recorded AI second."""
+    return {**_duration_stats(ai_values), "total_seconds": round(sum(ai_seconds_by_ticket.values()), 1)}
+
+
+def build_runs_by_outcome(run_outcomes: Counter[str]) -> dict[str, int]:
+    """Run counts keyed by outcome, otherwise status, otherwise unknown."""
+    return dict(sorted(run_outcomes.items()))
+
+
+def build_rework_rounds(rework_tickets: list[dict]) -> dict[str, Any]:
+    """Total verify-rework rounds and the per-ticket counts."""
+    return {"count": sum(row["rounds"] for row in rework_tickets), "tickets": rework_tickets}
+
+
+def build_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    """Token and cost totals, with rows sorted by account and by provider and model."""
+    total_in, total_out = usage["total_in"], usage["total_out"]
+    return {
+        "tokens_in": total_in, "tokens_out": total_out, "tokens_total": total_in + total_out,
+        "cost_usd": round(usage["total_cost"], 6),
+        "by_account": sorted(usage["account_totals"].values(), key=lambda row: row["account"]),
+        "by_model": sorted(usage["model_totals"].values(), key=lambda row: (row["provider"], row["model"])),
+    }
+
+
+def build_incidents_opened(incidents: list[dict]) -> dict[str, Any]:
+    """Opened incidents for the scoped tickets."""
+    return {"count": len(incidents), "items": incidents}
+
+
+def build_owner_needed(owner_needed: list[dict]) -> dict[str, Any]:
+    """Tickets that asked for the owner or still carry that status or label."""
+    return {"count": len(owner_needed), "tickets": owner_needed}
+
+
+def build_slowest_tickets(slowest: list[dict]) -> list[dict]:
+    """The five completed tickets with the longest lead time."""
+    slowest.sort(key=lambda row: (-row["lead_time_seconds"], row["key"]))
+    return slowest[:5]
+
+
+def build_lessons(rework_tickets: list[dict], owner_needed: list[dict], incidents: list[dict]) -> list[str]:
+    """Lessons from rework, owner input and incidents on a scope that has tickets."""
     lessons = []
     if rework_tickets:
         lessons.append(f"Clarify acceptance criteria for the {len(rework_tickets)} ticket(s) that needed"
-                       f" {sum(r['rounds'] for r in rework_tickets)} rework round(s).")
+                       f" {sum(row['rounds'] for row in rework_tickets)} rework round(s).")
     if owner_needed:
         lessons.append(f"Bring owner decisions into intake earlier for the {len(owner_needed)} ticket(s) that needed"
                        " owner input.")
@@ -281,9 +362,81 @@ def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str
         lessons.append(f"Review the {len(incidents)} recorded incident(s) and their causes before repeating this"
                        " project setup.")
     if not lessons:
-        lessons.append("The recorded history shows no rework, owner escalation, or incident; keep the successful workflow.")
-    report["lessons"] = lessons
+        lessons.append("The recorded history shows no rework, owner escalation, or incident; "
+                       "keep the successful workflow.")
+    return lessons
+
+
+def empty_report(project_key: str, epic_key: str | None, suggestion: dict[str, Any],
+                 tickets: list[dict]) -> dict[str, Any]:
+    """Report returned when the scope has no non-epic tickets. Key order differs from the filled report."""
+    return {
+        "project": project_key, "epic": epic_key,
+        "period": build_period(tickets, [], {}),
+        "tickets": build_ticket_summary(tickets, []),
+        "lead_time": build_lead_time([]),
+        "ai_time": build_ai_time([], {}),
+        "runs_by_outcome": build_runs_by_outcome(Counter()),
+        "rework_rounds": build_rework_rounds([]),
+        "usage": build_usage({
+            "total_in": 0, "total_out": 0, "total_cost": 0.0, "account_totals": {}, "model_totals": {},
+        }),
+        "incidents_opened": build_incidents_opened([]),
+        "owner_needed": build_owner_needed([]),
+        "slowest_tickets": build_slowest_tickets([]),
+        "requirement_coverage": _requirement_coverage(tickets, {}, {}, {}, {}, epic_key),
+        "project_close_suggestion": suggestion,
+        # This sentence belongs to the empty scope. A filled scope with no findings uses build_lessons.
+        "lessons": ["No lessons can be inferred from the recorded project history yet."],
+    }
+
+
+def filled_report(ctx, project_key: str, epic_key: str | None, by_key: dict[str, dict],
+                  suggestion: dict[str, Any], tickets: list[dict]) -> dict[str, Any]:
+    """Assemble the report when the scope contains at least one non-epic ticket."""
+    ticket_keys = [ticket["key"] for ticket in tickets]
+    completed = [ticket for ticket in tickets if ticket["status"] == "Done"]
+    done_at = completion_times(completed)
+    runs = load_runs(ctx, ticket_keys)
+    usage = summarize_runs(runs)
+    lead_values, slowest, ai_values = completion_samples(completed, done_at, usage["ai_seconds_by_ticket"])
+    rework_tickets, rework_by_ticket = load_rework(ctx, ticket_keys)
+    latest_verify = load_latest_verify(ctx, ticket_keys)
+    lead_by_ticket = lead_time_by_ticket(completed, done_at)
+    coverage = _requirement_coverage(
+        tickets, latest_verify, rework_by_ticket, usage["usage_by_ticket"], lead_by_ticket, epic_key)
+    owner_needed = load_owner_needed(ctx, ticket_keys, tickets, by_key)
+    incidents = load_incidents(ctx, ticket_keys)
+    report = {
+        "project": project_key, "epic": epic_key,
+        "project_close_suggestion": suggestion,
+        "period": build_period(tickets, completed, done_at),
+        "tickets": build_ticket_summary(tickets, completed),
+        "lead_time": build_lead_time(lead_values),
+        "ai_time": build_ai_time(ai_values, usage["ai_seconds_by_ticket"]),
+        "runs_by_outcome": build_runs_by_outcome(usage["run_outcomes"]),
+        "rework_rounds": build_rework_rounds(rework_tickets),
+        "usage": build_usage(usage),
+        "incidents_opened": build_incidents_opened(incidents),
+        "owner_needed": build_owner_needed(owner_needed),
+        "slowest_tickets": build_slowest_tickets(slowest),
+        "requirement_coverage": coverage,
+    }
+    report["lessons"] = build_lessons(rework_tickets, owner_needed, incidents)
     return report
+
+
+def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str, Any]:
+    """Summarize completed tickets and all recorded run history for a project or epic."""
+    all_tickets = load_project_tickets(ctx, project_key)
+    by_key = {ticket["key"]: ticket for ticket in all_tickets}
+    suggestion = build_project_close_suggestion(all_tickets)
+    if epic_key:
+        require_epic(by_key, project_key, epic_key)
+    tickets = tickets_in_scope(all_tickets, epic_key, by_key)
+    if not tickets:
+        return empty_report(project_key, epic_key, suggestion, tickets)
+    return filled_report(ctx, project_key, epic_key, by_key, suggestion, tickets)
 
 
 def _duration_value(seconds: float) -> str:

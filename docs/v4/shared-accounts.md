@@ -90,3 +90,10 @@ machine, **Enable on**, **Total sessions**, **Retry sign-in**, **Remove** and **
 Changes need the `nodes.manage` permission (owner, super administrator). The shared account tables are created by
 `011_shared_accounts.sql`; `015_shared_account_machine_detach.sql` records detached assignments from accounts that
 were imported from the legacy control repository.
+
+## Audit
+
+Successful account creation, session-limit changes, machine enablement, sign-in retries, machine removal and
+remove-everywhere writes publish `ai_account.created`, `ai_account.session_limit_set`,
+`ai_account.machine_enabled`, `ai_account.sign_in_retried`, `ai_account.machine_removed` and
+`ai_account.removed_everywhere` events. The audit listener writes the same `write_audit` row for each event.

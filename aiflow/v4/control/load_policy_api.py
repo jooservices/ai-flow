@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 from . import load_policy
 from . import licensing, rollout
 from .db import J
+from .features.fleet.events import MachineLoadLimitsSaved
+from .platform.events.wiring import publish_for
 
 
 class MachineLoadLimitsBody(BaseModel):
@@ -42,9 +44,8 @@ def register_machine_load_limits(app: FastAPI, ctx: Any, console_user: Callable,
                        " cpu_load_per_cpu=EXCLUDED.cpu_load_per_cpu,state='{}'::jsonb,updated_at=now()",
                        (hostname, body.host_cpu_load_per_cpu))
         load_policy.record_heartbeat(ctx, name)
-        audit("machine-load", "limits", name, "", None, user.subject, True, "load limits saved",
-              {"machine": limits, "host": hostname,
-               "host_cpu_load_per_cpu": body.host_cpu_load_per_cpu})
+        publish_for(ctx, MachineLoadLimitsSaved(node=name, actor=user.subject, machine=limits, host=hostname,
+                                               host_cpu_load_per_cpu=body.host_cpu_load_per_cpu))
         host_limit = (body.host_cpu_load_per_cpu if body.host_cpu_load_per_cpu is not None else
                       load_policy.DEFAULT_HOST_LIMITS["cpu_load_per_cpu"])
         return {"machine": name, "hostname": hostname, "load_limits": limits,

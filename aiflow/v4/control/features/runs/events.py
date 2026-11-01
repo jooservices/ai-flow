@@ -49,3 +49,51 @@ class MasterActionCompleted(DomainEvent):
                      {"intent": self.intent, "why": self.why, "account_id": self.account_id,
                       "target_run_id": self.target_run_id, "signature": self.signature},
                      self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class MasterEscalationRequested(DomainEvent):
+    type = "master.escalation_requested"
+    owner = "runs"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    action: str
+    reason: str
+    intent_chars: int
+    observation_key: str
+    options: list[str]
+
+    def audit(self) -> Audit:
+        return Audit("master", self.action, self.ticket, self.actor, self.reason,
+                     {"intent_chars": self.intent_chars, "observation_key": self.observation_key,
+                      "options": self.options}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class MasterEscalationNotified(DomainEvent):
+    type = "master.escalation_notified"
+    owner = "runs"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    result: str
+    reason: str
+    options: list[str]
+    observation_key: str
+    pending_channels: list[str]
+
+    def audit(self) -> Audit:
+        return Audit("notify", "master-escalation", self.ticket, self.actor, self.result,
+                     {"reason": self.reason, "options": self.options, "observation_key": self.observation_key,
+                      "pending_channels": self.pending_channels}, self.run_id, self.fence)

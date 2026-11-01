@@ -478,6 +478,7 @@ def test_commands_use_assigned_token_connection_through_repository_transfer_rela
                                             "base": "develop", "title": "t", "body": "", "draft": True},
                      headers=headers)
     assert pr.status_code == 200, pr.text
+    assert ctx.db.one("SELECT pr_url FROM runs WHERE id=%s", (claimed["run_id"],)) == {"pr_url": pr.json()["url"]}
     comment = client.post("/v1/github/comment", json={**run, "number": 1, "body": "hi"}, headers=headers)
     assert comment.status_code == 200, comment.text
     rows = ctx.db.all("SELECT action, payload FROM write_audit WHERE target='github' AND run_id=%s ORDER BY id",
@@ -486,6 +487,45 @@ def test_commands_use_assigned_token_connection_through_repository_transfer_rela
     assert all(r["payload"]["connection"] == conn for r in rows)
     assert TOKEN not in json.dumps(rows)
     assert ctx.github.prs == []  # the organization App never touched the personal repository
+    published = ctx.db.all("SELECT type, payload FROM domain_events WHERE aggregate='run' AND aggregate_id=%s"
+                           " AND type LIKE 'github.%%' ORDER BY seq", (claimed["run_id"],))
+    assert [e["type"] for e in published] == ["github.git_relay_token_issued", "github.git_relay_token_issued",
+                                              "github.pr_created", "github.comment_posted"]
+    assert all(e["payload"]["run_id"] == claimed["run_id"] and e["payload"]["fence"] == claimed["fence"]
+               for e in published)
+
+
+def test_pull_request_row_rolls_back_with_its_audit_event(client, ctx, control_repo, secrets_dir, monkeypatch):
+    from aiflow.v4.control.features.github_fenced import routes as github_fenced_routes
+
+    prepare_project_control(ctx, control_repo)
+    owner_sign_in(client, ctx)
+    add_token(client)
+    config_path = control_repo / "projects/TESTWP.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    config["repositories"] = [{"repo": "person/tool", "base": "develop", "checks": ["pytest"], "stack": ""}]
+    config["epic_repositories"] = {"TESTWP-50": "person/tool"}
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    ctx.repo = lambda: ControlRepo.load(control_repo)
+    headers = worker_headers(client)
+    ctx.db.run("INSERT INTO tickets (key,project,status,type,labels,summary,description,parent_key)"
+               " VALUES ('TESTWP-50','TESTWP','In Progress','Epic',%s,'Core','',NULL)", ([],))
+    add_ticket(ctx.db, "TESTWP-51")
+    ctx.db.run("UPDATE tickets SET type='Story',parent_key='TESTWP-50' WHERE key='TESTWP-51'")
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-51", "account": "codex-01", "step": "dev"},
+                          headers=headers).json()
+    run = {"run_id": claimed["run_id"], "fence": claimed["fence"]}
+
+    def failing_publish(ctx_, event):
+        raise RuntimeError("forced event failure")
+
+    monkeypatch.setattr(github_fenced_routes, "publish_for", failing_publish)
+    with pytest.raises(RuntimeError, match="forced event failure"):
+        client.post("/v1/github/pr", json={**run, "repo": "person/tool", "head": "TESTWP-51-work",
+                                           "base": "develop", "title": "t", "body": "", "draft": True},
+                    headers=headers)
+    assert ctx.db.one("SELECT pr_url FROM runs WHERE id=%s", (claimed["run_id"],)) == {"pr_url": ""}
+    assert ctx.db.all("SELECT type FROM domain_events WHERE type='github.pr_created'") == []
 
 
 def test_new_app_connection_is_added_beside_the_existing_one(client, ctx, secrets_dir):
@@ -570,6 +610,8 @@ def test_remote_branch_cleanup_uses_assigned_connection_and_audits_it(client, ct
     assert getattr(ctx.github, "deleted_branches", []) == []  # the organization App was not used
     row = ctx.db.one("SELECT payload FROM write_audit WHERE action='delete-branch' ORDER BY id DESC")
     assert row["payload"]["connection"] == conn and row["payload"]["repo"] == "person/tool"
+    deleted_event = ctx.db.all("SELECT payload FROM domain_events WHERE type='github.branch_deleted'")
+    assert [e["payload"]["deleted"] for e in deleted_event] == [done.json()["deleted"]]
 
     def rejected_delete(repo, branch):
         raise GitHubError("DELETE /refs/heads/TESTWP-51-invalid -> 422: validation failed", status_code=422)

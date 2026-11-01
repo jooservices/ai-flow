@@ -79,7 +79,8 @@ the business change-request and stakeholder routes moved too. The knowledge rout
 moved too (JAIF-478). The console view-as, notification and licensing routes moved too (JAIF-478). The accepted fleet
 writes (join command, work acceptance and check-probe credential) moved too (JAIF-478). The remaining
 `audit()` calls move with their features (JAIF-478). An `Audit` row may carry `run_id` and `fence` for a fenced write; only
-accepted writes are events, a refused write keeps calling `audit()` with `accepted=False`.
+accepted writes are events, a refused write keeps calling `audit()` with `accepted=False`. The accepted GitHub fenced writes
+(token, Git relay token, pull request lookup, pull request creation, comment and branch deletion) moved too (JAIF-478).
 
 `Events` (telemetry log) is split by responsibility: `events.py` writes the registry row and hands the event over; shipping to
 OpenObserve (queue, thread, capped backoff, delivery incident) is `openobserve_shipper.OpenObserveShipper`, reached as

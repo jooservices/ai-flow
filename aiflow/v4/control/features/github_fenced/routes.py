@@ -24,6 +24,9 @@ from ...github import GitHubError
 from ... import pr_comments
 from ...pr_comments import PRCommentBody
 from ...features.work.constants import utcnow
+from ...platform.events.wiring import publish_for
+from .events import (GitHubBranchDeleted, GitHubCommentPosted, GitHubGitRelayTokenIssued, GitHubPrCreated,
+                     GitHubPrLookedUp, GitHubTokenIssued)
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
@@ -82,14 +85,14 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 "fence": body.fence, "node": node, "branch": branch,
                 "expires": int(expires.timestamp()),
             })
-            audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
-                  "repository Git relay capability issued",
-                  {"repo": repository, "branch": branch, "expires": expires.isoformat(), "transport": "control"})
+            publish_for(ctx, GitHubGitRelayTokenIssued(
+                run_id=body.run_id, fence=body.fence, ticket=run["ticket_key"], actor=run["account_id"],
+                repo=repository, branch=branch, expires=expires.isoformat()))
             return {"token": capability, "expires_at": expires.isoformat(),
                     "transport_url": f"{ctx.settings.control_url.rstrip('/')}/v1/github/git/{repository}.git"}
         token, expires = github.token(repository.split("/", 1)[-1], permissions)
-        audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "issued",
-              {"repo": repository, "expires": expires.isoformat()})
+        publish_for(ctx, GitHubTokenIssued(run_id=body.run_id, fence=body.fence, ticket=run["ticket_key"],
+                                           actor=run["account_id"], repo=repository, expires=expires.isoformat()))
         return {"token": token, "expires_at": expires.isoformat()}
 
     async def github_git_proxy(git_path: str, request: Request) -> Response:
@@ -197,8 +200,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
             head_sha = str((pr.get("head") or {}).get("sha") or "")
             if head_sha:
                 found["head_sha"] = head_sha
-        audit("github", "find_pr", run["ticket_key"], run_id, fence, run["account_id"], True,
-              found.get("url", "not found"), {"repo": repository, "head": head})
+        publish_for(ctx, GitHubPrLookedUp(run_id=run_id, fence=fence, ticket=run["ticket_key"],
+                                          actor=run["account_id"], repo=repository, head=head,
+                                          result=found.get("url", "not found")))
         return found
 
     @app.post("/v1/github/pr")
@@ -213,9 +217,11 @@ def install(app, ctx, deps) -> SimpleNamespace:
         if body.base != settings["base"]:
             raise HTTPException(403, "pull request base does not match the repository settings")
         pr = github.create_pr(repository.split("/", 1)[-1], body.head, body.base, body.title, body.body, body.draft)
-        ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s WHERE id=%s", (pr["html_url"], body.head, body.run_id))
-        audit("github", "pr", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, pr["html_url"],
-              {"number": pr.get("number"), "draft": body.draft, "repo": repository})
+        with ctx.db.transaction():
+            ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s WHERE id=%s", (pr["html_url"], body.head, body.run_id))
+            publish_for(ctx, GitHubPrCreated(run_id=body.run_id, fence=body.fence, ticket=run["ticket_key"],
+                                             actor=run["account_id"], repo=repository, url=pr["html_url"],
+                                             number=pr.get("number"), draft=body.draft))
         ctx.events.emit("github.pr", ticket=run["ticket_key"], run_id=body.run_id, fence=body.fence,
                         account=run["account_id"], node=node, outcome="opened", pr_url=pr["html_url"])
         return {"url": pr["html_url"], "number": pr.get("number")}
@@ -543,8 +549,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
         repository = repository_for_run(run, project)
         github = github_gateway(ctx, repository)
         outcome = pr_comments.post(github, repository.split("/", 1)[-1], body.number, body.kind, body.body)
-        audit("github", "comment", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "ok",
-              {"number": body.number, "repo": repository, "kind": body.kind, "outcome": outcome})
+        publish_for(ctx, GitHubCommentPosted(run_id=body.run_id, fence=body.fence, ticket=run["ticket_key"],
+                                             actor=run["account_id"], repo=repository, number=body.number,
+                                             kind=body.kind, outcome=outcome))
         return {"ok": True, "outcome": outcome}
 
     @app.post("/v1/github/delete-branch")
@@ -566,8 +573,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
             audit("github", "delete-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], False,
                   "GitHub refused the branch deletion", {"branch": branch, "repo": repository})
             raise HTTPException(502, "GitHub refused the branch deletion") from exc
-        audit("github", "delete-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
-              "deleted" if deleted else "already gone", {"branch": branch, "repo": repository})
+        publish_for(ctx, GitHubBranchDeleted(run_id=body.run_id, fence=body.fence, ticket=run["ticket_key"],
+                                             actor=run["account_id"], repo=repository, branch=branch,
+                                             deleted=bool(deleted)))
         return {"ok": True, "deleted": deleted}
 
     return SimpleNamespace(github_token=github_token, github_find_pr=github_find_pr, github_pr=github_pr, github_merge=github_merge, review_queue=review_queue, review_item_kind=review_item_kind, current_review_item_kind=current_review_item_kind, review_thread=review_thread, review_data=review_data, export_review_metrics=export_review_metrics, approve_review=approve_review, request_review_rework=request_review_rework, reject_review=reject_review, ask_review_ai=ask_review_ai, answer_review_question=answer_review_question, skip_review_gate=skip_review_gate, github_update_branch=github_update_branch, github_checks=github_checks, github_comment=github_comment, github_delete_branch=github_delete_branch)

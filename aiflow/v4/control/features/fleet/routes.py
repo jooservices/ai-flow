@@ -497,6 +497,15 @@ def install(app, ctx, deps) -> SimpleNamespace:
                         node=account.node, outcome="queued", reason="owner requested provider sign-in again")
         return {"account": account_id, "status": "queued", "sign_in_url": "", "code": ""}
 
+    @app.get("/v1/accounts/{account_id}/spec")
+    def account_spec(account_id: str, node: str = Depends(node_auth)) -> dict:
+        repo = ctx.repo()
+        acc = repo.account(account_id)
+        if not acc or not acc.runs_on(node):
+            raise HTTPException(403, f"account {account_id} does not run on {node}")
+        model, effort = repo.model_for(acc.provider, acc.tier)
+        return {"account": acc.id, "provider": acc.provider, "tier": acc.tier, "model": model, "effort": effort}
+
     @app.get("/v1/accounts/{account_id}/sign-in")
     def account_sign_in_details(account_id: str, request: Request) -> dict:
         console_user(request, {"nodes.manage"})

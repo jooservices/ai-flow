@@ -22,7 +22,7 @@ from ... import (flow_doctor_api, licensing, load_policy, load_policy_api,
                log_viewer, quota_refresh, runtime_settings, system_check_api, tooling)
 from ... import environment as environment_reports
 from ...db import J
-from ...platform.events.wiring import publish_for
+from ...platform.events.wiring import dispatcher_for, publish_for
 from ...route_deps import github_connection_used, h
 from ...features.work.constants import utcnow
 
@@ -85,14 +85,14 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 " dynamic=EXCLUDED.dynamic,status='joined',accepting_work=true,removed_at=NULL"
                 " RETURNING name,role,projects,dynamic",
                 (h(body.join_token), body.name, body.name, body.ip, h(token))).fetchone()
+            envelope = None
             if row:
-                publish_for(ctx, NodeJoined(node=row["name"], ip_present=bool(body.ip), role=row["role"],
-                                            project=row["projects"][0]))
+                envelope = publish_for(ctx, NodeJoined(node=row["name"], ip_present=bool(body.ip), role=row["role"],
+                                                       project=row["projects"][0]))
         if not row:
             raise HTTPException(403, "invalid, expired, or used join token")
-        ctx.events.emit("node.joined", node=row["name"], reason=f"{row['role']} · {row['projects'][0]}")
+        dispatcher_for(ctx).run_once(event_id=envelope.id)  # the join's reactions run now, as they did inline
         repo = ctx.repo()
-        system_check_api.schedule_join_readiness(ctx, row["name"])
         project = repo.projects[row["projects"][0]]
         sign_in_requests = ctx.db.all(
             "SELECT id FROM managed_ai_accounts"

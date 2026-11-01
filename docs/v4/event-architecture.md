@@ -81,6 +81,7 @@ writes (join command, work acceptance and check-probe credential) moved too (JAI
 `audit()` calls move with their features (JAIF-478). An `Audit` row may carry `run_id` and `fence` for a fenced write; only
 accepted writes are events, a refused write keeps calling `audit()` with `accepted=False`. The accepted GitHub fenced writes
 (token, Git relay token, pull request lookup, pull request creation, comment and branch deletion) moved too (JAIF-478).
+The master daily budget update, completed master actions and accepted GitHub CI-log reads moved too (JAIF-478).
 
 `Events` (telemetry log) is split by responsibility: `events.py` writes the registry row and hands the event over; shipping to
 OpenObserve (queue, thread, capped backoff, delivery incident) is `openobserve_shipper.OpenObserveShipper`, reached as

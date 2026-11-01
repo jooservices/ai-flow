@@ -9,6 +9,8 @@ from aiflow.v4.control.features.business import events as _business_events  # no
 from aiflow.v4.control.features.knowledge import events as _knowledge_events  # noqa: F401  (registers the knowledge events)
 from aiflow.v4.control.features.console import events as _console_events  # noqa: F401  (registers console audit events)
 from aiflow.v4.control.features.fleet import events as _fleet_events  # noqa: F401  (registers fleet audit events)
+from aiflow.v4.control.features.runs import events as _runs_events  # noqa: F401  (registers master audit events)
+from aiflow.v4.control.features.github_ci_log import events as _github_ci_log_events  # noqa: F401  (registers CI log audit event)
 from aiflow.v4.control.platform.events import CATALOG, docgen
 
 DOC = Path(__file__).resolve().parents[2] / "docs/v4/events.md"

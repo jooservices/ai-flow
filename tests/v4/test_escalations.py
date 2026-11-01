@@ -15,6 +15,7 @@ import pytest
 from conftest import add_ticket, join_node
 from aiflow.v4.control import escalations as esc
 from aiflow.v4.control import owner_notifications
+from aiflow.v4.control import route_deps
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.github import GitHubApp
 from aiflow.v4.control.jira import Jira
@@ -1529,22 +1530,47 @@ def test_the_ci_log_tail_is_read_through_the_control_api(client, ctx, monkeypatc
     ctx.github.pr_data = {9: {"number": 9, "head": {"ref": "TESTWP-9-x", "sha": "sha-TESTWP-9-x",
                               "repo": {"full_name": "jooservices/test-aiflow-wp"}}}}
     monkeypatch.setattr(ctx.github, "failing_job_log", failing_job_log, raising=False)
+    route_deps.github_connection_used.set("")
     got = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
                                                    "branch": "TESTWP-9-x", "lines": 50}, headers=headers)
     assert got.status_code == 200, got.text
     body = got.json()
     assert body["found"] and body["job"] == "Test (v4)" and "AssertionError: 1 != 2" in body["tail"]
     assert seen == [("test-aiflow-wp", "sha-TESTWP-9-x", 50)]
+    assert ctx.db.all("SELECT type,aggregate,aggregate_id,payload FROM domain_events "
+                      "WHERE type='github.ci_log_read' ORDER BY seq") == [
+        {"type": "github.ci_log_read", "aggregate": "run", "aggregate_id": claim["run_id"],
+         "payload": {"run_id": claim["run_id"], "fence": claim["fence"], "ticket": "TESTWP-9",
+                     "actor": "claude-01", "job": "Test (v4)", "sha": "sha-TESTWP-9", "lines": 50}}]
+    assert ctx.db.all("SELECT target,action,ticket,run_id,fence,actor,accepted,result,payload FROM write_audit "
+                      "WHERE target='github' AND action='ci-log' AND accepted=true") == [
+        {"target": "github", "action": "ci-log", "ticket": "TESTWP-9", "run_id": claim["run_id"],
+         "fence": claim["fence"], "actor": "claude-01", "accepted": True, "result": "Test (v4)",
+         "payload": {"sha": "sha-TESTWP-9", "lines": 50, "connection": "default"}}]
     wrong_branch = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
                                                             "branch": "develop"}, headers=headers)
     assert wrong_branch.status_code == 403 and "not the run's pull request branch" in wrong_branch.text
     wrong_sha = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
                                                          "sha": "another-commit"}, headers=headers)
     assert wrong_sha.status_code == 403 and "not the current head" in wrong_sha.text
+    route_deps.github_connection_used.set("")
     direct_sha = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
                                                          "sha": "sha-TESTWP-9-x", "lines": 25}, headers=headers)
     assert direct_sha.status_code == 200 and direct_sha.json()["sha"] == "sha-TESTWP-9-x"
     assert seen[-1] == ("test-aiflow-wp", "sha-TESTWP-9-x", 25)
+    assert ctx.db.all("SELECT type,aggregate,aggregate_id,payload FROM domain_events "
+                      "WHERE type='github.ci_log_read' ORDER BY seq") == [
+        {"type": "github.ci_log_read", "aggregate": "run", "aggregate_id": claim["run_id"],
+         "payload": {"run_id": claim["run_id"], "fence": claim["fence"], "ticket": "TESTWP-9",
+                     "actor": "claude-01", "job": "Test (v4)", "sha": "sha-TESTWP-9", "lines": 50}},
+        {"type": "github.ci_log_read", "aggregate": "run", "aggregate_id": claim["run_id"],
+         "payload": {"run_id": claim["run_id"], "fence": claim["fence"], "ticket": "TESTWP-9",
+                     "actor": "claude-01", "job": "Test (v4)", "sha": "sha-TESTWP-9", "lines": 25}}]
+    assert ctx.db.all("SELECT target,action,ticket,run_id,fence,actor,accepted,result,payload FROM write_audit "
+                      "WHERE target='github' AND action='ci-log' AND accepted=true AND payload->>'lines'='25'") == [
+        {"target": "github", "action": "ci-log", "ticket": "TESTWP-9", "run_id": claim["run_id"],
+         "fence": claim["fence"], "actor": "claude-01", "accepted": True, "result": "Test (v4)",
+         "payload": {"sha": "sha-TESTWP-9", "lines": 25, "connection": "default"}}]
     ctx.github.pr_data[9]["head"]["ref"] = "develop"
     wrong_remote_branch = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
                                                                    "branch": "TESTWP-9-x"}, headers=headers)

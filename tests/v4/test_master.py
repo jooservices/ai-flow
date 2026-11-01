@@ -274,6 +274,20 @@ def test_master_actions_are_limited_to_safe_fenced_actions_and_audited(client, c
                    intent="return the unowned ticket to To Do", why="No worker owns it")
     assert moved.status_code == 200
     assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-210'")["status"] == "To Do"
+    events = ctx.db.all("SELECT type,aggregate,aggregate_id,payload FROM domain_events "
+                        "WHERE type='master.action_completed' ORDER BY seq")
+    assert events == [{"type": "master.action_completed", "aggregate": "run", "aggregate_id": master["run_id"],
+                       "payload": {"run_id": master["run_id"], "fence": master["fence"],
+                                   "ticket": "TESTWP-210", "actor": "claude-01", "action": "move_to_todo",
+                                   "result": "ticket moved to To Do", "intent": "return the unowned ticket to To Do",
+                                   "why": "No worker owns it", "account_id": "", "target_run_id": "",
+                                   "signature": ""}}]
+    assert ctx.db.all("SELECT target,action,ticket,run_id,fence,actor,accepted,result,payload FROM write_audit "
+                      "WHERE target='master' AND action='move_to_todo'") == [
+        {"target": "master", "action": "move_to_todo", "ticket": "TESTWP-210", "run_id": master["run_id"],
+         "fence": master["fence"], "actor": "claude-01", "accepted": True, "result": "ticket moved to To Do",
+         "payload": {"intent": "return the unowned ticket to To Do", "why": "No worker owns it", "account_id": "",
+                     "target_run_id": "", "signature": ""}}]
 
     add_ticket(ctx.db, "TESTWP-211")
     ctx.jira.status_of["TESTWP-211"] = "To Do"
@@ -473,8 +487,15 @@ def test_owner_can_change_daily_budget_and_read_weekly_autonomy_report(client, c
     assert initial.json()["budget"]["daily_budget_minutes"] == 60
     updated = client.put("/v1/master/autonomy/budget", json={"daily_budget_minutes": 12})
     assert updated.status_code == 200 and updated.json()["budget"]["daily_budget_minutes"] == 12
-    assert ctx.db.one("SELECT actor,accepted FROM write_audit WHERE action='daily-budget-update'") == {
-        "actor": "owner@example.test", "accepted": True}
+    assert ctx.db.all("SELECT type,aggregate,aggregate_id,payload FROM domain_events "
+                      "WHERE type='master.daily_budget_updated' ORDER BY seq") == [
+        {"type": "master.daily_budget_updated", "aggregate": "master_budget", "aggregate_id": "control",
+         "payload": {"actor": "owner@example.test", "daily_budget_minutes": 12, "scope": "control"}}]
+    assert ctx.db.all("SELECT target,action,ticket,run_id,fence,actor,accepted,result,payload FROM write_audit "
+                      "WHERE target='master' AND action='daily-budget-update'") == [
+        {"target": "master", "action": "daily-budget-update", "ticket": "", "run_id": "", "fence": None,
+         "actor": "owner@example.test", "accepted": True, "result": "daily budget set to 12 minutes",
+         "payload": {"daily_budget_minutes": 12}}]
 
     add_ticket(ctx.db, "TESTWP-250", status="Done")
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome)"
@@ -517,6 +538,28 @@ def test_owner_can_change_daily_budget_and_read_weekly_autonomy_report(client, c
     client.cookies.set(COOKIE_NAME, issue_session("lead@example.test", "lead", 4_000_000_000, secret))
     assert client.get("/v1/master/autonomy").status_code == 200
     assert client.put("/v1/master/autonomy/budget", json={"daily_budget_minutes": 30}).status_code == 403
+
+
+def test_master_budget_update_rolls_back_when_event_publication_fails(client, ctx, monkeypatch):
+    from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
+
+    secret = "test-console-session-secret-that-is-long-enough"
+    ctx.settings.console_session_secret = secret
+    client.cookies.set(COOKIE_NAME, issue_session("owner@example.test", "owner", 4_000_000_000, secret))
+    before = ctx.db.one("SELECT daily_budget_minutes FROM master_settings WHERE singleton=true")
+
+    def fail_publish(*args, **kwargs):
+        raise RuntimeError("forced event publication failure")
+
+    monkeypatch.setattr("aiflow.v4.control.features.runs.routes.publish_for", fail_publish)
+    # The request fixture already uses an active connection, so this does not isolate the route transaction by itself.
+    with pytest.raises(RuntimeError, match="forced event publication failure"):
+        client.put("/v1/master/autonomy/budget", json={"daily_budget_minutes": 12})
+
+    assert ctx.db.one("SELECT daily_budget_minutes FROM master_settings WHERE singleton=true") == before
+    assert ctx.db.one("SELECT count(*) AS n FROM domain_events WHERE type='master.daily_budget_updated'")["n"] == 0
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE target='master' "
+                      "AND action='daily-budget-update'")["n"] == 0
 
 
 def test_invalid_plan_cycles_open_incident_and_a_valid_plan_resets_the_count(client, ctx):

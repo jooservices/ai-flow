@@ -42,3 +42,5 @@ node-operation queue (`node.operation_queued`) writes publish `NodeJoined`, `AiA
 `fleet.schedule_join_readiness` starts the machine's first readiness check from the outbox once the join has committed. The route
 delivers the outbox right after the commit, so the check still starts before the node receives its answer; a listener that fails
 is left for the dispatcher to retry and does not fail the join.
+
+`POST /v1/accounts/{account_id}/sign-in/complete` publishes `ai_account.sign_in_completed`; the `account.sign_in_completed` timeline row is the in-transaction listener `fleet.telemetry_account_sign_in_completed`.

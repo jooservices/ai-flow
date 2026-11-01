@@ -57,4 +57,5 @@ and `master.action_completed`; the audit ledger listener writes the same accepte
 budget update and its event share a transaction. An accepted `escalate_to_owner` action publishes
 `master.escalation_requested` and `master.escalation_notified`; they commit with the update of the escalation's delivered
 channels. A refused action, an escalation action other than `escalate_to_owner` and the partial-result audit that is
-followed by an error remain direct `audit()` calls.
+followed by an error remain direct `audit()` calls. Successful flow-bug writes publish `flow_bug.issue_created`,
+`flow_bug.repeat_commented` and `flow_bug.intake_moved`; refused or failed Jira writes keep their direct refused audit rows.

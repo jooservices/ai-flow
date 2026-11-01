@@ -97,3 +97,71 @@ class MasterEscalationNotified(DomainEvent):
         return Audit("notify", "master-escalation", self.ticket, self.actor, self.result,
                      {"reason": self.reason, "options": self.options, "observation_key": self.observation_key,
                       "pending_channels": self.pending_channels}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class FlowBugCreated(DomainEvent):
+    # `flow_bug.created` is already used by the telemetry log.
+    type = "flow_bug.issue_created"
+    owner = "runs"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    reason: str
+    signature: str
+    run_ids: list[str]
+    tickets: list[str]
+    labels: list[str]
+
+    def audit(self) -> Audit:
+        return Audit("jira", "flow_bug_create", self.ticket, self.actor, "created",
+                     {"reason": self.reason, "signature": self.signature, "run_ids": self.run_ids,
+                      "tickets": self.tickets, "labels": self.labels}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class FlowBugRepeated(DomainEvent):
+    # `flow_bug.repeated` is already used by the telemetry log.
+    type = "flow_bug.repeat_commented"
+    owner = "runs"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    comment_id: str
+    signature: str
+    repeat_count: int
+    new_run_ids: list[str]
+
+    def audit(self) -> Audit:
+        return Audit("jira", "flow_bug_repeat", self.ticket, self.actor, self.comment_id,
+                     {"signature": self.signature, "repeat_count": self.repeat_count,
+                      "new_run_ids": self.new_run_ids}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class FlowBugIntakeMoved(DomainEvent):
+    type = "flow_bug.intake_moved"
+    owner = "runs"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    signature: str
+
+    def audit(self) -> Audit:
+        return Audit("jira", "flow_bug_intake", self.ticket, self.actor, "Intake",
+                     {"signature": self.signature}, self.run_id, self.fence)

@@ -183,7 +183,7 @@ def build_prompt(claim: Any, branch: str, conflicts: list[str] | None = None, ci
         checks += "\n  - Docker commands go through the run's rootless, worktree-confined runtime"
     if gate_step.enabled(claim.project) and (gate_line := gate_step.prompt_check(claim.project)):
         checks += "\n  - " + gate_line
-    t, rework = claim.ticket, ""
+    rework = ""
     if claim.findings:
         rework += ("\nThis is a rework: the branch already holds your earlier work and a reviewer sent it back. Fix every"
                    " finding below, keep what was right, and run the checks again. Before you change code, list each finding"

@@ -535,7 +535,7 @@ def publish_no_changes(run: DevRun) -> dict:
 
 
 def publish_existing_work(run: DevRun, existing_pr: dict | None) -> dict:
-    c, project, wt = run.claim, run.project, run.worktree
+    c, wt = run.claim, run.worktree
     pushed = False
     if run.branch_commit_count:
         credential = run.api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,

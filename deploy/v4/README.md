@@ -15,6 +15,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Master AI rescue](../../docs/v4/master-rescue.md): Claude takes a long Blocked or over-time ticket once, with its own budget; owner-only work and an unavailable Claude go to the owner, a failed rescue returns to development
 - [Shared worker fairness](../../docs/v4/shared-worker-fairness.md): round-robin ready tickets across projects while preserving rework preference and each project's priority and age order
 - [Work eligibility pipeline](../../docs/v4/work-eligibility.md): named account, node, project and role rules feed step collectors and the existing ordering and routing stages
+- [Container command policy structure](../../docs/v4/policy-structure.md): named checks for the safe build, run and compose command forms
 - [Work claim stages](../../docs/v4/work-claim.md): ordered named steps for eligibility, lease and hot-file acquisition, run registration and response building
 - [Review metrics](../../docs/v4/review-metrics.md): weekly waits, finished tickets without human-review activity, waiting durations and review decisions
 

@@ -29,6 +29,9 @@ from .capacity import reported_run_tokens, reservation_tokens, unresolved_run_re
 from ..core.controlrepo import Account, ControlRepo
 from .application_context import ApplicationContext
 from .db import J
+from .features.fleet.events import (SharedAccountCreated, SharedAccountMachineEnabled, SharedAccountMachineRemoved,
+                                    SharedAccountRemoved, SharedAccountSessionLimitSet, SharedAccountSignInRetried)
+from .platform.events.wiring import publish_for
 
 NODE_ONLINE_S = 75
 ACCOUNT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
@@ -552,7 +555,7 @@ def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_aut
                    (body.id, body.provider, body.tier, body.roles, body.explicit_only, body.session_limit,
                     user.subject))
         sync()
-        audit("account", "create", body.id, "", None, user.subject, True, "created")
+        publish_for(ctx, SharedAccountCreated(account=body.id, actor=user.subject))
         return view(account_or_404(body.id), include_signin=True)
 
     @app.put("/v1/shared-accounts/{account_id}/session-limit")
@@ -575,7 +578,8 @@ def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_aut
                              " ON CONFLICT (id) DO UPDATE SET session_limit=EXCLUDED.session_limit",
                              (acc.id, acc.provider, acc.tier, acc.roles, acc.explicit_only, body.session_limit,
                               user.subject))
-        audit("account", "session_limit", acc.id, "", None, user.subject, True, str(body.session_limit))
+        publish_for(ctx, SharedAccountSessionLimitSet(account=acc.id, actor=user.subject,
+                                                      session_limit=body.session_limit))
         return view(account_or_404(account_id), include_signin=True)
 
     @app.post("/v1/shared-accounts/{account_id}/machines", status_code=201)
@@ -598,7 +602,7 @@ def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_aut
                 conn.execute("INSERT INTO account_machines (account_id, node, enabled_by) VALUES (%s,%s,%s)",
                              (acc.id, body.node, user.subject))
         sync()
-        audit("account", "enable_machine", acc.id, "", None, user.subject, True, body.node)
+        publish_for(ctx, SharedAccountMachineEnabled(account=acc.id, actor=user.subject, node=body.node))
         ctx.events.emit("account.machine_enabled", account=acc.id, node=body.node, outcome="pending")
         return view(account_or_404(account_id), include_signin=True)
 
@@ -613,7 +617,7 @@ def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_aut
             " signin_expires_at=NULL WHERE account_id=%s AND node=%s AND status='pending'", (acc.id, node))
         if not changed:
             raise HTTPException(409, f"{acc.id} has no pending sign-in on {node}")
-        audit("account", "retry_signin", acc.id, "", None, user.subject, True, node)
+        publish_for(ctx, SharedAccountSignInRetried(account=acc.id, actor=user.subject, node=node))
         return view(account_or_404(account_id), include_signin=True)
 
     @app.delete("/v1/shared-accounts/{account_id}/machines/{node}")
@@ -633,8 +637,8 @@ def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_aut
         removed_account = False
         if last:
             removed_account = delete_account(acc)
-        audit("account", "remove_machine", acc.id, "", None, user.subject, True, node,
-              {"account_removed": removed_account})
+        publish_for(ctx, SharedAccountMachineRemoved(account=acc.id, actor=user.subject, node=node,
+                                                     account_removed=removed_account))
         ctx.events.emit("account.machine_removed", account=acc.id, node=node, outcome="removed")
         return {"account": acc.id, "node": node, "account_removed": removed_account,
                 "machines": [] if removed_account else [n for n in acc.machines if n != node]}
@@ -682,8 +686,7 @@ def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_aut
             for node in acc.machines:
                 detach_machine(acc, node, user.subject)
             retained = True
-        audit("account", "remove", acc.id, "", None, user.subject, True, "removed from all machines",
-              {"source_retained": retained})
+        publish_for(ctx, SharedAccountRemoved(account=acc.id, actor=user.subject, source_retained=retained))
         ctx.events.emit("account.removed", account=acc.id, outcome="removed")
         return {"account": acc.id, "removed": True, "source_retained": retained, "machines": list(acc.machines)}
 

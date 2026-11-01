@@ -67,4 +67,6 @@ The generated API reference documents these v4 contracts:
 - `POST /v1/runs/{run_id}/result` records a failure or timeout during a current hard-limit violation as retryable
   load-shed work, preserving the measurements that caused the retry.
 
+Saving machine load limits publishes `node.load_limits_saved` and writes the matching `write_audit` row.
+
 The Machines and AI screen is covered by the [screen guide](../screens/machines.md).

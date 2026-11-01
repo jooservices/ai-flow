@@ -215,3 +215,121 @@ class NodeOperationQueued(DomainEvent):
         return Audit("node", self.action, self.node, self.actor, "queued",
                      {"operation_id": self.operation_id, "components": self.components,
                       "service_count": self.service_count}, run_id=self.operation_id, fence=None)
+
+
+@event
+@dataclass(frozen=True)
+class SharedAccountCreated(DomainEvent):
+    type = "ai_account.created"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+
+    def audit(self) -> Audit:
+        return Audit("account", "create", self.account, self.actor, "created")
+
+
+@event
+@dataclass(frozen=True)
+class SharedAccountSessionLimitSet(DomainEvent):
+    type = "ai_account.session_limit_set"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+    session_limit: int
+
+    def audit(self) -> Audit:
+        return Audit("account", "session_limit", self.account, self.actor, str(self.session_limit))
+
+
+@event
+@dataclass(frozen=True)
+class SharedAccountMachineEnabled(DomainEvent):
+    type = "ai_account.machine_enabled"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+    node: str
+
+    def audit(self) -> Audit:
+        return Audit("account", "enable_machine", self.account, self.actor, self.node)
+
+
+@event
+@dataclass(frozen=True)
+class SharedAccountSignInRetried(DomainEvent):
+    type = "ai_account.sign_in_retried"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+    node: str
+
+    def audit(self) -> Audit:
+        return Audit("account", "retry_signin", self.account, self.actor, self.node)
+
+
+@event
+@dataclass(frozen=True)
+class SharedAccountMachineRemoved(DomainEvent):
+    type = "ai_account.machine_removed"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+    node: str
+    account_removed: bool
+
+    def audit(self) -> Audit:
+        return Audit("account", "remove_machine", self.account, self.actor, self.node,
+                     {"account_removed": self.account_removed})
+
+
+@event
+@dataclass(frozen=True)
+class SharedAccountRemoved(DomainEvent):
+    type = "ai_account.removed_everywhere"
+    owner = "fleet"
+    aggregate = "ai_account"
+    aggregate_field = "account"
+
+    account: str
+    actor: str
+    source_retained: bool
+
+    def audit(self) -> Audit:
+        return Audit("account", "remove", self.account, self.actor, "removed from all machines",
+                     {"source_retained": self.source_retained})
+
+
+@event
+@dataclass(frozen=True)
+class MachineLoadLimitsSaved(DomainEvent):
+    type = "node.load_limits_saved"
+    owner = "fleet"
+    aggregate = "node"
+    aggregate_field = "node"
+
+    node: str
+    actor: str
+    machine: dict
+    host: str | None
+    host_cpu_load_per_cpu: float | None
+
+    def audit(self) -> Audit:
+        return Audit("machine-load", "limits", self.node, self.actor, "load limits saved",
+                     {"machine": self.machine, "host": self.host,
+                      "host_cpu_load_per_cpu": self.host_cpu_load_per_cpu})

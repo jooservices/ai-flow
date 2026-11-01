@@ -27,3 +27,10 @@ The other fleet routes (`POST /v1/nodes/join`, `POST /v1/nodes/{name}/heartbeat`
 Audit: the accepted join-command, work-acceptance and check-probe-token writes publish `NodeJoinCommandCreated`,
 `NodeWorkAcceptanceChanged` and `CheckProbeTokenIssued`; the audit ledger writes their existing rows in the event
 transaction. Refused writes still call `audit()` with `accepted=False`.
+
+The successful node join (`node.agent_joined`), managed-account add (`ai_account.added`), management update
+(`ai_account.management_changed`), sign-in restart (`ai_account.sign_in_restarted`), sign-in completion
+(`ai_account.sign_in_completed`) and removal (`ai_account.removed`), node removal (`node.managed_removed`), and
+node-operation queue (`node.operation_queued`) writes publish `NodeJoined`, `AiAccountAdded`,
+`AiAccountManagementChanged`, `AiAccountSignInRestarted`, `AiAccountSignInCompleted`, `AiAccountRemoved`,
+`NodeRemoved` and `NodeOperationQueued`. The audit ledger writes each event's existing row in the same transaction.

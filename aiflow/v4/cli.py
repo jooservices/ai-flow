@@ -145,7 +145,7 @@ def _console_user(a, s) -> int:
         db.close()
 
 
-def _scale_proof(a: argparse.Namespace) -> int:
+def run_scale_proof(a: argparse.Namespace) -> int:
     """Run the scenario in a scratch database, print every budget, write and submit the report.
 
     Exit 0: within every budget. 1: a budget is exceeded or behaviour was incorrect (the release must not ship).
@@ -186,11 +186,7 @@ def _scale_proof(a: argparse.Namespace) -> int:
     return code
 
 
-def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=os.environ.get("AIFLOW4_LOG_LEVEL", "INFO"),
-                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    ap = argparse.ArgumentParser(prog="aiflow4", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+def add_core_commands(sub: argparse._SubParsersAction) -> None:
     sub.add_parser("version")
     sub.add_parser("migrate")
     sub.add_parser("import-inventory", help="one-time import of machines and AI accounts from the control repo into "
@@ -199,6 +195,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8080)
     sub.add_parser("control-loops")
+
+
+def add_node_commands(sub: argparse._SubParsersAction) -> None:
     pn = sub.add_parser("node")
     pn.add_argument("action", choices=["join"])
     pn.add_argument("--name")
@@ -210,6 +209,9 @@ def main(argv: list[str] | None = None) -> int:
     pa = sub.add_parser("node-agent")
     pa.add_argument("--slots", type=int, default=2)
     pa.add_argument("--no-workers", action="store_true")
+
+
+def add_canary_commands(sub: argparse._SubParsersAction) -> None:
     pc = sub.add_parser("canary")
     canary_sub = pc.add_subparsers(dest="canary_action", required=True)
     pe = canary_sub.add_parser("evaluate")
@@ -234,6 +236,9 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--measurements", required=True)
     pp.add_argument("--minimum-runs", type=int, default=5)
     canary_sub.add_parser("retry-tickets")
+
+
+def add_notification_commands(sub: argparse._SubParsersAction) -> None:
     pnotify = sub.add_parser("notify", help="send a system alert using saved notification channels")
     pnotify.add_argument("--severity", choices=("info", "warning", "critical"), required=True)
     pnotify.add_argument("--title", required=True)
@@ -246,6 +251,9 @@ def main(argv: list[str] | None = None) -> int:
     pba_setup.add_argument("--chat-id", required=True)
     pba_setup.add_argument("--project", required=True)
     pba_setup.add_argument("--token-stdin", action="store_true", help="read the bot token from stdin")
+
+
+def add_release_commands(sub: argparse._SubParsersAction) -> None:
     pu = sub.add_parser("upgrade-check")
     pu.add_argument("--target", required=True)
     pu.add_argument("--current", default="")
@@ -271,6 +279,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="attach the result to the release on this control plane (token: AIFLOW4_OWNER_TOKEN)")
     psp.add_argument("--database-url", default=os.environ.get("AIFLOW4_TEST_DATABASE_URL", ""))
     psp.add_argument("--redis-url", default=os.environ.get("AIFLOW4_TEST_REDIS_URL", ""))
+
+
+def add_admin_commands(sub: argparse._SubParsersAction) -> None:
     ps = sub.add_parser("secret")
     ps.add_argument("action", choices=["set", "list"])
     ps.add_argument("name", nargs="?")
@@ -288,206 +299,279 @@ def main(argv: list[str] | None = None) -> int:
     pu2.add_argument("--role", default="super_admin")
     pu2.add_argument("--name", default="")
     pu2.add_argument("--password-file", help="where the generated password is written (mode 0600); it is never printed")
-    a = ap.parse_args(argv)
 
-    if a.cmd == "install":
-        from .install.control import ControlInstaller, Options
-        return ControlInstaller(Options(version=a.release, domain=a.domain, rollback=a.rollback, stack=a.stack,
-                                        si=a.si, vpn=a.vpn, otel_collector=a.otel_collector,
-                                        health_timeout=a.health_timeout, admin_email=a.admin_email)).run()
-    if a.cmd == "scale-proof":
-        return _scale_proof(a)
-    if a.cmd == "secret":
-        from .install.control import secret_command
-        return secret_command(a.action, a.name, a.stdin)
-    s = Settings.from_env()
 
-    if a.cmd == "version":
-        print(VERSION)
-        return 0
-    if a.cmd == "upgrade-check":
-        # Run from the new release before the control plane switches to it; exit 9 blocks the upgrade.
-        from types import SimpleNamespace
-        from .control.db import DB, MIGRATIONS
-        from .control.events import Events
-        from .control.rollout import check_upgrade, record_check
-        db = DB(s.database_url, max_size=2)
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="aiflow4", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    add_core_commands(sub)
+    add_node_commands(sub)
+    add_canary_commands(sub)
+    add_notification_commands(sub)
+    add_release_commands(sub)
+    add_admin_commands(sub)
+    return ap
+
+
+def run_install(a: argparse.Namespace) -> int:
+    from .install.control import ControlInstaller, Options
+    options = Options(version=a.release, domain=a.domain, rollback=a.rollback, stack=a.stack,
+                      si=a.si, vpn=a.vpn, otel_collector=a.otel_collector,
+                      health_timeout=a.health_timeout, admin_email=a.admin_email)
+    return ControlInstaller(options).run()
+
+
+def run_secret(a: argparse.Namespace) -> int:
+    from .install.control import secret_command
+    return secret_command(a.action, a.name, a.stdin)
+
+
+def run_version(a: argparse.Namespace, s: Settings) -> int:
+    print(VERSION)
+    return 0
+
+
+def run_upgrade_check(a: argparse.Namespace, s: Settings) -> int:
+    # Run from the new release before the control plane switches to it; exit 9 blocks the upgrade.
+    from types import SimpleNamespace
+    from .control.db import DB, MIGRATIONS
+    from .control.events import Events
+    from .control.rollout import check_upgrade, record_check
+    db = DB(s.database_url, max_size=2)
+    try:
+        result = check_upgrade(db, a.target, Path(a.migrations) if a.migrations else MIGRATIONS,
+                               Path(a.baseline) if a.baseline else None, a.current, s.version_max_minor_lag)
+        record_check(SimpleNamespace(db=db, settings=s, events=Events(db, s.o2_url, s.o2_basic)), result)
+        print(json.dumps(result, separators=(",", ":")))
+    finally:
+        db.close()
+    return 0 if result["ok"] else 9
+
+
+def run_console_user(a: argparse.Namespace, s: Settings) -> int:
+    return _console_user(a, s)
+
+
+def run_backup(a: argparse.Namespace, s: Settings) -> int:
+    from .core import backups
+    try:
+        key = backups.read_key(a.key_file)
+        result = backups.restore_archive(a.source, key, s.database_url, s,
+                                         s3_endpoint=a.s3_endpoint, s3_region=a.s3_region)
+    except backups.BackupError as exc:
+        print(f"restore failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Backup: {result.get('backup', a.source)}")
+    for name in ("database", "stored_secrets", "control_repository", "knowledge"):
+        component = result["components"].get(name, {"status": "failed", "detail": "no outcome was recorded"})
+        label = {"database": "Database", "stored_secrets": "Stored secrets",
+                 "control_repository": "Control repository settings", "knowledge": "Knowledge"}[name]
+        print(f"{label}: {component['status']} — {component['detail']}")
+    return 0 if result.get("ok") else 1
+
+
+def run_migrate(a: argparse.Namespace, s: Settings) -> int:
+    from .control.db import DB
+    db = DB(s.database_url)
+    print("applied:", db.migrate() or "nothing")
+    return 0
+
+
+def run_import_inventory(a: argparse.Namespace, s: Settings) -> int:
+    from .control import inventory
+    from .control.github import GitHubApp
+    from .control.db import DB
+    db = DB(s.database_url)
+    try:
+        db.migrate()
+        cache = RepoCache(s.control_repo, pull_every=0)
+        cache.refresh()  # the import and the remote cleanup both work from the latest pulled revision
+        repo = cache()
+        app_dir = Path(s.github_app_dir)
+        has_app = (app_dir / "app.json").is_file() and (app_dir / "app.pem").is_file()
+        factory = (lambda: GitHubApp(s.github_app_dir, s.github_org)) if has_app else None
+        result = inventory.import_and_clean(db, repo, factory, Path(s.control_repo).name if has_app else "")
+    finally:
+        db.close()
+    print("imported" if result["imported"] else "already imported; nothing changed",
+          f"({result['machines']} machines, {result['accounts']} AI accounts)")
+    return 0
+
+
+def run_control_api(a: argparse.Namespace, s: Settings) -> int:
+    import uvicorn
+    from .control.api import create_app
+    from .control.ui import mount_ui
+    wait_for_control_stores(s)
+    ctx = build_ctx(s)
+    ctx.db.migrate()
+    ctx.events.start()
+    app = create_app(ctx)
+    mount_ui(app, ctx)
+    uvicorn.run(app, host=a.host, port=a.port, log_level="warning", proxy_headers=True)
+    return 0
+
+
+def run_control_loops(a: argparse.Namespace, s: Settings) -> int:
+    from .control.loops import run_loops
+    wait_for_control_stores(s)
+    ctx = build_ctx(s)
+    ctx.db.migrate()
+    run_loops(ctx)
+    return 0
+
+
+def run_notify(a: argparse.Namespace, s: Settings) -> int:
+    from types import SimpleNamespace
+    from .control.db import DB
+    from .control import notify
+    db = DB(s.database_url, max_size=2)
+    try:
+        notify.send(a.severity, a.title, a.detail, a.link, ctx=SimpleNamespace(db=db, settings=s))
+    finally:
+        db.close()
+    return 0
+
+
+def run_ba_chat(a: argparse.Namespace, s: Settings) -> int:
+    import getpass
+    from .control.db import DB
+    from .control import ba_chat, notify
+    from .core.controlrepo import ControlRepo
+    project_key = a.project.strip().upper()
+    if not ba_chat.PROJECT_KEY.fullmatch(project_key) or project_key not in ControlRepo.load(s.control_repo).projects:
+        print("choose a configured Jira project", file=sys.stderr)
+        return 2
+    if not a.token_stdin and not sys.stdin.isatty():
+        print("use --token-stdin for non-interactive setup", file=sys.stderr)
+        return 2
+    bot_token = (sys.stdin.read() if a.token_stdin else getpass.getpass("Telegram bot token: ")).strip()
+    if not bot_token:
+        print("Telegram bot token is required", file=sys.stderr)
+        return 2
+    db = DB(s.database_url, max_size=2)
+    try:
+        db.migrate()
+        existing = db.one("SELECT id FROM notification_channels WHERE kind='telegram' AND name=%s", (a.name,))
+        notify.save_channel(db, {"id": existing["id"] if existing else None, "kind": "telegram",
+            "name": a.name, "enabled": True,
+            "config": {"bot_token": bot_token, "chat_id": a.chat_id, "ba_chat_enabled": True,
+                       "project_key": project_key}})
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    finally:
+        db.close()
+    print("Telegram BA chat channel configured; credentials are hidden.")
+    return 0
+
+
+def run_canary(a: argparse.Namespace, s: Settings) -> None:
+    from datetime import datetime, timezone
+    from .control.canary import (Thresholds, decide, measure_registry, record_promotion,
+                                 record_rollback, retry_pending_flow_bugs)
+    if a.canary_action == "evaluate":
+        from .control.db import DB
+        db = DB(s.database_url)
         try:
-            result = check_upgrade(db, a.target, Path(a.migrations) if a.migrations else MIGRATIONS,
-                                   Path(a.baseline) if a.baseline else None, a.current, s.version_max_minor_lag)
-            record_check(SimpleNamespace(db=db, settings=s, events=Events(db, s.o2_url, s.o2_basic)), result)
+            installed = db.one("SELECT release_version FROM nodes WHERE name=%s", (a.node,))
+            measurements = measure_registry(db, a.node, datetime.fromisoformat(a.started_at), a.previous)
+            thresholds = Thresholds.from_values(a.minimum_age_s, a.minimum_runs, a.maximum_age_s,
+                                                a.failure_ratio, a.minimum_infra_failures)
+            elapsed = max(0, int((datetime.now(timezone.utc) - datetime.fromisoformat(a.started_at)).total_seconds()))
+            result = decide(measurements, elapsed, thresholds,
+                            installed=bool(installed and installed["release_version"] == a.target))
             print(json.dumps(result, separators=(",", ":")))
         finally:
             db.close()
-        return 0 if result["ok"] else 9
-    if a.cmd == "console-user":
-        return _console_user(a, s)
-    if a.cmd == "backup" and a.backup_action == "restore":
-        from .core import backups
-        try:
-            key = backups.read_key(a.key_file)
-            result = backups.restore_archive(a.source, key, s.database_url, s,
-                                             s3_endpoint=a.s3_endpoint, s3_region=a.s3_region)
-        except backups.BackupError as exc:
-            print(f"restore failed: {exc}", file=sys.stderr)
-            return 1
-        print(f"Backup: {result.get('backup', a.source)}")
-        for name in ("database", "stored_secrets", "control_repository", "knowledge"):
-            component = result["components"].get(name, {"status": "failed", "detail": "no outcome was recorded"})
-            label = {"database": "Database", "stored_secrets": "Stored secrets",
-                     "control_repository": "Control repository settings", "knowledge": "Knowledge"}[name]
-            print(f"{label}: {component['status']} — {component['detail']}")
-        return 0 if result.get("ok") else 1
-    if a.cmd == "migrate":
-        from .control.db import DB
-        db = DB(s.database_url)
-        print("applied:", db.migrate() or "nothing")
-        return 0
-    if a.cmd == "import-inventory":
-        from .control import inventory
-        from .control.github import GitHubApp
-        from .control.db import DB
-        db = DB(s.database_url)
-        try:
-            db.migrate()
-            cache = RepoCache(s.control_repo, pull_every=0)
-            cache.refresh()  # the import and the remote cleanup both work from the latest pulled revision
-            repo = cache()
-            app_dir = Path(s.github_app_dir)
-            has_app = (app_dir / "app.json").is_file() and (app_dir / "app.pem").is_file()
-            factory = (lambda: GitHubApp(s.github_app_dir, s.github_org)) if has_app else None
-            result = inventory.import_and_clean(db, repo, factory, Path(s.control_repo).name if has_app else "")
-        finally:
-            db.close()
-        print("imported" if result["imported"] else "already imported; nothing changed",
-              f"({result['machines']} machines, {result['accounts']} AI accounts)")
-        return 0
-    if a.cmd == "control-api":
-        import uvicorn
-        from .control.api import create_app
-        from .control.ui import mount_ui
-        wait_for_control_stores(s)
-        ctx = build_ctx(s)
-        ctx.db.migrate()
-        ctx.events.start()
-        app = create_app(ctx)
-        mount_ui(app, ctx)
-        uvicorn.run(app, host=a.host, port=a.port, log_level="warning", proxy_headers=True)
-        return 0
-    if a.cmd == "control-loops":
-        from .control.loops import run_loops
-        wait_for_control_stores(s)
-        ctx = build_ctx(s)
-        ctx.db.migrate()
-        run_loops(ctx)
-        return 0
-    if a.cmd == "notify":
-        from types import SimpleNamespace
-        from .control.db import DB
-        from .control import notify
-        db = DB(s.database_url, max_size=2)
-        try:
-            notify.send(a.severity, a.title, a.detail, a.link, ctx=SimpleNamespace(db=db, settings=s))
-        finally:
-            db.close()
-        return 0
-    if a.cmd == "ba-chat" and a.ba_action == "setup":
-        import getpass
-        from .control.db import DB
-        from .control import ba_chat, notify
-        from .core.controlrepo import ControlRepo
-        project_key = a.project.strip().upper()
-        if not ba_chat.PROJECT_KEY.fullmatch(project_key) or project_key not in ControlRepo.load(s.control_repo).projects:
-            print("choose a configured Jira project", file=sys.stderr)
-            return 2
-        if not a.token_stdin and not sys.stdin.isatty():
-            print("use --token-stdin for non-interactive setup", file=sys.stderr)
-            return 2
-        bot_token = (sys.stdin.read() if a.token_stdin else getpass.getpass("Telegram bot token: ")).strip()
-        if not bot_token:
-            print("Telegram bot token is required", file=sys.stderr)
-            return 2
-        db = DB(s.database_url, max_size=2)
-        try:
-            db.migrate()
-            existing = db.one("SELECT id FROM notification_channels WHERE kind='telegram' AND name=%s", (a.name,))
-            notify.save_channel(db, {"id": existing["id"] if existing else None, "kind": "telegram",
-                "name": a.name, "enabled": True,
-                "config": {"bot_token": bot_token, "chat_id": a.chat_id, "ba_chat_enabled": True,
-                           "project_key": project_key}})
-        except ValueError as exc:
-            print(str(exc), file=sys.stderr)
-            return 2
-        finally:
-            db.close()
-        print("Telegram BA chat channel configured; credentials are hidden.")
-        return 0
-    if a.cmd == "canary":
-        from datetime import datetime, timezone
-        from .control.canary import (Thresholds, decide, measure_registry, record_promotion,
-                                     record_rollback, retry_pending_flow_bugs)
-        if a.canary_action == "evaluate":
-            from .control.db import DB
-            db = DB(s.database_url)
-            try:
-                installed = db.one("SELECT release_version FROM nodes WHERE name=%s", (a.node,))
-                measurements = measure_registry(db, a.node, datetime.fromisoformat(a.started_at), a.previous)
-                thresholds = Thresholds.from_values(a.minimum_age_s, a.minimum_runs, a.maximum_age_s,
-                                                    a.failure_ratio, a.minimum_infra_failures)
-                elapsed = max(0, int((datetime.now(timezone.utc) - datetime.fromisoformat(a.started_at)).total_seconds()))
-                result = decide(measurements, elapsed, thresholds,
-                                installed=bool(installed and installed["release_version"] == a.target))
-                print(json.dumps(result, separators=(",", ":")))
-            finally:
-                db.close()
-            return 0
-        ctx = build_ctx(s)
-        try:
-            if a.canary_action == "retry-tickets":
-                print(json.dumps(retry_pending_flow_bugs(ctx), separators=(",", ":")))
-                return 0
-            measurements = json.loads(a.measurements)
-            if a.canary_action == "record-rollback":
-                result = record_rollback(ctx, node=a.node, target=a.target, previous=a.previous,
-                                         commit=a.commit, measurements=measurements)
-            else:
-                result = {"incident_opened": record_promotion(
-                    ctx, target=a.target, node=a.node, measurements=measurements, under_observed=True,
-                    required_runs=a.minimum_runs)}
-            print(json.dumps(result, separators=(",", ":")))
-        finally:
-            ctx.db.close()
-            ctx.leases.r.close()
-        return 0
-    if a.cmd == "node":
-        import httpx
-        control = a.control or s.control_url
-        join_secret = sys.stdin.read().strip() if a.join_token_stdin else Path(a.join_token_file).read_text().strip()
-        payload = {"join_token": join_secret, "ip": a.ip}
-        if a.name:
-            payload["name"] = a.name
-        r = httpx.post(f"{control.rstrip('/')}/v1/nodes/join", json=payload,
-                       timeout=30)
-        r.raise_for_status()
-        tok = Path(s.node_token_file)
-        tok.parent.mkdir(parents=True, exist_ok=True)
-        old = os.umask(0o077)
-        tok.write_text(r.json()["node_token"])
-        os.umask(old)
-        print(f"joined {r.json()['node']}; token in {tok}")
-        return 0
-    if a.cmd == "node-agent":
-        from .node.agent import run_agent
-        token = Path(s.node_token_file).read_text().strip()
-        run_agent(s.control_url, s.node_name or os.uname().nodename, token, slots=a.slots, manage_workers=not a.no_workers)
-        return 0
-    if a.cmd == "worker":
-        from .worker.loop import Worker
-        token = Path(s.node_token_file).read_text().strip()
-        Worker(a.account, s.control_url, token, s.node_name or os.uname().nodename, s.srv_root,
-               heartbeat_s=s.heartbeat_s, poll_s=s.poll_s).run_forever()
-        return 0
+        return
+    ctx = build_ctx(s)
+    try:
+        if a.canary_action == "retry-tickets":
+            print(json.dumps(retry_pending_flow_bugs(ctx), separators=(",", ":")))
+            return
+        measurements = json.loads(a.measurements)
+        if a.canary_action == "record-rollback":
+            result = record_rollback(ctx, node=a.node, target=a.target, previous=a.previous,
+                                     commit=a.commit, measurements=measurements)
+        else:
+            result = {"incident_opened": record_promotion(
+                ctx, target=a.target, node=a.node, measurements=measurements, under_observed=True,
+                required_runs=a.minimum_runs)}
+        print(json.dumps(result, separators=(",", ":")))
+    finally:
+        ctx.db.close()
+        ctx.leases.r.close()
+
+
+def run_node(a: argparse.Namespace, s: Settings) -> int:
+    import httpx
+    control = a.control or s.control_url
+    join_secret = sys.stdin.read().strip() if a.join_token_stdin else Path(a.join_token_file).read_text().strip()
+    payload = {"join_token": join_secret, "ip": a.ip}
+    if a.name:
+        payload["name"] = a.name
+    r = httpx.post(f"{control.rstrip('/')}/v1/nodes/join", json=payload, timeout=30)
+    r.raise_for_status()
+    tok = Path(s.node_token_file)
+    tok.parent.mkdir(parents=True, exist_ok=True)
+    old = os.umask(0o077)
+    tok.write_text(r.json()["node_token"])
+    os.umask(old)
+    print(f"joined {r.json()['node']}; token in {tok}")
+    return 0
+
+
+def run_node_agent(a: argparse.Namespace, s: Settings) -> int:
+    from .node.agent import run_agent
+    token = Path(s.node_token_file).read_text().strip()
+    run_agent(s.control_url, s.node_name or os.uname().nodename, token, slots=a.slots,
+              manage_workers=not a.no_workers)
+    return 0
+
+
+def run_worker(a: argparse.Namespace, s: Settings) -> int:
+    from .worker.loop import Worker
+    token = Path(s.node_token_file).read_text().strip()
+    Worker(a.account, s.control_url, token, s.node_name or os.uname().nodename, s.srv_root,
+           heartbeat_s=s.heartbeat_s, poll_s=s.poll_s).run_forever()
+    return 0
+
+
+def run_unknown(a: argparse.Namespace, s: Settings) -> int:
     return 2
+
+
+_COMMANDS = {
+    "version": run_version,
+    "migrate": run_migrate,
+    "import-inventory": run_import_inventory,
+    "control-api": run_control_api,
+    "control-loops": run_control_loops,
+    "node": run_node,
+    "node-agent": run_node_agent,
+    "canary": run_canary,
+    "notify": run_notify,
+    "ba-chat": run_ba_chat,
+    "upgrade-check": run_upgrade_check,
+    "worker": run_worker,
+    "install": run_install,
+    "scale-proof": run_scale_proof,
+    "secret": run_secret,
+    "backup": run_backup,
+    "console-user": run_console_user,
+}
+_SETTINGS_FREE_COMMANDS = {"install", "scale-proof", "secret"}
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=os.environ.get("AIFLOW4_LOG_LEVEL", "INFO"),
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    a = build_parser().parse_args(argv)
+    handler = _COMMANDS.get(a.cmd, run_unknown)
+    if a.cmd in _SETTINGS_FREE_COMMANDS:
+        return handler(a) or 0
+    return handler(a, Settings.from_env()) or 0
 
 
 def wait_for_control_stores(settings) -> None:

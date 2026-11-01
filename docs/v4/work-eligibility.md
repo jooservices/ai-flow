@@ -2,6 +2,8 @@
 
 `GET /v1/work/candidates` and `POST /v1/work/claim` use the same ordered eligibility pipeline. Claim revalidation can
 scope that pipeline to one ticket and step while retaining the same checks and filters.
+The exception is a claim of step `master`: it does not use this pipeline but takes its candidate from `master_candidate`
+(`aiflow/v4/control/features/work_routes/routes.py`); the candidate listing never calls it.
 
 ## Stages
 

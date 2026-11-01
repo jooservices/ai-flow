@@ -145,13 +145,10 @@ def _engine_storage_ready(data: dict[str, Any]) -> tuple[Path, Path] | None:
 
 def _engine_capacity_ready(graphroot: Path, engine_home: Path) -> bool:
     usage, runtime_usage = shutil.disk_usage(graphroot), shutil.disk_usage(engine_home)
-    if usage.total < TOTAL_STORAGE_LIMIT + RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE:
-        return False
-    if runtime_usage.total < RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE:
-        return False
-    if runtime_usage.free < RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE:
-        return False
-    return True
+    runtime_floor = RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE
+    return not (usage.total < TOTAL_STORAGE_LIMIT + runtime_floor
+                or runtime_usage.total < runtime_floor
+                or runtime_usage.free < runtime_floor)
 
 
 def _compose_provider_version() -> list[str] | None:

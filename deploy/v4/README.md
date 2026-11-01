@@ -17,6 +17,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Master AI rescue](../../docs/v4/master-rescue.md): Claude takes a long Blocked or over-time ticket once, with its own budget; owner-only work and an unavailable Claude go to the owner, a failed rescue returns to development
 - [Shared worker fairness](../../docs/v4/shared-worker-fairness.md): round-robin ready tickets across projects while preserving rework preference and each project's priority and age order
 - [Work eligibility pipeline](../../docs/v4/work-eligibility.md): named account, node, project and role rules feed step collectors and the existing ordering and routing stages
+- [Container command policy structure](../../docs/v4/policy-structure.md): named checks for the safe build, run and compose command forms
 - [Work claim stages](../../docs/v4/work-claim.md): ordered named steps for eligibility, lease and hot-file acquisition, run registration and response building
 - [Review metrics](../../docs/v4/review-metrics.md): weekly waits, finished tickets without human-review activity, waiting durations and review decisions
 
@@ -66,6 +67,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Control API audit against the HTTP standard](../../docs/v4/api-rest-audit.md): every route with its findings and a proposed resource-oriented design, kept complete by a test
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
 - [Master autonomy](../../docs/v4/master.md): budgeted fenced monitoring, safe actions, owner escalations, invalid-plan recovery and a weekly Command Center report
+- [Master action steps](../../docs/v4/master-action-steps.md): named policy, denial, escalation and action steps preserve the fenced master route behavior
 - [Ticket timeline routes](../../docs/v4/route-module-tickets.md): the ticket timeline routes are served from their own router module
 - [Rework loop limit](../../docs/v4/rework-loop-limit.md): allow three rework returns by default, block the fourth with per-round reasons, and honor project overrides
 - [Owner question deadline](../../docs/v4/escalation-deadline.md): an unanswered question with a reversible recommendation is applied after 12 hours

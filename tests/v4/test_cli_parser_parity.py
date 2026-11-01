@@ -151,6 +151,7 @@ def _parser_spec(parser: argparse.ArgumentParser) -> dict[str, Any]:
 def _set_parser_environment(monkeypatch) -> None:
     monkeypatch.setenv("AIFLOW4_TEST_DATABASE_URL", "postgresql://db.example/aiflow_test")
     monkeypatch.setenv("AIFLOW4_TEST_REDIS_URL", "redis://redis.example/0")
+    monkeypatch.setenv("COLUMNS", "80")  # argparse wraps help text to the terminal width
 
 
 def test_parser_spec_matches_golden(monkeypatch) -> None:

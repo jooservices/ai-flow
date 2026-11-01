@@ -136,3 +136,64 @@ class GitHubBranchDeleted(DomainEvent):
         return Audit("github", "delete-branch", self.ticket, self.actor,
                      "deleted" if self.deleted else "already gone",
                      {"branch": self.branch, "repo": self.repo}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class GitHubPushAccepted(DomainEvent):
+    type = "github.push_accepted"
+    owner = "github_fenced"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    repo: str
+    branch: str
+
+    def audit(self) -> Audit:
+        return Audit("github", "git-push", self.ticket, self.actor, "pushed",
+                     {"repo": self.repo, "branch": self.branch}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class GitHubPrClosed(DomainEvent):
+    type = "github.pr_closed"
+    owner = "github_fenced"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    repo: str
+    number: int
+
+    def audit(self) -> Audit:
+        return Audit("github", "close", self.ticket, self.actor, "pull request closed",
+                     {"number": self.number, "repo": self.repo}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class GitHubBranchUpdated(DomainEvent):
+    type = "github.branch_updated"
+    owner = "github_fenced"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    repo: str
+    number: int
+    message: str
+
+    def audit(self) -> Audit:
+        return Audit("github", "update-branch", self.ticket, self.actor, self.message,
+                     {"number": self.number, "repo": self.repo}, self.run_id, self.fence)

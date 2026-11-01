@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ from conftest import FakeGitHub, add_ticket, join_node
 from test_projects import owner_sign_in, prepare_project_control, worker_headers
 from test_reviews import add_review_run
 import aiflow.v4.control.api as api
-from aiflow.v4.control import gateway_helpers
+from aiflow.v4.control import gateway_helpers, route_deps
 from aiflow.v4.control.gateway_helpers import github_gateway
 from aiflow.v4.control.github import GitHubApp, GitHubError
 from aiflow.v4.control.github_connections import GitHubConnections
@@ -213,6 +214,7 @@ def test_review_rejection_comments_and_closes_pr_through_the_assigned_connection
     add_ticket(ctx.db, key, status="Human review", labels=("require-human",))
     add_review_run(ctx, key, pr_url="https://github.com/person/tool/pull/42",
                    details={"repository": "person/tool"})
+    route_deps.github_connection_used.set("")
     response = client.post(f"/v1/reviews/{key}/reject", json={"reason": "Out of scope."},
                            headers={"Authorization": "Bearer review-secret"})
 
@@ -224,6 +226,19 @@ def test_review_rejection_comments_and_closes_pr_through_the_assigned_connection
                         " AND action IN ('comment','close') ORDER BY id", (key,))
     assert [row["action"] for row in writes] == ["comment", "close"]
     assert all(row["payload"]["connection"] == connection for row in writes)
+    closed_events = ctx.db.all("SELECT type,aggregate,aggregate_id,payload FROM domain_events"
+                               " WHERE type='github.pr_closed' ORDER BY seq")
+    assert len(closed_events) == 1
+    closed = closed_events[0]
+    assert closed["type"] == "github.pr_closed" and closed["aggregate"] == "run"
+    assert closed["payload"] == {"run_id": closed["aggregate_id"], "fence": 1, "ticket": key,
+                                  "actor": "reviewer-console", "repo": "person/tool", "number": 42}
+    close_audit = ctx.db.one("SELECT target,action,ticket,run_id,fence,actor,accepted,result,payload"
+                             " FROM write_audit WHERE target='github' AND action='close' AND ticket=%s", (key,))
+    assert close_audit == {"target": "github", "action": "close", "ticket": key,
+                           "run_id": closed["payload"]["run_id"], "fence": 1,
+                           "actor": "reviewer-console", "accepted": True, "result": "pull request closed",
+                           "payload": {"number": 42, "repo": "person/tool", "connection": connection}}
 
 
 def test_check_probe_uses_assigned_connection_and_relays_token_credentials_read_only(
@@ -462,13 +477,26 @@ def test_commands_use_assigned_token_connection_through_repository_transfer_rela
                               headers={**basic(push_token["token"]),
                                        "Content-Type": "application/x-git-receive-pack-request"})
     assert denied_push.status_code == 403
+    route_deps.github_connection_used.set("")
     pushed = client.post("/v1/github/git/person/tool.git/git-receive-pack", content=pack_request,
                          headers={**basic(push_token["token"]),
                                   "Content-Type": "application/x-git-receive-pack-request"})
     assert pushed.status_code == 200
     assert upstream_calls[-1][1:3] == (".git/git-receive-pack", "POST")
-    assert ctx.db.one("SELECT payload FROM write_audit WHERE action='git-push' ORDER BY id DESC LIMIT 1")[
-        "payload"]["connection"] == conn
+    push_events = ctx.db.all("SELECT type,aggregate,aggregate_id,payload FROM domain_events"
+                             " WHERE type='github.push_accepted' ORDER BY seq")
+    assert push_events == [{"type": "github.push_accepted", "aggregate": "run",
+                            "aggregate_id": claimed["run_id"],
+                            "payload": {"run_id": claimed["run_id"], "fence": claimed["fence"],
+                                        "ticket": "TESTWP-51", "actor": "codex-01",
+                                        "repo": "person/tool", "branch": branch}}]
+    push_audit = ctx.db.one("SELECT target,action,ticket,run_id,fence,actor,accepted,result,payload"
+                            " FROM write_audit WHERE target='github' AND action='git-push'"
+                            " ORDER BY id DESC LIMIT 1")
+    assert push_audit == {"target": "github", "action": "git-push", "ticket": "TESTWP-51",
+                          "run_id": claimed["run_id"], "fence": claimed["fence"], "actor": "codex-01",
+                          "accepted": True, "result": "pushed",
+                          "payload": {"repo": "person/tool", "branch": branch, "connection": conn}}
 
     out_of_scope = client.get("/v1/github/git/person/not-the-repo.git/info/refs",
                               params={"service": "git-upload-pack"}, headers=basic(credential["token"]))
@@ -490,9 +518,60 @@ def test_commands_use_assigned_token_connection_through_repository_transfer_rela
     published = ctx.db.all("SELECT type, payload FROM domain_events WHERE aggregate='run' AND aggregate_id=%s"
                            " AND type LIKE 'github.%%' ORDER BY seq", (claimed["run_id"],))
     assert [e["type"] for e in published] == ["github.git_relay_token_issued", "github.git_relay_token_issued",
-                                              "github.pr_created", "github.comment_posted"]
+                                              "github.push_accepted", "github.pr_created", "github.comment_posted"]
     assert all(e["payload"]["run_id"] == claimed["run_id"] and e["payload"]["fence"] == claimed["fence"]
                for e in published)
+
+
+def test_update_branch_publishes_only_successful_write_events(client, ctx):
+    headers = worker_headers(client)
+    key = "TESTWP-478"
+    add_ticket(ctx.db, key, status="In Verify")
+    run_id = str(uuid.uuid4())
+    claim = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)
+    assert claim.ok
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,token_hash)"
+               " VALUES (%s,%s,'TESTWP','verify','codex-01','codex','node1',%s,'')",
+               (run_id, key, claim.fence))
+    repo = ctx.repo().projects["TESTWP"].repo
+    success_result = {"ok": True, "message": "202: Updating pull request branch."}
+    ctx.github.update_branch_result = success_result
+    route_deps.github_connection_used.set("")
+
+    succeeded = client.post("/v1/github/update-branch",
+                            json={"run_id": run_id, "fence": claim.fence, "number": 42, "body": ""}, headers=headers)
+
+    assert succeeded.status_code == 200 and succeeded.json() == success_result
+    events = ctx.db.all("SELECT type,aggregate,aggregate_id,payload FROM domain_events"
+                        " WHERE type='github.branch_updated' ORDER BY seq")
+    assert events == [{"type": "github.branch_updated", "aggregate": "run", "aggregate_id": run_id,
+                       "payload": {"run_id": run_id, "fence": claim.fence, "ticket": key,
+                                   "actor": "codex-01", "repo": repo, "number": 42,
+                                   "message": success_result["message"][:200]}}]
+    success_audit = ctx.db.one("SELECT target,action,ticket,run_id,fence,actor,accepted,result,payload"
+                               " FROM write_audit WHERE target='github' AND action='update-branch'"
+                               " ORDER BY id DESC LIMIT 1")
+    assert success_audit == {"target": "github", "action": "update-branch", "ticket": key,
+                             "run_id": run_id, "fence": claim.fence, "actor": "codex-01",
+                             "accepted": True, "result": success_result["message"][:200],
+                             "payload": {"number": 42, "repo": repo, "connection": "default"}}
+
+    failure_result = {"ok": False, "message": "422: Cannot update pull request branch."}
+    ctx.github.update_branch_result = failure_result
+    route_deps.github_connection_used.set("")
+    failed = client.post("/v1/github/update-branch",
+                         json={"run_id": run_id, "fence": claim.fence, "number": 42, "body": ""}, headers=headers)
+
+    assert failed.status_code == 200 and failed.json() == failure_result
+    assert ctx.db.all("SELECT type,aggregate,aggregate_id,payload FROM domain_events"
+                      " WHERE type='github.branch_updated' ORDER BY seq") == events
+    failure_audit = ctx.db.one("SELECT target,action,ticket,run_id,fence,actor,accepted,result,payload"
+                               " FROM write_audit WHERE target='github' AND action='update-branch'"
+                               " ORDER BY id DESC LIMIT 1")
+    assert failure_audit == {"target": "github", "action": "update-branch", "ticket": key,
+                             "run_id": run_id, "fence": claim.fence, "actor": "codex-01",
+                             "accepted": False, "result": failure_result["message"][:200],
+                             "payload": {"number": 42, "repo": repo, "connection": "default"}}
 
 
 def test_pull_request_row_rolls_back_with_its_audit_event(client, ctx, control_repo, secrets_dir, monkeypatch):

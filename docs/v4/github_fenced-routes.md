@@ -45,7 +45,8 @@ A successful fenced write publishes a domain event defined in `features/github_f
 control relay), `github.pr_lookup_completed` (`GET /v1/github/pr`), `github.pr_created` (`POST /v1/github/pr`, whose
 `runs.pr_url` update is in the same transaction), `github.comment_posted` (`POST /v1/github/comment`) and
 `github.branch_deleted` (`POST /v1/github/delete-branch`, only when GitHub accepted the call). A refused or failed write
-keeps its `audit(..., accepted=False)` call. The Git push, update-branch, close and review action writes still call
+keeps its `audit(..., accepted=False)` call. Git push, update-branch and pull request close now publish
+`github.push_accepted`, `github.branch_updated` and `github.pr_closed` respectively. Review action writes still call
 `audit()` directly (JAIF-478).
 
 See `docs/v4/event-architecture.md` for how `install(app, ctx, deps)` registers them.

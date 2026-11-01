@@ -25,8 +25,8 @@ from ... import pr_comments
 from ...pr_comments import PRCommentBody
 from ...features.work.constants import utcnow
 from ...platform.events.wiring import publish_for
-from .events import (GitHubBranchDeleted, GitHubCommentPosted, GitHubGitRelayTokenIssued, GitHubPrCreated,
-                     GitHubPrLookedUp, GitHubTokenIssued)
+from .events import (GitHubBranchDeleted, GitHubBranchUpdated, GitHubCommentPosted, GitHubGitRelayTokenIssued,
+                     GitHubPrClosed, GitHubPrCreated, GitHubPrLookedUp, GitHubPushAccepted, GitHubTokenIssued)
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
@@ -167,9 +167,12 @@ def install(app, ctx, deps) -> SimpleNamespace:
             if run is None:
                 raise HTTPException(403, "check-probe Git credentials are read-only")
             accepted = 200 <= upstream.status_code < 300
-            audit("github", "git-push", run["ticket_key"], run_id, fence, run["account_id"], accepted,
-                  "pushed" if accepted else f"GitHub returned {upstream.status_code}",
-                  {"repo": repository, "branch": branch})
+            if accepted:
+                publish_for(ctx, GitHubPushAccepted(run_id=run_id, fence=fence, ticket=run["ticket_key"],
+                                                    actor=run["account_id"], repo=repository, branch=branch))
+            else:
+                audit("github", "git-push", run["ticket_key"], run_id, fence, run["account_id"], False,
+                      f"GitHub returned {upstream.status_code}", {"repo": repository, "branch": branch})
         response_headers = {key: value for key, value in upstream.headers.items()
                             if key.lower() in {"content-type", "cache-control", "expires", "pragma"}}
         return Response(content=upstream.content, status_code=upstream.status_code, headers=response_headers)
@@ -404,8 +407,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
                        " merge_note=%s, pr_checked_at=now() WHERE key=%s",
                        ((merge_flow.latest_pr(ctx.db, key) or {}).get("url", ""), f"rejected in human review: {reason}"[:500], key))
             closed = gateway.close_pr(repository.split("/", 1)[-1], number)
-            audit("github", "close", key, run_id, fence, run["account_id"], True,
-                  "pull request closed", {"number": number, "repo": repository})
+            publish_for(ctx, GitHubPrClosed(run_id=run_id, fence=fence, ticket=key, actor=run["account_id"],
+                                            repo=repository, number=number))
             reviewer_labels(key, run_id, fence, add=("rejected",), remove=("require-human",))
             status = reviewer_transition(key, run_id, fence, "Done", "human review rejected")
             record_reviewer_action(ticket, run_id, fence, "reject", reason)
@@ -528,8 +531,13 @@ def install(app, ctx, deps) -> SimpleNamespace:
         repository = repository_for_run(run, project)
         github = github_gateway(ctx, repository)
         res = github.update_branch(repository.split("/", 1)[-1], body.number)
-        audit("github", "update-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], res["ok"],
-              res["message"][:200], {"number": body.number, "repo": repository})
+        if res["ok"]:
+            publish_for(ctx, GitHubBranchUpdated(run_id=body.run_id, fence=body.fence, ticket=run["ticket_key"],
+                                                 actor=run["account_id"], repo=repository, number=body.number,
+                                                 message=res["message"][:200]))
+        else:
+            audit("github", "update-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], False,
+                  res["message"][:200], {"number": body.number, "repo": repository})
         return res
 
     @app.get("/v1/github/checks")

@@ -6,6 +6,7 @@ The nodes, machines and managed-account routes live in `aiflow/v4/control/featur
 - `DELETE /v1/accounts/{account_id}`
 - `DELETE /v1/nodes/{name}`
 - `GET /v1/accounts/{account_id}/sign-in`
+- `GET /v1/accounts/{account_id}/spec`
 - `GET /v1/nodes/{name}/health`
 - `GET /v1/nodes/{name}/operations`
 - `GET /v1/nodes/{name}/operations/next`

@@ -14,7 +14,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (JSONResponse)
 from pydantic import BaseModel, Field
@@ -257,16 +257,6 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     # --- shared accounts: enable an account on machines, remove it, report the sign-in prompt ----------------------
     shared_accounts.install(app, ctx, console_user, audit, node_auth)
-
-    # --- account specs, no-generation quota refresh and legacy probes -------------------------------------------
-    @app.get("/v1/accounts/{account_id}/spec")
-    def account_spec(account_id: str, node: str = Depends(node_auth)) -> dict:
-        repo = ctx.repo()
-        acc = repo.account(account_id)
-        if not acc or not acc.runs_on(node):
-            raise HTTPException(403, f"account {account_id} does not run on {node}")
-        model, effort = repo.model_for(acc.provider, acc.tier)
-        return {"account": acc.id, "provider": acc.provider, "tier": acc.tier, "model": model, "effort": effort}
 
 
     jira_connect.mount(app, ctx); setup_wizard.install(app, ctx)

@@ -34,3 +34,11 @@ The successful node join (`node.agent_joined`), managed-account add (`ai_account
 node-operation queue (`node.operation_queued`) writes publish `NodeJoined`, `AiAccountAdded`,
 `AiAccountManagementChanged`, `AiAccountSignInRestarted`, `AiAccountSignInCompleted`, `AiAccountRemoved`,
 `NodeRemoved` and `NodeOperationQueued`. The audit ledger writes each event's existing row in the same transaction.
+
+## Reactions
+
+`POST /v1/nodes/join` publishes `node.agent_joined` (`NodeJoined`) and no longer runs its reactions inline. They are listeners in
+`features/fleet/listeners.py`: `fleet.telemetry_node_joined` keeps the `node.joined` telemetry row in the join's transaction, and
+`fleet.schedule_join_readiness` starts the machine's first readiness check from the outbox once the join has committed. The route
+delivers the outbox right after the commit, so the check still starts before the node receives its answer; a listener that fails
+is left for the dispatcher to retry and does not fail the join.

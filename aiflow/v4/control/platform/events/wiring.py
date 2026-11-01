@@ -24,10 +24,12 @@ def _feature_installers():
     from ...features.escalation import listeners as escalation_listeners
     from . import audit_ledger
     # the audit ledger goes last: it registers one listener for every event type that asks to be audited
+    from ...features.fleet import listeners as fleet_listeners
     from ...features.incidents import listeners as incident_listeners
     from ...features.work import listeners as work_listeners
     return (tickets_listeners.register_listeners, escalation_listeners.register_listeners,
-            incident_listeners.register_listeners, work_listeners.register_listeners, audit_ledger.register_listeners)
+            incident_listeners.register_listeners, work_listeners.register_listeners,
+            fleet_listeners.register_listeners, audit_ledger.register_listeners)
 
 
 def registry_for(ctx: Any) -> Registry:

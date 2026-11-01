@@ -5,8 +5,9 @@ as `deps`; the names the routes define for the rest of the app are returned."""
 from types import SimpleNamespace
 
 from .bodies import ConsoleUserCreateBody, ConsoleUserDisabledBody, ConsoleUserUpdateBody, LicenseKeyBody, OfflineLicenseBody, PlanLimitsBody, ViewAsBody
-from .events import (LicenceActivated, LicenceLimitsUpdated, NotificationChannelDeleted, NotificationChannelSaved,
-                     NotificationPreferencesSaved, ViewAsStarted, ViewAsStopped)
+from .events import (ConsoleUserAdded, ConsoleUserDisabledChanged, ConsoleUserUpdated, LicenceActivated, LicenceLimitsUpdated,
+                     NotificationChannelDeleted, NotificationChannelSaved, NotificationPreferencesSaved,
+                     ViewAsStarted, ViewAsStopped)
 from fastapi import HTTPException, Request
 from fastapi.responses import (JSONResponse, PlainTextResponse)
 from ...audit import record_console_user_change as audit_user, record_console_user_roles_change as audit_user_roles
@@ -20,7 +21,6 @@ from ...platform.events.wiring import publish_for
 
 def install(app, ctx, deps) -> SimpleNamespace:
     from ...api import log  # noqa: PLC0415 - api imports this module
-    audit_in = deps.audit_in
     console_user = deps.console_user
     optional_console_user = deps.optional_console_user
     require_capacity = deps.require_capacity
@@ -73,7 +73,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         project_keys = validate_project_keys(body.project_keys)
         password = generate_password()
         try:
-            with ctx.db.pool.connection() as connection:
+            with ctx.db.transaction() as connection:
                 with connection.transaction():
                     licensing.lock_resource_admission(connection)
                     people = connection.execute(
@@ -86,8 +86,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
                          hash_password(password))).fetchone()
                     if not created:
                         raise HTTPException(409, "a console user with that email already exists")
-                    audit_in(connection, "console", "user_add", "", "", None, user.subject, True, "Person added",
-                             {"email": email, "roles": list(roles), "project_keys": project_keys})
+                    publish_for(ctx, ConsoleUserAdded(actor=user.subject, email=email, roles=list(roles),
+                                                      project_keys=project_keys))
         except HTTPException:
             raise
         except Exception as exc:
@@ -106,7 +106,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         project_keys = validate_project_keys(body.project_keys)
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             connection.execute("LOCK TABLE console_users IN EXCLUSIVE MODE")
             current = connection.execute("SELECT roles,disabled FROM console_users WHERE email=%s FOR UPDATE",
                                          (email,)).fetchone()
@@ -120,8 +120,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
                     raise HTTPException(409, "the last administrator cannot be removed")
             connection.execute("UPDATE console_users SET role=%s,roles=%s,project_keys=%s,updated_at=now() WHERE email=%s",
                                (roles[0], list(roles), project_keys, email))
-            audit_in(connection, "console", "user_update", "", "", None, user.subject, True, "Person updated",
-                     {"email": email, "roles": list(roles), "project_keys": project_keys})
+            publish_for(ctx, ConsoleUserUpdated(actor=user.subject, email=email, roles=list(roles),
+                                                project_keys=project_keys))
         audit_user_roles(request, user.subject, email, roles_before, roles, project_keys)
         return {"updated": True}
 
@@ -134,7 +134,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             email = normalize_email(email)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             connection.execute("LOCK TABLE console_users IN EXCLUSIVE MODE")
             current = connection.execute("SELECT roles,disabled FROM console_users WHERE email=%s FOR UPDATE",
                                          (email,)).fetchone()
@@ -148,9 +148,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
                     raise HTTPException(409, "the last administrator cannot be disabled")
             connection.execute("UPDATE console_users SET disabled=%s,updated_at=now() WHERE email=%s",
                                (body.disabled, email))
-            action = "user_disable" if body.disabled else "user_enable"
-            audit_in(connection, "console", action, "", "", None, user.subject, True,
-                     "Person disabled" if body.disabled else "Person enabled", {"email": email})
+            publish_for(ctx, ConsoleUserDisabledChanged(actor=user.subject, email=email, disabled=body.disabled))
         audit_user(request, user.subject, "person_disabled" if body.disabled else "person_enabled", email, {"disabled": body.disabled})
         return {"disabled": body.disabled}
 

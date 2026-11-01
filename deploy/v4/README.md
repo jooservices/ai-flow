@@ -16,6 +16,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Shared worker fairness](../../docs/v4/shared-worker-fairness.md): round-robin ready tickets across projects while preserving rework preference and each project's priority and age order
 - [Work eligibility pipeline](../../docs/v4/work-eligibility.md): named account, node, project and role rules feed step collectors and the existing ordering and routing stages
 - [Work claim stages](../../docs/v4/work-claim.md): ordered named steps for eligibility, lease and hot-file acquisition, run registration and response building
+- [Review metrics](../../docs/v4/review-metrics.md): weekly waits, finished tickets without human-review activity, waiting durations and review decisions
 
 Feature documents live in `docs/v4/`. Normally, add one line per feature in `deploy/v4/topics/<topic>.md` (see
 [Fewer merge conflicts](../../docs/v4/merge-conflicts.md)); tickets that explicitly require a README link may add

@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 
 from ..core.system_check import condition
@@ -176,182 +177,325 @@ def _cached_integration_probe(ctx, key: tuple[object, ...], trigger: str, probe)
     return value
 
 
-def _github_project_conditions(ctx, project, trigger: str, provider_checks: bool = True) -> list[dict[str, object]]:
-    """Verify each configured repository through its assigned GitHub connection and check its base branch.
+def _github_pending_installation_condition(action: str) -> dict[str, object]:
+    return condition("github-installation", "GitHub installation", "needs_action",
+                     "The GitHub installation check has not completed.", action)
 
-    Provider errors are deliberately reduced to fixed display text. GitHub response bodies can contain request
-    details and must never become a readiness result.
-    """
-    repositories = [str(name) for name in project.configured_repositories if isinstance(name, str) and name]
-    if not provider_checks:
-        action = "Wait for the provider-backed System check to finish before starting work."
-        pending = condition("github-installation", "GitHub installation", "needs_action",
-                            "The GitHub installation check has not completed.", action)
-        out = [pending, condition("github-app-permissions", "GitHub App permissions", "needs_action",
-                                  "The GitHub permissions check has not completed.", action)]
-        for repository in repositories:
-            out.append(condition(f"repository-access:{repository}", f"Repository access · {repository}",
-                                 "needs_action", "Repository access has not been verified.", action))
-            out.append(condition(f"base-branch:{repository}", f"Base branch · {repository}", "needs_action",
-                                 "The configured base branch has not been verified.", action))
-        return out
-    from .route_deps import github_connection_used
-    from .gateway_helpers import github_connection_list, github_connections, github_gateway
 
+def _github_pending_permissions_condition(action: str) -> dict[str, object]:
+    return condition("github-app-permissions", "GitHub App permissions", "needs_action",
+                     "The GitHub permissions check has not completed.", action)
+
+
+def _github_pending_repository_access_condition(repository: str, action: str) -> dict[str, object]:
+    return condition(f"repository-access:{repository}", f"Repository access · {repository}", "needs_action",
+                     "Repository access has not been verified.", action)
+
+
+def _github_pending_base_branch_condition(repository: str, action: str) -> dict[str, object]:
+    return condition(f"base-branch:{repository}", f"Base branch · {repository}", "needs_action",
+                     "The configured base branch has not been verified.", action)
+
+
+def _github_pending_conditions(repositories: list[str]) -> list[dict[str, object]]:
+    action = "Wait for the provider-backed System check to finish before starting work."
+    out = [_github_pending_installation_condition(action), _github_pending_permissions_condition(action)]
+    for repository in repositories:
+        out.append(_github_pending_repository_access_condition(repository, action))
+        out.append(_github_pending_base_branch_condition(repository, action))
+    return out
+
+
+def _github_verified_installation_condition() -> dict[str, object]:
+    return condition("github-installation", "GitHub connection", "ready",
+                     "AI Flow verified the GitHub connection selected for every configured repository.")
+
+
+def _github_available_connection_condition() -> dict[str, object]:
+    return condition("github-installation", "GitHub connection", "ready",
+                     "A GitHub connection is available for this project.")
+
+
+def _github_unverified_connection_condition() -> dict[str, object]:
+    return condition("github-installation", "GitHub connection", "needs_action",
+                     "A GitHub connection for this project could not be verified.",
+                     "Connect GitHub or assign a working connection to each repository in the Projects screen.")
+
+
+def _github_installation_condition(repositories: list[str], connections: list,
+                                   selected: dict[str, tuple[object | None, str, set[str] | None]]) \
+        -> dict[str, object]:
+    if repositories and all(accessible is not None for _, _, accessible in selected.values()):
+        return _github_verified_installation_condition()
+    if not repositories and connections:
+        return _github_available_connection_condition()
+    return _github_unverified_connection_condition()
+
+
+def _github_token_permissions_condition() -> dict[str, object]:
+    return condition("github-app-permissions", "GitHub App permissions", "ready",
+                     "This project uses verified GitHub token connections, so GitHub App permissions do not apply.")
+
+
+def _github_no_repository_permissions_condition() -> dict[str, object]:
+    return condition("github-app-permissions", "GitHub App permissions", "ready",
+                     "No GitHub App permissions are required until a repository is configured.")
+
+
+def _github_unavailable_app_permissions_condition() -> dict[str, object]:
+    return condition("github-app-permissions", "GitHub App permissions", "needs_action",
+                     "GitHub App permissions could not be verified for the selected connection.",
+                     "Reconnect or assign a GitHub App connection in the Projects screen and rerun the System check.")
+
+
+def _github_unverified_app_permissions_condition() -> dict[str, object]:
+    return condition("github-app-permissions", "GitHub App permissions", "needs_action",
+                     "The GitHub App installation permissions could not be verified.",
+                     "Reconnect the GitHub App on the Integrations screen and rerun the System check.")
+
+
+def _github_missing_permissions_condition(missing_permissions: set[tuple[str, str]], app_count: int) \
+        -> dict[str, object]:
+    requirements = ", ".join(f"{name}: {level}" for name, level in sorted(missing_permissions))
+    target = "the GitHub App installation" if app_count == 1 else "each selected GitHub App installation"
+    return condition(
+        "github-app-permissions", "GitHub App permissions", "needs_action",
+        f"The GitHub App installation is missing these required permissions: {requirements}.",
+        f"Grant {requirements} to {target} in GitHub settings.")
+
+
+def _github_verified_app_permissions_condition() -> dict[str, object]:
+    return condition("github-app-permissions", "GitHub App permissions", "ready",
+                     "Every selected GitHub App installation has the permissions AI Flow requires.")
+
+
+def _github_app_permissions_condition(
+        repositories: list[str], selected: dict[str, tuple[object | None, str, set[str] | None]],
+                                      app_connections: dict[str, object],
+                                      permission_checks: list[dict[str, str] | None]) \
+        -> dict[str, object]:
+    if not app_connections:
+        if repositories and all(gateway is not None and getattr(gateway, "kind", "app") == "token"
+                                for gateway, _, _ in selected.values()):
+            return _github_token_permissions_condition()
+        if not repositories:
+            return _github_no_repository_permissions_condition()
+        return _github_unavailable_app_permissions_condition()
+    if any(permissions is None for permissions in permission_checks):
+        return _github_unverified_app_permissions_condition()
+
+    permission_labels = {"contents": "Contents", "pull_requests": "Pull requests", "workflows": "Workflows",
+                         "actions": "Actions", "checks": "Checks", "statuses": "Statuses",
+                         "administration": "Administration"}
+    missing_permissions = {
+        (permission_labels[permission], level)
+        for permissions in permission_checks
+        for permission, level in GITHUB_APP_REQUIRED_PERMISSIONS.items()
+        if permissions.get(permission) != level
+    }
+    if missing_permissions:
+        return _github_missing_permissions_condition(missing_permissions, len(app_connections))
+    return _github_verified_app_permissions_condition()
+
+
+def _github_connection_data(ctx, connection_list, connections_registry) -> tuple[list, dict]:
     try:
-        connections = github_connection_list(ctx)
-        assignments = github_connections(ctx).assignments()
+        connections = connection_list(ctx)
+        assignments = connections_registry(ctx).assignments()
     except Exception:  # noqa: BLE001 - secret-store and provider details are not safe readiness output
-        connections, assignments = [], {}
+        return [], {}
+    return connections, assignments
 
+
+def _github_connection_fallback(repository: str, connections: list, assignments: dict,
+                                by_id: dict, owner_by_repository: dict) -> tuple[object | None, str]:
+    assigned = assignments.get(repository.lower())
+    connection = by_id.get(assigned) if assigned else next(
+        (item for item in connections if item.account.lower() == owner_by_repository.get(repository, "")), None)
+    if connection is None:
+        return None, ""
+    return connection.gateway, connection.id
+
+
+def _github_repository_route(ctx, repository: str, connections: list, assignments: dict,
+                             by_id: dict, owner_by_repository: dict,
+                             gateway_for_repository, connection_used) -> tuple[object | None, str]:
+    gateway, connection_id = None, ""
+    try:
+        gateway = gateway_for_repository(ctx, repository)
+        connection_id = connection_used.get()
+    except Exception:  # noqa: BLE001 - provider response details are not safe readiness output
+        gateway, connection_id = _github_connection_fallback(
+            repository, connections, assignments, by_id, owner_by_repository)
+    return gateway, connection_id
+
+
+def _read_github_repositories(gateway) -> set[str] | None:
+    try:
+        rows = gateway.installation_repositories()
+        return {str(item.get("full_name") or "").lower() for item in rows
+                if isinstance(item, dict) and item.get("full_name")}
+    except Exception:  # noqa: BLE001 - provider details are not safe readiness output
+        return None
+
+
+def _github_selected_repositories(ctx, repositories: list[str], trigger: str, connections: list,
+                                  assignments: dict, gateway_for_repository, connection_used) \
+        -> dict[str, tuple[object | None, str, set[str] | None]]:
     by_id = {item.id: item for item in connections}
     owner_by_repository = {repository: repository.split("/", 1)[0].lower()
                            for repository in repositories if "/" in repository}
     selected: dict[str, tuple[object | None, str, set[str] | None]] = {}
     for repository in repositories:
-        gateway, connection_id = None, ""
-        try:
-            gateway = github_gateway(ctx, repository)
-            connection_id = github_connection_used.get()
-        except Exception:  # noqa: BLE001 - provider response details are not safe readiness output
-            assigned = assignments.get(repository.lower())
-            connection = by_id.get(assigned) if assigned else next(
-                (item for item in connections
-                 if item.account.lower() == owner_by_repository.get(repository, "")), None)
-            if connection is not None:
-                gateway, connection_id = connection.gateway, connection.id
-
+        gateway, connection_id = _github_repository_route(
+            ctx, repository, connections, assignments, by_id, owner_by_repository,
+            gateway_for_repository, connection_used)
         accessible = None
         if gateway is not None:
-            def read_connection_repositories() -> set[str] | None:
-                try:
-                    rows = gateway.installation_repositories()
-                    return {str(item.get("full_name") or "").lower() for item in rows
-                            if isinstance(item, dict) and item.get("full_name")}
-                except Exception:  # noqa: BLE001 - provider details are not safe readiness output
-                    return None
-
             accessible = _cached_integration_probe(
-                ctx, ("github-repositories", connection_id), trigger, read_connection_repositories)
+                ctx, ("github-repositories", connection_id), trigger,
+                partial(_read_github_repositories, gateway))
         selected[repository] = (gateway, connection_id, accessible)
+    return selected
 
-    if repositories and all(accessible is not None for _, _, accessible in selected.values()):
-        out = [condition("github-installation", "GitHub connection", "ready",
-                         "AI Flow verified the GitHub connection selected for every configured repository.")]
-    elif not repositories and connections:
-        out = [condition("github-installation", "GitHub connection", "ready",
-                         "A GitHub connection is available for this project.")]
-    else:
-        out = [condition("github-installation", "GitHub connection", "needs_action",
-                         "A GitHub connection for this project could not be verified.",
-                         "Connect GitHub or assign a working connection to each repository in the Projects screen.")]
 
-    permission_labels = {"contents": "Contents", "pull_requests": "Pull requests", "workflows": "Workflows",
-                         "actions": "Actions", "checks": "Checks", "statuses": "Statuses",
-                         "administration": "Administration"}
-    app_connections = {connection_id: gateway for gateway, connection_id, _ in selected.values()
-                       if gateway is not None and getattr(gateway, "kind", "app") != "token"}
+def _github_application_connections(
+        selected: dict[str, tuple[object | None, str, set[str] | None]]) -> dict[str, object]:
+    return {connection_id: gateway for gateway, connection_id, _ in selected.values()
+            if gateway is not None and getattr(gateway, "kind", "app") != "token"}
+
+
+def _read_github_installation_permissions(gateway, installation: str) -> dict[str, str] | None:
+    try:
+        if not installation:
+            return None
+        details = gateway.installation_details(int(installation))
+        permissions = details.get("permissions") if isinstance(details, dict) else None
+        return permissions if isinstance(permissions, dict) else None
+    except Exception:  # noqa: BLE001 - provider response bodies are not safe readiness output
+        return None
+
+
+def _github_permission_checks(ctx, trigger: str,
+                              app_connections: dict[str, object]) -> list[dict[str, str] | None]:
     permission_checks: list[dict[str, str] | None] = []
     for connection_id, gateway in app_connections.items():
         meta = getattr(gateway, "meta", None)
         installation = str(meta.get("installation_id") or "") if isinstance(meta, dict) else ""
-
-        def read_installation_permissions(gateway=gateway,
-                                         installation=installation) -> dict[str, str] | None:
-            try:
-                if not installation:
-                    return None
-                details = gateway.installation_details(int(installation))
-                permissions = details.get("permissions") if isinstance(details, dict) else None
-                return permissions if isinstance(permissions, dict) else None
-            except Exception:  # noqa: BLE001 - provider response bodies are not safe readiness output
-                return None
-
         permission_checks.append(_cached_integration_probe(
-            ctx, ("github-permissions", connection_id, installation), trigger, read_installation_permissions))
+            ctx, ("github-permissions", connection_id, installation), trigger,
+            partial(_read_github_installation_permissions, gateway, installation)))
+    return permission_checks
 
-    if not app_connections:
-        if repositories and all(gateway is not None and getattr(gateway, "kind", "app") == "token"
-                                for gateway, _, _ in selected.values()):
-            out.append(condition("github-app-permissions", "GitHub App permissions", "ready",
-                                 "This project uses verified GitHub token connections, so GitHub App permissions do not apply."))
-        elif not repositories:
-            out.append(condition("github-app-permissions", "GitHub App permissions", "ready",
-                                 "No GitHub App permissions are required until a repository is configured."))
-        else:
-            out.append(condition("github-app-permissions", "GitHub App permissions", "needs_action",
-                                 "GitHub App permissions could not be verified for the selected connection.",
-                                 "Reconnect or assign a GitHub App connection in the Projects screen and rerun the System check."))
-    elif any(permissions is None for permissions in permission_checks):
-        out.append(condition("github-app-permissions", "GitHub App permissions", "needs_action",
-                             "The GitHub App installation permissions could not be verified.",
-                             "Reconnect the GitHub App on the Integrations screen and rerun the System check."))
-    else:
-        missing_permissions = {
-            (permission_labels[permission], level)
-            for permissions in permission_checks
-            for permission, level in GITHUB_APP_REQUIRED_PERMISSIONS.items()
-            if permissions.get(permission) != level
-        }
-        if missing_permissions:
-            requirements = ", ".join(f"{name}: {level}" for name, level in sorted(missing_permissions))
-            target = "the GitHub App installation" if len(app_connections) == 1 \
-                else "each selected GitHub App installation"
-            out.append(condition(
-                "github-app-permissions", "GitHub App permissions", "needs_action",
-                f"The GitHub App installation is missing these required permissions: {requirements}.",
-                f"Grant {requirements} to {target} in GitHub settings."))
-        else:
-            out.append(condition("github-app-permissions", "GitHub App permissions", "ready",
-                                 "Every selected GitHub App installation has the permissions AI Flow requires."))
 
+def _github_verified_repository_access_condition(repository: str) -> dict[str, object]:
+    return condition(f"repository-access:{repository}", f"Repository access · {repository}", "ready",
+                     "The selected GitHub connection can access the configured repository.")
+
+
+def _github_unverified_repository_access_condition(repository: str,
+                                                   accessible: set[str] | None) -> dict[str, object]:
+    detail = "The selected GitHub connection cannot access the configured repository." \
+        if accessible is not None else "Repository access could not be verified."
+    action = "Assign a GitHub connection with access to this repository in the Projects screen."
+    return condition(f"repository-access:{repository}", f"Repository access · {repository}", "needs_action",
+                     detail, action)
+
+
+def _github_repository_access_condition(repository: str, accessible: set[str] | None) \
+        -> dict[str, object]:
+    if accessible is not None and repository.lower() in accessible:
+        return _github_verified_repository_access_condition(repository)
+    return _github_unverified_repository_access_condition(repository, accessible)
+
+
+def _github_unconfigured_base_branch_condition(repository: str) -> dict[str, object]:
+    return condition(f"base-branch:{repository}", f"Base branch · {repository}", "needs_action",
+                     "A base branch is not configured for this repository.",
+                     "Configure a base branch for this repository in the Projects screen.")
+
+
+def _github_unreachable_base_branch_condition(repository: str) -> dict[str, object]:
+    return condition(f"base-branch:{repository}", f"Base branch · {repository}", "needs_action",
+                     "The configured base branch could not be checked without repository access.",
+                     "Assign a GitHub connection with access to this repository and rerun the System check.")
+
+
+def _github_existing_base_branch_condition(repository: str) -> dict[str, object]:
+    return condition(f"base-branch:{repository}", f"Base branch · {repository}", "ready",
+                     "The configured base branch exists in the repository.")
+
+
+def _github_missing_base_branch_condition(repository: str) -> dict[str, object]:
+    return condition(f"base-branch:{repository}", f"Base branch · {repository}", "needs_action",
+                     "The configured base branch does not exist in the repository.",
+                     "Create the configured base branch in the repository and rerun the System check.")
+
+
+def _github_unverified_base_branch_condition(repository: str) -> dict[str, object]:
+    return condition(f"base-branch:{repository}", f"Base branch · {repository}", "needs_action",
+                     "The configured base branch could not be checked.",
+                     "Restore the selected GitHub connection and rerun the System check.")
+
+
+def _check_github_base_branch(gateway, repository: str, base: str) -> bool | None:
+    try:
+        return bool(gateway.branch_exists(repository.split("/", 1)[-1], base))
+    except Exception:  # noqa: BLE001 - discard provider response bodies and request details
+        return None
+
+
+def _github_base_branch_condition(ctx, repository: str, base: str, gateway, connection_id: str,
+                                  has_access: bool, trigger: str) -> dict[str, object]:
+    if not base:
+        return _github_unconfigured_base_branch_condition(repository)
+    if not has_access:
+        return _github_unreachable_base_branch_condition(repository)
+    exists = _cached_integration_probe(
+        ctx, ("github-branch", connection_id, repository.lower(), base), trigger,
+        partial(_check_github_base_branch, gateway, repository, base))
+    if exists is True:
+        return _github_existing_base_branch_condition(repository)
+    if exists is False:
+        return _github_missing_base_branch_condition(repository)
+    return _github_unverified_base_branch_condition(repository)
+
+
+def _github_repository_conditions(ctx, project, repository: str,
+                                 selected: dict[str, tuple[object | None, str, set[str] | None]],
+                                 trigger: str) -> list[dict[str, object]]:
+    repo_settings = project.settings_for_repo(repository)
+    base = str(repo_settings.get("base") or "")
+    gateway, connection_id, accessible = selected[repository]
+    has_access = accessible is not None and repository.lower() in accessible
+    return [
+        _github_repository_access_condition(repository, accessible),
+        _github_base_branch_condition(ctx, repository, base, gateway, connection_id, has_access, trigger),
+    ]
+
+
+def _github_project_conditions(ctx, project, trigger: str, provider_checks: bool = True) -> list[dict[str, object]]:
+    """Verify configured repositories and base branches through their assigned GitHub connections.
+
+    Provider errors are reduced to fixed display text because GitHub response bodies may contain request details.
+    """
+    repositories = [str(name) for name in project.configured_repositories if isinstance(name, str) and name]
+    if not provider_checks:
+        return _github_pending_conditions(repositories)
+
+    from .route_deps import github_connection_used
+    from .gateway_helpers import github_connection_list, github_connections, github_gateway
+
+    connections, assignments = _github_connection_data(ctx, github_connection_list, github_connections)
+    selected = _github_selected_repositories(ctx, repositories, trigger, connections, assignments,
+                                             github_gateway, github_connection_used)
+    out = [_github_installation_condition(repositories, connections, selected)]
+    app_connections = _github_application_connections(selected)
+    permission_checks = _github_permission_checks(ctx, trigger, app_connections)
+    out.append(_github_app_permissions_condition(repositories, selected, app_connections, permission_checks))
     for repository in repositories:
-        access_id = f"repository-access:{repository}"
-        branch_id = f"base-branch:{repository}"
-        repo_settings = project.settings_for_repo(repository)
-        base = str(repo_settings.get("base") or "")
-        gateway, connection_id, accessible = selected[repository]
-        has_access = accessible is not None and repository.lower() in accessible
-        if has_access:
-            out.append(condition(access_id, f"Repository access · {repository}", "ready",
-                                 "The selected GitHub connection can access the configured repository."))
-        else:
-            detail = "The selected GitHub connection cannot access the configured repository." \
-                if accessible is not None else "Repository access could not be verified."
-            action = "Assign a GitHub connection with access to this repository in the Projects screen."
-            out.append(condition(access_id, f"Repository access · {repository}", "needs_action", detail, action))
-
-        if not base:
-            out.append(condition(branch_id, f"Base branch · {repository}", "needs_action",
-                                 "A base branch is not configured for this repository.",
-                                 "Configure a base branch for this repository in the Projects screen."))
-        elif not has_access:
-            out.append(condition(branch_id, f"Base branch · {repository}", "needs_action",
-                                 "The configured base branch could not be checked without repository access.",
-                                 "Assign a GitHub connection with access to this repository and rerun the System check."))
-        else:
-            def check_base_branch() -> bool | None:
-                try:
-                    return bool(gateway.branch_exists(repository.split("/", 1)[-1], base))
-                except Exception:  # noqa: BLE001 - discard provider response bodies and request details
-                    return None
-
-            exists = _cached_integration_probe(ctx, ("github-branch", connection_id, repository.lower(), base),
-                                               trigger, check_base_branch)
-            if exists is True:
-                out.append(condition(branch_id, f"Base branch · {repository}", "ready",
-                                     "The configured base branch exists in the repository."))
-            elif exists is False:
-                out.append(condition(branch_id, f"Base branch · {repository}", "needs_action",
-                                     "The configured base branch does not exist in the repository.",
-                                     "Create the configured base branch in the repository and rerun the System check."))
-            else:
-                out.append(condition(branch_id, f"Base branch · {repository}", "needs_action",
-                                     "The configured base branch could not be checked.",
-                                     "Restore the selected GitHub connection and rerun the System check."))
+        out.extend(_github_repository_conditions(ctx, project, repository, selected, trigger))
     return out
-
-
 def _jira_auth_blocked(auth) -> dict[str, object] | None:
     """The credential condition when the stored Jira credential is known to be unusable, otherwise None."""
     if auth is None:

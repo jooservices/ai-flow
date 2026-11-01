@@ -1,1447 +1,1423 @@
 {
-  "format_help": "usage: aiflow4 [-h]\n               {version,migrate,import-inventory,control-api,control-loops,node,node-agent,canary,notify,ba-chat,upgrade-check,worker,install,scale-proof,secret,backup,console-user}\n               ...\n\naiflow4: one command for every AI Flow v4 process.\n\n  aiflow4 migrate                       apply registry migrations\n  aiflow4 control-api [--port 8080]     control API + dashboards\n  aiflow4 control-loops                 Jira sync, watchdog\n  aiflow4 canary evaluate ...            evaluate the active auto-deploy canary\n  aiflow4 canary record-rollback ...      record a canary rollback in the registry and Jira\n  aiflow4 canary record-promotion ...     record an under-observed canary promotion\n  aiflow4 canary retry-tickets           retry pending rollback flow-bug tickets\n  aiflow4 notify --severity S --title T --detail D   deliver through saved notification channels\n  aiflow4 ba-chat setup --name N --chat-id ID --project KEY  configure Telegram BA chat (token read privately)\n  aiflow4 upgrade-check --target vX.Y.Z  check migrations and version skew before a control upgrade (exit 9: blocked)\n  aiflow4 node join [--name N] (--join-token-file F | --join-token-stdin) [--control URL]\n  aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)\n  aiflow4 worker --account ID           one AI account (root; AI runs as aiflow-worker)\n  aiflow4 install control --version vX.Y.Z --domain D [--admin-email E]   install, re-run or upgrade the control plane (root)\n  aiflow4 console-user seed --email E --password-file F   create a Command Center user; the password goes to F (0600)\n  aiflow4 install control --rollback    return the control plane to the previous release (root)\n  aiflow4 scale-proof --release vX.Y.Z [--out F] [--submit URL]   run the 100/50/200 scale proof (CI); exit 1: a budget is exceeded\n  aiflow4 secret set NAME [--stdin]     store an owner-supplied token with hidden input (root)\n  aiflow4 backup restore --from FILE --key-file FILE [--s3-endpoint URL]\n                                        rebuild a new control plane from an encrypted backup\n  aiflow4 version\n\npositional arguments:\n  {version,migrate,import-inventory,control-api,control-loops,node,node-agent,canary,notify,ba-chat,upgrade-check,worker,install,scale-proof,secret,backup,console-user}\n    import-inventory    one-time import of machines and AI accounts from the\n                        control repo into the database (docs/v4/inventory-in-\n                        database.md); developers and CI only\n    notify              send a system alert using saved notification channels\n    ba-chat             configure the developer Telegram BA chat channel\n    scale-proof         run the scale proof scenario against the budgets\n                        (docs/v4/scale-proof.md)\n    backup              encrypted Command Center backup operations\n    console-user        create or reset a Command Center user\n                        (docs/v4/console-login.md)\n\noptions:\n  -h, --help            show this help message and exit\n",
-  "actions": [
+ "actions": [
+  {
+   "option_strings": [
+    "-h",
+    "--help"
+   ],
+   "dest": "help",
+   "default": "==SUPPRESS==",
+   "choices": null,
+   "required": false,
+   "nargs": 0,
+   "type_name": null,
+   "help": "show this help message and exit",
+   "metavar": null
+  },
+  {
+   "option_strings": [],
+   "dest": "cmd",
+   "default": null,
+   "choices": [
+    "version",
+    "migrate",
+    "import-inventory",
+    "control-api",
+    "control-loops",
+    "node",
+    "node-agent",
+    "canary",
+    "notify",
+    "ba-chat",
+    "upgrade-check",
+    "worker",
+    "install",
+    "scale-proof",
+    "secret",
+    "backup",
+    "console-user"
+   ],
+   "required": true,
+   "nargs": "A...",
+   "type_name": null,
+   "help": null,
+   "metavar": null
+  }
+ ],
+ "subcommands": {
+  "version": {
+   "actions": [
     {
-      "option_strings": [
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "migrate": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "import-inventory": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "control-api": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--host"
+     ],
+     "dest": "host",
+     "default": "0.0.0.0",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--port"
+     ],
+     "dest": "port",
+     "default": 8080,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": "int",
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "control-loops": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "node": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "action",
+     "default": null,
+     "choices": [
+      "join"
+     ],
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--name"
+     ],
+     "dest": "name",
+     "default": null,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--join-token-file"
+     ],
+     "dest": "join_token_file",
+     "default": null,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--join-token-stdin"
+     ],
+     "dest": "join_token_stdin",
+     "default": false,
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--control"
+     ],
+     "dest": "control",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--ip"
+     ],
+     "dest": "ip",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "node-agent": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--slots"
+     ],
+     "dest": "slots",
+     "default": 2,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": "int",
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--no-workers"
+     ],
+     "dest": "no_workers",
+     "default": false,
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "canary": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "canary_action",
+     "default": null,
+     "choices": [
+      "evaluate",
+      "record-rollback",
+      "record-promotion",
+      "retry-tickets"
+     ],
+     "required": true,
+     "nargs": "A...",
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {
+    "evaluate": {
+     "actions": [
+      {
+       "option_strings": [
         "-h",
         "--help"
-      ],
-      "dest": "help",
-      "default": "==SUPPRESS==",
-      "choices": null,
-      "required": false,
-      "nargs": 0,
-      "type_name": null,
-      "help": "show this help message and exit",
-      "metavar": null
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--node"
+       ],
+       "dest": "node",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--target"
+       ],
+       "dest": "target",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--previous"
+       ],
+       "dest": "previous",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--started-at"
+       ],
+       "dest": "started_at",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--minimum-age-s"
+       ],
+       "dest": "minimum_age_s",
+       "default": 1200,
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": "int",
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--minimum-runs"
+       ],
+       "dest": "minimum_runs",
+       "default": 5,
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": "int",
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--maximum-age-s"
+       ],
+       "dest": "maximum_age_s",
+       "default": 3600,
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": "int",
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--failure-ratio"
+       ],
+       "dest": "failure_ratio",
+       "default": "2",
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--minimum-infra-failures"
+       ],
+       "dest": "minimum_infra_failures",
+       "default": 3,
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": "int",
+       "help": null,
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    },
+    "record-rollback": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--node"
+       ],
+       "dest": "node",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--target"
+       ],
+       "dest": "target",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--previous"
+       ],
+       "dest": "previous",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--commit"
+       ],
+       "dest": "commit",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--measurements"
+       ],
+       "dest": "measurements",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    },
+    "record-promotion": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--node"
+       ],
+       "dest": "node",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--target"
+       ],
+       "dest": "target",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--measurements"
+       ],
+       "dest": "measurements",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--minimum-runs"
+       ],
+       "dest": "minimum_runs",
+       "default": 5,
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": "int",
+       "help": null,
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    },
+    "retry-tickets": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    }
+   }
+  },
+  "notify": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
     },
     {
-      "option_strings": [],
-      "dest": "cmd",
-      "default": null,
-      "choices": [
-        "version",
-        "migrate",
-        "import-inventory",
-        "control-api",
-        "control-loops",
-        "node",
-        "node-agent",
-        "canary",
-        "notify",
-        "ba-chat",
-        "upgrade-check",
-        "worker",
-        "install",
-        "scale-proof",
-        "secret",
-        "backup",
-        "console-user"
-      ],
-      "required": true,
-      "nargs": "A...",
-      "type_name": null,
-      "help": null,
-      "metavar": null
+     "option_strings": [
+      "--severity"
+     ],
+     "dest": "severity",
+     "default": null,
+     "choices": [
+      "info",
+      "warning",
+      "critical"
+     ],
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--title"
+     ],
+     "dest": "title",
+     "default": null,
+     "choices": null,
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--detail"
+     ],
+     "dest": "detail",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--link"
+     ],
+     "dest": "link",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
     }
-  ],
-  "subcommands": {
-    "version": {
-      "format_help": "usage: aiflow4 version [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
+   ],
+   "subcommands": {}
+  },
+  "ba-chat": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
     },
-    "migrate": {
-      "format_help": "usage: aiflow4 migrate [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "import-inventory": {
-      "format_help": "usage: aiflow4 import-inventory [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "control-api": {
-      "format_help": "usage: aiflow4 control-api [-h] [--host HOST] [--port PORT]\n\noptions:\n  -h, --help   show this help message and exit\n  --host HOST\n  --port PORT\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--host"
-          ],
-          "dest": "host",
-          "default": "0.0.0.0",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--port"
-          ],
-          "dest": "port",
-          "default": 8080,
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": "int",
-          "help": null,
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "control-loops": {
-      "format_help": "usage: aiflow4 control-loops [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "node": {
-      "format_help": "usage: aiflow4 node [-h] [--name NAME]\n                    (--join-token-file JOIN_TOKEN_FILE | --join-token-stdin)\n                    [--control CONTROL] [--ip IP]\n                    {join}\n\npositional arguments:\n  {join}\n\noptions:\n  -h, --help            show this help message and exit\n  --name NAME\n  --join-token-file JOIN_TOKEN_FILE\n  --join-token-stdin\n  --control CONTROL\n  --ip IP\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [],
-          "dest": "action",
-          "default": null,
-          "choices": [
-            "join"
-          ],
-          "required": true,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--name"
-          ],
-          "dest": "name",
-          "default": null,
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--join-token-file"
-          ],
-          "dest": "join_token_file",
-          "default": null,
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--join-token-stdin"
-          ],
-          "dest": "join_token_stdin",
-          "default": false,
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--control"
-          ],
-          "dest": "control",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--ip"
-          ],
-          "dest": "ip",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "node-agent": {
-      "format_help": "usage: aiflow4 node-agent [-h] [--slots SLOTS] [--no-workers]\n\noptions:\n  -h, --help     show this help message and exit\n  --slots SLOTS\n  --no-workers\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--slots"
-          ],
-          "dest": "slots",
-          "default": 2,
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": "int",
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--no-workers"
-          ],
-          "dest": "no_workers",
-          "default": false,
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "canary": {
-      "format_help": "usage: aiflow4 canary [-h]\n                      {evaluate,record-rollback,record-promotion,retry-tickets}\n                      ...\n\npositional arguments:\n  {evaluate,record-rollback,record-promotion,retry-tickets}\n\noptions:\n  -h, --help            show this help message and exit\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [],
-          "dest": "canary_action",
-          "default": null,
-          "choices": [
-            "evaluate",
-            "record-rollback",
-            "record-promotion",
-            "retry-tickets"
-          ],
-          "required": true,
-          "nargs": "A...",
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        }
-      ],
-      "subcommands": {
-        "evaluate": {
-          "format_help": "usage: aiflow4 canary evaluate [-h] --node NODE --target TARGET --previous\n                               PREVIOUS --started-at STARTED_AT\n                               [--minimum-age-s MINIMUM_AGE_S]\n                               [--minimum-runs MINIMUM_RUNS]\n                               [--maximum-age-s MAXIMUM_AGE_S]\n                               [--failure-ratio FAILURE_RATIO]\n                               [--minimum-infra-failures MINIMUM_INFRA_FAILURES]\n\noptions:\n  -h, --help            show this help message and exit\n  --node NODE\n  --target TARGET\n  --previous PREVIOUS\n  --started-at STARTED_AT\n  --minimum-age-s MINIMUM_AGE_S\n  --minimum-runs MINIMUM_RUNS\n  --maximum-age-s MAXIMUM_AGE_S\n  --failure-ratio FAILURE_RATIO\n  --minimum-infra-failures MINIMUM_INFRA_FAILURES\n",
-          "actions": [
-            {
-              "option_strings": [
-                "-h",
-                "--help"
-              ],
-              "dest": "help",
-              "default": "==SUPPRESS==",
-              "choices": null,
-              "required": false,
-              "nargs": 0,
-              "type_name": null,
-              "help": "show this help message and exit",
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--node"
-              ],
-              "dest": "node",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--target"
-              ],
-              "dest": "target",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--previous"
-              ],
-              "dest": "previous",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--started-at"
-              ],
-              "dest": "started_at",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--minimum-age-s"
-              ],
-              "dest": "minimum_age_s",
-              "default": 1200,
-              "choices": null,
-              "required": false,
-              "nargs": null,
-              "type_name": "int",
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--minimum-runs"
-              ],
-              "dest": "minimum_runs",
-              "default": 5,
-              "choices": null,
-              "required": false,
-              "nargs": null,
-              "type_name": "int",
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--maximum-age-s"
-              ],
-              "dest": "maximum_age_s",
-              "default": 3600,
-              "choices": null,
-              "required": false,
-              "nargs": null,
-              "type_name": "int",
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--failure-ratio"
-              ],
-              "dest": "failure_ratio",
-              "default": "2",
-              "choices": null,
-              "required": false,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--minimum-infra-failures"
-              ],
-              "dest": "minimum_infra_failures",
-              "default": 3,
-              "choices": null,
-              "required": false,
-              "nargs": null,
-              "type_name": "int",
-              "help": null,
-              "metavar": null
-            }
-          ],
-          "subcommands": {}
-        },
-        "record-rollback": {
-          "format_help": "usage: aiflow4 canary record-rollback [-h] --node NODE --target TARGET\n                                      --previous PREVIOUS --commit COMMIT\n                                      --measurements MEASUREMENTS\n\noptions:\n  -h, --help            show this help message and exit\n  --node NODE\n  --target TARGET\n  --previous PREVIOUS\n  --commit COMMIT\n  --measurements MEASUREMENTS\n",
-          "actions": [
-            {
-              "option_strings": [
-                "-h",
-                "--help"
-              ],
-              "dest": "help",
-              "default": "==SUPPRESS==",
-              "choices": null,
-              "required": false,
-              "nargs": 0,
-              "type_name": null,
-              "help": "show this help message and exit",
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--node"
-              ],
-              "dest": "node",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--target"
-              ],
-              "dest": "target",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--previous"
-              ],
-              "dest": "previous",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--commit"
-              ],
-              "dest": "commit",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--measurements"
-              ],
-              "dest": "measurements",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            }
-          ],
-          "subcommands": {}
-        },
-        "record-promotion": {
-          "format_help": "usage: aiflow4 canary record-promotion [-h] --node NODE --target TARGET\n                                       --measurements MEASUREMENTS\n                                       [--minimum-runs MINIMUM_RUNS]\n\noptions:\n  -h, --help            show this help message and exit\n  --node NODE\n  --target TARGET\n  --measurements MEASUREMENTS\n  --minimum-runs MINIMUM_RUNS\n",
-          "actions": [
-            {
-              "option_strings": [
-                "-h",
-                "--help"
-              ],
-              "dest": "help",
-              "default": "==SUPPRESS==",
-              "choices": null,
-              "required": false,
-              "nargs": 0,
-              "type_name": null,
-              "help": "show this help message and exit",
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--node"
-              ],
-              "dest": "node",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--target"
-              ],
-              "dest": "target",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--measurements"
-              ],
-              "dest": "measurements",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--minimum-runs"
-              ],
-              "dest": "minimum_runs",
-              "default": 5,
-              "choices": null,
-              "required": false,
-              "nargs": null,
-              "type_name": "int",
-              "help": null,
-              "metavar": null
-            }
-          ],
-          "subcommands": {}
-        },
-        "retry-tickets": {
-          "format_help": "usage: aiflow4 canary retry-tickets [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
-          "actions": [
-            {
-              "option_strings": [
-                "-h",
-                "--help"
-              ],
-              "dest": "help",
-              "default": "==SUPPRESS==",
-              "choices": null,
-              "required": false,
-              "nargs": 0,
-              "type_name": null,
-              "help": "show this help message and exit",
-              "metavar": null
-            }
-          ],
-          "subcommands": {}
-        }
-      }
-    },
-    "notify": {
-      "format_help": "usage: aiflow4 notify [-h] --severity {info,warning,critical} --title TITLE\n                      [--detail DETAIL] [--link LINK]\n\noptions:\n  -h, --help            show this help message and exit\n  --severity {info,warning,critical}\n  --title TITLE\n  --detail DETAIL\n  --link LINK\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--severity"
-          ],
-          "dest": "severity",
-          "default": null,
-          "choices": [
-            "info",
-            "warning",
-            "critical"
-          ],
-          "required": true,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--title"
-          ],
-          "dest": "title",
-          "default": null,
-          "choices": null,
-          "required": true,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--detail"
-          ],
-          "dest": "detail",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--link"
-          ],
-          "dest": "link",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "ba-chat": {
-      "format_help": "usage: aiflow4 ba-chat [-h] {setup} ...\n\npositional arguments:\n  {setup}\n    setup     add or update a Telegram BA chat channel\n\noptions:\n  -h, --help  show this help message and exit\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [],
-          "dest": "ba_action",
-          "default": null,
-          "choices": [
-            "setup"
-          ],
-          "required": true,
-          "nargs": "A...",
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        }
-      ],
-      "subcommands": {
-        "setup": {
-          "format_help": "usage: aiflow4 ba-chat setup [-h] --name NAME --chat-id CHAT_ID --project\n                             PROJECT [--token-stdin]\n\noptions:\n  -h, --help         show this help message and exit\n  --name NAME\n  --chat-id CHAT_ID\n  --project PROJECT\n  --token-stdin      read the bot token from stdin\n",
-          "actions": [
-            {
-              "option_strings": [
-                "-h",
-                "--help"
-              ],
-              "dest": "help",
-              "default": "==SUPPRESS==",
-              "choices": null,
-              "required": false,
-              "nargs": 0,
-              "type_name": null,
-              "help": "show this help message and exit",
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--name"
-              ],
-              "dest": "name",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--chat-id"
-              ],
-              "dest": "chat_id",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--project"
-              ],
-              "dest": "project",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--token-stdin"
-              ],
-              "dest": "token_stdin",
-              "default": false,
-              "choices": null,
-              "required": false,
-              "nargs": 0,
-              "type_name": null,
-              "help": "read the bot token from stdin",
-              "metavar": null
-            }
-          ],
-          "subcommands": {}
-        }
-      }
-    },
-    "upgrade-check": {
-      "format_help": "usage: aiflow4 upgrade-check [-h] --target TARGET [--current CURRENT]\n                             [--migrations MIGRATIONS] [--baseline BASELINE]\n\noptions:\n  -h, --help            show this help message and exit\n  --target TARGET\n  --current CURRENT\n  --migrations MIGRATIONS\n  --baseline BASELINE\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--target"
-          ],
-          "dest": "target",
-          "default": null,
-          "choices": null,
-          "required": true,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--current"
-          ],
-          "dest": "current",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--migrations"
-          ],
-          "dest": "migrations",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--baseline"
-          ],
-          "dest": "baseline",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "worker": {
-      "format_help": "usage: aiflow4 worker [-h] --account ACCOUNT\n\noptions:\n  -h, --help         show this help message and exit\n  --account ACCOUNT\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--account"
-          ],
-          "dest": "account",
-          "default": null,
-          "choices": null,
-          "required": true,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "install": {
-      "format_help": "usage: aiflow4 install [-h] [--version vX.Y.Z] [--domain DOMAIN] [--rollback]\n                       [--stack STACK] [--si SI_NAME=VALUE]\n                       [--vpn {tailscale,wireguard}] [--otel-collector]\n                       [--health-timeout HEALTH_TIMEOUT]\n                       [--admin-email ADMIN_EMAIL]\n                       {control}\n\npositional arguments:\n  {control}\n\noptions:\n  -h, --help            show this help message and exit\n  --version vX.Y.Z\n  --domain DOMAIN\n  --rollback\n  --stack STACK         project stack whose OS toolchain server-installer\n                        adds, e.g. php-8.3\n  --si SI_NAME=VALUE\n  --vpn {tailscale,wireguard}\n  --otel-collector\n  --health-timeout HEALTH_TIMEOUT\n  --admin-email ADMIN_EMAIL\n                        the first Super Administrator of Command Center (first\n                        install)\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [],
-          "dest": "target",
-          "default": null,
-          "choices": [
-            "control"
-          ],
-          "required": true,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--version"
-          ],
-          "dest": "release",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": "vX.Y.Z"
-        },
-        {
-          "option_strings": [
-            "--domain"
-          ],
-          "dest": "domain",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--rollback"
-          ],
-          "dest": "rollback",
-          "default": false,
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--stack"
-          ],
-          "dest": "stack",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": "project stack whose OS toolchain server-installer adds, e.g. php-8.3",
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--si"
-          ],
-          "dest": "si",
-          "default": [],
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": "SI_NAME=VALUE"
-        },
-        {
-          "option_strings": [
-            "--vpn"
-          ],
-          "dest": "vpn",
-          "default": "",
-          "choices": [
-            "tailscale",
-            "wireguard"
-          ],
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--otel-collector"
-          ],
-          "dest": "otel_collector",
-          "default": false,
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--health-timeout"
-          ],
-          "dest": "health_timeout",
-          "default": 300,
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": "int",
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--admin-email"
-          ],
-          "dest": "admin_email",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": "the first Super Administrator of Command Center (first install)",
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "scale-proof": {
-      "format_help": "usage: aiflow4 scale-proof [-h] --release RELEASE [--out OUT]\n                           [--submit CONTROL_URL]\n                           [--database-url DATABASE_URL]\n                           [--redis-url REDIS_URL]\n\noptions:\n  -h, --help            show this help message and exit\n  --release RELEASE     the release the result is attached to, e.g. v4.3.0\n  --out OUT             write the JSON report here\n  --submit CONTROL_URL  attach the result to the release on this control plane\n                        (token: AIFLOW4_OWNER_TOKEN)\n  --database-url DATABASE_URL\n  --redis-url REDIS_URL\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--release"
-          ],
-          "dest": "release",
-          "default": null,
-          "choices": null,
-          "required": true,
-          "nargs": null,
-          "type_name": null,
-          "help": "the release the result is attached to, e.g. v4.3.0",
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--out"
-          ],
-          "dest": "out",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": "write the JSON report here",
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--submit"
-          ],
-          "dest": "submit",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": "attach the result to the release on this control plane (token: AIFLOW4_OWNER_TOKEN)",
-          "metavar": "CONTROL_URL"
-        },
-        {
-          "option_strings": [
-            "--database-url"
-          ],
-          "dest": "database_url",
-          "default": "postgresql://db.example/aiflow_test",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--redis-url"
-          ],
-          "dest": "redis_url",
-          "default": "redis://redis.example/0",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "secret": {
-      "format_help": "usage: aiflow4 secret [-h] [--stdin] {set,list} [name]\n\npositional arguments:\n  {set,list}\n  name\n\noptions:\n  -h, --help  show this help message and exit\n  --stdin     read the value from a pipe instead of a hidden prompt\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [],
-          "dest": "action",
-          "default": null,
-          "choices": [
-            "set",
-            "list"
-          ],
-          "required": true,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [],
-          "dest": "name",
-          "default": null,
-          "choices": null,
-          "required": false,
-          "nargs": "?",
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--stdin"
-          ],
-          "dest": "stdin",
-          "default": false,
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "read the value from a pipe instead of a hidden prompt",
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
-    },
-    "backup": {
-      "format_help": "usage: aiflow4 backup [-h] {restore} ...\n\npositional arguments:\n  {restore}\n    restore   restore a backup onto a new control machine\n\noptions:\n  -h, --help  show this help message and exit\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [],
-          "dest": "backup_action",
-          "default": null,
-          "choices": [
-            "restore"
-          ],
-          "required": true,
-          "nargs": "A...",
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        }
-      ],
-      "subcommands": {
-        "restore": {
-          "format_help": "usage: aiflow4 backup restore [-h] --from SOURCE --key-file KEY_FILE\n                              [--s3-endpoint S3_ENDPOINT]\n                              [--s3-region S3_REGION]\n\noptions:\n  -h, --help            show this help message and exit\n  --from SOURCE         local encrypted backup or s3://bucket/key\n  --key-file KEY_FILE   the one-time backup key downloaded from Command Center\n  --s3-endpoint S3_ENDPOINT\n                        S3-compatible endpoint for an s3:// source\n  --s3-region S3_REGION\n",
-          "actions": [
-            {
-              "option_strings": [
-                "-h",
-                "--help"
-              ],
-              "dest": "help",
-              "default": "==SUPPRESS==",
-              "choices": null,
-              "required": false,
-              "nargs": 0,
-              "type_name": null,
-              "help": "show this help message and exit",
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--from"
-              ],
-              "dest": "source",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": "local encrypted backup or s3://bucket/key",
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--key-file"
-              ],
-              "dest": "key_file",
-              "default": null,
-              "choices": null,
-              "required": true,
-              "nargs": null,
-              "type_name": null,
-              "help": "the one-time backup key downloaded from Command Center",
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--s3-endpoint"
-              ],
-              "dest": "s3_endpoint",
-              "default": "",
-              "choices": null,
-              "required": false,
-              "nargs": null,
-              "type_name": null,
-              "help": "S3-compatible endpoint for an s3:// source",
-              "metavar": null
-            },
-            {
-              "option_strings": [
-                "--s3-region"
-              ],
-              "dest": "s3_region",
-              "default": "us-east-1",
-              "choices": null,
-              "required": false,
-              "nargs": null,
-              "type_name": null,
-              "help": null,
-              "metavar": null
-            }
-          ],
-          "subcommands": {}
-        }
-      }
-    },
-    "console-user": {
-      "format_help": "usage: aiflow4 console-user [-h] [--email EMAIL] [--role ROLE] [--name NAME]\n                            [--password-file PASSWORD_FILE]\n                            {seed,reset-password,list}\n\npositional arguments:\n  {seed,reset-password,list}\n\noptions:\n  -h, --help            show this help message and exit\n  --email EMAIL\n  --role ROLE\n  --name NAME\n  --password-file PASSWORD_FILE\n                        where the generated password is written (mode 0600);\n                        it is never printed\n",
-      "actions": [
-        {
-          "option_strings": [
-            "-h",
-            "--help"
-          ],
-          "dest": "help",
-          "default": "==SUPPRESS==",
-          "choices": null,
-          "required": false,
-          "nargs": 0,
-          "type_name": null,
-          "help": "show this help message and exit",
-          "metavar": null
-        },
-        {
-          "option_strings": [],
-          "dest": "action",
-          "default": null,
-          "choices": [
-            "seed",
-            "reset-password",
-            "list"
-          ],
-          "required": true,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--email"
-          ],
-          "dest": "email",
-          "default": null,
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--role"
-          ],
-          "dest": "role",
-          "default": "super_admin",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--name"
-          ],
-          "dest": "name",
-          "default": "",
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": null,
-          "metavar": null
-        },
-        {
-          "option_strings": [
-            "--password-file"
-          ],
-          "dest": "password_file",
-          "default": null,
-          "choices": null,
-          "required": false,
-          "nargs": null,
-          "type_name": null,
-          "help": "where the generated password is written (mode 0600); it is never printed",
-          "metavar": null
-        }
-      ],
-      "subcommands": {}
+    {
+     "option_strings": [],
+     "dest": "ba_action",
+     "default": null,
+     "choices": [
+      "setup"
+     ],
+     "required": true,
+     "nargs": "A...",
+     "type_name": null,
+     "help": null,
+     "metavar": null
     }
+   ],
+   "subcommands": {
+    "setup": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--name"
+       ],
+       "dest": "name",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--chat-id"
+       ],
+       "dest": "chat_id",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--project"
+       ],
+       "dest": "project",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--token-stdin"
+       ],
+       "dest": "token_stdin",
+       "default": false,
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "read the bot token from stdin",
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    }
+   }
+  },
+  "upgrade-check": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--target"
+     ],
+     "dest": "target",
+     "default": null,
+     "choices": null,
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--current"
+     ],
+     "dest": "current",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--migrations"
+     ],
+     "dest": "migrations",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--baseline"
+     ],
+     "dest": "baseline",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "worker": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--account"
+     ],
+     "dest": "account",
+     "default": null,
+     "choices": null,
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "install": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "target",
+     "default": null,
+     "choices": [
+      "control"
+     ],
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--version"
+     ],
+     "dest": "release",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": "vX.Y.Z"
+    },
+    {
+     "option_strings": [
+      "--domain"
+     ],
+     "dest": "domain",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--rollback"
+     ],
+     "dest": "rollback",
+     "default": false,
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--stack"
+     ],
+     "dest": "stack",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": "project stack whose OS toolchain server-installer adds, e.g. php-8.3",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--si"
+     ],
+     "dest": "si",
+     "default": [],
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": "SI_NAME=VALUE"
+    },
+    {
+     "option_strings": [
+      "--vpn"
+     ],
+     "dest": "vpn",
+     "default": "",
+     "choices": [
+      "tailscale",
+      "wireguard"
+     ],
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--otel-collector"
+     ],
+     "dest": "otel_collector",
+     "default": false,
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--health-timeout"
+     ],
+     "dest": "health_timeout",
+     "default": 300,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": "int",
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--admin-email"
+     ],
+     "dest": "admin_email",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": "the first Super Administrator of Command Center (first install)",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "scale-proof": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--release"
+     ],
+     "dest": "release",
+     "default": null,
+     "choices": null,
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": "the release the result is attached to, e.g. v4.3.0",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--out"
+     ],
+     "dest": "out",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": "write the JSON report here",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--submit"
+     ],
+     "dest": "submit",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": "attach the result to the release on this control plane (token: AIFLOW4_OWNER_TOKEN)",
+     "metavar": "CONTROL_URL"
+    },
+    {
+     "option_strings": [
+      "--database-url"
+     ],
+     "dest": "database_url",
+     "default": "postgresql://db.example/aiflow_test",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--redis-url"
+     ],
+     "dest": "redis_url",
+     "default": "redis://redis.example/0",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "secret": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "action",
+     "default": null,
+     "choices": [
+      "set",
+      "list"
+     ],
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "name",
+     "default": null,
+     "choices": null,
+     "required": false,
+     "nargs": "?",
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--stdin"
+     ],
+     "dest": "stdin",
+     "default": false,
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "read the value from a pipe instead of a hidden prompt",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "backup": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "backup_action",
+     "default": null,
+     "choices": [
+      "restore"
+     ],
+     "required": true,
+     "nargs": "A...",
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {
+    "restore": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--from"
+       ],
+       "dest": "source",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": "local encrypted backup or s3://bucket/key",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--key-file"
+       ],
+       "dest": "key_file",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": "the one-time backup key downloaded from Command Center",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--s3-endpoint"
+       ],
+       "dest": "s3_endpoint",
+       "default": "",
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": null,
+       "help": "S3-compatible endpoint for an s3:// source",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--s3-region"
+       ],
+       "dest": "s3_region",
+       "default": "us-east-1",
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    }
+   }
+  },
+  "console-user": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "action",
+     "default": null,
+     "choices": [
+      "seed",
+      "reset-password",
+      "list"
+     ],
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--email"
+     ],
+     "dest": "email",
+     "default": null,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--role"
+     ],
+     "dest": "role",
+     "default": "super_admin",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--name"
+     ],
+     "dest": "name",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--password-file"
+     ],
+     "dest": "password_file",
+     "default": null,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": "where the generated password is written (mode 0600); it is never printed",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
   }
+ }
 }

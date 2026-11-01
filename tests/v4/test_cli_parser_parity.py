@@ -145,7 +145,9 @@ def _parser_spec(parser: argparse.ArgumentParser) -> dict[str, Any]:
         })
         if isinstance(action, argparse._SubParsersAction):
             subparsers = {name: _parser_spec(child) for name, child in action.choices.items()}
-    return {"format_help": parser.format_help(), "actions": actions, "subcommands": subparsers}
+    # format_help() text is not compared: argparse wraps usage differently across Python versions (CI runs 3.14, local 3.12);
+    # every option and its help string is already compared through `actions`.
+    return {"actions": actions, "subcommands": subparsers}
 
 
 def _set_parser_environment(monkeypatch) -> None:

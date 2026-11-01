@@ -288,160 +288,213 @@ def _same_worktree(path: str, worktree: str) -> bool:
         return False
 
 
-def _container_command_allowed(segment: str, worktree: str) -> bool:
-    """Small shell-command allowlist for the brokered Docker-compatible interface."""
+def _container_command_arguments(segment: str) -> list[str] | None:
+    """Parse a safe Docker command and return its arguments after the executable."""
     if any(char in segment for char in "$`<>\r\n"):
-        return False
+        return None
     try:
         argv = shlex.split(segment, posix=True)
     except ValueError:
-        return False
+        return None
     if not argv or argv[0] != "docker":
+        return None
+    return argv[1:]
+
+
+def _container_build_value_allowed(option: str, value: str, worktree: str) -> bool:
+    """Check the path and network restrictions for a Docker build option value."""
+    file_outside = option in {"-f", "--file"} and not _within(value, worktree)
+    network_open = option == "--network" and value not in {"default", "none"}
+    return not (file_outside or network_open)
+
+
+def _container_build_arguments_allowed(args: list[str], worktree: str) -> bool:
+    """Allow one worktree build context and the explicitly supported build options."""
+    i, contexts = 0, []
+    value_options = {"-f", "--file", "-t", "--tag", "--target", "--platform", "--build-arg",
+                     "--progress", "--network"}
+    flags = {"--pull", "--no-cache", "--quiet"}
+    while i < len(args):
+        arg = args[i]
+        if arg in flags:
+            i += 1
+        elif arg in value_options:
+            if i + 1 >= len(args):
+                return False
+            if not _container_build_value_allowed(arg, args[i + 1], worktree):
+                return False
+            i += 2
+        elif arg.startswith("--network="):
+            if arg.split("=", 1)[1] not in {"default", "none"}:
+                return False
+            i += 1
+        elif arg.startswith("-"):
+            return False
+        else:
+            contexts.append(arg)
+            i += 1
+    return len(contexts) == 1 and _within(contexts[0], worktree)
+
+
+def _container_run_mount_option_step(args: list[str], index: int) -> tuple[int, str, bool] | None:
+    """Parse a volume or bind-mount option before the image argument."""
+    arg = args[index]
+    if arg in {"-v", "--volume", "--mount"}:
+        if index + 1 >= len(args):
+            return None
+        mount = args[index + 1]
+        if arg == "--mount":
+            mount = "mount=" + mount
+        return 2, mount, False
+    if arg.startswith("--mount="):
+        return 1, "mount=" + arg.split("=", 1)[1], False
+    return None
+
+
+def _container_run_option_step(args: list[str], index: int) -> tuple[int, str | None, bool] | None:
+    """Parse one pre-image run option as (consumed, mount, image-seen), or reject it."""
+    arg = args[index]
+    flags = {"--rm", "-i", "--interactive", "-t", "--tty", "--init"}
+    if arg in flags:
+        return 1, None, False
+    mount_step = _container_run_mount_option_step(args, index)
+    if mount_step is not None:
+        return mount_step
+    value_options = {"--name", "--workdir", "-w", "--env", "-e", "--publish", "-p", "--expose",
+                     "--entrypoint", "--user", "-u", "--label", "--platform", "--network",
+                     "--hostname", "--dns", "--pull", "--memory", "--cpus"}
+    if arg in value_options:
+        if index + 1 >= len(args):
+            return None
+        if arg == "--network" and args[index + 1] not in {"default", "bridge", "none"}:
+            return None
+        return 2, None, False
+    if arg.startswith("--network="):
+        if arg.split("=", 1)[1] not in {"default", "bridge", "none"}:
+            return None
+        return 1, None, False
+    if arg.startswith("-"):
+        return None
+    return 1, None, True
+
+
+def _container_run_mount_allowed(mount: str, worktree: str) -> bool:
+    """Restrict a run mount to the worktree root without bind propagation."""
+    if mount.startswith("mount="):
+        fields = dict(part.split("=", 1) for part in mount[6:].split(",") if "=" in part)
+        source = fields.get("src", fields.get("source", ""))
+        return (fields.get("type") == "bind" and _same_worktree(source, worktree)
+                and not fields.get("bind-propagation"))
+    parts = mount.split(":")
+    return (len(parts) in (2, 3) and _same_worktree(parts[0], worktree)
+            and (len(parts) == 2 or set(parts[2].split(",")) <= {"ro", "rw"}))
+
+
+def _container_run_arguments_allowed(args: list[str], worktree: str) -> bool:
+    """Allow a run command with exactly one bind mount of the current worktree."""
+    i, mounts, image_seen = 0, [], False
+    while i < len(args):
+        if args[i] == "--":
+            return image_seen and len(mounts) == 1
+        if image_seen:
+            i += 1
+            continue
+        step = _container_run_option_step(args, i)
+        if step is None:
+            return False
+        consumed, mount, image_seen = step
+        if mount is not None:
+            mounts.append(mount)
+        i += consumed
+    if not image_seen or len(mounts) != 1:
         return False
-    args = argv[1:]
+    return _container_run_mount_allowed(mounts[0], worktree)
+
+
+def _container_compose_prefix(args: list[str], worktree: str) -> int | None:
+    """Validate compose file options before the subcommand and return their count."""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in {"-p", "--project-name"}:
+            return None
+        if arg in {"-f", "--file", "--env-file", "--project-directory", "--profile"}:
+            if i + 1 >= len(args):
+                return None
+            if arg in {"-f", "--file", "--env-file", "--project-directory"} and not _within(args[i + 1], worktree):
+                return None
+            i += 2
+            continue
+        if arg.startswith("--file=") or arg.startswith("--env-file=") or arg.startswith("--project-directory="):
+            if not _within(arg.split("=", 1)[1], worktree):
+                return None
+            i += 1
+            continue
+        break
+    return i
+
+
+def _container_compose_up_allowed(tail: list[str]) -> bool:
+    """Allow compose-up flags while refusing every other leading option."""
+    safe_flags = {"-d", "--detach", "--abort-on-container-exit", "--build", "--no-build", "--pull", "--remove-orphans",
+                  "--force-recreate", "--no-recreate", "--no-deps", "--wait", "--quiet-pull",
+                  "--renew-anon-volumes", "--timestamps"}
+    value_flags = {"--timeout", "-t"}
+    for arg in tail:
+        if arg in safe_flags or arg in value_flags:
+            continue
+        if arg.startswith("--") and any(arg.startswith(flag + "=") for flag in value_flags):
+            continue
+        if arg.startswith("-"):
+            return False
+    return True
+
+
+def _container_compose_run_allowed(tail: list[str]) -> bool:
+    """Allow compose-run flags before the required service and command."""
+    safe_flags = {"--rm", "--build", "--no-deps", "--quiet-pull", "-T", "--no-TTY",
+                  "--service-ports", "--use-aliases"}
+    value_flags = {"--entrypoint", "--env", "-e", "--user", "-u", "--workdir", "-w"}
+    i = 0
+    while i < len(tail) and tail[i].startswith("-"):
+        if tail[i] in safe_flags:
+            i += 1
+        elif tail[i] in value_flags:
+            i += 2
+            if i > len(tail):
+                return False
+        elif any(tail[i].startswith(flag + "=") for flag in value_flags):
+            i += 1
+        else:
+            return False
+    return i < len(tail)
+
+
+def _container_compose_arguments_allowed(args: list[str], worktree: str) -> bool:
+    """Validate compose pre-options and dispatch the supported up or run command."""
+    prefix_length = _container_compose_prefix(args[1:], worktree)
+    if prefix_length is None or prefix_length >= len(args) - 1:
+        return False
+    subcommand_index = prefix_length + 1
+    subcommand, tail = args[subcommand_index], args[subcommand_index + 1:]
+    if subcommand == "up":
+        return _container_compose_up_allowed(tail)
+    if subcommand == "run":
+        return bool(tail) and _container_compose_run_allowed(tail)
+    return False
+
+
+def _container_command_allowed(segment: str, worktree: str) -> bool:
+    """Small shell-command allowlist for the brokered Docker-compatible interface."""
+    args = _container_command_arguments(segment)
     if not args:
         return False
     if args[0] == "build":
-        i, contexts = 1, []
-        value_options = {"-f", "--file", "-t", "--tag", "--target", "--platform", "--build-arg",
-                         "--progress", "--network"}
-        flags = {"--pull", "--no-cache", "--quiet"}
-        while i < len(args):
-            arg = args[i]
-            if arg in flags:
-                i += 1
-            elif arg in value_options:
-                if i + 1 >= len(args):
-                    return False
-                value = args[i + 1]
-                if arg in {"-f", "--file"} and not _within(value, worktree):
-                    return False
-                if arg == "--network" and value not in {"default", "none"}:
-                    return False
-                i += 2
-            elif arg.startswith("--network="):
-                if arg.split("=", 1)[1] not in {"default", "none"}:
-                    return False
-                i += 1
-            elif arg.startswith("-"):
-                return False
-            else:
-                contexts.append(arg)
-                i += 1
-        return len(contexts) == 1 and _within(contexts[0], worktree)
+        return _container_build_arguments_allowed(args[1:], worktree)
     if args[0] == "run":
-        i, mounts = 1, []
-        value_options = {"--name", "--workdir", "-w", "--env", "-e", "--publish", "-p", "--expose",
-                         "--entrypoint", "--user", "-u", "--label", "--platform", "--network",
-                         "--hostname", "--dns", "--pull", "--memory", "--cpus"}
-        flags = {"--rm", "-i", "--interactive", "-t", "--tty", "--init"}
-        image_seen = False
-        while i < len(args):
-            arg = args[i]
-            if arg == "--":
-                return image_seen and len(mounts) == 1
-            if not image_seen:
-                if arg in flags:
-                    i += 1
-                elif arg in {"-v", "--volume"}:
-                    if i + 1 >= len(args):
-                        return False
-                    mounts.append(args[i + 1])
-                    i += 2
-                elif arg.startswith("--mount="):
-                    mounts.append("mount=" + arg.split("=", 1)[1])
-                    i += 1
-                elif arg == "--mount":
-                    if i + 1 >= len(args):
-                        return False
-                    mounts.append("mount=" + args[i + 1])
-                    i += 2
-                elif arg in value_options:
-                    if i + 1 >= len(args):
-                        return False
-                    if arg == "--network" and args[i + 1] not in {"default", "bridge", "none"}:
-                        return False
-                    i += 2
-                elif arg.startswith("--network="):
-                    if arg.split("=", 1)[1] not in {"default", "bridge", "none"}:
-                        return False
-                    i += 1
-                elif arg.startswith("-"):
-                    return False
-                else:
-                    image_seen = True
-                    i += 1
-            else:
-                i += 1
-        if not image_seen or len(mounts) != 1:
-            return False
-        mount = mounts[0]
-        if mount.startswith("mount="):
-            fields = dict(part.split("=", 1) for part in mount[6:].split(",") if "=" in part)
-            source = fields.get("src", fields.get("source", ""))
-            return (fields.get("type") == "bind" and _same_worktree(source, worktree)
-                    and not fields.get("bind-propagation"))
-        parts = mount.split(":")
-        return (len(parts) in (2, 3) and _same_worktree(parts[0], worktree)
-                and (len(parts) == 2 or set(parts[2].split(",")) <= {"ro", "rw"}))
+        return _container_run_arguments_allowed(args[1:], worktree)
     if args[0] == "compose":
-        i, files = 1, []
-        while i < len(args):
-            arg = args[i]
-            if arg in {"-p", "--project-name"}:
-                return False
-            if arg in {"-f", "--file", "--env-file", "--project-directory", "--profile"}:
-                if i + 1 >= len(args):
-                    return False
-                if arg in {"-f", "--file", "--env-file", "--project-directory"} and not _within(args[i + 1], worktree):
-                    return False
-                if arg in {"-f", "--file"}:
-                    files.append(args[i + 1])
-                i += 2
-                continue
-            if arg.startswith("--file=") or arg.startswith("--env-file=") or arg.startswith("--project-directory="):
-                path = arg.split("=", 1)[1]
-                if not _within(path, worktree):
-                    return False
-                if arg.startswith("--file="):
-                    files.append(path)
-                i += 1
-                continue
-            break
-        if i >= len(args) or args[i] not in {"up", "run"}:
-            return False
-        subcommand, tail = args[i], args[i + 1:]
-        if not tail and args[i] == "run":
-            return False
-        if subcommand == "up":
-            safe_flags = {"-d", "--detach", "--abort-on-container-exit", "--build", "--no-build", "--pull", "--remove-orphans",
-                          "--force-recreate", "--no-recreate", "--no-deps", "--wait", "--quiet-pull",
-                          "--renew-anon-volumes", "--timestamps"}
-            value_flags = {"--timeout", "-t"}
-            for arg in tail:
-                if arg in safe_flags or arg in value_flags:
-                    continue
-                if arg.startswith("--") and any(arg.startswith(flag + "=") for flag in value_flags):
-                    continue
-                if arg.startswith("-"):
-                    return False
-            return True
-        safe_flags = {"--rm", "--build", "--no-deps", "--quiet-pull", "-T", "--no-TTY",
-                      "--service-ports", "--use-aliases"}
-        value_flags = {"--entrypoint", "--env", "-e", "--user", "-u", "--workdir", "-w"}
-        i = 0
-        while i < len(tail) and tail[i].startswith("-"):
-            if tail[i] in safe_flags:
-                i += 1
-            elif tail[i] in value_flags:
-                i += 2
-                if i > len(tail):
-                    return False
-            elif any(tail[i].startswith(flag + "=") for flag in value_flags):
-                i += 1
-            else:
-                return False
-        return i < len(tail)  # the remaining arguments are service name and its command
+        return _container_compose_arguments_allowed(args, worktree)
     return False
 
 

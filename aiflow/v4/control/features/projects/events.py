@@ -1,7 +1,7 @@
-"""Domain events for successful GitHub connection and environment writes in projects routes."""
+"""Domain events for successful project configuration and GitHub writes in projects routes."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ...platform.events import Audit, DomainEvent, event
 
@@ -249,3 +249,130 @@ class EnvironmentRemovalsRecorded(DomainEvent):
         return Audit("environment", "removals", self.ticket, self.actor,
                      f"{self.removed} removed, {self.tickets} environment ticket(s)",
                      {"needs": self.needs}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class ProjectRepositoriesSaved(DomainEvent):
+    type = "project.repositories_saved"
+    owner = "projects"
+    aggregate = "project"
+    aggregate_field = "project"
+
+    project: str
+    actor: str
+    result: str
+    details: dict = field(default_factory=dict)
+
+    def audit(self) -> Audit:
+        return Audit("aiflow-control", "save_project_repositories", self.project, self.actor,
+                     self.result, self.details or {"project": self.project})
+
+
+@event
+@dataclass(frozen=True)
+class ProjectEnvironmentSaved(DomainEvent):
+    type = "project.environment_saved"
+    owner = "projects"
+    aggregate = "project"
+    aggregate_field = "project"
+
+    project: str
+    actor: str
+    result: str
+    details: dict = field(default_factory=dict)
+
+    def audit(self) -> Audit:
+        return Audit("aiflow-control", "save_project_environment", self.project, self.actor,
+                     self.result, self.details or {"project": self.project})
+
+
+@event
+@dataclass(frozen=True)
+class ProjectEnvironmentScanned(DomainEvent):
+    type = "project.environment_scanned"
+    owner = "projects"
+    aggregate = "project"
+    aggregate_field = "scope"
+
+    project: str
+    actor: str
+    result: str
+    details: dict = field(default_factory=dict)
+    scope: str = "control"
+
+    def audit(self) -> Audit:
+        return Audit("aiflow-control", "environment_scan", self.project, self.actor,
+                     self.result, self.details or {"project": self.project})
+
+
+@event
+@dataclass(frozen=True)
+class ProjectAdded(DomainEvent):
+    type = "project.added"
+    owner = "projects"
+    aggregate = "project"
+    aggregate_field = "project"
+
+    project: str
+    actor: str
+    result: str
+    details: dict = field(default_factory=dict)
+
+    def audit(self) -> Audit:
+        return Audit("aiflow-control", "add_project", self.project, self.actor,
+                     self.result, self.details or {"project": self.project})
+
+
+@event
+@dataclass(frozen=True)
+class ProjectServicesChanged(DomainEvent):
+    type = "project.services_changed"
+    owner = "projects"
+    aggregate = "project"
+    aggregate_field = "project"
+
+    project: str
+    actor: str
+    result: str
+    details: dict = field(default_factory=dict)
+
+    def audit(self) -> Audit:
+        return Audit("aiflow-control", "project_services", self.project, self.actor,
+                     self.result, self.details or {"project": self.project})
+
+
+@event
+@dataclass(frozen=True)
+class ProjectPauseChanged(DomainEvent):
+    type = "project.pause_changed"
+    owner = "projects"
+    aggregate = "project"
+    aggregate_field = "project"
+
+    project: str
+    actor: str
+    result: str
+    details: dict = field(default_factory=dict)
+
+    def audit(self) -> Audit:
+        return Audit("aiflow-control", "pause_project", self.project, self.actor,
+                     self.result, self.details or {"project": self.project})
+
+
+@event
+@dataclass(frozen=True)
+class ProjectRemoved(DomainEvent):
+    type = "project.removed"
+    owner = "projects"
+    aggregate = "project"
+    aggregate_field = "project"
+
+    project: str
+    actor: str
+    result: str
+    details: dict = field(default_factory=dict)
+
+    def audit(self) -> Audit:
+        return Audit("aiflow-control", "remove_project", self.project, self.actor,
+                     self.result, self.details or {"project": self.project})

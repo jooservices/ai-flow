@@ -14,7 +14,9 @@ from .events import (EnvironmentRemovalsRecorded, GitHubAppConnected, GitHubAppI
                      GitHubAppInstallOpened, GitHubConnectionAssigned, GitHubConnectionRemoved,
                      GitHubInstallationSettingsOpened, GitHubManifestCreated, GitHubManifestStarted,
                      GitHubRepositoryAccessChanged, GitHubRepositorySnapshotRecorded,
-                     GitHubTokenConnectionAdded, GitHubTokenConnectionReplaced)
+                     GitHubTokenConnectionAdded, GitHubTokenConnectionReplaced, ProjectAdded,
+                     ProjectEnvironmentSaved, ProjectEnvironmentScanned, ProjectPauseChanged,
+                     ProjectRemoved, ProjectRepositoriesSaved, ProjectServicesChanged)
 from typing import Any
 from urllib.parse import quote, urlsplit
 import yaml
@@ -853,9 +855,10 @@ def install(app, ctx, deps) -> SimpleNamespace:
             publish_for(ctx, GitHubConnectionAssigned(actor=user.subject, repo=repos[lowered]["repo"],
                                                       connection=connection, project=key))
         refresh_projects()
-        project_audit("save_project_repositories", key, user.subject, True,
-                      commit or "bot commit created", {"epic_repositories": mappings,
-                                                       "repositories": normalized})
+        publish_for(ctx, ProjectRepositoriesSaved(project=key, actor=user.subject,
+                                                  result=commit or "bot commit created",
+                                                  details={"epic_repositories": mappings,
+                                                           "repositories": normalized}))
         ctx.events.emit("project.repositories_changed", project=key, account=user.subject, outcome="saved",
                         reason=f"control repo commit {commit or 'created'}",
                         data={"epic_count": len(mappings), "repository_count": len(normalized)})
@@ -910,8 +913,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
             raise HTTPException(502, "could not save the environment to aiflow-control") from exc
         refresh_projects()
         # names only in the audit: the values are configuration, the secrets are never in the file
-        project_audit("save_project_environment", key, user.subject, True, commit or "bot commit created",
-                      {"project": key, "names": [i.name for i in items]})
+        publish_for(ctx, ProjectEnvironmentSaved(project=key, actor=user.subject,
+                                                 result=commit or "bot commit created",
+                                                 details={"project": key, "names": [i.name for i in items]}))
         ctx.events.emit("project.environment_changed", project=key, account=user.subject, outcome="saved",
                         reason=f"control repo commit {commit or 'created'}", data={"items": len(items)})
         return {"saved": True, "project": key, "commit": commit, "items": [i.public() for i in items]}
@@ -934,8 +938,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
     def environment_scan_run(request: Request) -> dict:
         user = console_user(request, {"projects.manage"}, target="aiflow-control", action="environment_scan")
         report = environment_reports.scan(ctx, actor=user.subject)
-        project_audit("environment_scan", "", user.subject, True,
-                      f"{len(report['offenders'])} of {report['scanned']} open tickets", {"scan": report["id"]})
+        publish_for(ctx, ProjectEnvironmentScanned(project="", actor=user.subject,
+                                                   result=f"{len(report['offenders'])} of {report['scanned']} open tickets",
+                                                   details={"scan": report["id"]}))
         return {"scan": report}
 
     @app.post("/v1/environment/removals")
@@ -1021,7 +1026,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
                     raise HTTPException(502, "could not save the project to aiflow-control") from exc
                 # Make the committed project visible to the next admission before releasing the lock.
                 refresh_projects()
-        project_audit("add_project", key, user.subject, True, commit or "bot commit created", config)
+        publish_for(ctx, ProjectAdded(project=key, actor=user.subject,
+                                      result=commit or "bot commit created", details=config))
         ctx.events.emit("project.added", project=key, account=user.subject, outcome="saved",
                         reason=f"control repo commit {commit or 'created'}")
         system_check.refresh_all(ctx, "project_added")
@@ -1044,7 +1050,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             log.warning("project services update failed (%s)", type(exc).__name__)
             project_audit("project_services", key, user.subject, False, "control repo commit failed", {"services": body.services})
             raise HTTPException(502, "could not update the project in aiflow-control") from exc
-        project_audit("project_services", key, user.subject, True, commit or "bot commit created", {"services": names})
+        publish_for(ctx, ProjectServicesChanged(project=key, actor=user.subject,
+                                                result=commit or "bot commit created", details={"services": names}))
         ctx.events.emit("project.services_saved", project=key, account=user.subject, outcome="saved",
                         reason=", ".join(names) or "none")
         return {"saved": True, "project": key, "services": names, "commit": commit}
@@ -1074,8 +1081,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
             raise HTTPException(502, "could not update the project in aiflow-control") from exc
         refresh_projects()
         action = "paused" if body.paused else "resumed"
-        project_audit("pause_project", key, user.subject, True, commit or f"{action} by bot commit",
-                      {"project": key, "paused": body.paused})
+        publish_for(ctx, ProjectPauseChanged(project=key, actor=user.subject,
+                                             result=commit or f"{action} by bot commit",
+                                             details={"project": key, "paused": body.paused}))
         ctx.events.emit(f"project.{action}", project=key, account=user.subject, outcome=action,
                         reason=f"control repo commit {commit or 'created'}")
         return {"project": key, "status": "paused" if body.paused else "active", "commit": commit}
@@ -1099,7 +1107,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             project_audit("remove_project", key, user.subject, False, "control repo commit failed")
             raise HTTPException(502, "could not remove the project from aiflow-control") from exc
         refresh_projects()
-        project_audit("remove_project", key, user.subject, True, commit or "bot commit created", {"project": key})
+        publish_for(ctx, ProjectRemoved(project=key, actor=user.subject,
+                                        result=commit or "bot commit created", details={"project": key}))
         ctx.events.emit("project.removed", project=key, account=user.subject, outcome="removed",
                         reason=f"control repo commit {commit or 'created'}")
         return {"removed": True, "project": key, "commit": commit}

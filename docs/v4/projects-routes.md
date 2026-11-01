@@ -63,8 +63,10 @@ Successful GitHub connection and repository writes publish `github.repository_sn
 `github.token_connection_replaced`, `github.connection_removed`, `github.manifest_started`,
 `github.manifest_created`, `github.app_import_verified`, `github.app_install_opened`,
 `github.installation_settings_opened` and `github.connection_assigned`. Environment removals publish
-`environment.removals_recorded`. The audit ledger listener writes the same `write_audit` rows as before.
-The project audit helper and refused writes still call `audit()` directly.
+`environment.removals_recorded`. Successful project configuration writes publish `project.repositories_saved`,
+`project.environment_saved`, `project.environment_scanned`, `project.added`, `project.services_changed`,
+`project.pause_changed` and `project.removed`. The audit ledger listener writes the same `write_audit` rows as before.
+Refused project writes still call `audit()` directly.
 
 The progress report helper in `control/report.py` was split (its requirement-coverage section became `_coverage_markdown`) with no change to
 the routes that render it: `GET /v1/projects/{key}/report` and `POST /v1/projects/{key}/close`.

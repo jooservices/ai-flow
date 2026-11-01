@@ -42,6 +42,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
 - [Telegram BA chat](../../docs/v4/telegram-ba-chat.md): private-chat follow-up questions, owner-approved epic/story/task proposals, and Jira ticket creation through the configured Telegram channel
 - [Developer hand-over](../../docs/v4/dev-handover.md): the developer builds a requirements ledger, tests each criterion with failing and boundary cases, reviews its own diff, and hands over an AC-MAP and SELF-REVIEW that the reviewer checks entry by entry
+- [Developer run steps](../../docs/v4/dev-run-steps.md): prepare, brief, run, collect and publish with setup shared by developer and verification workers
 - [Role health](../../docs/v4/role-health.md): only real failures count; role capacity preserves two enabled accounts and limits switches to half the pool, with shared-cause incidents and immediate recovery when a tool or run history is fixed
 - [Code quality gate](../../docs/v4/code-quality.md): tool-independent lint, complexity, function-size and layer checks with a shrink-only baseline
 - [Already completed work](../../docs/v4/already-completed-work.md): clean developer runs reuse an open PR or open one for committed branch work, then send the ticket to verification; empty branches record a doctor-retryable failure

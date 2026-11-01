@@ -197,3 +197,127 @@ class GitHubBranchUpdated(DomainEvent):
     def audit(self) -> Audit:
         return Audit("github", "update-branch", self.ticket, self.actor, self.message,
                      {"number": self.number, "repo": self.repo}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class ReviewerJiraCommentPosted(DomainEvent):
+    type = "review.jira_comment_posted"
+    owner = "github_fenced"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    comment_id: str
+    source: str
+    chars: int
+
+    def audit(self) -> Audit:
+        return Audit("jira", "comment", self.ticket, self.actor, self.comment_id,
+                     {"source": self.source, "chars": self.chars}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class ReviewerGitHubCommentPosted(DomainEvent):
+    type = "review.github_comment_posted"
+    owner = "github_fenced"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    source: str
+    number: int
+    repo: str
+
+    def audit(self) -> Audit:
+        return Audit("github", "comment", self.ticket, self.actor, "ok",
+                     {"source": self.source, "number": self.number, "repo": self.repo}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class ReviewerTicketTransitioned(DomainEvent):
+    type = "review.ticket_transitioned"
+    owner = "github_fenced"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    status: str
+    target: str
+
+    def audit(self) -> Audit:
+        return Audit("jira", "transition", self.ticket, self.actor, self.status,
+                     {"to": self.target, "source": "human-review"}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class ReviewerLabelsUpdated(DomainEvent):
+    type = "review.labels_updated"
+    owner = "github_fenced"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    add: list[str]
+    remove: list[str]
+
+    def audit(self) -> Audit:
+        return Audit("jira", "fields", self.ticket, self.actor, "review labels updated",
+                     {"source": "human-review", "add": self.add, "remove": self.remove}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class ReviewerActionAccepted(DomainEvent):
+    type = "review.action_accepted"
+    owner = "github_fenced"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    action: str
+    kind: str
+    text: str
+
+    def audit(self) -> Audit:
+        return Audit("human-review", self.action, self.ticket, "reviewer-console", "accepted",
+                     {"kind": self.kind, "text": self.text}, self.run_id, self.fence)
+
+
+@event
+@dataclass(frozen=True)
+class GitHubMergeCompleted(DomainEvent):
+    type = "github.merge_completed"
+    owner = "github_fenced"
+    aggregate = "run"
+    aggregate_field = "run_id"
+
+    run_id: str
+    fence: int
+    ticket: str
+    actor: str
+    number: int
+    method: str
+    repo: str
+    result: str
+
+    def audit(self) -> Audit:
+        return Audit("github", "merge", self.ticket, self.actor, self.result,
+                     {"number": self.number, "method": self.method, "repo": self.repo}, self.run_id, self.fence)

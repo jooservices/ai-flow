@@ -26,6 +26,11 @@ from .db import J
 from .route_deps import h
 from .features.work.constants import utcnow
 from .features.work.listeners import run_finished
+from .features.github_fenced.events import (GitHubMergeCompleted, ReviewerActionAccepted,
+                                            ReviewerGitHubCommentPosted, ReviewerJiraCommentPosted,
+                                            ReviewerLabelsUpdated, ReviewerTicketTransitioned)
+from .features.runs.events import FlowBugCreated, FlowBugIntakeMoved, FlowBugRepeated
+from .platform.events.wiring import publish_for
 
 
 def _api():
@@ -218,8 +223,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
         """Mirror a reviewer action to Jira and, when the ticket has a PR, its PR conversation."""
         jira_run = fenced(run_id, fence, "jira", "comment", {"chars": len(text)})
         comment_id = ctx.jira.comment(ticket, text)
-        audit("jira", "comment", ticket, run_id, fence, jira_run["account_id"], True, comment_id,
-              {"source": source, "chars": len(text)})
+        publish_for(ctx, ReviewerJiraCommentPosted(run_id=run_id, fence=fence, ticket=ticket,
+                                                   actor=jira_run["account_id"], comment_id=comment_id,
+                                                   source=source, chars=len(text)))
         if number:
             github_run = fenced(run_id, fence, "github", "comment", {"number": number})
             project = ctx.repo().projects.get(github_run["project"])
@@ -228,8 +234,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
             repository = repository_for_run(github_run, project)
             gateway = github_gateway(ctx, repository)
             gateway.comment(repository.split("/", 1)[-1], number, text)
-            audit("github", "comment", ticket, run_id, fence, github_run["account_id"], True, "ok",
-                  {"source": source, "number": number, "repo": repository})
+            publish_for(ctx, ReviewerGitHubCommentPosted(run_id=run_id, fence=fence, ticket=ticket,
+                                                         actor=github_run["account_id"], source=source,
+                                                         number=number, repo=repository))
 
     def reviewer_transition(ticket: str, run_id: str, fence: int, target: str, reason: str) -> str:
         transition_run = fenced(run_id, fence, "jira", "transition", {"to": target})
@@ -238,8 +245,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
         ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN %s='Done' THEN coalesce(done_at,now())"
                    " ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, ticket))
         merge_flow.record_move(ctx, ticket, (before or {}).get("status", ""), status, merge_flow.PERSON, reason)
-        audit("jira", "transition", ticket, run_id, fence, transition_run["account_id"], True, status,
-              {"to": target, "source": "human-review"})
+        publish_for(ctx, ReviewerTicketTransitioned(run_id=run_id, fence=fence, ticket=ticket,
+                                                    actor=transition_run["account_id"], status=status, target=target))
         ctx.events.emit("jira.transition", ticket=ticket, project=transition_run["project"], run_id=run_id,
                         fence=fence, account="reviewer-console", node="control", outcome=status, reason=reason)
         return status
@@ -256,15 +263,15 @@ def install(app, ctx, deps) -> SimpleNamespace:
         for label in remove:
             ctx.jira.remove_label(ticket, label)
             ctx.db.run("UPDATE tickets SET labels=array_remove(labels,%s) WHERE key=%s", (label, ticket))
-        audit("jira", "fields", ticket, run_id, fence, fields_run["account_id"], True, "review labels updated",
-              {"source": "human-review", "add": list(add), "remove": list(remove)})
+        publish_for(ctx, ReviewerLabelsUpdated(run_id=run_id, fence=fence, ticket=ticket,
+                                               actor=fields_run["account_id"], add=list(add), remove=list(remove)))
 
     def record_reviewer_action(ticket: dict, run_id: str, fence: int, action: str, text: str = "") -> None:
         latest_dev = ctx.db.one("SELECT step,outcome FROM runs WHERE ticket_key=%s AND step='dev'"
                                 " ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
         kind = deps.late.github_fenced_routes.review_item_kind(ticket, latest_dev)
-        audit("human-review", action, ticket["key"], run_id, fence, "reviewer-console", True, "accepted",
-              {"kind": kind, "text": text[:4000]})
+        publish_for(ctx, ReviewerActionAccepted(run_id=run_id, fence=fence, ticket=ticket["key"], action=action,
+                                                kind=kind, text=text[:4000]))
         ctx.events.emit("review.action", ticket=ticket["key"], project=ticket["project"], step="qa",
                         run_id=run_id, fence=fence, account="reviewer-console", node="control", outcome=action,
                         action=action, kind=kind, text=text[:4000])
@@ -300,9 +307,15 @@ def install(app, ctx, deps) -> SimpleNamespace:
         repo_name = repository.split("/", 1)[-1]
         res = github.merge_pr(repo_name, number, title, method)
         ok = bool(res.get("merged"))
-        audit("github", "merge", run["ticket_key"], str(run["id"]), run["fence"], run["account_id"], ok,
-              res.get("sha") or res.get("message", ""), {"number": number, "method": method,
-                                                             "repo": repository})
+        if ok:
+            publish_for(ctx, GitHubMergeCompleted(run_id=str(run["id"]), fence=run["fence"],
+                                                  ticket=run["ticket_key"], actor=run["account_id"], number=number,
+                                                  method=method, repo=repository,
+                                                  result=res.get("sha") or res.get("message", "")))
+        else:
+            audit("github", "merge", run["ticket_key"], str(run["id"]), run["fence"], run["account_id"], False,
+                  res.get("sha") or res.get("message", ""), {"number": number, "method": method,
+                                                                "repo": repository})
         ctx.events.emit("github.merge", ticket=run["ticket_key"], run_id=str(run["id"]), fence=run["fence"],
                         account=run["account_id"], node=node or run["node"],
                         outcome="merged" if ok else "refused", reason=res.get("message", "")[:200])
@@ -504,9 +517,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
                    " type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
                    " description=EXCLUDED.description, synced_at=now()",
                    (ticket_key, project, ["flow-bug"], summary, description))
-        audit("jira", "flow_bug_create", ticket_key, str(run["id"]), run["fence"], run["account_id"], True,
-              "created", {"reason": reason, "signature": candidate["signature"], "run_ids": run_ids,
-                          "tickets": candidate["tickets"], "labels": ["flow-bug"]})
+        publish_for(ctx, FlowBugCreated(run_id=str(run["id"]), fence=run["fence"], ticket=ticket_key,
+                                        actor=run["account_id"], reason=reason, signature=candidate["signature"],
+                                        run_ids=run_ids, tickets=candidate["tickets"], labels=["flow-bug"]))
         status = move_flow_bug_to_intake(run, ticket_key, candidate["signature"])
         ctx.events.emit("flow_bug.created", ticket=ticket_key, project=project, run_id=str(run["id"]),
                         fence=run["fence"], account=run["account_id"], node=run["node"],
@@ -556,10 +569,11 @@ def install(app, ctx, deps) -> SimpleNamespace:
                         all_ids = sorted(known | {r["id"] for r in new_runs})
                         ctx.db.run("UPDATE flow_bug_tracker SET run_ids=%s, repeat_count=%s, updated_at=now()"
                                    " WHERE signature=%s", (all_ids, repeat_count, candidate["signature"]))
-                        audit("jira", "flow_bug_repeat", ticket_key, str(run["id"]), run["fence"],
-                              run["account_id"], True, comment_id,
-                              {"signature": candidate["signature"], "repeat_count": repeat_count,
-                               "new_run_ids": [r["id"] for r in new_runs]})
+                        publish_for(ctx, FlowBugRepeated(run_id=str(run["id"]), fence=run["fence"],
+                                                         ticket=ticket_key, actor=run["account_id"],
+                                                         comment_id=comment_id, signature=candidate["signature"],
+                                                         repeat_count=repeat_count,
+                                                         new_run_ids=[r["id"] for r in new_runs]))
                         ctx.events.emit("flow_bug.repeated", ticket=ticket_key,
                                         project=ctx.settings.maintenance_project, run_id=str(run["id"]),
                                         fence=run["fence"], account=run["account_id"], node=run["node"],
@@ -592,8 +606,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             return None
         ctx.db.run("UPDATE flow_bug_tracker SET in_intake=true, updated_at=now() WHERE signature=%s", (signature,))
         ctx.db.run("UPDATE tickets SET status='Intake', synced_at=now() WHERE key=%s", (ticket_key,))
-        audit("jira", "flow_bug_intake", ticket_key, str(run["id"]), run["fence"], run["account_id"], True,
-              "Intake", {"signature": signature})
+        publish_for(ctx, FlowBugIntakeMoved(run_id=str(run["id"]), fence=run["fence"], ticket=ticket_key,
+                                            actor=run["account_id"], signature=signature))
         return "Intake"
 
     # --- nodes ----------------------------------------------------------------------------------------------

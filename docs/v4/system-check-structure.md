@@ -11,3 +11,7 @@
 Condition-specific functions build each displayed result. To add or change a result, keep its builder focused on one
 condition, call it in the existing order, add a direct unit case for the builder, and add representative input and
 literal output to `tests/v4/test_system_check_parity.py`.
+
+## Routes
+
+The routes are unchanged: `POST /v1/system-check/run` runs the check, `POST /v1/projects` and `POST /v1/nodes/{name}/heartbeat` read the same conditions.

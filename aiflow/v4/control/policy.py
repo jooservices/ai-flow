@@ -303,11 +303,9 @@ def _container_command_arguments(segment: str) -> list[str] | None:
 
 def _container_build_value_allowed(option: str, value: str, worktree: str) -> bool:
     """Check the path and network restrictions for a Docker build option value."""
-    if option in {"-f", "--file"} and not _within(value, worktree):
-        return False
-    if option == "--network" and value not in {"default", "none"}:
-        return False
-    return True
+    file_outside = option in {"-f", "--file"} and not _within(value, worktree)
+    network_open = option == "--network" and value not in {"default", "none"}
+    return not (file_outside or network_open)
 
 
 def _container_build_arguments_allowed(args: list[str], worktree: str) -> bool:

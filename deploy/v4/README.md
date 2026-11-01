@@ -11,6 +11,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [CLI structure](../../docs/v4/cli-structure.md): how the developer and CI parser and dispatcher are organized
 - [v4 control plane architecture](../../docs/v4/architecture.md): layers, dependency direction, registration points, patterns and architectural checks
 - [Container runtime structure](../../docs/v4/container-structure.md): modules for Compose policy, process execution, and client shims
+- [State snapshot structure](../../docs/v4/state_snapshot-structure.md): section builders and the stable console snapshot contract
 - [Routes that publish domain events](../../docs/v4/event-publishing-routes.md): which routes publish events, so a change to the event wiring updates a page that names them
 - [Run inbox](../../docs/v4/run-inbox.md): queue guidance for active worker runs and deliver it after a provider invocation completes
 - [Control API router registry](../../docs/v4/router-registry.md): feature routers discovered and mounted by priority without a central registration list
@@ -34,6 +35,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
 - [Commit and pull request title rules](../../docs/v4/commit-rules.md): one rules module and a normalizer so a title or commit message is valid before the push
 - [System readiness check](../../docs/v4/system-check.md): check machine and project assumptions after join, project addition, upgrade and hourly; safely repair supported problems, gate work, and include results in the support bundle
+- [System check condition structure](../../docs/v4/system-check-structure.md): how GitHub project checks are ordered and how to add a condition
 - [Security hardening](../../docs/v4/security.md): two-factor sign-in and recovery codes, session length and forced sign-out, encrypted secrets, rate limits, CSRF, audit log, PR security scans, release security report and the disclosure policy
 - [Login installer structure](../../docs/v4/login-structure.md): sign-in, sessions, user management, and the permission gate are wired from small named parts
 - [Provider routing by quota](../../docs/v4/provider-routing.md): tickets go first to the provider with the most quota left (default Codex, Grok, Claude), a provider above its owner-set ceiling is held back and returns after its window resets or below 60%, with the reason for each assignment shown on Machines and AI

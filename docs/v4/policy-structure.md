@@ -11,3 +11,7 @@ checked by `_container_compose_prefix`, `_container_compose_up_allowed`, `_conta
 To add a permitted command form, add a named check for its rule and call it explicitly from the dispatcher or the
 owning subcommand check. Keep the existing check order, add literal characterization cases for allowed and refused
 forms, and add direct unit coverage for the new helper.
+
+## Route
+
+The route is unchanged: `POST /v1/policy/decide` asks whether a command is allowed. The container command check described above is one of the rules it evaluates.

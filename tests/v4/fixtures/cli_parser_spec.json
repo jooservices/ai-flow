@@ -1,0 +1,1423 @@
+{
+ "actions": [
+  {
+   "option_strings": [
+    "-h",
+    "--help"
+   ],
+   "dest": "help",
+   "default": "==SUPPRESS==",
+   "choices": null,
+   "required": false,
+   "nargs": 0,
+   "type_name": null,
+   "help": "show this help message and exit",
+   "metavar": null
+  },
+  {
+   "option_strings": [],
+   "dest": "cmd",
+   "default": null,
+   "choices": [
+    "version",
+    "migrate",
+    "import-inventory",
+    "control-api",
+    "control-loops",
+    "node",
+    "node-agent",
+    "canary",
+    "notify",
+    "ba-chat",
+    "upgrade-check",
+    "worker",
+    "install",
+    "scale-proof",
+    "secret",
+    "backup",
+    "console-user"
+   ],
+   "required": true,
+   "nargs": "A...",
+   "type_name": null,
+   "help": null,
+   "metavar": null
+  }
+ ],
+ "subcommands": {
+  "version": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "migrate": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "import-inventory": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "control-api": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--host"
+     ],
+     "dest": "host",
+     "default": "0.0.0.0",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--port"
+     ],
+     "dest": "port",
+     "default": 8080,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": "int",
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "control-loops": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "node": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "action",
+     "default": null,
+     "choices": [
+      "join"
+     ],
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--name"
+     ],
+     "dest": "name",
+     "default": null,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--join-token-file"
+     ],
+     "dest": "join_token_file",
+     "default": null,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--join-token-stdin"
+     ],
+     "dest": "join_token_stdin",
+     "default": false,
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--control"
+     ],
+     "dest": "control",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--ip"
+     ],
+     "dest": "ip",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "node-agent": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--slots"
+     ],
+     "dest": "slots",
+     "default": 2,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": "int",
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--no-workers"
+     ],
+     "dest": "no_workers",
+     "default": false,
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "canary": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "canary_action",
+     "default": null,
+     "choices": [
+      "evaluate",
+      "record-rollback",
+      "record-promotion",
+      "retry-tickets"
+     ],
+     "required": true,
+     "nargs": "A...",
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {
+    "evaluate": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--node"
+       ],
+       "dest": "node",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--target"
+       ],
+       "dest": "target",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--previous"
+       ],
+       "dest": "previous",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--started-at"
+       ],
+       "dest": "started_at",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--minimum-age-s"
+       ],
+       "dest": "minimum_age_s",
+       "default": 1200,
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": "int",
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--minimum-runs"
+       ],
+       "dest": "minimum_runs",
+       "default": 5,
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": "int",
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--maximum-age-s"
+       ],
+       "dest": "maximum_age_s",
+       "default": 3600,
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": "int",
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--failure-ratio"
+       ],
+       "dest": "failure_ratio",
+       "default": "2",
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--minimum-infra-failures"
+       ],
+       "dest": "minimum_infra_failures",
+       "default": 3,
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": "int",
+       "help": null,
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    },
+    "record-rollback": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--node"
+       ],
+       "dest": "node",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--target"
+       ],
+       "dest": "target",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--previous"
+       ],
+       "dest": "previous",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--commit"
+       ],
+       "dest": "commit",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--measurements"
+       ],
+       "dest": "measurements",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    },
+    "record-promotion": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--node"
+       ],
+       "dest": "node",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--target"
+       ],
+       "dest": "target",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--measurements"
+       ],
+       "dest": "measurements",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--minimum-runs"
+       ],
+       "dest": "minimum_runs",
+       "default": 5,
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": "int",
+       "help": null,
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    },
+    "retry-tickets": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    }
+   }
+  },
+  "notify": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--severity"
+     ],
+     "dest": "severity",
+     "default": null,
+     "choices": [
+      "info",
+      "warning",
+      "critical"
+     ],
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--title"
+     ],
+     "dest": "title",
+     "default": null,
+     "choices": null,
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--detail"
+     ],
+     "dest": "detail",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--link"
+     ],
+     "dest": "link",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "ba-chat": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "ba_action",
+     "default": null,
+     "choices": [
+      "setup"
+     ],
+     "required": true,
+     "nargs": "A...",
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {
+    "setup": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--name"
+       ],
+       "dest": "name",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--chat-id"
+       ],
+       "dest": "chat_id",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--project"
+       ],
+       "dest": "project",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--token-stdin"
+       ],
+       "dest": "token_stdin",
+       "default": false,
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "read the bot token from stdin",
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    }
+   }
+  },
+  "upgrade-check": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--target"
+     ],
+     "dest": "target",
+     "default": null,
+     "choices": null,
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--current"
+     ],
+     "dest": "current",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--migrations"
+     ],
+     "dest": "migrations",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--baseline"
+     ],
+     "dest": "baseline",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "worker": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--account"
+     ],
+     "dest": "account",
+     "default": null,
+     "choices": null,
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "install": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "target",
+     "default": null,
+     "choices": [
+      "control"
+     ],
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--version"
+     ],
+     "dest": "release",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": "vX.Y.Z"
+    },
+    {
+     "option_strings": [
+      "--domain"
+     ],
+     "dest": "domain",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--rollback"
+     ],
+     "dest": "rollback",
+     "default": false,
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--stack"
+     ],
+     "dest": "stack",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": "project stack whose OS toolchain server-installer adds, e.g. php-8.3",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--si"
+     ],
+     "dest": "si",
+     "default": [],
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": "SI_NAME=VALUE"
+    },
+    {
+     "option_strings": [
+      "--vpn"
+     ],
+     "dest": "vpn",
+     "default": "",
+     "choices": [
+      "tailscale",
+      "wireguard"
+     ],
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--otel-collector"
+     ],
+     "dest": "otel_collector",
+     "default": false,
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--health-timeout"
+     ],
+     "dest": "health_timeout",
+     "default": 300,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": "int",
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--admin-email"
+     ],
+     "dest": "admin_email",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": "the first Super Administrator of Command Center (first install)",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "scale-proof": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--release"
+     ],
+     "dest": "release",
+     "default": null,
+     "choices": null,
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": "the release the result is attached to, e.g. v4.3.0",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--out"
+     ],
+     "dest": "out",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": "write the JSON report here",
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--submit"
+     ],
+     "dest": "submit",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": "attach the result to the release on this control plane (token: AIFLOW4_OWNER_TOKEN)",
+     "metavar": "CONTROL_URL"
+    },
+    {
+     "option_strings": [
+      "--database-url"
+     ],
+     "dest": "database_url",
+     "default": "postgresql://db.example/aiflow_test",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--redis-url"
+     ],
+     "dest": "redis_url",
+     "default": "redis://redis.example/0",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "secret": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "action",
+     "default": null,
+     "choices": [
+      "set",
+      "list"
+     ],
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "name",
+     "default": null,
+     "choices": null,
+     "required": false,
+     "nargs": "?",
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--stdin"
+     ],
+     "dest": "stdin",
+     "default": false,
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "read the value from a pipe instead of a hidden prompt",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  },
+  "backup": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "backup_action",
+     "default": null,
+     "choices": [
+      "restore"
+     ],
+     "required": true,
+     "nargs": "A...",
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    }
+   ],
+   "subcommands": {
+    "restore": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--from"
+       ],
+       "dest": "source",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": "local encrypted backup or s3://bucket/key",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--key-file"
+       ],
+       "dest": "key_file",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": "the one-time backup key downloaded from Command Center",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--s3-endpoint"
+       ],
+       "dest": "s3_endpoint",
+       "default": "",
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": null,
+       "help": "S3-compatible endpoint for an s3:// source",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--s3-region"
+       ],
+       "dest": "s3_region",
+       "default": "us-east-1",
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    }
+   }
+  },
+  "console-user": {
+   "actions": [
+    {
+     "option_strings": [
+      "-h",
+      "--help"
+     ],
+     "dest": "help",
+     "default": "==SUPPRESS==",
+     "choices": null,
+     "required": false,
+     "nargs": 0,
+     "type_name": null,
+     "help": "show this help message and exit",
+     "metavar": null
+    },
+    {
+     "option_strings": [],
+     "dest": "action",
+     "default": null,
+     "choices": [
+      "seed",
+      "reset-password",
+      "list"
+     ],
+     "required": true,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--email"
+     ],
+     "dest": "email",
+     "default": null,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--role"
+     ],
+     "dest": "role",
+     "default": "super_admin",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--name"
+     ],
+     "dest": "name",
+     "default": "",
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": null,
+     "metavar": null
+    },
+    {
+     "option_strings": [
+      "--password-file"
+     ],
+     "dest": "password_file",
+     "default": null,
+     "choices": null,
+     "required": false,
+     "nargs": null,
+     "type_name": null,
+     "help": "where the generated password is written (mode 0600); it is never printed",
+     "metavar": null
+    }
+   ],
+   "subcommands": {}
+  }
+ }
+}

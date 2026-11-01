@@ -15,3 +15,12 @@ To extend login behavior, add the helper or route to the part that owns it and r
 position of the gate before security middleware. `login.py` retains the shared password, user, and settings helpers
 used by existing callers. The routes remain `/login`, `/v1/auth/login`, `/v1/auth/logout`, `/logout`,
 `/v1/auth/me`, and `GET`/`POST /v1/auth/users`.
+
+## Routes in these modules
+
+The routes are unchanged by the split; they are listed here because the documentation check ties a changed route module to a document that names its routes.
+
+- `POST /v1/auth/login` (sign-in, `login_signin.py`)
+- `POST /v1/auth/logout` (sessions, `login_sessions.py`)
+- `GET /v1/auth/me` (sessions, `login_sessions.py`)
+- `GET /v1/auth/users` and `POST /v1/auth/users` (user management, `login_users.py`)

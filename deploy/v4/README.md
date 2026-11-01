@@ -9,6 +9,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 - [Technical decisions](../../docs/v4/technical-decisions.md): engineering questions are decided and recorded by the SA role and never sent to the owner
 - [v4 control plane architecture](../../docs/v4/architecture.md): layers, dependency direction, registration points, patterns and architectural checks
+- [Routes that publish domain events](../../docs/v4/event-publishing-routes.md): which routes publish events, so a change to the event wiring updates a page that names them
 - [Run inbox](../../docs/v4/run-inbox.md): queue guidance for active worker runs and deliver it after a provider invocation completes
 - [Control API router registry](../../docs/v4/router-registry.md): feature routers discovered and mounted by priority without a central registration list
 - [Master AI rescue](../../docs/v4/master-rescue.md): Claude takes a long Blocked or over-time ticket once, with its own budget; owner-only work and an unavailable Claude go to the owner, a failed rescue returns to development

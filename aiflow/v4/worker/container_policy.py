@@ -131,12 +131,14 @@ def _short_compose_volume(value: str, project_dir: Path, root: Path, named_volum
         raise ContainerPolicyError("compose mount propagation and relabel options are not allowed")
 
 
-def _validate_compose_document(data: Any, compose_file: Path, project_dir: Path, root: Path,
-                               *, require_services: bool = True) -> int:
+def _validate_compose_document_header(data: Any) -> None:
     if not isinstance(data, dict):
         raise ContainerPolicyError("compose file must contain a mapping")
     if "include" in data:
         raise ContainerPolicyError("compose include is disabled; all compose inputs must be explicit worktree files")
+
+
+def _validate_compose_named_volumes(data: dict[str, Any]) -> set[str]:
     raw_volumes = data.get("volumes") or {}
     if not isinstance(raw_volumes, dict):
         raise ContainerPolicyError("compose volumes must be a mapping")
@@ -144,25 +146,44 @@ def _validate_compose_document(data: Any, compose_file: Path, project_dir: Path,
     if len(named_volumes) > ACTIVE_CONTAINER_LIMIT:
         raise ContainerPolicyError(f"compose may declare at most {ACTIVE_CONTAINER_LIMIT} named volumes")
     for name, volume in raw_volumes.items():
-        if not _SAFE_NAME.fullmatch(str(name)) or not isinstance(volume or {}, dict):
-            raise ContainerPolicyError("invalid compose volume declaration")
-        if (volume or {}).get("name"):
-            raise ContainerPolicyError("custom compose volume names are not allowed; volumes are named per run")
-        if ((volume or {}).get("external") or (volume or {}).get("driver_opts")
-                or (volume or {}).get("driver") not in (None, "", "local")):
-            raise ContainerPolicyError("external and host-backed named volumes are not allowed")
-    for section in ("secrets", "configs"):
-        entries = data.get(section) or {}
-        if not isinstance(entries, dict):
-            raise ContainerPolicyError(f"compose {section} must be a mapping")
-        for name, entry in entries.items():
-            if not _SAFE_NAME.fullmatch(str(name)) or not isinstance(entry or {}, dict):
-                raise ContainerPolicyError(f"invalid compose {section} declaration")
-            entry = entry or {}
-            if entry.get("external"):
-                raise ContainerPolicyError(f"external compose {section} are not allowed")
-            if entry.get("file"):
-                _inside_file(str(entry["file"]), root, base=project_dir)
+        _validate_compose_named_volume(name, volume)
+    return named_volumes
+
+
+def _validate_compose_named_volume(name: Any, volume: Any) -> None:
+    if not _SAFE_NAME.fullmatch(str(name)) or not isinstance(volume or {}, dict):
+        raise ContainerPolicyError("invalid compose volume declaration")
+    _validate_compose_volume_name(volume)
+    _validate_compose_volume_backend(volume)
+
+
+def _validate_compose_volume_name(volume: Any) -> None:
+    if (volume or {}).get("name"):
+        raise ContainerPolicyError("custom compose volume names are not allowed; volumes are named per run")
+
+
+def _validate_compose_volume_backend(volume: Any) -> None:
+    if ((volume or {}).get("external") or (volume or {}).get("driver_opts")
+            or (volume or {}).get("driver") not in (None, "", "local")):
+        raise ContainerPolicyError("external and host-backed named volumes are not allowed")
+
+
+def _validate_compose_resource_files(data: dict[str, Any], section: str, root: Path,
+                                    project_dir: Path) -> None:
+    entries = data.get(section) or {}
+    if not isinstance(entries, dict):
+        raise ContainerPolicyError(f"compose {section} must be a mapping")
+    for name, entry in entries.items():
+        if not _SAFE_NAME.fullmatch(str(name)) or not isinstance(entry or {}, dict):
+            raise ContainerPolicyError(f"invalid compose {section} declaration")
+        entry = entry or {}
+        if entry.get("external"):
+            raise ContainerPolicyError(f"external compose {section} are not allowed")
+        if entry.get("file"):
+            _inside_file(str(entry["file"]), root, base=project_dir)
+
+
+def _validate_compose_networks(data: dict[str, Any]) -> dict[str, Any]:
     networks = data.get("networks") or {}
     if not isinstance(networks, dict):
         raise ContainerPolicyError("compose networks must be a mapping")
@@ -173,73 +194,167 @@ def _validate_compose_document(data: Any, compose_file: Path, project_dir: Path,
         if (network.get("external") or network.get("name") or network.get("driver_opts")
                 or network.get("driver") not in (None, "", "bridge")):
             raise ContainerPolicyError("external, named, host-backed, and custom compose networks are not allowed")
+    return networks
+
+
+def _validate_compose_services(data: dict[str, Any], require_services: bool) -> dict[str, Any]:
     services = data.get("services") or {}
     if not isinstance(services, dict) or (require_services and not services) or len(services) > ACTIVE_CONTAINER_LIMIT:
         raise ContainerPolicyError(f"compose must define between 1 and {ACTIVE_CONTAINER_LIMIT} services")
+    return services
+
+
+def _validate_compose_service_name(name: Any, service: Any) -> None:
+    if not _SAFE_NAME.fullmatch(str(name)) or not isinstance(service, dict):
+        raise ContainerPolicyError("invalid compose service")
+
+
+def _validate_compose_service_privileges(service: dict[str, Any]) -> None:
+    if (service.get("privileged") not in (None, False) or service.get("cap_add") or service.get("devices")
+            or service.get("device_cgroup_rules")):
+        raise ContainerPolicyError("privileged containers, added capabilities, and host devices are not allowed")
+
+
+def _validate_compose_service_labels(service: dict[str, Any]) -> None:
+    labels = service.get("labels") or {}
+    label_keys = labels.keys() if isinstance(labels, dict) else labels if isinstance(labels, list) else []
+    if any(str(label).partition("=")[0] == "aiflow4.run" for label in label_keys):
+        raise ContainerPolicyError("the aiflow4.run label is reserved for broker cleanup")
+
+
+def _validate_compose_service_host_controls(service: dict[str, Any]) -> None:
+    if service.get("volumes_from") or service.get("security_opt") or service.get("runtime"):
+        raise ContainerPolicyError("host container controls and inherited mounts are not allowed")
+
+
+def _validate_compose_service_inheritance(service: dict[str, Any]) -> None:
+    if service.get("extends") or service.get("develop"):
+        raise ContainerPolicyError("compose service inheritance and host-side watch settings are not allowed")
+
+
+def _validate_compose_service_namespaces(service: dict[str, Any]) -> None:
+    for key in ("pid", "ipc", "uts", "userns_mode", "cgroup"):
+        if service.get(key) not in (None, ""):
+            raise ContainerPolicyError(f"custom {key} namespaces are not allowed")
+
+
+def _validate_compose_service_network_mode(service: dict[str, Any]) -> None:
+    if str(service.get("network_mode") or "").lower():
+        raise ContainerPolicyError("custom container network modes are not allowed")
+
+
+def _validate_compose_service_networks(service: dict[str, Any], networks: dict[str, Any]) -> None:
+    service_networks = service.get("networks") or []
+    if isinstance(service_networks, dict):
+        service_networks = list(service_networks)
+    if not isinstance(service_networks, list):
+        raise ContainerPolicyError("compose service networks must be a list or mapping")
+    if any(str(item) not in networks and str(item) != "default" for item in service_networks):
+        raise ContainerPolicyError("compose services may use only networks declared in this project")
+
+
+def _validate_compose_service_build(service: dict[str, Any], root: Path, project_dir: Path) -> None:
+    if service.get("build"):
+        build = service["build"]
+        build = {"context": build} if isinstance(build, str) else build
+        _validate_compose_build_options(build)
+        _validate_compose_build_files(build, root, project_dir)
+        _validate_compose_build_network(build)
+
+
+def _validate_compose_build_options(build: Any) -> None:
+    if (not isinstance(build, dict) or build.get("ssh") or build.get("secrets") or build.get("additional_contexts")
+            or build.get("privileged") not in (None, False)):
+        raise ContainerPolicyError("build secrets, ssh agents, and additional contexts are not allowed")
+
+
+def _validate_compose_build_files(build: dict[str, Any], root: Path, project_dir: Path) -> None:
+    context = _inside_directory(str(build.get("context") or "."), root, base=project_dir)
+    dockerfile = build.get("dockerfile")
+    if dockerfile:
+        _inside_file(str(context / str(dockerfile)), root)
+
+
+def _validate_compose_build_network(build: dict[str, Any]) -> None:
+    if str(build.get("network") or "").lower() not in {"", "default", "none"}:
+        raise ContainerPolicyError("host networking during build is not allowed")
+
+
+def _validate_compose_service_env_files(service: dict[str, Any], root: Path, project_dir: Path) -> None:
+    env_files = service.get("env_file") or []
+    if isinstance(env_files, (str, dict)):
+        env_files = [env_files]
+    for item in env_files:
+        path = item.get("path") if isinstance(item, dict) else item
+        _inside_file(str(path), root, base=project_dir)
+
+
+def _validate_compose_service_volumes(service: dict[str, Any], project_dir: Path, root: Path,
+                                      named_volumes: set[str]) -> None:
+    for volume in service.get("volumes") or []:
+        _validate_compose_service_volume(volume, project_dir, root, named_volumes)
+
+
+def _validate_compose_service_volume(volume: Any, project_dir: Path, root: Path,
+                                     named_volumes: set[str]) -> None:
+    if isinstance(volume, str):
+        _short_compose_volume(volume, project_dir, root, named_volumes)
+    elif isinstance(volume, dict):
+        _validate_compose_long_volume(volume, project_dir, root, named_volumes)
+    else:
+        raise ContainerPolicyError("invalid compose volume")
+
+
+def _validate_compose_long_volume(volume: dict[str, Any], project_dir: Path, root: Path,
+                                  named_volumes: set[str]) -> None:
+    kind = str(volume.get("type") or "volume")
+    if kind == "bind":
+        _validate_compose_bind_volume(volume, project_dir, root)
+    elif kind == "volume":
+        _validate_compose_long_named_volume(volume, named_volumes)
+    elif kind != "tmpfs":
+        raise ContainerPolicyError(f"compose mount type is not allowed: {kind}")
+
+
+def _validate_compose_bind_volume(volume: dict[str, Any], project_dir: Path, root: Path) -> None:
+    source = str(volume.get("source") or "")
+    _validate_bind(source if Path(source).is_absolute() else str(project_dir / source), root)
+    bind = volume.get("bind") or {}
+    if bind.get("propagation"):
+        raise ContainerPolicyError("bind propagation is not allowed")
+
+
+def _validate_compose_long_named_volume(volume: dict[str, Any], named_volumes: set[str]) -> None:
+    source = str(volume.get("source") or "")
+    if not source:
+        raise ContainerPolicyError("anonymous compose volumes are not allowed; declare a quota-backed named volume")
+    if source not in named_volumes:
+        raise ContainerPolicyError("compose named volumes must be declared in the project")
+
+
+def _validate_compose_service(name: str, service: Any, named_volumes: set[str],
+                              networks: dict[str, Any], root: Path, project_dir: Path) -> None:
+    _validate_compose_service_name(name, service)
+    _validate_compose_service_privileges(service)
+    _validate_compose_service_labels(service)
+    _validate_compose_service_host_controls(service)
+    _validate_compose_service_inheritance(service)
+    _validate_compose_service_namespaces(service)
+    _validate_compose_service_network_mode(service)
+    _validate_compose_service_networks(service, networks)
+    _validate_compose_service_build(service, root, project_dir)
+    _validate_compose_service_env_files(service, root, project_dir)
+    _validate_compose_service_volumes(service, project_dir, root, named_volumes)
+
+
+def _validate_compose_document(data: Any, compose_file: Path, project_dir: Path, root: Path,
+                               *, require_services: bool = True) -> int:
+    _validate_compose_document_header(data)
+    named_volumes = _validate_compose_named_volumes(data)
+    _validate_compose_resource_files(data, "secrets", root, project_dir)
+    _validate_compose_resource_files(data, "configs", root, project_dir)
+    networks = _validate_compose_networks(data)
+    services = _validate_compose_services(data, require_services)
     for name, service in services.items():
-        if not _SAFE_NAME.fullmatch(str(name)) or not isinstance(service, dict):
-            raise ContainerPolicyError("invalid compose service")
-        if (service.get("privileged") not in (None, False) or service.get("cap_add") or service.get("devices")
-                or service.get("device_cgroup_rules")):
-            raise ContainerPolicyError("privileged containers, added capabilities, and host devices are not allowed")
-        labels = service.get("labels") or {}
-        label_keys = labels.keys() if isinstance(labels, dict) else labels if isinstance(labels, list) else []
-        if any(str(label).partition("=")[0] == "aiflow4.run" for label in label_keys):
-            raise ContainerPolicyError("the aiflow4.run label is reserved for broker cleanup")
-        if service.get("volumes_from") or service.get("security_opt") or service.get("runtime"):
-            raise ContainerPolicyError("host container controls and inherited mounts are not allowed")
-        if service.get("extends") or service.get("develop"):
-            raise ContainerPolicyError("compose service inheritance and host-side watch settings are not allowed")
-        for key in ("pid", "ipc", "uts", "userns_mode", "cgroup"):
-            if service.get(key) not in (None, ""):
-                raise ContainerPolicyError(f"custom {key} namespaces are not allowed")
-        network_mode = str(service.get("network_mode") or "").lower()
-        if network_mode:
-            raise ContainerPolicyError("custom container network modes are not allowed")
-        service_networks = service.get("networks") or []
-        if isinstance(service_networks, dict):
-            service_networks = list(service_networks)
-        if not isinstance(service_networks, list):
-            raise ContainerPolicyError("compose service networks must be a list or mapping")
-        if any(str(item) not in networks and str(item) != "default" for item in service_networks):
-            raise ContainerPolicyError("compose services may use only networks declared in this project")
-        if service.get("build"):
-            build = service["build"]
-            build = {"context": build} if isinstance(build, str) else build
-            if (not isinstance(build, dict) or build.get("ssh") or build.get("secrets") or build.get("additional_contexts")
-                    or build.get("privileged") not in (None, False)):
-                raise ContainerPolicyError("build secrets, ssh agents, and additional contexts are not allowed")
-            context = _inside_directory(str(build.get("context") or "."), root, base=project_dir)
-            dockerfile = build.get("dockerfile")
-            if dockerfile:
-                _inside_file(str(context / str(dockerfile)), root)
-            if str(build.get("network") or "").lower() not in {"", "default", "none"}:
-                raise ContainerPolicyError("host networking during build is not allowed")
-        env_files = service.get("env_file") or []
-        if isinstance(env_files, (str, dict)):
-            env_files = [env_files]
-        for item in env_files:
-            path = item.get("path") if isinstance(item, dict) else item
-            _inside_file(str(path), root, base=project_dir)
-        for volume in service.get("volumes") or []:
-            if isinstance(volume, str):
-                _short_compose_volume(volume, project_dir, root, named_volumes)
-            elif isinstance(volume, dict):
-                kind = str(volume.get("type") or "volume")
-                if kind == "bind":
-                    source = str(volume.get("source") or "")
-                    _validate_bind(source if Path(source).is_absolute() else str(project_dir / source), root)
-                    bind = volume.get("bind") or {}
-                    if bind.get("propagation"):
-                        raise ContainerPolicyError("bind propagation is not allowed")
-                elif kind == "volume":
-                    source = str(volume.get("source") or "")
-                    if not source:
-                        raise ContainerPolicyError("anonymous compose volumes are not allowed; declare a quota-backed named volume")
-                    if source not in named_volumes:
-                        raise ContainerPolicyError("compose named volumes must be declared in the project")
-                elif kind != "tmpfs":
-                    raise ContainerPolicyError(f"compose mount type is not allowed: {kind}")
-            else:
-                raise ContainerPolicyError("invalid compose volume")
+        _validate_compose_service(name, service, named_volumes, networks, root, project_dir)
     return len(services)

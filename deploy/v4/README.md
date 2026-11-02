@@ -11,6 +11,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [CLI structure](../../docs/v4/cli-structure.md): how the developer and CI parser and dispatcher are organized
 - [v4 control plane architecture](../../docs/v4/architecture.md): layers, dependency direction, registration points, patterns and architectural checks
 - [Container runtime structure](../../docs/v4/container-structure.md): modules for Compose policy, process execution, and client shims
+- [Compose validation structure](../../docs/v4/compose_validation-structure.md): named document and service checks run in the existing refusal order
 - [State snapshot structure](../../docs/v4/state_snapshot-structure.md): section builders and the stable console snapshot contract
 - [Routes that publish domain events](../../docs/v4/event-publishing-routes.md): which routes publish events, so a change to the event wiring updates a page that names them
 - [Run inbox](../../docs/v4/run-inbox.md): queue guidance for active worker runs and deliver it after a provider invocation completes

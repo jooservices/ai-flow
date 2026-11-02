@@ -29,6 +29,64 @@ from .events import (GitHubBranchDeleted, GitHubBranchUpdated, GitHubCommentPost
                      GitHubPrClosed, GitHubPrCreated, GitHubPrLookedUp, GitHubPushAccepted, GitHubTokenIssued)
 
 
+def _git_transfer_request(git_path: str, request: Request, capability: dict) -> tuple[str, str, str]:
+    """Resolve the repository, path suffix and Git operation of one relay request."""
+    repository, separator, suffix = git_path.partition(".git")
+    if (not separator or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+            or repository.lower() != str(capability.get("repo", ""))):
+        raise HTTPException(403, "Git repository transfer is outside this credential's scope")
+    suffix = ".git" + suffix
+    if request.method == "GET" and suffix == ".git/info/refs":
+        service = request.query_params.get("service", "")
+        if service not in ("git-upload-pack", "git-receive-pack"):
+            raise HTTPException(400, "unsupported Git service")
+        return repository, suffix, service
+    if request.method == "POST" and suffix in (".git/git-upload-pack", ".git/git-receive-pack"):
+        return repository, suffix, suffix.rsplit("/", 1)[-1]
+    raise HTTPException(404, "unsupported Git repository transfer operation")
+
+
+def _authorize_check_probe(capability: dict, repository: str, operation: str,
+                           fleet_routes) -> tuple[None, str, int]:
+    """A check-probe capability reads the configured repositories of the project it names, nothing else."""
+    if operation != "git-upload-pack":
+        raise HTTPException(403, "check-probe Git credentials are read-only")
+    node_name = str(capability.get("node") or "")
+    project_key = str(capability.get("project") or "")
+    project = fleet_routes.probe_project(node_name, project_key)
+    if repository.lower() not in {name.lower() for name in project.configured_repositories}:
+        raise HTTPException(409, "check-probe repository is no longer configured")
+    return None, "", -1
+
+
+def _authorize_run_transfer(capability: dict, repository: str, operation: str, ctx, run_row,
+                            matches_run_repository, repository_for_run) -> tuple[dict, str, int]:
+    """A run capability transfers only the repository and branch of a live, fenced run."""
+    run_id = str(capability.get("run_id") or "")
+    run = run_row(run_id)
+    fence = int(capability.get("fence", -1))
+    if (run["node"] != capability.get("node") or int(run["fence"]) != fence
+            or not ctx.leases.valid(run["ticket_key"], run_id, fence)
+            or not matches_run_repository(repository_for_run(run, ctx.repo().projects.get(run["project"])),
+                                          repository)):
+        raise HTTPException(409, "Git repository transfer run is no longer active")
+    if operation == "git-receive-pack" and not capability.get("branch"):
+        raise HTTPException(403, "Git push is not allowed by this read-only credential")
+    return run, run_id, fence
+
+
+def _authorized_git_transfer(capability: dict, repository: str, operation: str, *, ctx, fleet_routes, run_row,
+                             matches_run_repository, repository_for_run) -> tuple[dict | None, str, int]:
+    """Dispatch on the capability purpose; every refusal keeps its original status and message."""
+    purpose = str(capability.get("purpose") or "run")
+    if purpose == "check_probe":
+        return _authorize_check_probe(capability, repository, operation, fleet_routes)
+    if purpose == "run":
+        return _authorize_run_transfer(capability, repository, operation, ctx, run_row,
+                                       matches_run_repository, repository_for_run)
+    raise HTTPException(403, "Git repository transfer credential has an unsupported purpose")
+
+
 def install(app, ctx, deps) -> SimpleNamespace:
     from ...api import log  # noqa: PLC0415 - api imports this module
     from ...gateway_helpers import _git_proxy_credential, _issue_git_proxy_token, _receive_pack_target, _verify_git_proxy_token, github_gateway, github_gateway_for_connection  # noqa: PLC0415 - api imports this module
@@ -101,46 +159,10 @@ def install(app, ctx, deps) -> SimpleNamespace:
         if not capability:
             raise HTTPException(401, "Git repository transfer credential is invalid or expired",
                                 headers={"WWW-Authenticate": 'Basic realm="AI Flow Git transfer"'})
-        repository, separator, suffix = git_path.partition(".git")
-        if (not separator or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
-                or repository.lower() != str(capability.get("repo", ""))):
-            raise HTTPException(403, "Git repository transfer is outside this credential's scope")
-        suffix = ".git" + suffix
-        if request.method == "GET" and suffix == ".git/info/refs":
-            service = request.query_params.get("service", "")
-            if service not in ("git-upload-pack", "git-receive-pack"):
-                raise HTTPException(400, "unsupported Git service")
-            operation = service
-        elif request.method == "POST" and suffix in (".git/git-upload-pack", ".git/git-receive-pack"):
-            operation = suffix.rsplit("/", 1)[-1]
-        else:
-            raise HTTPException(404, "unsupported Git repository transfer operation")
-
-        purpose = str(capability.get("purpose") or "run")
-        run = None
-        run_id = ""
-        fence = -1
-        if purpose == "check_probe":
-            if operation != "git-upload-pack":
-                raise HTTPException(403, "check-probe Git credentials are read-only")
-            node_name = str(capability.get("node") or "")
-            project_key = str(capability.get("project") or "")
-            project = fleet_routes.probe_project(node_name, project_key)
-            if repository.lower() not in {name.lower() for name in project.configured_repositories}:
-                raise HTTPException(409, "check-probe repository is no longer configured")
-        elif purpose == "run":
-            run_id = str(capability.get("run_id") or "")
-            run = run_row(run_id)
-            fence = int(capability.get("fence", -1))
-            if (run["node"] != capability.get("node") or int(run["fence"]) != fence
-                    or not ctx.leases.valid(run["ticket_key"], run_id, fence)
-                    or not matches_run_repository(repository_for_run(run, ctx.repo().projects.get(run["project"])),
-                                                  repository)):
-                raise HTTPException(409, "Git repository transfer run is no longer active")
-            if operation == "git-receive-pack" and not capability.get("branch"):
-                raise HTTPException(403, "Git push is not allowed by this read-only credential")
-        else:
-            raise HTTPException(403, "Git repository transfer credential has an unsupported purpose")
+        repository, suffix, operation = _git_transfer_request(git_path, request, capability)
+        run, run_id, fence = _authorized_git_transfer(
+            capability, repository, operation, ctx=ctx, fleet_routes=fleet_routes, run_row=run_row,
+            matches_run_repository=matches_run_repository, repository_for_run=repository_for_run)
         body_bytes = await request.body() if request.method == "POST" else b""
         branch = str(capability.get("branch") or "")
         if request.method == "POST" and operation == "git-receive-pack":

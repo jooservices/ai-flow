@@ -27,6 +27,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [UI mount structure](../../docs/v4/ui_mount-structure.md): named parts that register console pages, scripts, help and the ticket and service routes in order
 - [Security installation structure](../../docs/v4/security-structure.md): the security middleware and routes split into guard, middleware, settings, people and two-factor parts
 - [GitHub Git proxy structure](../../docs/v4/git_proxy-structure.md): named steps for credential scope, purpose authorization, push target and relay in the Git smart HTTP route
+- [Worker loop cycle structure](../../docs/v4/worker_loop_cycle-structure.md): explicit version release, BA chat and work phases for one worker poll
 
 Feature documents live in `docs/v4/`. Normally, add one line per feature in `deploy/v4/topics/<topic>.md` (see
 [Fewer merge conflicts](../../docs/v4/merge-conflicts.md)); tickets that explicitly require a README link may add

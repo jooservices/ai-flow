@@ -90,6 +90,154 @@ def _post_shared_sign_in_complete(api: ControlClient, account: str, request_id: 
     api.call("POST", f"/v1/accounts/{quote(account, safe='')}/signin-complete",
              {"request_id": request_id}, retries=1)
 
+def _valid_sign_in_request(account: str, request_id: str, shared_account: bool) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", account) and (request_id or shared_account))
+
+
+def _report_unsupported_provider(api: ControlClient, node: str, account: str, request_id: str,
+                                shared_account: bool) -> None:
+    try:
+        if shared_account:
+            return
+        _post_sign_in_status(api, node, account, request_id, "failed", error="Provider sign-in is unsupported.")
+    except Exception:  # noqa: BLE001 - do not log provider output or auth details
+        pass
+
+
+def _prepare_sign_in_environment(api: ControlClient, node: str, account: str, request_id: str,
+                                 shared_account: bool, accounts_root: str) -> dict | None:
+    if not shared_account:
+        _post_sign_in_status(api, node, account, request_id, "starting")
+    if not ensure_account_home(account, accounts_root):
+        if not shared_account:
+            _post_sign_in_status(api, node, account, request_id, "failed",
+                                 error="Could not prepare the private account home on this machine.")
+        return None
+    home = str(Path(accounts_root) / account)
+    return {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home,
+            "USER": "aiflow-worker", "LOGNAME": "aiflow-worker", "TERM": "xterm-256color",
+            "CODEX_HOME": str(Path(home) / ".codex"),
+            "CLAUDE_CONFIG_DIR": str(Path(home) / ".claude"),
+            "XDG_DATA_HOME": str(Path(home) / ".local" / "share")}
+
+
+def _copy_auth_url_is_requested(clean_output: str) -> bool:
+    return bool(re.search(r"(?i)(?:press|type)\s+c\b.{0,80}(?:copy|url|browser)|"
+                          r"(?:copy|show).{0,50}auth(?:entication)?\s+url.{0,40}\bc", clean_output))
+
+
+def _stop_provider_sign_in(process: subprocess.Popen) -> None:
+    os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+
+
+def _read_provider_sign_in_chunk(master_fd: int) -> str:
+    try:
+        return os.read(master_fd, 4096).decode("utf-8", errors="replace")
+    except OSError:  # Linux PTYs report EIO once the child has closed its slave.
+        return ""
+
+
+def _relay_provider_sign_in_output(api: ControlClient, node: str, account: str, request_id: str,
+                                   shared_account: bool, master_fd: int, chunk: str, output: str,
+                                   last_details: tuple[str, str], copied_auth_url: bool
+                                   ) -> tuple[str, tuple[str, str], bool]:
+    output = (output + chunk)[-16_000:]
+    clean_output = _ANSI.sub("", output)
+    if not copied_auth_url and _copy_auth_url_is_requested(clean_output):
+        os.write(master_fd, b"c")
+        copied_auth_url = True
+    details = provider_sign_in_details(clean_output)
+    if details[0] and details != last_details and (not shared_account or details[1]):
+        if shared_account:
+            _post_shared_sign_in_prompt(api, account, details[0], details[1])
+        else:
+            _post_sign_in_status(api, node, account, request_id, "waiting",
+                                 sign_in_url=details[0], code=details[1])
+        last_details = details
+    return output, last_details, copied_auth_url
+
+
+def _monitor_provider_sign_in(api: ControlClient, node: str, account: str, request_id: str,
+                              shared_account: bool, cancel: threading.Event, process: subprocess.Popen,
+                              master_fd: int) -> tuple[int | None, tuple[str, str]]:
+    output = ""
+    last_details = ("", "")
+    copied_auth_url = False
+    while True:
+        if cancel.is_set():
+            _stop_provider_sign_in(process)
+            return None, last_details
+        readable, _, _ = select.select([master_fd], [], [], 0.25)
+        if not readable:
+            if process.poll() is not None:
+                break
+            continue
+        chunk = _read_provider_sign_in_chunk(master_fd)
+        if not chunk:
+            break
+        output, last_details, copied_auth_url = _relay_provider_sign_in_output(
+            api, node, account, request_id, shared_account, master_fd, chunk, output,
+            last_details, copied_auth_url)
+    return process.wait(timeout=10), last_details
+
+
+def _report_provider_sign_in_result(api: ControlClient, node: str, account: str, request_id: str,
+                                    shared_account: bool, return_code: int,
+                                    last_details: tuple[str, str]) -> None:
+    if not shared_account:
+        if return_code == 0:
+            _post_sign_in_status(api, node, account, request_id, "completed",
+                                 sign_in_url=last_details[0], code=last_details[1])
+        else:
+            _post_sign_in_status(api, node, account, request_id, "failed",
+                                 sign_in_url=last_details[0], code=last_details[1],
+                                 error=f"Provider sign-in exited with status {return_code}.")
+    elif return_code == 0:
+        # The next heartbeat starts the worker, whose first action is the usual credential probe. This
+        # completion report breaks the pending-assignment/worker-probe cycle without moving credentials.
+        _post_shared_sign_in_complete(api, account, request_id)
+
+
+def _run_provider_sign_in_process(api: ControlClient, node: str, account: str, request_id: str,
+                                  shared_account: bool, cancel: threading.Event, command: list[str],
+                                  env: dict) -> None:
+    master_fd, slave_fd = pty.openpty()
+    try:
+        process = subprocess.Popen(_SIGN_IN_RUN_AS + command, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                                   env=env, close_fds=True, start_new_session=True)
+        os.close(slave_fd)
+        slave_fd = -1
+        return_code, last_details = _monitor_provider_sign_in(
+            api, node, account, request_id, shared_account, cancel, process, master_fd)
+        if return_code is not None:
+            if cancel.is_set():
+                return
+            _report_provider_sign_in_result(api, node, account, request_id,
+                                            shared_account, return_code, last_details)
+    finally:
+        if slave_fd >= 0:
+            os.close(slave_fd)
+        os.close(master_fd)
+
+
+def _handle_provider_sign_in_error(api: ControlClient, node: str, account: str, request_id: str,
+                                   shared_account: bool, cancel: threading.Event, exc: Exception) -> None:
+    if cancel.is_set():
+        return
+    try:
+        if not shared_account:
+            _post_sign_in_status(api, node, account, request_id, "failed",
+                                 error=f"Provider sign-in could not start ({type(exc).__name__}).")
+    except Exception:  # noqa: BLE001
+        pass
+    log.warning("provider sign-in failed for %s (%s)", account, type(exc).__name__)
+
+
 def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: threading.Event,
                          accounts_root: str = "/srv/aiflow/accounts") -> None:
     """Run a provider login inside its private account home and relay its device handoff to the console."""
@@ -97,106 +245,21 @@ def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: t
     request_id = str(request.get("request_id") or "")
     provider = str(request.get("provider") or "")
     shared_account = bool(request.get("shared_account"))
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", account) or (not request_id and not shared_account):
+    if not _valid_sign_in_request(account, request_id, shared_account):
         return
     command = provider_sign_in_command(provider)
     if not command:
-        try:
-            if shared_account:
-                return
-            _post_sign_in_status(api, node, account, request_id, "failed", error="Provider sign-in is unsupported.")
-        except Exception:  # noqa: BLE001 - do not log provider output or auth details
-            pass
+        _report_unsupported_provider(api, node, account, request_id, shared_account)
         return
 
     try:
-        if not shared_account:
-            _post_sign_in_status(api, node, account, request_id, "starting")
-        if not ensure_account_home(account, accounts_root):
-            if not shared_account:
-                _post_sign_in_status(api, node, account, request_id, "failed",
-                                     error="Could not prepare the private account home on this machine.")
+        env = _prepare_sign_in_environment(api, node, account, request_id, shared_account, accounts_root)
+        if env is None:
             return
-        home = str(Path(accounts_root) / account)
-        env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home,
-               "USER": "aiflow-worker", "LOGNAME": "aiflow-worker", "TERM": "xterm-256color",
-               "CODEX_HOME": str(Path(home) / ".codex"),
-               "CLAUDE_CONFIG_DIR": str(Path(home) / ".claude"),
-               "XDG_DATA_HOME": str(Path(home) / ".local" / "share")}
-        master_fd, slave_fd = pty.openpty()
-        process = None
-        try:
-            process = subprocess.Popen(_SIGN_IN_RUN_AS + command, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-                                       env=env, close_fds=True, start_new_session=True)
-            os.close(slave_fd)
-            slave_fd = -1
-            output = ""
-            last_details = ("", "")
-            copied_auth_url = False
-            while True:
-                if cancel.is_set():
-                    os.killpg(process.pid, signal.SIGTERM)
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.wait(timeout=5)
-                    return
-                readable, _, _ = select.select([master_fd], [], [], 0.25)
-                if not readable:
-                    if process.poll() is not None:
-                        break
-                    continue
-                try:
-                    chunk = os.read(master_fd, 4096).decode("utf-8", errors="replace")
-                except OSError:  # Linux PTYs report EIO once the child has closed its slave.
-                    break
-                if not chunk:
-                    break  # macOS PTYs report EOF as an empty read rather than EIO.
-                output = (output + chunk)[-16_000:]
-                clean_output = _ANSI.sub("", output)
-                if not copied_auth_url and re.search(
-                        r"(?i)(?:press|type)\s+c\b.{0,80}(?:copy|url|browser)|"
-                        r"(?:copy|show).{0,50}auth(?:entication)?\s+url.{0,40}\bc\b", clean_output):
-                    os.write(master_fd, b"c")
-                    copied_auth_url = True
-                details = provider_sign_in_details(clean_output)
-                if details[0] and details != last_details and (not shared_account or details[1]):
-                    if shared_account:
-                        _post_shared_sign_in_prompt(api, account, details[0], details[1])
-                    else:
-                        _post_sign_in_status(api, node, account, request_id, "waiting",
-                                             sign_in_url=details[0], code=details[1])
-                    last_details = details
-            return_code = process.wait(timeout=10)
-            if cancel.is_set():
-                return
-            if not shared_account:
-                if return_code == 0:
-                    _post_sign_in_status(api, node, account, request_id, "completed",
-                                         sign_in_url=last_details[0], code=last_details[1])
-                else:
-                    _post_sign_in_status(api, node, account, request_id, "failed",
-                                         sign_in_url=last_details[0], code=last_details[1],
-                                         error=f"Provider sign-in exited with status {return_code}.")
-            elif return_code == 0:
-                # The next heartbeat starts the worker, whose first action is the usual credential probe. This
-                # completion report breaks the pending-assignment/worker-probe cycle without moving credentials.
-                _post_shared_sign_in_complete(api, account, request_id)
-        finally:
-            if slave_fd >= 0:
-                os.close(slave_fd)
-            os.close(master_fd)
+        _run_provider_sign_in_process(api, node, account, request_id, shared_account,
+                                      cancel, command, env)
     except Exception as exc:  # noqa: BLE001 - never include CLI output, tokens, or paths in logs or API errors
-        if cancel.is_set():
-            return
-        try:
-            if not shared_account:
-                _post_sign_in_status(api, node, account, request_id, "failed",
-                                     error=f"Provider sign-in could not start ({type(exc).__name__}).")
-        except Exception:  # noqa: BLE001
-            pass
-        log.warning("provider sign-in failed for %s (%s)", account, type(exc).__name__)
+        _handle_provider_sign_in_error(api, node, account, request_id, shared_account, cancel, exc)
 
 def sync_provider_sign_ins(api: ControlClient, node: str, requests: list[dict],
                            active: dict[str, tuple[str, threading.Event, threading.Thread]]) -> None:

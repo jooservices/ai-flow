@@ -90,18 +90,29 @@ def self_update(api: ControlClient, version: str, node: str = "unknown") -> None
     inc.mkdir(parents=True, exist_ok=True)
     tar = inc / f"aiflow4-{version}.tar.gz"
     bundle = inc / f"aiflow4-{version}.tar.gz.sigstore.json"
+    manifest = _fetch_release_manifest(api, node, version)
+    if manifest is None:
+        return
+    expected_sha256 = str(manifest["sha256"])
+    if _download_release_assets(api, node, version, manifest, tar, bundle, expected_sha256) is None:
+        return
+    _schedule_release_install(version, tar, bundle, expected_sha256)
+
+
+def _reject_release(api: ControlClient, node: str, version: str, detail: str) -> None:
+    log.error("rejecting release %s: %s", version, detail)
+    _report_release_rejection(api, node, version, detail)
+
+
+def _fetch_release_manifest(api: ControlClient, node: str, version: str) -> dict | None:
     try:
         manifest_response = api.c.get(f"/v1/releases/{version}/manifest", timeout=30)
     except Exception as exc:  # noqa: BLE001 - an advertised release without its manifest is a verification failure
-        detail = f"release manifest unavailable: {type(exc).__name__}"
-        log.error("rejecting release %s: %s", version, detail)
-        _report_release_rejection(api, node, version, detail)
-        return
+        _reject_release(api, node, version, f"release manifest unavailable: {type(exc).__name__}")
+        return None
     if manifest_response.status_code != 200:
-        detail = f"release manifest unavailable (HTTP {manifest_response.status_code})"
-        log.error("rejecting release %s: %s", version, detail)
-        _report_release_rejection(api, node, version, detail)
-        return
+        _reject_release(api, node, version, f"release manifest unavailable (HTTP {manifest_response.status_code})")
+        return None
     try:
         manifest = manifest_response.json()
         expected_sha256 = str(manifest["sha256"])
@@ -111,35 +122,30 @@ def self_update(api: ControlClient, version: str, node: str = "unknown") -> None
         if tar_url != f"/v1/releases/{version}.tar.gz" or bundle_url != f"/v1/releases/{version}.tar.gz.sigstore.json":
             raise ValueError("release manifest points outside its versioned asset paths")
     except (KeyError, TypeError, ValueError) as exc:
-        detail = f"invalid release manifest: {exc}"
-        log.error("rejecting release %s: %s", version, detail)
-        _report_release_rejection(api, node, version, detail)
-        return
+        _reject_release(api, node, version, f"invalid release manifest: {exc}")
+        return None
+    return manifest
 
+
+def _download_release_assets(api: ControlClient, node: str, version: str, manifest: dict,
+                             tar: Path, bundle: Path, expected_sha256: str) -> str | None:
     try:
-        response = api.c.get(tar_url, timeout=120)
+        response = api.c.get(manifest["tarball"], timeout=120)
     except Exception as exc:  # noqa: BLE001 - all required signed assets must exist before installation
-        detail = f"release tarball unavailable: {type(exc).__name__}"
-        log.error("rejecting release %s: %s", version, detail)
-        _report_release_rejection(api, node, version, detail)
-        return
+        _reject_release(api, node, version, f"release tarball unavailable: {type(exc).__name__}")
+        return None
     if response.status_code != 200:
-        detail = f"release tarball unavailable (HTTP {response.status_code})"
-        log.error("rejecting release %s: %s", version, detail)
-        _report_release_rejection(api, node, version, detail)
-        return
+        _reject_release(api, node, version, f"release tarball unavailable (HTTP {response.status_code})")
+        return None
     try:
-        signature_response = api.c.get(bundle_url, timeout=120)
+        signature_response = api.c.get(manifest["signature"], timeout=120)
     except Exception as exc:  # noqa: BLE001 - an advertised release without its signature cannot be installed
-        detail = f"release signature bundle unavailable: {type(exc).__name__}"
-        log.error("rejecting release %s: %s", version, detail)
-        _report_release_rejection(api, node, version, detail)
-        return
+        _reject_release(api, node, version, f"release signature bundle unavailable: {type(exc).__name__}")
+        return None
     if signature_response.status_code != 200:
-        detail = f"release signature bundle unavailable (HTTP {signature_response.status_code})"
-        log.error("rejecting release %s: %s", version, detail)
-        _report_release_rejection(api, node, version, detail)
-        return
+        _reject_release(api, node, version,
+                        f"release signature bundle unavailable (HTTP {signature_response.status_code})")
+        return None
     tar_tmp = tar.with_suffix(tar.suffix + ".tmp")
     bundle_tmp = bundle.with_suffix(bundle.suffix + ".tmp")
     tar_tmp.write_bytes(response.content)
@@ -148,17 +154,16 @@ def self_update(api: ControlClient, version: str, node: str = "unknown") -> None
     bundle_tmp.replace(bundle)
 
     if hashlib.sha256(tar.read_bytes()).hexdigest() != expected_sha256:
-        detail = "SHA256SUMS checksum does not match the downloaded release tarball"
-        log.error("rejecting release %s: %s", version, detail)
-        _report_release_rejection(api, node, version, detail)
-        return
+        _reject_release(api, node, version, "SHA256SUMS checksum does not match the downloaded release tarball")
+        return None
     valid, detail = verify_release_signature(tar, bundle, version)
     if not valid:
-        detail = f"cosign signature verification failed: {detail}"
-        log.error("rejecting release %s: %s", version, detail)
-        _report_release_rejection(api, node, version, detail)
-        return
+        _reject_release(api, node, version, f"cosign signature verification failed: {detail}")
+        return None
+    return expected_sha256
 
+
+def _schedule_release_install(version: str, tar: Path, bundle: Path, expected_sha256: str) -> None:
     unit = f"aiflow4-self-update-{version.replace('.', '-')}-{int(time.time())}"
     command = ["systemd-run", "--unit", unit, "--no-block", "--collect",
                "/usr/local/sbin/aiflow4-node-install", str(tar), version, str(bundle), expected_sha256]

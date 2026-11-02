@@ -12,7 +12,7 @@ steps around it are module-level functions in `aiflow/v4/control/features/github
    (`git-upload-pack` or `git-receive-pack`) from the method, path and query.
 2. `_authorized_git_transfer` dispatches on the credential purpose; `_authorize_check_probe` keeps check probes
    read-only and limited to the project's configured repositories, while `_authorize_run_transfer` requires a live
-   fenced run whose repository and branch match the credential.
+   fenced run whose repository matches the credential (the branch is enforced at token issuance and by the handler's receive-pack target check; a push also needs a credential that carries a branch).
 3. The handler reads the receive-pack targets, resolves the access-token connection, relays the request and then
    publishes `GitHubPushAccepted` or audits the rejected push.
 

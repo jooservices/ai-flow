@@ -968,54 +968,66 @@ def _publish_after_merge(ctx, project: Any, version: dict[str, Any], tracker: st
             "release_url": release_url}
 
 
-def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict[str, Any]) -> dict[str, Any]:
-    """Accept a fenced check report and finish publication from the checked snapshot that produced its merge."""
-    tracker = tracker_for(ctx, project, version["id"], version["name"])
-    saved = _tracker_row(ctx, project, version["id"])
+def _saved_release_result(ctx, project: Any, version: dict[str, Any], tracker: str, saved: dict | None,
+                          run: dict) -> dict[str, Any] | None:
     if saved and saved["status"] == "released" and saved.get("tag") and saved.get("master_sha"):
         if ctx.github is not None:
             merge_back(ctx, project, tracker, version["name"], saved["tag"], run)
         return {"released": True, "status": "released", "tag": saved["tag"], "sha": saved["master_sha"],
                 "release_url": saved.get("github_release_url") or ""}
+
+
+def _prior_check_failure_result(ctx, tracker: str, run: dict) -> dict[str, Any] | None:
     prior_failure = ctx.db.one("SELECT payload FROM write_audit WHERE ticket=%s AND action='jira-release-check-failed'"
                                " AND run_id=%s ORDER BY id DESC LIMIT 1", (tracker, str(run["id"])))
     if prior_failure:
         return {"released": False, "status": "failed",
                 "bugs": (prior_failure["payload"] or {}).get("bugs") or []}
-    if ctx.github is None:
-        raise RuntimeError("GitHub App is not connected")
 
-    # A merged release is immutable input to retries. The worker may have checked a newer develop head, and Jira
-    # membership may have changed since the merge, so resume the tag/Release/Jira writes from the merge audit.
+
+def _resume_audited_merge(ctx, project: Any, version: dict[str, Any], tracker: str, run: dict,
+                          saved: dict | None) -> dict[str, Any] | None:
     previous_merge = _release_audit(ctx, tracker, "github-merge")
-    if previous_merge:
-        master_sha = str(previous_merge.get("result") or "")
-        if not master_sha:
-            raise RuntimeError("cannot resume release safely: merge audit has no target commit SHA")
-        snapshot, notes = _resumed_release_data(ctx, project, tracker, version, previous_merge)
-        payload = previous_merge.get("payload") or {}
-        checked_sha = str(payload.get("checked_sha") or saved.get("checked_develop_sha") or "")
-        if not checked_sha:
-            raise RuntimeError("cannot resume release safely: merge audit has no checked source SHA")
-        pr = {"number": payload.get("pr_number"), "html_url": payload.get("pr_url", "")}
-        return _publish_after_merge(ctx, project, version, tracker, run, snapshot, notes, checked_sha, master_sha, pr)
+    if not previous_merge:
+        return None
+    master_sha = str(previous_merge.get("result") or "")
+    if not master_sha:
+        raise RuntimeError("cannot resume release safely: merge audit has no target commit SHA")
+    snapshot, notes = _resumed_release_data(ctx, project, tracker, version, previous_merge)
+    payload = previous_merge.get("payload") or {}
+    checked_sha = str(payload.get("checked_sha") or saved.get("checked_develop_sha") or "")
+    if not checked_sha:
+        raise RuntimeError("cannot resume release safely: merge audit has no checked source SHA")
+    pr = {"number": payload.get("pr_number"), "html_url": payload.get("pr_url", "")}
+    return _publish_after_merge(ctx, project, version, tracker, run, snapshot, notes, checked_sha, master_sha, pr)
 
+
+def _live_gate_result(ctx, project: Any, version: dict[str, Any], tracker: str, run: dict
+                      ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     snapshot = evaluate(ctx, project, version)
-    if not snapshot["ready"]:
-        detail = _snapshot_text(snapshot)
-        _set_state(ctx, project, version["id"], status="blocked", gate_detail=detail,
-                   ticket_snapshot=J(snapshot["tickets"]))
-        ctx.jira.comment(tracker, f"Release stopped before publication because the live version gate changed.\n{detail}")
-        ctx.events.emit("version_release.check", ticket=tracker, project=project.key, step="version_release",
-                        run_id=str(run["id"]), fence=run["fence"], outcome="blocked", reason=detail,
-                        data={"version_id": version["id"], "tickets": snapshot["tickets"]})
-        return {"released": False, "status": "blocked", "reasons": snapshot["reasons"]}
-    failures = [f for f in report.get("checks", []) if not f.get("passed")]
+    if snapshot["ready"]:
+        return snapshot, None
+    detail = _snapshot_text(snapshot)
+    _set_state(ctx, project, version["id"], status="blocked", gate_detail=detail,
+               ticket_snapshot=J(snapshot["tickets"]))
+    ctx.jira.comment(tracker, f"Release stopped before publication because the live version gate changed.\n{detail}")
+    ctx.events.emit("version_release.check", ticket=tracker, project=project.key, step="version_release",
+                    run_id=str(run["id"]), fence=run["fence"], outcome="blocked", reason=detail,
+                    data={"version_id": version["id"], "tickets": snapshot["tickets"]})
+    return snapshot, {"released": False, "status": "blocked", "reasons": snapshot["reasons"]}
+
+
+def _reported_check_failure(ctx, project: Any, version: dict[str, Any], tracker: str, run: dict,
+                            report: dict[str, Any]) -> dict[str, Any] | None:
+    failures = [failure for failure in report.get("checks", []) if not failure.get("passed")]
     if report.get("error"):
         failures.append({"command": "prepare release checkout", "exit_code": -1, "output": report["error"]})
     if failures:
         return _failed_checks(ctx, project, version, tracker, run, failures)
 
+
+def _validated_release_shas(ctx, project: Any, version: dict[str, Any], tracker: str, run: dict,
+                             report: dict[str, Any]) -> tuple[str, str] | dict[str, Any]:
     checked_head = str(report.get("head_sha") or "")
     source_sha = str(report.get("source_sha") or checked_head)
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", checked_head):
@@ -1026,6 +1038,11 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
         return _failed_checks(ctx, project, version, tracker, run,
                               [{"command": "resolve release branch source commit", "exit_code": -1,
                                 "output": "The release worker did not report a valid source commit SHA."}])
+    return checked_head, source_sha
+
+
+def _current_release_branch(ctx, project: Any, version: dict[str, Any], tracker: str, run: dict,
+                            source_sha: str, checked_head: str) -> tuple[str, str, str, dict[str, Any] | None]:
     repo = project.repo_name
     source, target = source_branch(project), target_branch(project)
     current_source = ctx.github.branch_sha(repo, source)
@@ -1033,10 +1050,11 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
         detail = f"{source} moved during the full check ({source_sha[:12]} checked, {current_source[:12]} now); retrying."
         _set_state(ctx, project, version["id"], status="pending", checked_develop_sha=source_sha, gate_detail=detail)
         ctx.jira.comment(tracker, f"Full checks passed but publication stopped: {detail}")
-        ctx.events.emit("version_release.check", ticket=tracker, project=project.key, step="version_release",
-                        run_id=str(run["id"]), fence=run["fence"], outcome="stale", reason=detail,
+        ctx.events.emit("version_release.check", ticket=tracker, project=project.key,
+                        step="version_release", run_id=str(run["id"]), fence=run["fence"],
+                        outcome="stale", reason=detail,
                         data={"version_id": version["id"], "checked_sha": source_sha, "current_sha": current_source})
-        return {"released": False, "status": "stale", "reason": detail}
+        return "", source, target, {"released": False, "status": "stale", "reason": detail}
 
     branch = release_branch(project, version["name"], source_sha)
     if not ctx.github.branch_exists(repo, branch):
@@ -1046,8 +1064,13 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
         detail = f"release branch {branch} moved during the full check; retrying."
         _set_state(ctx, project, version["id"], status="pending", checked_develop_sha=source_sha,
                    gate_detail=detail)
-        return {"released": False, "status": "stale", "reason": detail}
+        return "", source, target, {"released": False, "status": "stale", "reason": detail}
+    return branch, source, target, None
 
+
+def _prepare_release_branch(ctx, project: Any, repo: str, branch: str, tracker: str, run: dict,
+                            version: dict[str, Any], snapshot: dict[str, Any], source_sha: str,
+                            report: dict[str, Any]) -> tuple[str, str]:
     notes, release_files = _prepare_release_files(ctx, project, repo, branch, snapshot, source_sha,
                                                   report.get("checks", []))
     changed_files = []
@@ -1065,7 +1088,28 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
            {"branch": branch, "source_sha": source_sha, "files": list(release_files),
             "changed_files": changed_files, "ticket_snapshot": snapshot, "notes": notes,
             "checks": report.get("checks", [])})
+    return notes, release_head
 
+
+def _open_release_pull_request(ctx, project: Any, repo: str, branch: str, target: str,
+                               version: dict[str, Any], notes: str, pr: dict | None) -> tuple[dict, str]:
+    if pr and pr.get("state") == "closed":
+        pr = ctx.github.reopen_pr(repo, int(pr["number"]))
+    if not pr:
+        pr = ctx.github.create_pr(repo, branch, target, f"Release {version['name']} ({project.key})",
+                                  notes, draft=False)
+    ctx.github.update_pr_body(repo, int(pr["number"]), notes)
+    ctx.github.enable_merge_commit(repo)
+    merged = ctx.github.merge_pr(repo, int(pr["number"]), f"Release {version['name']}", method="merge")
+    if not merged.get("merged") or not merged.get("sha"):
+        raise RuntimeError(f"release PR #{pr['number']} could not be merged without squash: "
+                           f"{merged.get('message') or 'GitHub refused merge'}")
+    master_sha = str(merged["sha"])
+    return {**pr, "merge_commit_sha": master_sha, "merged": True}, master_sha
+
+
+def _merge_release_pull_request(ctx, project: Any, repo: str, branch: str, target: str,
+                                version: dict[str, Any], notes: str) -> tuple[dict[str, Any], str]:
     pr = ctx.github.release_pr(repo, branch, target)
     if pr and pr.get("merged"):
         # Recover a merge that succeeded immediately before the process stopped writing its merge audit.
@@ -1073,22 +1117,15 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
         if not master_sha:
             raise RuntimeError(f"merged release PR #{pr.get('number')} has no merge commit SHA")
     else:
-        if pr and pr.get("state") == "closed":
-            pr = ctx.github.reopen_pr(repo, int(pr["number"]))
-        if not pr:
-            pr = ctx.github.create_pr(repo, branch, target, f"Release {version['name']} ({project.key})",
-                                      notes, draft=False)
-        ctx.github.update_pr_body(repo, int(pr["number"]), notes)
-        ctx.github.enable_merge_commit(repo)
-        merged = ctx.github.merge_pr(repo, int(pr["number"]), f"Release {version['name']}", method="merge")
-        if not merged.get("merged") or not merged.get("sha"):
-            raise RuntimeError(f"release PR #{pr['number']} could not be merged without squash: "
-                               f"{merged.get('message') or 'GitHub refused merge'}")
-        master_sha = str(merged["sha"])
-        pr = {**pr, "merge_commit_sha": master_sha, "merged": True}
+        pr, master_sha = _open_release_pull_request(ctx, project, repo, branch, target, version, notes, pr)
     if not master_sha:
         master_sha = ctx.github.branch_sha(repo, target)
-    pr = pr or {}
+    return pr or {}, master_sha
+
+
+def _record_release_merge(ctx, project: Any, tracker: str, run: dict, branch: str, source: str, target: str,
+                          source_sha: str, release_head: str, pr: dict, snapshot: dict[str, Any], notes: str,
+                          master_sha: str) -> None:
     merge_payload = {"source": branch, "develop_source": source, "target": target, "checked_sha": source_sha,
                      "release_head_sha": release_head, "pr_number": pr.get("number"),
                      "pr_url": pr.get("html_url", ""), "method": "merge",
@@ -1098,6 +1135,47 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
                     run_id=str(run["id"]), fence=run["fence"], outcome="merged", reason=master_sha,
                     data={"source": branch, "target": target, "checked_sha": source_sha,
                           "pr_number": pr.get("number"), "method": "merge"})
+
+
+def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict[str, Any]) -> dict[str, Any]:
+    """Accept a fenced check report and finish publication from the checked snapshot that produced its merge."""
+    tracker = tracker_for(ctx, project, version["id"], version["name"])
+    saved = _tracker_row(ctx, project, version["id"])
+    result = _saved_release_result(ctx, project, version, tracker, saved, run)
+    if result is not None:
+        return result
+    prior_failure = _prior_check_failure_result(ctx, tracker, run)
+    if prior_failure is not None:
+        return prior_failure
+    if ctx.github is None:
+        raise RuntimeError("GitHub App is not connected")
+
+    # A merged release is immutable input to retries. The worker may have checked a newer develop head, and Jira
+    # membership may have changed since the merge, so resume the tag/Release/Jira writes from the merge audit.
+    resumed = _resume_audited_merge(ctx, project, version, tracker, run, saved)
+    if resumed is not None:
+        return resumed
+
+    snapshot, gate_result = _live_gate_result(ctx, project, version, tracker, run)
+    if gate_result is not None:
+        return gate_result
+    check_result = _reported_check_failure(ctx, project, version, tracker, run, report)
+    if check_result is not None:
+        return check_result
+    release_shas = _validated_release_shas(ctx, project, version, tracker, run, report)
+    if isinstance(release_shas, dict):
+        return release_shas
+    checked_head, source_sha = release_shas
+    branch, source, target, branch_result = _current_release_branch(
+        ctx, project, version, tracker, run, source_sha, checked_head)
+    if branch_result is not None:
+        return branch_result
+    repo = project.repo_name
+    notes, release_head = _prepare_release_branch(ctx, project, repo, branch, tracker, run, version,
+                                                  snapshot, source_sha, report)
+    pr, master_sha = _merge_release_pull_request(ctx, project, repo, branch, target, version, notes)
+    _record_release_merge(ctx, project, tracker, run, branch, source, target, source_sha, release_head,
+                          pr, snapshot, notes, master_sha)
     return _publish_after_merge(ctx, project, version, tracker, run, snapshot, notes, source_sha, master_sha, pr)
 
 

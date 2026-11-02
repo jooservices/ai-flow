@@ -80,6 +80,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
 - [Capacity routes](../../docs/v4/route-module-capacity.md): the capacity routes are served from their own router module
 - [Automatic Jira version releases](../../docs/v4/version-release.md): check, document, PR, merge, tag and publish configured Jira versions without owner approval
+- [Version release completion structure](../../docs/v4/version_release_complete-structure.md): ordered, named steps that accept checked reports and publish configured Jira versions
 - [Notify routes](../../docs/v4/route-module-notify.md): the notify routes are served from their own router module
 - [Release installation smoke test](../../docs/v4/install.md): tagged releases install control and two nodes in Ubuntu systemd CI before publication
 - [Health routes](../../docs/v4/route-module-healthz.md): the health routes are served from their own router module

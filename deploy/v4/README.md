@@ -83,6 +83,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
 - [Capacity routes](../../docs/v4/route-module-capacity.md): the capacity routes are served from their own router module
 - [Automatic Jira version releases](../../docs/v4/version-release.md): check, document, PR, merge, tag and publish configured Jira versions without owner approval
+- [Version release completion structure](../../docs/v4/version_release_complete-structure.md): ordered, named steps that accept checked reports and publish configured Jira versions
 - [Notify routes](../../docs/v4/route-module-notify.md): the notify routes are served from their own router module
 - [Release installation smoke test](../../docs/v4/install.md): tagged releases install control and two nodes in Ubuntu systemd CI before publication
 - [Health routes](../../docs/v4/route-module-healthz.md): the health routes are served from their own router module
@@ -97,6 +98,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Role health routes](../../docs/v4/route-module-role_health.md): the role health routes are served from their own router module
 - [Typed control application context](../../docs/v4/application-context.md): shared typed settings, database, repositories, leases, events, repo configuration and clock for control modules
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
+- [Node self-update structure](../../docs/v4/node_self_update-structure.md): named fetch, download-and-verify, schedule and rejection steps behind the unchanged `self_update` entry point
 - [Memory routes](../../docs/v4/route-module-memory.md): the memory routes are served from their own router module
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
 - [Shared route helpers](../../docs/v4/route-dependencies.md): audit, console and node authentication and fencing as functions of the application context, usable by any router

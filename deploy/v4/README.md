@@ -15,6 +15,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [State snapshot structure](../../docs/v4/state_snapshot-structure.md): section builders and the stable console snapshot contract
 - [Routes that publish domain events](../../docs/v4/event-publishing-routes.md): which routes publish events, so a change to the event wiring updates a page that names them
 - [Run inbox](../../docs/v4/run-inbox.md): queue guidance for active worker runs and deliver it after a provider invocation completes
+- [Idle incident explanations](../../docs/v4/incidents-idle-structure.md): ordered node, ticket, project and account reasons for idle work
 - [Control API router registry](../../docs/v4/router-registry.md): feature routers discovered and mounted by priority without a central registration list
 - [Master AI rescue](../../docs/v4/master-rescue.md): Claude takes a long Blocked or over-time ticket once, with its own budget; owner-only work and an unavailable Claude go to the owner, a failed rescue returns to development
 - [Shared worker fairness](../../docs/v4/shared-worker-fairness.md): round-robin ready tickets across projects while preserving rework preference and each project's priority and age order

@@ -230,19 +230,16 @@ def idle_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
     return out
 
 
-def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -> list[str]:
-    """Why the projects with ready tickets get no worker: the concrete cause, so a person knows what to fix."""
-    repo = ctx.repo()
-    reasons: list[str] = []
+def _idle_online_nodes(ctx) -> list[dict]:
     from .shared_accounts import NODE_ONLINE_S
     nodes = ctx.db.all("SELECT name,status,accepting_work,tools,metrics,projects,dynamic,"
                        "(last_heartbeat IS NOT NULL AND last_heartbeat > now()-make_interval(secs => %s))"
                        " AS heartbeat_fresh FROM nodes WHERE removed_at IS NULL", (NODE_ONLINE_S,))
-    online = [n for n in nodes if n["status"] == "online" and n["accepting_work"] and n["heartbeat_fresh"]]
-    ticket_keys = ticket_keys or set()
-    if not online:
-        reasons.append("no node is online")
+    return [node for node in nodes
+            if node["status"] == "online" and node["accepting_work"] and node["heartbeat_fresh"]]
 
+
+def _idle_parked_tool_wait_reasons(ctx, ticket_keys: set[str]) -> list[str]:
     # A tool wait is a queue state with an actionable requirement; it must never collapse to "no cause found".
     parked: dict[str, list[str]] = {}
     from .tooling import requirement_is_accepted, system_action
@@ -251,24 +248,37 @@ def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -
                 or (ticket_keys and wait["ticket_key"] not in ticket_keys)):
             continue
         parked.setdefault(wait["requirement"], []).append(wait["ticket_key"])
+    reasons = []
     for requirement, keys in sorted(parked.items()):
         shown = ", ".join(sorted(set(keys))[:6])
         extra = f" and {len(set(keys)) - 6} more" if len(set(keys)) > 6 else ""
         reasons.append(f"parked tickets {shown}{extra} waiting for {requirement}; {system_action(requirement)}")
+    return reasons
 
+
+def _idle_retry_backoff_reasons(ctx, ticket_keys: set[str]) -> list[str]:
     # Backoff is a deliberate pause, but it still names the tickets that have no run available now.
     from .features.work.constants import BACKOFF_SQL
     cooling_tickets = {r["ticket_key"] for step in ("dev", "verify")
                        for r in ctx.db.all(BACKOFF_SQL, {"step": step})}
     cooling_tickets.intersection_update(ticket_keys)
-    if cooling_tickets:
-        reasons.append("retry backoff for " + ", ".join(sorted(cooling_tickets)[:8]))
+    if not cooling_tickets:
+        return []
+    return ["retry backoff for " + ", ".join(sorted(cooling_tickets)[:8])]
 
+
+def _idle_project_pause_reasons(repo, projects: set[str]) -> list[str]:
     # Project pause and licence limits are enforced before a lease is created.
+    reasons = []
     for key in sorted(projects):
         project = repo.projects.get(key)
         if project and project.paused:
             reasons.append(f"{key} is paused in project settings")
+    return reasons
+
+
+def _idle_project_license_reasons(ctx, projects: set[str]) -> list[str]:
+    reasons = []
     try:
         from . import licensing
         license_state = licensing.snapshot(ctx.db, ctx.settings.license_public_key)
@@ -282,66 +292,99 @@ def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -
                 reasons.append(f"licence limit stops new work for project {key}: {exc}")
     except Exception as exc:  # a broken licence read still needs an understandable cause
         reasons.append(f"licence status could not be checked ({type(exc).__name__})")
+    return reasons
 
-    for key in sorted(projects):
-        project = repo.projects.get(key)
-        if not project or project.paused:
-            continue
-        serving = [n for n in online if key in repo.projects_for_node(n["name"], n["projects"] or [], n["dynamic"])]
-        if not serving:
-            reasons.append(f"no online node serves {key}")
-            continue
-        from . import api as control_api, rollout
-        compatible = []
-        skewed = []
-        for node in serving:
-            verdict = rollout.node_compatible(ctx, node["name"], control_api.RELEASES)
-            if verdict["compatible"]:
-                compatible.append(node)
-            else:
-                skewed.append(f"{node['name']} ({verdict['reason']})")
-        if skewed:
-            reasons.append(f"version skew blocks {key} on " + "; ".join(skewed))
-        if not compatible:
-            continue
-        blocked = []
-        for n in compatible:
-            gaps = toolchain_gaps(n["tools"], project.tools, repo.versions, project.stacks,
-                                  require_pins=bool(project.stacks))
-            if gaps:
-                unpinned = [g for g in gaps if g in {x for s in normalize_stacks(project.stacks) for x in STACK_TOOLS.get(s, ())}
-                            and not locked_version(repo.versions, g)]
-                why = (f"versions.lock has no pin for {', '.join(unpinned)}" if unpinned
-                       else f"tools missing or outside their pin: {', '.join(gaps)}")
-                blocked.append(f"{n['name']} ({why})")
-            else:
-                svc = service_gaps((n["metrics"] or {}).get("services"), project.required_services)
-                if svc:
-                    blocked.append(f"{n['name']} (test services unhealthy: "
-                                   + ", ".join(f"{k}: {v}" for k, v in svc.items()) + ")")
-        if blocked and len(blocked) == len(compatible):
-            reasons.append(f"{key} is gated on every node that serves it: " + "; ".join(blocked))
 
-    # Surface account and plan gates that the candidates endpoint enforces before work starts.
+def _idle_compatible_nodes(ctx, serving: list[dict]) -> tuple[list[dict], list[str]]:
+    from . import api as control_api, rollout
+    compatible = []
+    skewed = []
+    for node in serving:
+        verdict = rollout.node_compatible(ctx, node["name"], control_api.RELEASES)
+        if verdict["compatible"]:
+            compatible.append(node)
+        else:
+            skewed.append(f"{node['name']} ({verdict['reason']})")
+    return compatible, skewed
+
+
+def _idle_node_tool_or_service_block(node: dict, project, repo) -> str | None:
+    gaps = toolchain_gaps(node["tools"], project.tools, repo.versions, project.stacks,
+                          require_pins=bool(project.stacks))
+    if gaps:
+        unpinned = [gap for gap in gaps if gap in {
+            tool for stack in normalize_stacks(project.stacks) for tool in STACK_TOOLS.get(stack, ())
+        } and not locked_version(repo.versions, gap)]
+        why = (f"versions.lock has no pin for {', '.join(unpinned)}" if unpinned
+               else f"tools missing or outside their pin: {', '.join(gaps)}")
+        return f"{node['name']} ({why})"
+    svc = service_gaps((node["metrics"] or {}).get("services"), project.required_services)
+    if svc:
+        return (f"{node['name']} (test services unhealthy: "
+                + ", ".join(f"{key}: {value}" for key, value in svc.items()) + ")")
+    return None
+
+
+def _idle_project_node_reasons(ctx, repo, project_key: str, online: list[dict]) -> list[str]:
+    project = repo.projects.get(project_key)
+    if not project or project.paused:
+        return []
+    serving = [node for node in online
+               if project_key in repo.projects_for_node(node["name"], node["projects"] or [], node["dynamic"])]
+    if not serving:
+        return [f"no online node serves {project_key}"]
+    compatible, skewed = _idle_compatible_nodes(ctx, serving)
+    reasons = []
+    if skewed:
+        reasons.append(f"version skew blocks {project_key} on " + "; ".join(skewed))
+    if not compatible:
+        return reasons
+    blocked = [reason for node in compatible
+               if (reason := _idle_node_tool_or_service_block(node, project, repo))]
+    if blocked and len(blocked) == len(compatible):
+        reasons.append(f"{project_key} is gated on every node that serves it: " + "; ".join(blocked))
+    return reasons
+
+
+def _idle_node_reasons(ctx, repo, projects: set[str], online: list[dict]) -> list[str]:
+    reasons = []
+    for project_key in sorted(projects):
+        reasons.extend(_idle_project_node_reasons(ctx, repo, project_key, online))
+    return reasons
+
+
+def _idle_account_inventory(ctx, online: list[dict]
+                            ) -> tuple[list[dict], dict[str, set[str]], list[dict], list[str], list[str]]:
     accounts = ctx.db.all("SELECT a.id, a.status, a.node, a.quota_at_risk FROM accounts a")
-    online_names = {n["name"] for n in online}
+    online_names = {node["name"] for node in online}
     # a shared account is enabled per machine (its own `node` may be empty): count every signed-in assignment
     signed_in: dict[str, set[str]] = {}
     pending: set[tuple[str, str]] = set()
-    for m in ctx.db.all("SELECT account_id, node, status FROM account_machines"):
-        if m["status"] == "signed_in":
-            signed_in.setdefault(m["account_id"], set()).add(m["node"])
+    for machine in ctx.db.all("SELECT account_id, node, status FROM account_machines"):
+        if machine["status"] == "signed_in":
+            signed_in.setdefault(machine["account_id"], set()).add(machine["node"])
         else:
-            pending.add((m["account_id"], m["node"]))
-    ready = [a for a in accounts if a["status"] in ("idle", "working", "probing")
-             and ((a["node"] in online_names and (a["id"], a["node"]) not in pending)
-                  or signed_in.get(a["id"], set()) & online_names) and not ctx.leases.cooling(a["id"])]
-    cooling = [a["id"] for a in accounts if a["status"] == "cooldown" or ctx.leases.cooling(a["id"])]
-    quota_risk = [a["id"] for a in accounts if a.get("quota_at_risk")]
+            pending.add((machine["account_id"], machine["node"]))
+    ready = [account for account in accounts if account["status"] in ("idle", "working", "probing")
+             and ((account["node"] in online_names and (account["id"], account["node"]) not in pending)
+                  or signed_in.get(account["id"], set()) & online_names) and not ctx.leases.cooling(account["id"])]
+    cooling = [account["id"] for account in accounts
+               if account["status"] == "cooldown" or ctx.leases.cooling(account["id"])]
+    quota_risk = [account["id"] for account in accounts if account.get("quota_at_risk")]
+    return accounts, signed_in, ready, cooling, quota_risk
+
+
+def _idle_quota_reasons(cooling: list[str], quota_risk: list[str]) -> list[str]:
+    reasons = []
     if cooling:
         reasons.append("quota cooldown/backoff affects " + ", ".join(sorted(cooling)))
     if quota_risk:
         reasons.append("quota forecast is deferring new work for " + ", ".join(sorted(quota_risk)))
+    return reasons
+
+
+def _idle_account_license_reasons(ctx, accounts: list[dict], signed_in: dict[str, set[str]]) -> list[str]:
+    reasons = []
     try:
         from . import licensing
         blocked_accounts: dict[str, list[str]] = {}
@@ -359,12 +402,38 @@ def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -
             reasons.append(f"licence limit stops new work for {len(ids)} AI account(s) ({shown}): {message}")
     except Exception as exc:  # preserve other known causes if a plan check cannot run
         reasons.append(f"licence work entitlement could not be checked ({type(exc).__name__})")
-    if not ready:
-        states = ", ".join(f"{a['id']}={a['status']}" for a in accounts) or "no accounts"
-        if not cooling:
-            reasons.append(f"no AI account is ready ({states})")
-        elif not any("quota cooldown/backoff" in reason for reason in reasons):
-            reasons.append(f"AI account quota cooldown/backoff leaves no account ready ({states})")
+    return reasons
+
+
+def _idle_account_readiness_reasons(accounts: list[dict], ready: list[dict], cooling: list[str],
+                                   reasons: list[str]) -> list[str]:
+    if ready:
+        return []
+    states = ", ".join(f"{account['id']}={account['status']}" for account in accounts) or "no accounts"
+    if not cooling:
+        return [f"no AI account is ready ({states})"]
+    if not any("quota cooldown/backoff" in reason for reason in reasons):
+        return [f"AI account quota cooldown/backoff leaves no account ready ({states})"]
+    return []
+
+
+def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -> list[str]:
+    """Why the projects with ready tickets get no worker: the concrete cause, so a person knows what to fix."""
+    repo = ctx.repo()
+    reasons: list[str] = []
+    online = _idle_online_nodes(ctx)
+    if not online:
+        reasons.append("no node is online")
+    ticket_keys = ticket_keys or set()
+    reasons.extend(_idle_parked_tool_wait_reasons(ctx, ticket_keys))
+    reasons.extend(_idle_retry_backoff_reasons(ctx, ticket_keys))
+    reasons.extend(_idle_project_pause_reasons(repo, projects))
+    reasons.extend(_idle_project_license_reasons(ctx, projects))
+    reasons.extend(_idle_node_reasons(ctx, repo, projects, online))
+    accounts, signed_in, ready, cooling, quota_risk = _idle_account_inventory(ctx, online)
+    reasons.extend(_idle_quota_reasons(cooling, quota_risk))
+    reasons.extend(_idle_account_license_reasons(ctx, accounts, signed_in))
+    reasons.extend(_idle_account_readiness_reasons(accounts, ready, cooling, reasons))
     return reasons or ["No specific cause was observed. Checked: parked tickets and tool waits, retry backoff, "
                        "project pause, licence entitlement, node availability, version skew, toolchains, test "
                        "services, account status, quota, role health, machine assignment and active leases."]

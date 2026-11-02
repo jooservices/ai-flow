@@ -123,107 +123,11 @@ class Worker:
 
     def once(self) -> bool:
         """One poll: claim the best candidate and run it. True when a run happened."""
-        release_candidates = self.api.call("GET", "/v1/version-releases/candidates",
-                                            params={"account": self.account}, allow_not_found=True) or {}
-        for release in release_candidates.get("versions", []):
-            try:
-                claimed = self.api.call("POST", "/v1/version-releases/claim",
-                                        {"project": release["project"], "version_id": release["version_id"],
-                                         "repository": release.get("repository", ""),
-                                         "account": self.account})
-            except Conflict:
-                continue
-            if not claimed.get("claimed"):
-                continue
-            c = Claimed(run_id=claimed["run_id"], fence=claimed["fence"], run_token=claimed["run_token"],
-                        account=self.account, provider=claimed["provider"], model="", effort="",
-                        ticket=claimed["ticket"], project=claimed["project"], identity=tuple(claimed["identity"]),
-                        step="version_release", context_pack=claimed.get("context_pack") or {})
-            self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id,
-                         step="version_release", since=time.time())
-            result = run_version_release(self.api, c, claimed["version"], claimed["tracker_key"],
-                                         self.srv, self.hb_s, self.run_as)
-            try:
-                self.api.call("POST", f"/v1/runs/{c.run_id}/result",
-                              {"fence": c.fence, **result})
-            except Exception as e:  # noqa: BLE001
-                log.warning("version release result not recorded: %s", e)
-            try:
-                self.api.call("POST", f"/v1/runs/{c.run_id}/release", {"fence": c.fence})
-            except Exception as e:  # noqa: BLE001
-                log.warning("version release lease cleanup failed: %s", e)
-            self.publish(state="idle", ticket=None, run_id=None, last_outcome=result.get("outcome"), since=time.time())
+        if _run_version_release_cycle(self):
             return True
-        chat_job = self.api.call("GET", "/v1/ba-chat/candidate", params={"account": self.account}).get("job")
-        if chat_job:
-            self.publish(state="working", ticket="BA chat", run_id=chat_job["job_id"], step="ba_chat", since=time.time())
-            try:
-                result = run_ba_chat_turn(self.api, chat_job, self.account, self.srv, self.control_url, self.run_as)
-            except Exception as e:  # noqa: BLE001 - the result API receives only a safe error kind
-                log.warning("BA chat turn failed account=%s error=%s", self.account, type(e).__name__)
-                result = {"error_kind": "worker_error", "output": {}}
-            try:
-                self.api.call("POST", f"/v1/ba-chat/{chat_job['job_id']}/result",
-                              {"account": self.account, "claim_token": chat_job["claim_token"],
-                               "output": result.get("output") or {},
-                               "error_kind": result.get("error_kind") or ""})
-            except Exception as e:  # noqa: BLE001
-                log.warning("BA chat result was not recorded account=%s error=%s", self.account, type(e).__name__)
-            self.publish(state="idle", ticket=None, run_id=None, last_outcome="ba_chat", since=time.time())
+        if _run_ba_chat_cycle(self):
             return True
-        master = self.api.call("GET", "/v1/master/candidate", params={"account": self.account}).get("candidate")
-        cands = ([master] if master else []) + self.api.call(
-            "GET", "/v1/work/candidates", params={"account": self.account, "worker_id": self.instance})["tickets"]
-        if not cands:
-            return False
-        for cand in cands:
-            step = cand.get("step", "dev")
-            try:
-                r = self.api.call("POST", "/v1/work/claim", {"ticket": cand["key"], "account": self.account, "step": step})
-            except Conflict:
-                continue
-            if not r.get("claimed"):
-                continue
-            c = Claimed(run_id=r["run_id"], fence=r["fence"], run_token=r["run_token"], account=self.account,
-                        provider=r["provider"], model=r.get("model", ""), effort=r.get("effort", ""),
-                        ticket=r["ticket"], project=r["project"], identity=tuple(r["identity"]), step=step,
-                        findings=r.get("findings") or "", branch=r.get("branch") or "", pr=r.get("pr"),
-                        last_dev_summary=r.get("last_dev_summary") or "",
-                        verify_findings=r.get("verify_findings") or "", recent_comments=r.get("recent_comments") or [],
-                        triage_answer=r.get("triage_answer") or "", triage_question=r.get("triage_question") or "",
-                        related=r.get("related") or [], project_tickets=r.get("project_tickets") or [],
-                        context_pack=r.get("context_pack") or {},
-                        machine_tools=r.get("machine_tools") or {}, owner_register=r.get("owner_register") or [],
-                        escalation_class=r.get("escalation_class") or "")
-            self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
-            log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
-            if step == "verify":
-                res = run_verify(self.api, c, c.pr or {}, self.srv, self.control_url, self.hb_s, self.run_as)
-            elif step == "post_merge":
-                res = run_post_merge(self.api, c, self.srv, self.hb_s, self.run_as)
-            elif step == "triage":
-                res = run_triage(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
-            elif step == "master":
-                res = run_master(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
-            elif step == "intake":
-                res = run_intake(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
-            elif step == "impact":
-                res = run_impact(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
-            else:
-                res = run_dev(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
-            attach_support_log(res, self.srv)
-            try:
-                self.api.call("POST", f"/v1/runs/{c.run_id}/result", res)
-            except Exception as e:  # noqa: BLE001
-                log.warning("result not recorded: %s", e)
-            try:
-                self.api.call("POST", f"/v1/runs/{c.run_id}/release", {"fence": c.fence})
-            except Exception as e:  # noqa: BLE001
-                log.warning("release failed: %s", e)
-            log.info("%s finished: %s", c.ticket["key"], res.get("outcome"))
-            self.publish(state="idle", ticket=None, run_id=None, last_outcome=res.get("outcome"), since=time.time())
-            return True
-        return False
+        return _run_work_cycle(self)
 
     def release(self) -> str:
         try:
@@ -258,3 +162,118 @@ class Worker:
         if quota_thread:
             quota_thread.join(timeout=30)
         self.publish(state="stopped")
+
+
+def _run_version_release_cycle(worker: Worker) -> bool:
+    release_candidates = worker.api.call("GET", "/v1/version-releases/candidates",
+                                         params={"account": worker.account}, allow_not_found=True) or {}
+    for release in release_candidates.get("versions", []):
+        try:
+            claimed = worker.api.call("POST", "/v1/version-releases/claim",
+                                      {"project": release["project"], "version_id": release["version_id"],
+                                       "repository": release.get("repository", ""),
+                                       "account": worker.account})
+        except Conflict:
+            continue
+        if not claimed.get("claimed"):
+            continue
+        claim = Claimed(run_id=claimed["run_id"], fence=claimed["fence"], run_token=claimed["run_token"],
+                        account=worker.account, provider=claimed["provider"], model="", effort="",
+                        ticket=claimed["ticket"], project=claimed["project"], identity=tuple(claimed["identity"]),
+                        step="version_release", context_pack=claimed.get("context_pack") or {})
+        worker.publish(state="working", ticket=claim.ticket["key"], run_id=claim.run_id,
+                       step="version_release", since=time.time())
+        result = run_version_release(worker.api, claim, claimed["version"], claimed["tracker_key"],
+                                     worker.srv, worker.hb_s, worker.run_as)
+        try:
+            worker.api.call("POST", f"/v1/runs/{claim.run_id}/result", {"fence": claim.fence, **result})
+        except Exception as e:  # noqa: BLE001
+            log.warning("version release result not recorded: %s", e)
+        try:
+            worker.api.call("POST", f"/v1/runs/{claim.run_id}/release", {"fence": claim.fence})
+        except Exception as e:  # noqa: BLE001
+            log.warning("version release lease cleanup failed: %s", e)
+        worker.publish(state="idle", ticket=None, run_id=None, last_outcome=result.get("outcome"), since=time.time())
+        return True
+    return False
+
+
+def _run_ba_chat_cycle(worker: Worker) -> bool:
+    chat_job = worker.api.call("GET", "/v1/ba-chat/candidate", params={"account": worker.account}).get("job")
+    if not chat_job:
+        return False
+    worker.publish(state="working", ticket="BA chat", run_id=chat_job["job_id"], step="ba_chat", since=time.time())
+    try:
+        result = run_ba_chat_turn(worker.api, chat_job, worker.account, worker.srv, worker.control_url, worker.run_as)
+    except Exception as e:  # noqa: BLE001 - the result API receives only a safe error kind
+        log.warning("BA chat turn failed account=%s error=%s", worker.account, type(e).__name__)
+        result = {"error_kind": "worker_error", "output": {}}
+    try:
+        worker.api.call("POST", f"/v1/ba-chat/{chat_job['job_id']}/result",
+                        {"account": worker.account, "claim_token": chat_job["claim_token"],
+                         "output": result.get("output") or {}, "error_kind": result.get("error_kind") or ""})
+    except Exception as e:  # noqa: BLE001
+        log.warning("BA chat result was not recorded account=%s error=%s", worker.account, type(e).__name__)
+    worker.publish(state="idle", ticket=None, run_id=None, last_outcome="ba_chat", since=time.time())
+    return True
+
+
+def _run_work_cycle(worker: Worker) -> bool:
+    master = worker.api.call("GET", "/v1/master/candidate", params={"account": worker.account}).get("candidate")
+    candidates = ([master] if master else []) + worker.api.call(
+        "GET", "/v1/work/candidates", params={"account": worker.account, "worker_id": worker.instance})["tickets"]
+    for candidate in candidates:
+        step = candidate.get("step", "dev")
+        try:
+            response = worker.api.call("POST", "/v1/work/claim",
+                                       {"ticket": candidate["key"], "account": worker.account, "step": step})
+        except Conflict:
+            continue
+        if not response.get("claimed"):
+            continue
+        claim = Claimed(run_id=response["run_id"], fence=response["fence"], run_token=response["run_token"],
+                        account=worker.account, provider=response["provider"], model=response.get("model", ""),
+                        effort=response.get("effort", ""), ticket=response["ticket"], project=response["project"],
+                        identity=tuple(response["identity"]), step=step,
+                        findings=response.get("findings") or "", branch=response.get("branch") or "",
+                        pr=response.get("pr"), last_dev_summary=response.get("last_dev_summary") or "",
+                        verify_findings=response.get("verify_findings") or "",
+                        recent_comments=response.get("recent_comments") or [],
+                        triage_answer=response.get("triage_answer") or "",
+                        triage_question=response.get("triage_question") or "",
+                        related=response.get("related") or [], project_tickets=response.get("project_tickets") or [],
+                        context_pack=response.get("context_pack") or {}, machine_tools=response.get("machine_tools") or {},
+                        owner_register=response.get("owner_register") or [],
+                        escalation_class=response.get("escalation_class") or "")
+        worker.publish(state="working", ticket=claim.ticket["key"], run_id=claim.run_id, step=step, since=time.time())
+        log.info("claimed %s for %s (fence %s)", claim.ticket["key"], step, claim.fence)
+        result = _run_work_step(worker, claim, step)
+        attach_support_log(result, worker.srv)
+        try:
+            worker.api.call("POST", f"/v1/runs/{claim.run_id}/result", result)
+        except Exception as e:  # noqa: BLE001
+            log.warning("result not recorded: %s", e)
+        try:
+            worker.api.call("POST", f"/v1/runs/{claim.run_id}/release", {"fence": claim.fence})
+        except Exception as e:  # noqa: BLE001
+            log.warning("release failed: %s", e)
+        log.info("%s finished: %s", claim.ticket["key"], result.get("outcome"))
+        worker.publish(state="idle", ticket=None, run_id=None, last_outcome=result.get("outcome"), since=time.time())
+        return True
+    return False
+
+
+def _run_work_step(worker: Worker, claim: Claimed, step: str) -> dict:
+    if step == "verify":
+        return run_verify(worker.api, claim, claim.pr or {}, worker.srv, worker.control_url, worker.hb_s, worker.run_as)
+    if step == "post_merge":
+        return run_post_merge(worker.api, claim, worker.srv, worker.hb_s, worker.run_as)
+    if step == "triage":
+        return run_triage(worker.api, claim, worker.srv, worker.control_url, worker.hb_s, worker.run_as)
+    if step == "master":
+        return run_master(worker.api, claim, worker.srv, worker.control_url, worker.hb_s, worker.run_as)
+    if step == "intake":
+        return run_intake(worker.api, claim, worker.srv, worker.control_url, worker.hb_s, worker.run_as)
+    if step == "impact":
+        return run_impact(worker.api, claim, worker.srv, worker.control_url, worker.hb_s, worker.run_as)
+    return run_dev(worker.api, claim, worker.srv, worker.control_url, worker.hb_s, worker.run_as)

@@ -260,114 +260,169 @@ def _prediction(used_fraction: float | None, capacity: float | None, tokens_used
             "remaining_now_pct": None if remaining_fraction is None else round(remaining_fraction * 100, 1)}
 
 
-def account_awareness(provider: str, quota: dict | None, runs: list[dict], samples: list[dict],
-                     now: datetime | None = None) -> dict:
-    """Build the account's seven-day usage, burn rates, reset windows and exhaustion forecasts."""
-    now = as_utc(now) or datetime.now(UTC)
-    quota = quota or {}
+def _awareness_periods(now: datetime) -> tuple[datetime, datetime, datetime]:
+    return now - timedelta(hours=1), now - timedelta(hours=24), now - timedelta(days=7)
+
+
+def _base_rates(runs: list[dict], now: datetime, hour_start: datetime, daily_start: datetime,
+                weekly_start: datetime) -> dict[str, dict]:
+    return {"last_hour": _rates(runs, now, hour_start), "last_day": _rates(runs, now, daily_start),
+            "whole_window": _rates(runs, now, weekly_start)}
+
+
+def _estimated_window(runs: list[dict], samples: list[dict], now: datetime, confidence: str,
+                      base_rates: dict[str, dict]) -> dict:
+    monday = now.date() - timedelta(days=now.weekday())
+    window_start = datetime.combine(monday, time.min, UTC)
+    reset = window_start + timedelta(days=7)
+    reset_source = "estimate"
+    learned_reset, _ = _learned_reset("estimated_week", samples, runs, now, 168)
+    if learned_reset:
+        reset = learned_reset
+        window_start = reset - timedelta(days=7)
+        reset_source = "learned"
+    capacity = _estimate_capacity(runs, window_start, now)
+    usage_runs = [r for r in runs if (at := _run_time(r)) and window_start <= at <= now]
+    used_tokens = sum(_run_usage(r)[0] for r in usage_runs)
+    rate = _rates(runs, now, window_start)
+    used_fraction = min(1.0, used_tokens / capacity)
+    prediction = _prediction(used_fraction, float(capacity), used_tokens, rate["tokens_per_hour"], None,
+                             reset, now, confidence)
+    return {"name": "estimated_week", "label": "Estimated weekly", "source": "estimate",
+            "used_pct": round(used_fraction * 100, 1), "left_pct": round(max(0, 1-used_fraction) * 100, 1),
+            "used_tokens": used_tokens, "left_tokens": max(0, capacity-used_tokens), "quota_tokens": capacity,
+            "reset_at": reset.isoformat(), "reset_source": reset_source,
+            "tokens": sum(_run_usage(r)[0] for r in usage_runs),
+            "cost_usd": round(sum(_run_usage(r)[1] for r in usage_runs), 6),
+            "burn_rates": {"last_hour": base_rates["last_hour"], "last_day": base_rates["last_day"],
+                           "whole_window": rate}, "prediction": prediction}
+
+
+def _reported_reset(name: str, value: dict, samples: list[dict], runs: list[dict], now: datetime,
+                    period_h: float) -> tuple[datetime | None, str]:
+    reset, reset_source = _learned_reset(name, samples, runs, now, period_h)
+    supplied_reset = as_utc(value.get("resets_at") or value.get("reset_at"))
+    if supplied_reset and supplied_reset > now:
+        return supplied_reset, "reported"
+    return reset, reset_source
+
+
+def _reported_usage(runs: list[dict], window_start: datetime, now: datetime) -> tuple[int, float]:
+    usage_runs = [r for r in runs if (at := _run_time(r)) and window_start <= at <= now]
+    return sum(_run_usage(r)[0] for r in usage_runs), sum(_run_usage(r)[1] for r in usage_runs)
+
+
+def _reported_capacity(value: dict) -> float | None:
+    try:
+        capacity = float(value.get("quota_tokens") or value.get("limit_tokens") or value.get("total_tokens") or 0)
+    except (TypeError, ValueError):
+        capacity = 0
+    return capacity or None
+
+
+def _reported_fraction_rates(samples: list[dict], name: str, utilization: float | None,
+                             reset: datetime | None, now: datetime, period_h: float) -> tuple[float | None, float | None]:
+    sampled_rate = _sample_rate(samples, name)
+    fraction_rate = sampled_rate
+    if fraction_rate is None and utilization is not None and reset and reset > now:
+        elapsed_h = max(.01, period_h - (reset - now).total_seconds() / 3600)
+        if elapsed_h >= .25:
+            fraction_rate = utilization / elapsed_h
+    return sampled_rate, fraction_rate
+
+
+def _effective_capacity(capacity: float | None, utilization: float | None, used_tokens: int) -> float | None:
+    if capacity is None and utilization and used_tokens:
+        return used_tokens / utilization
+    return capacity
+
+
+def _reported_window(name: str, value: dict, runs: list[dict], samples: list[dict], now: datetime,
+                     confidence: str, hour_start: datetime, daily_start: datetime) -> dict:
+    utilization = _ratio(value.get("utilization", value.get("used_percent")))
+    period_h = _period_hours(name, value)
+    reset, reset_source = _reported_reset(name, value, samples, runs, now, period_h)
+    window_start = reset - timedelta(hours=period_h) if reset else now - timedelta(hours=period_h)
+    used_tokens, used_cost = _reported_usage(runs, window_start, now)
+    rates = {"last_hour": _rates(runs, now, max(hour_start, window_start)),
+             "last_day": _rates(runs, now, max(daily_start, window_start)),
+             "whole_window": _rates(runs, now, window_start)}
+    capacity = _reported_capacity(value)
+    sampled_fraction_rate, fraction_rate = _reported_fraction_rates(samples, name, utilization, reset, now, period_h)
+    effective_capacity = _effective_capacity(capacity, utilization, used_tokens)
+    prediction_fraction_rate = sampled_fraction_rate if capacity is not None else fraction_rate
+    prediction = _prediction(utilization, effective_capacity, used_tokens, rates["whole_window"]["tokens_per_hour"],
+                            prediction_fraction_rate, reset, now, confidence)
+    left_pct = None if utilization is None else round(max(0, 1-utilization) * 100, 1)
+    left_tokens = None if effective_capacity is None or utilization is None else max(
+        0, int(effective_capacity * (1-utilization)))
+    return {"name": name, "label": name.replace("_", " ").title(), "source": "reported",
+            "used_pct": None if utilization is None else round(utilization*100, 1),
+            "left_pct": left_pct, "used_tokens": used_tokens, "left_tokens": left_tokens,
+            "quota_tokens": capacity, "reset_at": reset.isoformat() if reset else None,
+            "reset_source": reset_source, "tokens": used_tokens, "cost_usd": round(used_cost, 6),
+            "burn_rates": rates, "prediction": prediction}
+
+
+def _reported_windows(window_reports: dict, runs: list[dict], samples: list[dict], now: datetime,
+                      confidence: str, hour_start: datetime, daily_start: datetime) -> list[dict]:
+    windows = []
+    for name, value in sorted(window_reports.items()):
+        if isinstance(value, dict):
+            windows.append(_reported_window(name, value, runs, samples, now, confidence, hour_start, daily_start))
+    return windows
+
+
+def _largest_run(runs: list[dict], weekly_start: datetime) -> dict | None:
+    largest = max((r for r in runs if (at := _run_time(r)) and at >= weekly_start),
+                  key=lambda r: _run_usage(r)[2], default=None)
+    if not largest:
+        return None
+    tokens, cost, context_tokens = _run_usage(largest)
+    return {"ticket": largest.get("ticket_key") or largest.get("ticket"),
+            "model": largest.get("model") or "", "tokens": tokens, "context_tokens": context_tokens,
+            "cost_usd": round(cost, 6), "duration_s": round(_run_duration(largest), 1)}
+
+
+def _weekly_usage(runs: list[dict], weekly_start: datetime) -> dict:
+    usage_runs = [r for r in runs if _run_time(r) and _run_time(r) >= weekly_start]
+    return {"tokens_in": sum(_run_usage(r)[2] for r in usage_runs),
+            "tokens_out": sum(max(0, int(r.get("tokens_out") or 0)) for r in usage_runs),
+            "tokens": sum(_run_usage(r)[0] for r in usage_runs),
+            "cost_usd": round(sum(_run_usage(r)[1] for r in usage_runs), 6), "runs": len(usage_runs)}
+
+
+def _sort_awareness_inputs(runs: list[dict], samples: list[dict], now: datetime) -> tuple[list[dict], list[dict]]:
     runs = sorted((r for r in runs if _run_time(r) and _run_time(r) <= now), key=lambda r: _run_time(r))
     samples = sorted(samples, key=lambda s: as_utc(s.get("observed_at") or s.get("sampled_at"))
                      or datetime.min.replace(tzinfo=UTC))
+    return runs, samples
+
+
+def _awareness_result(estimate: bool, run_count: int, confidence: str, spread: float | None,
+                      base_rates: dict[str, dict], runs: list[dict], weekly_start: datetime,
+                      now: datetime, windows: list[dict]) -> dict:
+    return {"source": "estimate" if estimate else "reported", "is_estimate": estimate,
+            "runs_24h": run_count, "confidence": confidence,
+            "rate_spread_ratio": None if spread is None else round(spread, 3), "burn_rates": base_rates,
+            "usage_7d": _weekly_usage(runs, weekly_start), "largest_run": _largest_run(runs, weekly_start),
+            "history": _history(runs, now), "windows": windows,
+            "at_risk": any(w["prediction"]["status"] == "will run out before reset" for w in windows)}
+
+
+def account_awareness(provider: str, quota: dict | None, runs: list[dict], samples: list[dict],
+                      now: datetime | None = None) -> dict:
+    """Build the account's seven-day usage, burn rates, reset windows and exhaustion forecasts."""
+    now = as_utc(now) or datetime.now(UTC)
+    quota = quota or {}
+    runs, samples = _sort_awareness_inputs(runs, samples, now)
     confidence, run_count, spread = _confidence(runs, now)
-    daily_start = now - timedelta(hours=24)
-    hour_start = now - timedelta(hours=1)
-    weekly_start = now - timedelta(days=7)
-    base_rates = {"last_hour": _rates(runs, now, hour_start), "last_day": _rates(runs, now, daily_start),
-                  "whole_window": _rates(runs, now, weekly_start)}
+    hour_start, daily_start, weekly_start = _awareness_periods(now)
+    base_rates = _base_rates(runs, now, hour_start, daily_start, weekly_start)
     window_reports = quota.get("windows") if isinstance(quota.get("windows"), dict) else {}
     estimate = not bool(window_reports)
     if estimate:
-        monday = now.date() - timedelta(days=now.weekday())
-        window_start = datetime.combine(monday, time.min, UTC)
-        reset = window_start + timedelta(days=7)
-        reset_source = "estimate"
-        learned_reset, _ = _learned_reset("estimated_week", samples, runs, now, 168)
-        if learned_reset:
-            reset = learned_reset
-            window_start = reset - timedelta(days=7)
-            reset_source = "learned"
-        capacity = _estimate_capacity(runs, window_start, now)
-        usage_runs = [r for r in runs if (at := _run_time(r)) and window_start <= at <= now]
-        used_tokens = sum(_run_usage(r)[0] for r in usage_runs)
-        rate = _rates(runs, now, window_start)
-        used_fraction = min(1.0, used_tokens / capacity)
-        pred = _prediction(used_fraction, float(capacity), used_tokens, rate["tokens_per_hour"], None,
-                           reset, now, confidence)
-        window_reports = {"estimated_week": {"utilization": used_fraction, "resets_at": reset.isoformat(),
-                                              "estimated_limit_tokens": capacity}}
-        windows = [{"name": "estimated_week", "label": "Estimated weekly", "source": "estimate",
-                    "used_pct": round(used_fraction * 100, 1), "left_pct": round(max(0, 1-used_fraction) * 100, 1),
-                    "used_tokens": used_tokens, "left_tokens": max(0, capacity-used_tokens),
-                    "quota_tokens": capacity, "reset_at": reset.isoformat(), "reset_source": reset_source,
-                    "tokens": sum(_run_usage(r)[0] for r in usage_runs),
-                    "cost_usd": round(sum(_run_usage(r)[1] for r in usage_runs), 6),
-                    "burn_rates": {"last_hour": base_rates["last_hour"], "last_day": base_rates["last_day"],
-                                   "whole_window": rate}, "prediction": pred}]
+        windows = [_estimated_window(runs, samples, now, confidence, base_rates)]
     else:
-        windows = []
-        for name, value in sorted(window_reports.items()):
-            if not isinstance(value, dict):
-                continue
-            utilization = _ratio(value.get("utilization", value.get("used_percent")))
-            period_h = _period_hours(name, value)
-            reset, reset_source = _learned_reset(name, samples, runs, now, period_h)
-            supplied_reset = as_utc(value.get("resets_at") or value.get("reset_at"))
-            if supplied_reset and supplied_reset > now:
-                reset, reset_source = supplied_reset, "reported"
-            if reset:
-                window_start = reset - timedelta(hours=period_h)
-            else:
-                window_start = now - timedelta(hours=period_h)
-            usage_runs = [r for r in runs if (at := _run_time(r)) and window_start <= at <= now]
-            used_tokens = sum(_run_usage(r)[0] for r in usage_runs)
-            used_cost = sum(_run_usage(r)[1] for r in usage_runs)
-            rates = {"last_hour": _rates(runs, now, max(hour_start, window_start)),
-                     "last_day": _rates(runs, now, max(daily_start, window_start)),
-                     "whole_window": _rates(runs, now, window_start)}
-            try:
-                capacity = float(value.get("quota_tokens") or value.get("limit_tokens") or value.get("total_tokens") or 0)
-            except (TypeError, ValueError):
-                capacity = 0
-            capacity = capacity or None
-            sampled_fraction_rate = _sample_rate(samples, name)
-            fraction_rate = sampled_fraction_rate
-            if fraction_rate is None and utilization is not None and reset and reset > now:
-                elapsed_h = max(.01, period_h - (reset - now).total_seconds() / 3600)
-                if elapsed_h >= .25:
-                    fraction_rate = utilization / elapsed_h
-            effective_capacity = capacity
-            if effective_capacity is None and utilization and used_tokens:
-                effective_capacity = used_tokens / utilization
-            prediction_fraction_rate = sampled_fraction_rate if capacity is not None else fraction_rate
-            pred = _prediction(utilization, effective_capacity, used_tokens,
-                               rates["whole_window"]["tokens_per_hour"], prediction_fraction_rate, reset, now,
-                               confidence)
-            left_pct = None if utilization is None else round(max(0, 1-utilization) * 100, 1)
-            left_tokens = None if effective_capacity is None or utilization is None else max(
-                0, int(effective_capacity * (1-utilization)))
-            windows.append({"name": name, "label": name.replace("_", " ").title(),
-                            "source": "reported", "used_pct": None if utilization is None else round(utilization*100, 1),
-                            "left_pct": left_pct, "used_tokens": used_tokens, "left_tokens": left_tokens,
-                            "quota_tokens": capacity, "reset_at": reset.isoformat() if reset else None,
-                            "reset_source": reset_source, "tokens": used_tokens,
-                            "cost_usd": round(used_cost, 6), "burn_rates": rates, "prediction": pred})
-    largest = max((r for r in runs if (at := _run_time(r)) and at >= weekly_start),
-                  key=lambda r: _run_usage(r)[2], default=None)
-    largest_run = None
-    if largest:
-        token_count, cost, context_tokens = _run_usage(largest)
-        largest_run = {"ticket": largest.get("ticket_key") or largest.get("ticket"),
-                       "model": largest.get("model") or "", "tokens": token_count, "context_tokens": context_tokens,
-                       "cost_usd": round(cost, 6),
-                       "duration_s": round(_run_duration(largest), 1)}
-    usage_runs = [r for r in runs if _run_time(r) and _run_time(r) >= weekly_start]
-    return {"source": "estimate" if estimate else "reported", "is_estimate": estimate,
-            "runs_24h": run_count, "confidence": confidence, "rate_spread_ratio": None if spread is None else round(spread, 3),
-            "burn_rates": base_rates,
-            "usage_7d": {"tokens_in": sum(_run_usage(r)[2] for r in usage_runs),
-                         "tokens_out": sum(max(0, int(r.get("tokens_out") or 0)) for r in usage_runs),
-                         "tokens": sum(_run_usage(r)[0] for r in usage_runs),
-                         "cost_usd": round(sum(_run_usage(r)[1] for r in usage_runs), 6),
-                         "runs": len(usage_runs)},
-            "largest_run": largest_run, "history": _history(runs, now), "windows": windows,
-            "at_risk": any(w["prediction"]["status"] == "will run out before reset" for w in windows)}
+        windows = _reported_windows(window_reports, runs, samples, now, confidence, hour_start, daily_start)
+    return _awareness_result(estimate, run_count, confidence, spread, base_rates, runs, weekly_start, now, windows)

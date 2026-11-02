@@ -24,6 +24,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Work claim stages](../../docs/v4/work-claim.md): ordered named steps for eligibility, lease and hot-file acquisition, run registration and response building
 - [Review metrics](../../docs/v4/review-metrics.md): weekly waits, finished tickets without human-review activity, waiting durations and review decisions
 - [UI mount structure](../../docs/v4/ui_mount-structure.md): named parts that register console pages, scripts, help and the ticket and service routes in order
+- [Security installation structure](../../docs/v4/security-structure.md): the security middleware and routes split into guard, middleware, settings, people and two-factor parts
 
 Feature documents live in `docs/v4/`. Normally, add one line per feature in `deploy/v4/topics/<topic>.md` (see
 [Fewer merge conflicts](../../docs/v4/merge-conflicts.md)); tickets that explicitly require a README link may add
@@ -151,6 +152,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Offline node bundle and Debian packages](../../docs/v4/offline-bundle.md): build checksummed release, image, Python wheels and version-pinned AI CLIs for offline Ubuntu/Debian node installs
 - [Licensing and usage](../../docs/v4/licensing.md): activate signed online or offline licences, manage plan limits, read usage by project and month, and export CSV
 - [Account quota awareness](../../docs/v4/quota-awareness.md): record account usage, forecast burn and reset risk, route around accounts likely to run out, and show estimates and seven-day history
+- [Account awareness structure](../../docs/v4/account_awareness-structure.md): named steps for assembling account usage, quota windows and forecasts
 - [Load-aware scheduling](../../docs/v4/load-aware-scheduling.md): set machine and shared-host load limits, hold or reduce offers by heartbeat measurements, and chart throttling beside throughput
 - [Scheduled account quota refresh](../../docs/v4/quota-refresh.md): database-configured, account-leased provider CLI quota snapshots with a 15-minute default and no prompt-based refresh
 - [Ticket estimates and AI capacity planning](../../docs/v4/capacity-planning.md): estimate tokens, time and rework ranges from completed work, route by quota headroom, and show next-week capacity and estimate error

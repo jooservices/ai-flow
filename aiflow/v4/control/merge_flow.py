@@ -260,107 +260,115 @@ def _merge_one(ctx, t: dict) -> bool:
         return _merge_held(ctx, t, ref, hold)
 
 
-def _merge_held(ctx, t: dict, ref: dict[str, Any], hold: Hold) -> bool:
-    key = t["key"]
-    gateway = _gateway(ctx, ref)
-    hold.keep()
-    data = gateway.pr(ref["name"], ref["number"]) or {}
-    if data.get("merged") or data.get("state") == "closed":
-        merge_queue.finish(ctx.db, ref["repository"], ref["number"], bool(data.get("merged")))
-        return reconcile_one(ctx, t, ref, data, hold=hold)  # settled on GitHub already: follow it
+def _finish_if_github_settled(ctx, t: dict, ref: dict[str, Any], data: dict, hold: Hold) -> tuple[bool, bool]:
+    if not (data.get("merged") or data.get("state") == "closed"):
+        return False, False
+    merge_queue.finish(ctx.db, ref["repository"], ref["number"], bool(data.get("merged")))
+    return True, reconcile_one(ctx, t, ref, data, hold=hold)
 
-    # Take the repository queue turn before updating a behind branch or checking its head. This keeps the
-    # background Ready to merge path in the same order as verify and human-review merges.
-    preflight = merge_queue.merge_next(
-        ctx.db, gateway, ref["repository"], ref["number"], key, "",
-        lambda: {"merged": False, "preflight": True}, before_call=hold.keep,
-    )
-    if preflight.get("updated"):
-        message = preflight.get("message", "branch brought up to date with the base")
-        _audit(ctx, "github", "update-branch", key, True, message, {"number": ref["number"]})
-        ctx.events.emit("github.merge_queue", ticket=key, account="merge-flow", node="control",
-                        outcome="updated", reason=message[:200])
-        ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-                   ("waiting: the branch was updated, the checks run again", key))
-        return False
-    if preflight.get("conflict"):
-        send_to_dev(ctx, t, ref, "The branch conflicts with the base branch.", hold=hold)
-        return False
-    if preflight.get("queued"):
-        ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-                   (f"waiting: {preflight.get('message', 'the repository merge queue is busy')}"[:500], key))
-        return False
-    if preflight.get("update_failed"):
-        ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-                   (f"waiting: {preflight.get('message', 'the branch update failed')}"[:500], key))
-        return False
 
-    hold.keep()
-    data = gateway.pr(ref["name"], ref["number"]) or {}
-    if data.get("merged") or data.get("state") == "closed":
-        merge_queue.finish(ctx.db, ref["repository"], ref["number"], bool(data.get("merged")))
-        return reconcile_one(ctx, t, ref, data, hold=hold)
-    if (data.get("mergeable_state") or "") == "dirty":
-        merge_queue.leave(ctx.db, ref["repository"], ref["number"])
-        send_to_dev(ctx, t, ref, "The branch conflicts with the base branch.", hold=hold)
+def _check_queue_updated(ctx, key: str, ref: dict[str, Any], result: dict) -> bool:
+    if not result.get("updated"):
         return False
-    head = (data.get("head") or {}).get("sha") or ""
-    hold.keep()
-    checks = gateway.checks(ref["name"], head) if head else []
-    failed = [c for c in checks if c["state"] == "failure"]
-    if failed:
-        merge_queue.leave(ctx.db, ref["repository"], ref["number"])
-        send_to_dev(ctx, t, ref, "Checks failed: " + ", ".join(f"{c['name']} ({c['url']})" for c in failed[:8]), hold=hold)
+    message = result.get("message", "branch brought up to date with the base")
+    _audit(ctx, "github", "update-branch", key, True, message, {"number": ref["number"]})
+    ctx.events.emit("github.merge_queue", ticket=key, account="merge-flow", node="control",
+                    outcome="updated", reason=message[:200])
+    ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
+               ("waiting: the branch was updated, the checks run again", key))
+    return True
+
+
+def _check_queue_conflict(ctx, t: dict, ref: dict[str, Any], result: dict, hold: Hold) -> bool:
+    if not result.get("conflict"):
         return False
-    if any(c["state"] == "pending" for c in checks):
-        ctx.db.run("UPDATE tickets SET merge_note='waiting: the checks are still running' WHERE key=%s", (key,))
+    send_to_dev(ctx, t, ref, "The branch conflicts with the base branch.", hold=hold)
+    return True
+
+
+def _check_queue_busy(ctx, key: str, result: dict) -> bool:
+    if not result.get("queued"):
         return False
-    project = ctx.repo().projects.get(t["project"])
-    method = (getattr(project, "merge", None) or {}).get("method", "squash") if project else "squash"
-    hold.keep()
-    # pinned to the commit whose checks were read: a branch that moved on is refused by GitHub and checked again
-    res = merge_queue.merge_next(
-        ctx.db, gateway, ref["repository"], ref["number"], key, "",
-        lambda: gateway.merge_pr(ref["name"], ref["number"], f"{key}: {t['summary']}", method, sha=head),
-        before_call=hold.keep,
-    )
-    if res.get("queued"):
-        ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-                   (f"waiting: {res.get('message', 'the repository merge queue is busy')}"[:500], key))
+    ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
+               (f"waiting: {result.get('message', 'the repository merge queue is busy')}"[:500], key))
+    return True
+
+
+def _check_branch_update_failed(ctx, key: str, result: dict) -> bool:
+    if not result.get("update_failed"):
         return False
-    if res.get("updated"):
-        message = res.get("message", "branch brought up to date with the base")
-        _audit(ctx, "github", "update-branch", key, True, message, {"number": ref["number"]})
-        ctx.events.emit("github.merge_queue", ticket=key, account="merge-flow", node="control",
-                        outcome="updated", reason=message[:200])
-        ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-                   ("waiting: the branch was updated, the checks run again", key))
+    ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
+               (f"waiting: {result.get('message', 'the branch update failed')}"[:500], key))
+    return True
+
+
+def _handle_preflight_holds(ctx, key: str, t: dict, ref: dict[str, Any], result: dict, hold: Hold) -> bool:
+    if _check_queue_updated(ctx, key, ref, result):
+        return True
+    if _check_queue_conflict(ctx, t, ref, result, hold):
+        return True
+    if _check_queue_busy(ctx, key, result):
+        return True
+    return _check_branch_update_failed(ctx, key, result)
+
+
+def _handle_merge_queue_holds(ctx, key: str, t: dict, ref: dict[str, Any], result: dict, hold: Hold) -> bool:
+    if _check_queue_busy(ctx, key, result):
+        return True
+    if _check_queue_updated(ctx, key, ref, result):
+        return True
+    if _check_queue_conflict(ctx, t, ref, result, hold):
+        return True
+    return _check_branch_update_failed(ctx, key, result)
+
+
+def _check_pr_conflict(ctx, t: dict, ref: dict[str, Any], data: dict, hold: Hold) -> bool:
+    if (data.get("mergeable_state") or "") != "dirty":
         return False
-    if res.get("conflict"):
-        send_to_dev(ctx, t, ref, "The branch conflicts with the base branch.", hold=hold)
+    merge_queue.leave(ctx.db, ref["repository"], ref["number"])
+    send_to_dev(ctx, t, ref, "The branch conflicts with the base branch.", hold=hold)
+    return True
+
+
+def _check_failed_checks(ctx, t: dict, ref: dict[str, Any], checks: list[dict], hold: Hold) -> bool:
+    failed = [check for check in checks if check["state"] == "failure"]
+    if not failed:
         return False
-    if res.get("update_failed"):
-        ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-                   (f"waiting: {res.get('message', 'the branch update failed')}"[:500], key))
+    merge_queue.leave(ctx.db, ref["repository"], ref["number"])
+    reason = "Checks failed: " + ", ".join(f"{check['name']} ({check['url']})" for check in failed[:8])
+    send_to_dev(ctx, t, ref, reason, hold=hold)
+    return True
+
+
+def _check_pending_checks(ctx, key: str, checks: list[dict]) -> bool:
+    if not any(check["state"] == "pending" for check in checks):
         return False
-    merge_clock = datetime.now(timezone.utc)
-    _audit(ctx, "github", "merge", key, bool(res.get("merged")), res.get("sha") or res.get("message", ""),
-           {"number": ref["number"], "method": method, "repo": ref["repository"], "pinned": head})
-    ctx.events.emit("github.merge", ticket=key, account="merge-flow", node="control",
-                    outcome="merged" if res.get("merged") else "refused", reason=str(res.get("message", ""))[:200])
-    if not res.get("merged"):
-        if res.get("mergeable_state") == "dirty":
-            merge_queue.leave(ctx.db, ref["repository"], ref["number"])
-            send_to_dev(ctx, t, ref, "The branch conflicts with the base branch.", hold=hold)
-        elif str(res.get("message", "")).startswith("409"):
-            ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-                       ("waiting: the branch changed after its checks were read; it is checked again", key))
-        else:
-            ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-                       (f"waiting: GitHub refused the merge ({res.get('message', '')})"[:500], key))
+    ctx.db.run("UPDATE tickets SET merge_note='waiting: the checks are still running' WHERE key=%s", (key,))
+    return True
+
+
+def _check_head_changed(ctx, key: str, result: dict) -> bool:
+    if not str(result.get("message", "")).startswith("409"):
         return False
-    # the merge time is the merge itself, kept before the Jira move: GitHub's own time when it can be read,
-    # else the clock right after the merge call
+    ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
+               ("waiting: the branch changed after its checks were read; it is checked again", key))
+    return True
+
+
+def _record_github_refusal(ctx, key: str, result: dict) -> None:
+    ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
+               (f"waiting: GitHub refused the merge ({result.get('message', '')})"[:500], key))
+
+
+def _handle_github_refusal(ctx, key: str, t: dict, ref: dict[str, Any], result: dict, hold: Hold) -> None:
+    if _check_pr_conflict(ctx, t, ref, result, hold):
+        return
+    if not _check_head_changed(ctx, key, result):
+        _record_github_refusal(ctx, key, result)
+
+
+def _complete_successful_merge(ctx, key: str, t: dict, ref: dict[str, Any], gateway,
+                               result: dict, hold: Hold, merge_clock: datetime) -> bool:
     merged_at = merge_clock
     try:
         hold.keep()
@@ -369,7 +377,7 @@ def _merge_held(ctx, t: dict, ref: dict[str, Any], hold: Hold) -> bool:
         raise
     except Exception as e:  # noqa: BLE001
         log.warning("could not read the merge time of PR #%s: %s", ref["number"], e)
-    sha = str(res.get("sha") or "")
+    sha = str(result.get("sha") or "")
     record_merge(ctx, key, ref, sha, settled=False, merged_at=merged_at)
     _move(ctx, t, "Done", FLOW_MERGE, f"PR #{ref['number']} merged as {sha[:10]}", done_at=merged_at, hold=hold)
     ctx.db.run("UPDATE tickets SET pr_state='merged' WHERE key=%s", (key,))
@@ -381,6 +389,74 @@ def _merge_held(ctx, t: dict, ref: dict[str, Any], hold: Hold) -> bool:
                        f"Next: Ticket Done" + (f"; {seconds} s between approval and merge." if seconds is not None else "."))
     _note_run(ctx, key, t["project"], "merged", f"PR #{ref['number']} merged by the flow")
     return True
+
+
+def _prepare_merge_preflight(ctx, key: str, t: dict, ref: dict[str, Any], gateway,
+                             hold: Hold) -> tuple[bool, bool]:
+    hold.keep()
+    data = gateway.pr(ref["name"], ref["number"]) or {}
+    settled, result = _finish_if_github_settled(ctx, t, ref, data, hold)
+    if settled:
+        return True, result
+    preflight = merge_queue.merge_next(
+        ctx.db, gateway, ref["repository"], ref["number"], key, "",
+        lambda: {"merged": False, "preflight": True}, before_call=hold.keep,
+    )
+    if _handle_preflight_holds(ctx, key, t, ref, preflight, hold):
+        return True, False
+    return False, False
+
+
+def _prepare_merge_head(ctx, key: str, t: dict, ref: dict[str, Any], gateway,
+                        hold: Hold) -> tuple[bool, bool, str]:
+    hold.keep()
+    data = gateway.pr(ref["name"], ref["number"]) or {}
+    settled, result = _finish_if_github_settled(ctx, t, ref, data, hold)
+    if settled:
+        return True, result, ""
+    if _check_pr_conflict(ctx, t, ref, data, hold):
+        return True, False, ""
+    head = (data.get("head") or {}).get("sha") or ""
+    hold.keep()
+    checks = gateway.checks(ref["name"], head) if head else []
+    if _check_failed_checks(ctx, t, ref, checks, hold):
+        return True, False, ""
+    if _check_pending_checks(ctx, key, checks):
+        return True, False, ""
+    return False, False, head
+
+
+def _merge_held(ctx, t: dict, ref: dict[str, Any], hold: Hold) -> bool:
+    key = t["key"]
+    gateway = _gateway(ctx, ref)
+    # Take the repository queue turn before updating a behind branch or checking its head. This keeps the
+    # background Ready to merge path in the same order as verify and human-review merges.
+    preflight_handled, preflight_result = _prepare_merge_preflight(ctx, key, t, ref, gateway, hold)
+    if preflight_handled:
+        return preflight_result
+    head_handled, head_result, head = _prepare_merge_head(ctx, key, t, ref, gateway, hold)
+    if head_handled:
+        return head_result
+    project = ctx.repo().projects.get(t["project"])
+    method = (getattr(project, "merge", None) or {}).get("method", "squash") if project else "squash"
+    hold.keep()
+    # pinned to the commit whose checks were read: a branch that moved on is refused by GitHub and checked again
+    res = merge_queue.merge_next(
+        ctx.db, gateway, ref["repository"], ref["number"], key, "",
+        lambda: gateway.merge_pr(ref["name"], ref["number"], f"{key}: {t['summary']}", method, sha=head),
+        before_call=hold.keep,
+    )
+    if _handle_merge_queue_holds(ctx, key, t, ref, res, hold):
+        return False
+    merge_clock = datetime.now(timezone.utc)
+    _audit(ctx, "github", "merge", key, bool(res.get("merged")), res.get("sha") or res.get("message", ""),
+           {"number": ref["number"], "method": method, "repo": ref["repository"], "pinned": head})
+    ctx.events.emit("github.merge", ticket=key, account="merge-flow", node="control",
+                    outcome="merged" if res.get("merged") else "refused", reason=str(res.get("message", ""))[:200])
+    if not res.get("merged"):
+        _handle_github_refusal(ctx, key, t, ref, res, hold)
+        return False
+    return _complete_successful_merge(ctx, key, t, ref, gateway, res, hold, merge_clock)
 
 
 # --- the reconcile loop -----------------------------------------------------------------------------------------

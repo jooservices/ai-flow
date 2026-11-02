@@ -36,6 +36,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Parallel CI](../../docs/v4/parallel-ci.md): the v4 suite on parallel shards, the required `Test (v4)` check and the scale proof job.
 - [Epics and verification without a verdict](../../docs/v4/verify-no-verdict.md): an epic is never offered as work; the status, retry and Dashboard parts of JAIF-271 follow in slices
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
+- [Merge-held decision structure](../../docs/v4/merge-held-structure.md): ordered named checks preserve each hold reason and its message while the merge lease is held
 - [Commit and pull request title rules](../../docs/v4/commit-rules.md): one rules module and a normalizer so a title or commit message is valid before the push
 - [System readiness check](../../docs/v4/system-check.md): check machine and project assumptions after join, project addition, upgrade and hourly; safely repair supported problems, gate work, and include results in the support bundle
 - [System check condition structure](../../docs/v4/system-check-structure.md): how GitHub project checks are ordered and how to add a condition

@@ -37,6 +37,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Adapter run structure](../../docs/v4/adapter_run-structure.md): the AI CLI run split into start hook, output streaming, line handling, process finish, failure explanation and verdict
 - [Route contract snapshot](../../docs/v4/route-contract-snapshot.md): a checked-in record of every route's method, path, authentication and response model, compared by a test
 - [Project repository save structure](../../docs/v4/project_repositories-structure.md): ordered validation and commit steps for `PUT /v1/projects/{key}/repositories`
+- [Projects route install structure](../../docs/v4/projects-install-structure.md): project and GitHub routes register in explicit groups that preserve their original order
 - [Release routes structure](../../docs/v4/release-install-structure.md): the release routes split into files on disk, downloads and node reports
 - [Route install registrations](../../docs/v4/route-install-registrations.md): a recorded list of what every feature's install function registers, kept identical when an install is split
 - [Business routes structure](../../docs/v4/business-install-structure.md): the business, stakeholder and state routes split into route groups and steps

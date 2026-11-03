@@ -10,6 +10,7 @@ import pytest
 from fastapi import HTTPException
 
 from aiflow.v4.control import api, gateway_helpers
+from aiflow.v4.control import shared_accounts
 from aiflow.v4.control.features.version_release import claim_steps, routes
 
 def _json(value):
@@ -130,9 +131,9 @@ def _observe(monkeypatch, scenario):
     monkeypatch.setattr(routes.licensing, "enforce_work_entitlement", lambda *_args, **_kw: calls.append("license:work") or _license(scenario.get("work_license")))
     monkeypatch.setattr(routes.licensing, "enforce_project_entitlement", lambda *_args, **_kw: calls.append("license:project") or _license(scenario.get("project_license")))
     monkeypatch.setattr(routes.rollout, "node_compatible", lambda *_args: calls.append("policy:node") or {"compatible": scenario.get("compatible", True), "reason": "old node"})
-    monkeypatch.setattr(routes.shared_accounts, "may_take", lambda *_args: (calls.append("account:may-take") or (scenario.get("may_take", True), scenario.get("may_take_reason", "no capacity"))))
+    monkeypatch.setattr(shared_accounts, "may_take", lambda *_args: (calls.append("account:may-take") or (scenario.get("may_take", True), scenario.get("may_take_reason", "no capacity"))))
     monkeypatch.setattr(routes.system_check_api, "require_project_ready", lambda *_args: calls.append("system:ready") or _raise(scenario.get("readiness_error")))
-    monkeypatch.setattr(routes, "toolchain_gaps", lambda *_args: scenario.get("tools_missing", False))
+    monkeypatch.setattr(claim_steps, "toolchain_gaps", lambda *_args: scenario.get("tools_missing", False))
     _patch_release(monkeypatch, scenario, calls, project, selected)
     deps = SimpleNamespace(account_master_paused=lambda _account: scenario.get("paused", False), bot_identity=lambda: "bot",
                            fenced=lambda *_args: None, node_auth=lambda: "node", quota_peer_release_candidates=lambda _account: {("TESTWP", "101", project.repo)} if scenario.get("peer") else set())
@@ -185,52 +186,6 @@ def _context(scenario, calls):
     if scenario.get("context_error"):
         raise RuntimeError("fixture search failure")
     return {"project": "TESTWP", "ticket": "TESTWP-REL-101", "items": []}
-
-def _unit_step_calls():
-    calls = []
-    scenario = {}
-    project = SimpleNamespace(key="TESTWP", repo="owner/project", repo_name="project",
-                              version_release={"enabled": True}, settings_for_repo=lambda _repo: {})
-    account = SimpleNamespace(id="release-1", roles=["release"], runs_on=lambda _node: True)
-    repo = SimpleNamespace(projects={"TESTWP": project}, versions={})
-    repo.account = lambda _account: account
-    repo.projects_for_node = lambda *_args: ["TESTWP"]
-    repo.accounts_on = lambda _node: [account]
-    ctx = FakeContext(RecordingDb(scenario, calls), LeaseRegistry(scenario, calls), RecordingEvents(calls),
-                      SimpleNamespace(license_public_key="key", lease_ms=1), repo_value=repo)
-    body = SimpleNamespace(account="release-1", project="TESTWP", version_id="101", repository="")
-    version = {"id": "101", "name": "Core 1.0", "repositories": [project.repo]}
-    snapshot = {"ready": True, "tickets": [], "reasons": []}
-    github = SimpleNamespace(branch_exists=lambda *_args: False, branch_sha=lambda *_args: "sha",
-                             create_branch=lambda *_args: None, create_branch_at_sha=lambda *_args: None)
-    no_op = lambda *_args, **_kwargs: None
-    return {
-        "check_claim_policy": lambda: claim_steps.check_claim_policy(
-            ctx, body, "node", lambda *_: 6, lambda *_a, **_k: {}, Exception,
-            lambda *_: {"compatible": True}, lambda: None, HTTPException),
-        "check_claim_owner": lambda: claim_steps.check_claim_owner(
-            ctx, body, "node", {}, lambda *_: False, no_op, Exception, lambda *_: (True, ""),
-            lambda _item: True, HTTPException),
-        "check_claim_node": lambda: claim_steps.check_claim_node(ctx, repo, project, body, "node", no_op, HTTPException),
-        "resolve_claim_version": lambda: claim_steps.resolve_claim_version(
-            ctx, body, project, lambda *_: [version], lambda *_: project, lambda _item: True, HTTPException),
-        "check_claim_runtime": lambda: claim_steps.check_claim_runtime(
-            ctx, repo, project, version, "node", body.account, lambda *_: False, "container", lambda *_: set(), HTTPException),
-        "evaluate_claim_gate": lambda: claim_steps.evaluate_claim_gate(
-            ctx, project, version, lambda *_: github, lambda context, **_kw: context,
-            lambda *_: snapshot, no_op, no_op, HTTPException),
-        "create_claim_branch": lambda: claim_steps.create_claim_branch(
-            project, version, snapshot, github, lambda _item: "develop", lambda *_: "release/core"),
-        "persist_claim_rows": lambda: claim_steps.persist_claim_rows(
-            ctx, project, version, "run-1", "TESTWP-REL", {}, "connection", snapshot, lambda value: value),
-    }
-
-@pytest.mark.parametrize("step", ["check_claim_policy", "check_claim_owner", "check_claim_node",
-                                   "resolve_claim_version", "check_claim_runtime", "evaluate_claim_gate",
-                                   "create_claim_branch", "persist_claim_rows"])
-def test_claim_steps_run_with_unit_fakes(step):
-    _unit_step_calls()[step]()
-
 
 FIXTURE = Path(__file__).parent / "fixtures" / "version_release_claim_parity.jsonl"
 RECORDED = [json.loads(line) for line in FIXTURE.read_text().splitlines()]

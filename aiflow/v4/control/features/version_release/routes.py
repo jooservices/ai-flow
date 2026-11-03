@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import Depends, HTTPException
 from ....core.toolchains import (CONTAINER_RUNTIME_TOOL, toolchain_gaps)
 from ... import (knowledge, licensing, load_policy_api,
-               rollout, shared_accounts, system_check_api, version_release)
+               rollout, system_check_api, version_release)
 from ... import environment as environment_reports
 from ...db import J
 from ...route_deps import github_connection_used
@@ -84,23 +84,13 @@ def install(app, ctx, deps) -> SimpleNamespace:
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
-        load_capacity, state = claim_steps.check_claim_policy(
-            ctx, body, node, load_policy_api.version_claim_capacity, licensing.enforce_work_entitlement,
-            licensing.LicenseError, rollout.node_compatible, _releases, HTTPException)
-        repo, project, acc = claim_steps.check_claim_owner(
-            ctx, body, node, state, account_master_paused, licensing.enforce_project_entitlement,
-            licensing.LicenseError, shared_accounts.may_take, version_release.enabled, HTTPException)
-        claim_steps.check_claim_node(ctx, repo, project, body, node,
-                                     system_check_api.require_project_ready, HTTPException)
-        project, version = claim_steps.resolve_claim_version(
-            ctx, body, project, version_release.project_versions, version_release.project_for_version,
-            version_release.enabled, HTTPException)
-        claim_steps.check_claim_runtime(
-            ctx, repo, project, version, node, body.account, toolchain_gaps, CONTAINER_RUNTIME_TOOL,
-            quota_peer_release_candidates, HTTPException)
-        claim_github, snapshot = claim_steps.evaluate_claim_gate(
-            ctx, project, version, github_gateway, replace, version_release.post_merge_resume,
-            version_release.evaluate, version_release.record_gate, HTTPException)
+        load_capacity, state = claim_steps.check_claim_policy(ctx, body, node, _releases)
+        repo, project, acc = claim_steps.check_claim_owner(ctx, body, node, state, account_master_paused)
+        claim_steps.check_claim_node(ctx, repo, project, body, node)
+        project, version = claim_steps.resolve_claim_version(ctx, body, project)
+        claim_steps.check_claim_runtime(ctx, repo, project, version, node, body.account,
+                                        quota_peer_release_candidates)
+        claim_github, snapshot = claim_steps.evaluate_claim_gate(ctx, project, version, github_gateway)
         key = version_release.version_identity(project.key, version["id"])
         run_id = str(uuid.uuid4())
         lease = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)
@@ -112,7 +102,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 raise HTTPException(503, "GitHub App is not connected")
             connection_id = github_connection_used.get() or DEFAULT_ID
             source_branch, source_sha, release_branch, branch_created = claim_steps.create_claim_branch(
-                project, version, snapshot, github, version_release.source_branch, version_release.release_branch)
+                project, version, snapshot, github)
             tracker = version_release.tracker_for(ctx, project, version["id"], version["name"])
             selected_settings = {"repo": project.repo, "base": project.base,
                                  "checks": version_release.check_commands(project), "stack": project.stack,
@@ -121,7 +111,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             if not load_policy_api.claim_run(ctx, acc, claim_values, load_capacity):
                 raise HTTPException(409, f"account {acc.id} has no shared session capacity on {node}")
             claim_steps.persist_claim_rows(ctx, project, version, run_id, tracker, selected_settings, connection_id,
-                                           snapshot, J)
+                                           snapshot)
             version_release._audit(ctx, project, tracker,
                                    {"id": run_id, "fence": lease.fence, "account_id": acc.id,
                                     "github_connection": connection_id},

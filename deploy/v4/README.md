@@ -25,6 +25,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Container command policy structure](../../docs/v4/policy-structure.md): named checks for the safe build, run and compose command forms
 - [Work claim stages](../../docs/v4/work-claim.md): ordered named steps for eligibility, lease and hot-file acquisition, run registration and response building
 - [Work route install structure](../../docs/v4/work-routes-install-structure.md): candidate and claim route groups remain in their existing registration order
+- [Version release claim structure](../../docs/v4/version_release_claim-structure.md): named policy, eligibility, gate, branch and persistence phases for the version release claim route
 - [Review metrics](../../docs/v4/review-metrics.md): weekly waits, finished tickets without human-review activity, waiting durations and review decisions
 - [Human review queue structure](../../docs/v4/human_reviews-structure.md): named queue, ticket, action, preview and thread builders behind `GET /v1/reviews`
 - [Human review mount structure](../../docs/v4/human_review_mount-structure.md): named installers and response-building steps for `GET /v1/reviews`

@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import logging
-import re
+import re  # noqa: F401 - review_queue_mount resolves this module global at request time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Callable
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request  # noqa: F401 - kept as module globals for the route
 
 from . import review_metrics
 
@@ -381,18 +381,6 @@ class ReviewQueueAPI:
         return keys
 
     def mount_human_reviews(self, app: FastAPI, console_user: Callable, optional_console_user: Callable) -> None:
-        ctx = self.ctx
+        from .review_queue_mount import install_human_reviews_route
 
-        @app.get("/v1/reviews")
-        def human_reviews(request: Request, project: str = Query(default="")) -> dict:
-            """Queue waiting items with their action set and project-filtered human-review metrics."""
-            user = (console_user(request, "view.human_review") if ctx.settings.console_login
-                    else optional_console_user(request))
-            repo = ctx.repo()
-            scope = user.project_keys if user and user.project_keys is not None else None
-            if project and scope is not None and project not in scope:
-                self.audit("console", "access_denied", "", "", None, user.subject, False,
-                           "not available for your role", {"path": request.url.path, "project": project,
-                                                              "roles": list(user.effective_roles)})
-                raise HTTPException(403, "not available for your role")
-            return _build_human_reviews_response(self, ctx, repo, project, scope)
+        install_human_reviews_route(self, app, console_user, optional_console_user)

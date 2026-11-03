@@ -3,7 +3,7 @@
     python3 -m aiflow.v4.core.local_gate run --path <worktree> --base develop [--title "<pull request title>"]
 
 The steps are the commands of the CI jobs ``Test (Unit)``, ``Giant files``, ``Duplicate blocks``, ``Broad exceptions``,
-``Documentation``, ``Code quality`` and ``Test (v4)`` plus the header rules of the commit and the pull request title.
+``SQL boundary``, ``Documentation``, ``Code quality`` and ``Test (v4)`` plus the header rules of the commit and the pull request title.
 The local-gate test compares them with ``.github/workflows/ci.yml`` so the gate cannot drift away from CI.
 
 Exit code 0: every step passed. 1: a step failed. 2: nothing failed, but a step did not finish (time slice) or needs a
@@ -110,6 +110,8 @@ def steps(base: str) -> list[Step]:
              "duplicate-blocks", 300, needs_commit=True),
         Step("broad-except", ("python3", "-m", "aiflow.v4.core.broad_except", "check", "--base", ref,
                                "--head", "HEAD"), "broad-except", 300, needs_commit=True),
+        Step("sql-boundary", ("python3", "-m", "aiflow.v4.core.sql_boundary", "--base", ref),
+             "sql-boundary", 300, needs_commit=True),
         Step("docs-build", ("uv", "run", "--frozen", "python", "-m", "aiflow.v4.core.docsite", "build", "--out",
                             OUT_DIR), "docs", 600),
         Step("docs-check", ("uv", "run", "--frozen", "python", "-m", "aiflow.v4.core.docsite", "check", "--base", ref),

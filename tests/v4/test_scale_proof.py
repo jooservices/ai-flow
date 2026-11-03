@@ -2,6 +2,7 @@
 traffic, the performance budgets and their enforcement, the release proof gate and the tickets created from findings.
 Machines and sessions are simulated; no AI provider is called."""
 import json
+import os
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,6 +20,16 @@ from aiflow.v4.control.ui import console_template
 ROOT = Path(__file__).resolve().parents[2]
 FULL = Scenario()
 OWNER = {"Authorization": "Bearer owner-secret"}
+
+
+def require_close_services():
+    """Time budgets are judged only where PostgreSQL and Redis answer fast (always in CI); correctness checks always run."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        return
+    latency = scale_proof.service_latency_ms(DATABASE_URL, REDIS_URL)
+    if scale_proof.latency_too_high(latency):
+        pytest.skip(f"services answer in {latency} ms per round trip here (limit {scale_proof.SERVICE_LATENCY_LIMIT_MS} ms): "
+                    "the time budgets cannot be judged on this link; CI runs this file on every pull request")
 
 
 @pytest.fixture(scope="module")
@@ -226,6 +237,7 @@ def test_budgets_are_written_down_once_with_their_statistic():
 
 
 def test_the_100_50_200_run_is_within_every_budget(proof):
+    require_close_services()
     report, _ = proof
     failures = [b["message"] for b in report["budgets"] if not b["passed"]]
     assert failures == [], json.dumps({"failures": failures,
@@ -564,3 +576,14 @@ def test_scale_proof_docs_name_the_release_api_routes_and_submission_arguments()
                   "GET /v1/scale-proof", "POST /v1/scale-proof/results"):
         assert route in doc
     assert "--submit \"$AIFLOW4_CONTROL_URL\"" in doc and "AIFLOW4_OWNER_TOKEN" in doc
+
+
+# --- JAIF-425: the time budgets are only judged where the services are close ---------------------------------
+def test_latency_limit_separates_a_ci_link_from_a_port_proxy():
+    assert scale_proof.latency_too_high(0.5) and scale_proof.latency_too_high(0.31)
+    assert not scale_proof.latency_too_high(0.1) and not scale_proof.latency_too_high(0.3)
+
+
+def test_service_latency_probe_reports_a_positive_round_trip_time():
+    latency = scale_proof.service_latency_ms(DATABASE_URL, REDIS_URL, rounds=20)
+    assert 0 < latency < 1000

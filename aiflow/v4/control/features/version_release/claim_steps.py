@@ -2,13 +2,17 @@
 
 The steps call the policy modules directly (not through parameters), so the documentation check still sees, from the
 route, which entitlement, quota and release rules a claim goes through."""
-from dataclasses import replace
+import secrets
+import uuid
+from dataclasses import dataclass, replace
 
 from fastapi import HTTPException
 
 from ....core.toolchains import CONTAINER_RUNTIME_TOOL, toolchain_gaps
-from ... import licensing, load_policy_api, rollout, shared_accounts, system_check_api, version_release
+from ... import knowledge, licensing, load_policy_api, rollout, shared_accounts, system_check_api, version_release
 from ...db import J
+from ...github_connections import DEFAULT_ID
+from ...route_deps import github_connection_used
 
 
 def check_claim_policy(ctx, body, node, releases):
@@ -137,3 +141,86 @@ def persist_claim_rows(ctx, project, version, run_id, tracker, selected_settings
                " version_name=EXCLUDED.version_name,tracker_key=EXCLUDED.tracker_key,status='checking',"
                " gate_detail='',ticket_snapshot=EXCLUDED.ticket_snapshot,updated_at=now()",
                (project.key, version["id"], version["name"], tracker, J(snapshot["tickets"]), project.repo))
+
+
+@dataclass(frozen=True)
+class StartedRelease:
+    """What taking the lease and preparing the release branch produced."""
+    key: str
+    run_id: str
+    lease: object
+    tracker: str
+    source_branch: str
+    source_sha: str
+    release_branch: str
+
+
+def start_release_run(ctx, project, version, snapshot, acc, node, load_capacity, github_gateway) -> StartedRelease:
+    """Take the version's lease, prepare the branch and store the run; the lease is released if anything fails."""
+    key = version_release.version_identity(project.key, version["id"])
+    run_id = str(uuid.uuid4())
+    lease = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)
+    if not lease.ok:
+        raise HTTPException(409, "version release is already claimed")
+    try:
+        github = github_gateway(ctx, project.repo)
+        if github is None:
+            raise HTTPException(503, "GitHub App is not connected")
+        connection_id = github_connection_used.get() or DEFAULT_ID
+        source_branch, source_sha, release_branch, branch_created = create_claim_branch(
+            project, version, snapshot, github)
+        tracker = version_release.tracker_for(ctx, project, version["id"], version["name"])
+        selected_settings = {"repo": project.repo, "base": project.base,
+                             "checks": version_release.check_commands(project), "stack": project.stack,
+                             "containers": bool(project.settings_for_repo(project.repo).get("containers"))}
+        claim_values = (run_id, key, project.key, "version_release", acc.id, acc.provider, "", node, lease.fence, "")
+        if not load_policy_api.claim_run(ctx, acc, claim_values, load_capacity):
+            raise HTTPException(409, f"account {acc.id} has no shared session capacity on {node}")
+        persist_claim_rows(ctx, project, version, run_id, tracker, selected_settings, connection_id, snapshot)
+        version_release._audit(ctx, project, tracker,
+                               {"id": run_id, "fence": lease.fence, "account_id": acc.id,
+                                "github_connection": connection_id},
+                               "github-release-branch", "created" if branch_created else "existing",
+                               {"branch": release_branch, "source": source_branch, "source_sha": source_sha})
+    except Exception:
+        ctx.leases.release(key, run_id, lease.fence)
+        raise
+    return StartedRelease(key, run_id, lease, tracker, source_branch, source_sha, release_branch)
+
+
+def announce_claim(ctx, project, version, snapshot, acc, node, started: StartedRelease) -> None:
+    ctx.db.run("UPDATE accounts SET status='working',updated_at=now(),idle_since=NULL,cooldown_since=NULL WHERE id=%s",
+               (acc.id,))
+    ctx.events.emit("version_release.claimed", ticket=started.tracker, project=project.key, step="version_release",
+                    run_id=started.run_id, fence=started.lease.fence, account=acc.id, provider=acc.provider,
+                    node=node, outcome="checking", reason=version["name"],
+                    data={"version_id": version["id"], "tickets": snapshot["tickets"]})
+
+
+def claim_response(ctx, log, project, version, snapshot, acc, started: StartedRelease, bot_identity) -> dict:
+    """The run description the worker receives: ticket, project settings and the knowledge context pack."""
+    key, run_id = started.key, started.run_id
+    project_data = {"key": project.key, "repo": project.repo, "base": project.base,
+                    "checks": version_release.check_commands(project),
+                    "source_branch": version_release.source_branch(project),
+                    "target_branch": version_release.target_branch(project),
+                    "release_branch": started.release_branch, "source_sha": started.source_sha,
+                    "environment": ([item.public() for item in project.environment_items
+                                     if "post_merge" in item.runs]),
+                    "containers": bool(project.settings_for_repo(project.repo).get("containers")),
+                    "work_minutes": project.work_minutes()}
+    ticket = {"key": key, "project": project.key, "summary": f"Release {version['name']}",
+              "description": (f"Run full configured project checks on {started.release_branch}, "
+                             f"cut from {started.source_branch}."),
+              "labels": [], "priority": "Highest", "type": "Release"}
+    try:
+        context_pack = knowledge.context_pack(ctx.db, project=project.key, ticket=key,
+                                              query=f"{ticket['summary']}\n{ticket['description']}", run_id=run_id)
+    except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
+        log.warning("knowledge context pack for release %s failed: %s", version["name"], type(exc).__name__)
+        context_pack = {"project": project.key, "ticket": key, "items": []}
+    return {"claimed": True, "step": "version_release", "run_id": run_id, "fence": started.lease.fence,
+            "run_token": secrets.token_urlsafe(32), "lease_ms": ctx.settings.lease_ms,
+            "provider": acc.provider, "model": "", "effort": "", "account": acc.id,
+            "identity": bot_identity(), "ticket": ticket, "project": project_data, "context_pack": context_pack,
+            "version": version, "tracker_key": started.tracker, "tickets": snapshot["tickets"]}

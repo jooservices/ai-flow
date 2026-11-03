@@ -23,6 +23,125 @@ from .master_actions import (MasterActionState, decide, deny_policy_decision, es
                              validate_ticket_action)
 
 
+def _prepare_run_result(ctx, run, body, node, still_owner):
+    details = dict(body.details)
+    details.pop("pr_url_source", None)  # provenance is set by the control API, never trusted from the worker
+    details.pop("quota_reservation", None)  # quota reservations are set by the control API
+    if body.pr_url:
+        details["pr_url_source"] = "current"
+    if still_owner and run["step"] == "verify" and body.outcome in ("merged", "human"):
+        try:
+            details["post_merge_criteria"] = environment_reports.record_post_merge_criteria(
+                ctx, run, details.get("post_merge_criteria") or [])
+        except environment_reports.UnmappedPostMergeCriteria as exc:
+            raise HTTPException(422, str(exc)) from exc
+    run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
+    details.pop("support_log_truncated", None)
+    outcome, error_kind = body.outcome, body.error_kind
+    if still_owner:
+        outcome, error_kind, details = load_policy.result_after_load_failure(
+            ctx, node, body, details, utcnow().isoformat())
+        body.outcome = outcome
+        body.error_kind = error_kind
+    return details, run_log, outcome, error_kind
+
+
+def _finish_run_result(ctx, run, run_id, body, details, node, still_owner):
+    late_result = run_inbox_control.finish(ctx, run, run_id, body, details, node)
+    account_update_allowed = not late_result and still_owner
+    status_update_allowed = account_update_allowed and run_inbox_control.account_update_allowed(
+        ctx, run_id, run["account_id"], still_owner)
+    return late_result, account_update_allowed, status_update_allowed
+
+
+def _update_run_result_account(ctx, run, run_id, node, body, run_log, late_result,
+                               account_update_allowed, status_update_allowed, refresh_quota_forecast,
+                               mark_machine_auth_failure, log):
+    if not late_result and isinstance(run_log, str) and run_log:
+        try:
+            support_bundle.store_run_log(ctx, run_id, run_log)
+        except Exception as exc:  # noqa: BLE001 - a missing diagnostic log must not lose the run result
+            log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
+    if body.quota:
+        quota_refresh.record_run_result(ctx.db, run, body, update_account=account_update_allowed)
+    elif account_update_allowed:
+        current = ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}
+        refresh_quota_forecast(run["account_id"], run["provider"], current.get("quota") or {})
+    if account_update_allowed and body.error_kind == "auth":
+        mark_machine_auth_failure(run["account_id"], node, body.summary)
+    if status_update_allowed:
+        if body.error_kind == "quota":
+            until = body.reset_at or (utcnow() + timedelta(minutes=30))
+            seconds = max(60, int((until - utcnow()).total_seconds()))
+            changed = ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s, updated_at=now(),"
+                                 " cooldown_since=coalesce(cooldown_since,now()), idle_since=NULL WHERE id=%s"
+                                 " AND NOT EXISTS (SELECT 1 FROM runs WHERE account_id=%s AND status='running')",
+                                 ("cooldown", until, body.summary[:300], run["account_id"], run["account_id"]))
+            if changed:
+                ctx.leases.cooldown(run["account_id"], seconds, "quota")
+        elif body.error_kind != "auth":
+            ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
+                       " updated_at=now(), idle_since=coalesce(idle_since,now()), cooldown_since=NULL"
+                       " WHERE id=%s AND status='working' AND NOT EXISTS"
+                       " (SELECT 1 FROM runs WHERE account_id=%s AND status='running')",
+                       (body.outcome, body.summary[:300], run["account_id"], run["account_id"]))
+
+
+def _record_run_result_missing(ctx, run, run_id, body, details, late_result, outcome):
+    if not late_result and body.outcome == "tool_missing" and run["step"] == "dev":
+        recorded = tooling.record_missing(ctx, run, [str(x) for x in body.details.get("missing_tools") or []],
+                                          body.summary)
+        details["missing_tools"] = recorded
+        if not recorded:
+            outcome = "failed"
+            ctx.db.run("UPDATE runs SET outcome='failed',error_kind=coalesce(nullif(error_kind,''),%s),details=details || %s"
+                       " WHERE id=%s",
+                       ("missing_requirement_unaccepted", J({"missing_tools": [], "missing_requirement_unaccepted": True}),
+                        run_id))
+        else:
+            ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s", (J({"missing_tools": recorded}), run_id))
+    if not late_result and body.outcome == "environment_missing" and run["step"] == "dev":
+        recorded = environment_reports.record_missing(
+            ctx, run, [str(x) for x in body.details.get("missing_environment") or []], body.summary)
+        ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s",
+                   (J({"missing_environment": recorded}), run_id))
+        if not recorded:  # a name that is not in the project configuration is not an environment item
+            outcome = "failed"
+            ctx.db.run("UPDATE runs SET outcome='failed', error_kind=coalesce(nullif(error_kind,''),"
+                       "'missing_environment_unaccepted') WHERE id=%s", (run_id,))
+    return outcome
+
+
+def _capture_run_result_followups(ctx, run, run_id, body, late_result, last_dev, log):
+    if not late_result:
+        try:
+            knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
+        except Exception as exc:  # noqa: BLE001 - per-run capture cannot undo a completed worker run
+            log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
+    dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
+    if ctx.jira and run["step"] == "dev" and not late_result and body.outcome not in ("lost",):
+        try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve
+            ctx.jira.add_worklog(run["ticket_key"], max(60, dur // 1000), run["started_at"],
+                                 f"AI Flow {run['step']} by {run['account_id']} ({run['provider']}"
+                                 f"{'/' + run['model'] if run['model'] else ''}): {body.outcome}."
+                                 f" Run {run_id}, fence {body.fence}.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("worklog for %s failed: %s", run["ticket_key"], e)
+    return dur
+
+
+def _evaluate_run_result_health(ctx, run, run_id, late_result, last_dev, log):
+    try:  # quality by role: this result may switch the role off or settle a probation ticket
+        if not late_result:
+            role_health.evaluate(ctx, run["account_id"])
+            if run["step"] == "verify":  # a verdict also decides the dev run it judged
+                dev = last_dev(run["ticket_key"])
+                if dev and dev["account_id"] != run["account_id"]:
+                    role_health.evaluate(ctx, dev["account_id"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("role health after run %s failed: %s", run_id, e)
+
+
 def install(app, ctx, deps) -> SimpleNamespace:
     from ...api import log  # noqa: PLC0415 - api imports this module
     audit = deps.audit
@@ -49,107 +168,21 @@ def install(app, ctx, deps) -> SimpleNamespace:
         if int(run["fence"]) != body.fence:
             raise HTTPException(409, "run fence is no longer active")
         still_owner = ctx.leases.valid(run["ticket_key"], run_id, body.fence)
-        details = dict(body.details)
-        details.pop("pr_url_source", None)  # provenance is set by the control API, never trusted from the worker
-        details.pop("quota_reservation", None)  # quota reservations are set by the control API
-        if body.pr_url:
-            details["pr_url_source"] = "current"
-        if still_owner and run["step"] == "verify" and body.outcome in ("merged", "human"):
-            try:
-                details["post_merge_criteria"] = environment_reports.record_post_merge_criteria(
-                    ctx, run, details.get("post_merge_criteria") or [])
-            except environment_reports.UnmappedPostMergeCriteria as exc:
-                raise HTTPException(422, str(exc)) from exc
-        run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
-        details.pop("support_log_truncated", None)
-        outcome, error_kind = body.outcome, body.error_kind
-        if still_owner:
-            outcome, error_kind, details = load_policy.result_after_load_failure(
-                ctx, node, body, details, utcnow().isoformat())
-            body.outcome = outcome
-            body.error_kind = error_kind
-        late_result = run_inbox_control.finish(ctx, run, run_id, body, details, node)
-        account_update_allowed = not late_result and still_owner
-        status_update_allowed = account_update_allowed and run_inbox_control.account_update_allowed(
-            ctx, run_id, run["account_id"], still_owner)
+        details, run_log, outcome, error_kind = _prepare_run_result(ctx, run, body, node, still_owner)
+        late_result, account_update_allowed, status_update_allowed = _finish_run_result(
+            ctx, run, run_id, body, details, node, still_owner)
         if late_result:
             outcome = "lost"
-        elif isinstance(run_log, str) and run_log:
-            try:
-                support_bundle.store_run_log(ctx, run_id, run_log)
-            except Exception as exc:  # noqa: BLE001 - a missing diagnostic log must not lose the run result
-                log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
-        if body.quota:
-            quota_refresh.record_run_result(ctx.db, run, body, update_account=account_update_allowed)
-        elif account_update_allowed:
-            current = ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}
-            refresh_quota_forecast(run["account_id"], run["provider"], current.get("quota") or {})
-        if account_update_allowed and body.error_kind == "auth":
-            mark_machine_auth_failure(run["account_id"], node, body.summary)
-        if status_update_allowed:
-            if body.error_kind == "quota":
-                until = body.reset_at or (utcnow() + timedelta(minutes=30))
-                seconds = max(60, int((until - utcnow()).total_seconds()))
-                changed = ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s, updated_at=now(),"
-                                     " cooldown_since=coalesce(cooldown_since,now()), idle_since=NULL WHERE id=%s"
-                                     " AND NOT EXISTS (SELECT 1 FROM runs WHERE account_id=%s AND status='running')",
-                                     ("cooldown", until, body.summary[:300], run["account_id"], run["account_id"]))
-                if changed:
-                    ctx.leases.cooldown(run["account_id"], seconds, "quota")
-            elif body.error_kind != "auth":
-                ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
-                           " updated_at=now(), idle_since=coalesce(idle_since,now()), cooldown_since=NULL"
-                           " WHERE id=%s AND status='working' AND NOT EXISTS"
-                           " (SELECT 1 FROM runs WHERE account_id=%s AND status='running')",
-                           (body.outcome, body.summary[:300], run["account_id"], run["account_id"]))
-        if not late_result and body.outcome == "tool_missing" and run["step"] == "dev":
-            recorded = tooling.record_missing(ctx, run, [str(x) for x in body.details.get("missing_tools") or []],
-                                              body.summary)
-            details["missing_tools"] = recorded
-            if not recorded:
-                outcome = "failed"
-                ctx.db.run("UPDATE runs SET outcome='failed',error_kind=coalesce(nullif(error_kind,''),%s),details=details || %s"
-                           " WHERE id=%s",
-                           ("missing_requirement_unaccepted", J({"missing_tools": [], "missing_requirement_unaccepted": True}),
-                            run_id))
-            else:
-                ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s", (J({"missing_tools": recorded}), run_id))
-        if not late_result and body.outcome == "environment_missing" and run["step"] == "dev":
-            recorded = environment_reports.record_missing(
-                ctx, run, [str(x) for x in body.details.get("missing_environment") or []], body.summary)
-            ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s",
-                       (J({"missing_environment": recorded}), run_id))
-            if not recorded:  # a name that is not in the project configuration is not an environment item
-                outcome = "failed"
-                ctx.db.run("UPDATE runs SET outcome='failed', error_kind=coalesce(nullif(error_kind,''),"
-                           "'missing_environment_unaccepted') WHERE id=%s", (run_id,))
-        if not late_result:
-            try:
-                knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
-            except Exception as exc:  # noqa: BLE001 - per-run capture cannot undo a completed worker run
-                log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
-        dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
-        if ctx.jira and run["step"] == "dev" and not late_result and body.outcome not in ("lost",):
-            try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve
-                ctx.jira.add_worklog(run["ticket_key"], max(60, dur // 1000), run["started_at"],
-                                     f"AI Flow {run['step']} by {run['account_id']} ({run['provider']}"
-                                     f"{'/' + run['model'] if run['model'] else ''}): {body.outcome}."
-                                     f" Run {run_id}, fence {body.fence}.")
-            except Exception as e:  # noqa: BLE001
-                log.warning("worklog for %s failed: %s", run["ticket_key"], e)
+        _update_run_result_account(ctx, run, run_id, node, body, run_log, late_result,
+                                   account_update_allowed, status_update_allowed, refresh_quota_forecast,
+                                   mark_machine_auth_failure, log)
+        outcome = _record_run_result_missing(ctx, run, run_id, body, details, late_result, outcome)
+        dur = _capture_run_result_followups(ctx, run, run_id, body, late_result, last_dev, log)
         run_finished(ctx, run_id=run_id, ticket_key=run["ticket_key"], project=run["project"], step=run["step"],
                      fence=body.fence, account=run["account_id"], provider=run["provider"], model=run["model"], node=node,
                      duration_ms=dur, outcome=outcome, reason=error_kind or body.summary[:200], usage_in=body.tokens_in,
                      usage_out=body.tokens_out, cost_usd=body.cost_usd, still_owner=still_owner, pr_url=body.pr_url)
-        try:  # quality by role: this result may switch the role off or settle a probation ticket
-            if not late_result:
-                role_health.evaluate(ctx, run["account_id"])
-                if run["step"] == "verify":  # a verdict also decides the dev run it judged
-                    dev = last_dev(run["ticket_key"])
-                    if dev and dev["account_id"] != run["account_id"]:
-                        role_health.evaluate(ctx, dev["account_id"])
-        except Exception as e:  # noqa: BLE001
-            log.warning("role health after run %s failed: %s", run_id, e)
+        _evaluate_run_result_health(ctx, run, run_id, late_result, last_dev, log)
         return {"ok": True, "still_owner": still_owner}
 
     @app.post("/v1/runs/{run_id}/release")

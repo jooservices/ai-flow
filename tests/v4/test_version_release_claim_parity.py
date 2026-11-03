@@ -11,7 +11,10 @@ from fastapi import HTTPException
 
 from aiflow.v4.control import api, gateway_helpers
 from aiflow.v4.control import shared_accounts
+from aiflow.v4.control import knowledge, licensing, load_policy_api, rollout, system_check_api, version_release  # noqa: F401
+import aiflow.v4.control as _control
 from aiflow.v4.control.features.version_release import claim_steps, routes
+from aiflow.v4.control.features.version_release.bodies import VersionReleaseClaimBody
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=lambda item: getattr(item, "obj", str(item)))
@@ -126,24 +129,24 @@ def _observe(monkeypatch, scenario):
 
     monkeypatch.setattr(gateway_helpers, "github_gateway", get_gateway)
     monkeypatch.setattr(api.log, "warning", lambda *args: calls.append("log:warning"))
-    monkeypatch.setattr(routes.load_policy_api, "version_claim_capacity", lambda *_args: calls.append("policy:capacity") or 6)
-    monkeypatch.setattr(routes.load_policy_api, "claim_run", lambda *_args: calls.append("policy:claim-run") or scenario.get("claim_run", True))
-    monkeypatch.setattr(routes.licensing, "enforce_work_entitlement", lambda *_args, **_kw: calls.append("license:work") or _license(scenario.get("work_license")))
-    monkeypatch.setattr(routes.licensing, "enforce_project_entitlement", lambda *_args, **_kw: calls.append("license:project") or _license(scenario.get("project_license")))
-    monkeypatch.setattr(routes.rollout, "node_compatible", lambda *_args: calls.append("policy:node") or {"compatible": scenario.get("compatible", True), "reason": "old node"})
+    monkeypatch.setattr(_control.load_policy_api, "version_claim_capacity", lambda *_args: calls.append("policy:capacity") or 6)
+    monkeypatch.setattr(_control.load_policy_api, "claim_run", lambda *_args: calls.append("policy:claim-run") or scenario.get("claim_run", True))
+    monkeypatch.setattr(_control.licensing, "enforce_work_entitlement", lambda *_args, **_kw: calls.append("license:work") or _license(scenario.get("work_license")))
+    monkeypatch.setattr(_control.licensing, "enforce_project_entitlement", lambda *_args, **_kw: calls.append("license:project") or _license(scenario.get("project_license")))
+    monkeypatch.setattr(_control.rollout, "node_compatible", lambda *_args: calls.append("policy:node") or {"compatible": scenario.get("compatible", True), "reason": "old node"})
     monkeypatch.setattr(shared_accounts, "may_take", lambda *_args: (calls.append("account:may-take") or (scenario.get("may_take", True), scenario.get("may_take_reason", "no capacity"))))
-    monkeypatch.setattr(routes.system_check_api, "require_project_ready", lambda *_args: calls.append("system:ready") or _raise(scenario.get("readiness_error")))
+    monkeypatch.setattr(_control.system_check_api, "require_project_ready", lambda *_args: calls.append("system:ready") or _raise(scenario.get("readiness_error")))
     monkeypatch.setattr(claim_steps, "toolchain_gaps", lambda *_args: scenario.get("tools_missing", False))
     _patch_release(monkeypatch, scenario, calls, project, selected)
     deps = SimpleNamespace(account_master_paused=lambda _account: scenario.get("paused", False), bot_identity=lambda: "bot",
                            fenced=lambda *_args: None, node_auth=lambda: "node", quota_peer_release_candidates=lambda _account: {("TESTWP", "101", project.repo)} if scenario.get("peer") else set())
     handler = routes.install(FakeApp(), ctx, deps).version_release_claim
-    body = routes.VersionReleaseClaimBody(project="TESTWP", version_id="101", account="release-1",
+    body = VersionReleaseClaimBody(project="TESTWP", version_id="101", account="release-1",
                                           repository=scenario.get("repository", ""))
-    monkeypatch.setattr(routes.uuid, "uuid4", lambda: UUID("00000000-0000-0000-0000-000000000001"))
-    monkeypatch.setattr(routes.secrets, "token_urlsafe", lambda _length: "stable-run-token")
-    monkeypatch.setattr(routes, "github_connection_used", SimpleNamespace(get=lambda: "connection-1"))
-    monkeypatch.setattr(routes, "DEFAULT_ID", "default-connection")
+    monkeypatch.setattr(claim_steps.uuid, "uuid4", lambda: UUID("00000000-0000-0000-0000-000000000001"))
+    monkeypatch.setattr(claim_steps.secrets, "token_urlsafe", lambda _length: "stable-run-token")
+    monkeypatch.setattr(claim_steps, "github_connection_used", SimpleNamespace(get=lambda: "connection-1"))
+    monkeypatch.setattr(claim_steps, "DEFAULT_ID", "default-connection")
     try:
         result = handler(body, "node-1")
         observed = {"result": result}
@@ -154,7 +157,7 @@ def _observe(monkeypatch, scenario):
 
 def _license(message):
     if message:
-        raise routes.licensing.LicenseError(message)
+        raise _control.licensing.LicenseError(message)
     return {"ok": True}
 
 def _raise(message):
@@ -162,7 +165,7 @@ def _raise(message):
         raise HTTPException(409, message)
 
 def _patch_release(monkeypatch, scenario, calls, project, selected):
-    release = routes.version_release
+    release = _control.version_release
     version = {"id": "101", "name": "Core 1.0", "repository": "", "repositories": [project.repo]}
     snapshot = {"ready": scenario.get("snapshot_ready", True), "tickets": [{"key": "TESTWP-1"}], "reasons": ["gate"]}
     if scenario.get("resume"):
@@ -179,7 +182,7 @@ def _patch_release(monkeypatch, scenario, calls, project, selected):
     monkeypatch.setattr(release, "tracker_for", lambda *_args: "TESTWP-REL")
     monkeypatch.setattr(release, "check_commands", lambda _project: ["check release"])
     monkeypatch.setattr(release, "_audit", lambda *_args: calls.append("audit:github-release-branch"))
-    monkeypatch.setattr(routes.knowledge, "context_pack", lambda *_args, **_kw: _context(scenario, calls))
+    monkeypatch.setattr(_control.knowledge, "context_pack", lambda *_args, **_kw: _context(scenario, calls))
 
 def _context(scenario, calls):
     calls.append("knowledge:context-pack")

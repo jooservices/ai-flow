@@ -24,6 +24,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Container command policy structure](../../docs/v4/policy-structure.md): named checks for the safe build, run and compose command forms
 - [Work claim stages](../../docs/v4/work-claim.md): ordered named steps for eligibility, lease and hot-file acquisition, run registration and response building
 - [Review metrics](../../docs/v4/review-metrics.md): weekly waits, finished tickets without human-review activity, waiting durations and review decisions
+- [Human review queue structure](../../docs/v4/human_reviews-structure.md): named queue, ticket, action, preview and thread builders behind `GET /v1/reviews`
 - [UI mount structure](../../docs/v4/ui_mount-structure.md): named parts that register console pages, scripts, help and the ticket and service routes in order
 - [Security installation structure](../../docs/v4/security-structure.md): the security middleware and routes split into guard, middleware, settings, people and two-factor parts
 - [GitHub Git proxy structure](../../docs/v4/git_proxy-structure.md): named steps for credential scope, purpose authorization, push target and relay in the Git smart HTTP route

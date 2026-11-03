@@ -65,6 +65,36 @@ PROBE_ITERATIONS = 400_000
 PROBE_REFERENCE_S = 0.115  # median of cpu_probe() on an idle reference Mac
 MAX_SPEED_FACTOR = 3.0
 TIME_UNITS = ("s", "ms")
+# The budgets also assume services next to the code. Every request makes many PostgreSQL and Redis round trips, so a
+# slow link multiplies the time without any change in the code (about 0.1 ms in CI; a Docker Desktop port proxy on a
+# workstation is 0.5 ms and makes the same code 7 to 20 times slower, far beyond the CPU factor above).
+SERVICE_LATENCY_LIMIT_MS = 0.3
+
+
+def service_latency_ms(database_url: str, redis_url: str, rounds: int = 200) -> float:
+    """Average milliseconds of one PostgreSQL `select 1` and one Redis `ping` round trip (the slower of the two)."""
+    import psycopg
+    import redis
+
+    conn = psycopg.connect(database_url, autocommit=True, connect_timeout=10)
+    client = redis.Redis.from_url(redis_url)
+    try:
+        started = time.perf_counter()
+        for _ in range(rounds):
+            conn.execute("select 1").fetchone()
+        pg_ms = (time.perf_counter() - started) / rounds * 1000
+        started = time.perf_counter()
+        for _ in range(rounds):
+            client.ping()
+        redis_ms = (time.perf_counter() - started) / rounds * 1000
+    finally:
+        conn.close()
+        client.close()
+    return round(max(pg_ms, redis_ms), 3)
+
+
+def latency_too_high(latency_ms: float) -> bool:
+    return latency_ms > SERVICE_LATENCY_LIMIT_MS
 
 
 def cpu_probe(repeats: int = 3) -> float:

@@ -219,3 +219,7 @@ marked a finished ticket `Done` after it had posted the result and the release, 
 before it reports the result. On a slow runner a concurrent claim could pick the ticket inside that window. The harness now marks the
 ticket first (and puts it back when the result or the release fails), so a duplicate pick is a real fencing defect again and not
 a harness race. The console page-load budget flaked for another reason, the speed of the runner; it is calibrated as described under Budgets.
+
+## Where the time budgets are judged (JAIF-425)
+
+The time budgets assume PostgreSQL and Redis next to the code (about 0.1 ms per round trip, as in CI). Each request makes many round trips, so a slow link multiplies the time without any change in the code: a Docker Desktop port proxy on a workstation answers in about 0.5 ms and made the same code 7 to 20 times slower, far beyond the CPU speed factor. Outside GitHub Actions the scale test first measures the service round trip (`scale_proof.service_latency_ms`); above `SERVICE_LATENCY_LIMIT_MS` (0.3 ms) it skips with the measured value, because the budgets cannot be judged on that link. CI always runs the full test, so a real regression is still caught there before merge.

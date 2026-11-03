@@ -5,6 +5,7 @@ their JSON event format. The run never commits or pushes: the worker does that a
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -234,113 +235,153 @@ class Adapter:
         self._command_path = run_env.get("PATH", "")
         proc = subprocess.Popen(self.argv(spec), cwd=spec.cwd, env=run_env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-        if spec.container_start_hook:
-            try:
-                spec.container_start_hook(proc.pid)
-            except Exception:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    proc.wait()
-                raise
+        _run_start_hook(proc, spec)
         if on_start:
             on_start()
+        tail: list[str] = []
+        try:
+            self._stream_events(proc, spec, res, log, started, stop, on_progress, tail)
+        finally:
+            _finish_process(proc, res, log, started)
+        _explain_failure(res, tail)
+        _read_verdict(res)
+        return res
+
+    def _stream_events(self, proc: subprocess.Popen, spec: RunSpec, res: RunResult, log, started: float,
+                       stop: "threading.Event | None", on_progress: Callable[[dict], None] | None,
+                       tail: list[str]) -> None:
+        """Read the process output line by line until it ends, is stopped, times out or goes idle."""
         sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ)
         last_output = time.time()
-        tail: list[str] = []
         buf = b""
+        while True:
+            reason = _stop_reason(spec, stop, started, last_output)
+            if reason:
+                res.error_kind = reason
+                break
+            if not sel.select(timeout=1.0):
+                if proc.poll() is not None:
+                    break
+                continue
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                if proc.poll() is not None:
+                    break
+                continue
+            last_output = time.time()
+            buf += chunk
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                self._handle_line(raw.decode("utf-8", "replace"), res, log, tail, on_progress)
+
+    def _handle_line(self, line: str, res: RunResult, log, tail: list[str],
+                     on_progress: Callable[[dict], None] | None) -> None:
+        if log:
+            log.write(line + "\n")
+        tail.append(line)
+        del tail[:-200]
         try:
-            while True:
-                if stop is not None and stop.is_set():
-                    res.error_kind = "stopped"
-                    break
-                if time.time() - started > spec.timeout_s:
-                    res.error_kind = "timeout"
-                    break
-                if time.time() - last_output > spec.idle_s:
-                    res.error_kind = "idle"
-                    break
-                events = sel.select(timeout=1.0)
-                if not events:
-                    if proc.poll() is not None:
-                        break
-                    continue
-                chunk = os.read(proc.stdout.fileno(), 65536)
-                if not chunk:
-                    if proc.poll() is not None:
-                        break
-                    continue
-                last_output = time.time()
-                buf += chunk
-                while b"\n" in buf:
-                    raw, buf = buf.split(b"\n", 1)
-                    line = raw.decode("utf-8", "replace")
-                    if log:
-                        log.write(line + "\n")
-                    tail.append(line)
-                    tail = tail[-200:]
-                    try:
-                        ev = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(ev, dict):
-                        _credential_expiry(ev, res)
-                        self.parse_event(ev, res)
-                        if on_progress:
-                            try:
-                                on_progress(ev)
-                            except Exception:  # noqa: BLE001
-                                pass
-        finally:
-            if proc.poll() is None:
+            ev = json.loads(line)
+        except ValueError:
+            return
+        if isinstance(ev, dict):
+            _credential_expiry(ev, res)
+            self.parse_event(ev, res)
+            if on_progress:
                 try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                    proc.wait(15)
+                    on_progress(ev)
                 except Exception:  # noqa: BLE001
-                    os.killpg(proc.pid, signal.SIGKILL)
-            res.exit_code = proc.returncode
-            res.duration_s = time.time() - started
-            if log:
-                log.close()
-        text_tail = "\n".join(tail[-60:])
-        if not res.error_message and (res.error_kind or res.exit_code):
-            for line in reversed(tail[-60:]):  # last non-JSON line or an error field from the stream
-                try:
-                    ev = json.loads(line)
-                    msg = ev.get("message") or ev.get("error") if isinstance(ev, dict) else None
-                    if isinstance(msg, dict):
-                        msg = msg.get("message")
-                    if msg:
-                        res.error_message = str(msg)[:400]
-                        break
-                except ValueError:
-                    if line.strip():
-                        res.error_message = line.strip()[:400]
-                        break
-        if not res.error_kind:
-            if QUOTA_PATTERN.search(text_tail) and (res.exit_code or not res.final_text):
-                res.error_kind = "quota"
-            elif AUTH_PATTERN.search(text_tail) and (res.exit_code or not res.final_text):
-                res.error_kind = "auth"
-            elif NETWORK_PATTERN.search(text_tail) and (res.exit_code or not res.final_text):
-                res.error_kind = "network"
-            elif res.exit_code not in (0, None) and not res.final_text:
-                res.error_kind = "provider"
-        m = None
-        for m in RESULT_LINE.finditer(res.final_text or ""):
-            pass
-        if m:
-            res.verdict, res.verdict_reason = m.group(2).upper(), m.group(3).strip()
-        return res
+                    pass
+
+
+def _run_start_hook(proc: subprocess.Popen, spec: RunSpec) -> None:
+    """Let the container layer attach to the new process; if it fails, stop the process group and re-raise."""
+    if not spec.container_start_hook:
+        return
+    try:
+        spec.container_start_hook(proc.pid)
+    except Exception:
+        _kill_group(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc.pid, signal.SIGKILL)
+            proc.wait()
+        raise
+
+
+def _kill_group(pid: int, sig: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pid, sig)
+
+
+def _stop_reason(spec: RunSpec, stop: "threading.Event | None", started: float, last_output: float) -> str:
+    if stop is not None and stop.is_set():
+        return "stopped"
+    if time.time() - started > spec.timeout_s:
+        return "timeout"
+    if time.time() - last_output > spec.idle_s:
+        return "idle"
+    return ""
+
+
+def _finish_process(proc: subprocess.Popen, res: RunResult, log, started: float) -> None:
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(15)
+        except Exception:  # noqa: BLE001
+            os.killpg(proc.pid, signal.SIGKILL)
+    res.exit_code = proc.returncode
+    res.duration_s = time.time() - started
+    if log:
+        log.close()
+
+
+def _last_error_message(tail: list[str]) -> str:
+    """The last non-JSON line, or the message/error field of the last JSON line that has one."""
+    for line in reversed(tail[-60:]):
+        try:
+            ev = json.loads(line)
+            msg = ev.get("message") or ev.get("error") if isinstance(ev, dict) else None
+            if isinstance(msg, dict):
+                msg = msg.get("message")
+            if msg:
+                return str(msg)[:400]
+        except ValueError:
+            if line.strip():
+                return line.strip()[:400]
+    return ""
+
+
+def _classify_error(res: RunResult, text_tail: str) -> str:
+    failed = bool(res.exit_code or not res.final_text)
+    if QUOTA_PATTERN.search(text_tail) and failed:
+        return "quota"
+    if AUTH_PATTERN.search(text_tail) and failed:
+        return "auth"
+    if NETWORK_PATTERN.search(text_tail) and failed:
+        return "network"
+    if res.exit_code not in (0, None) and not res.final_text:
+        return "provider"
+    return ""
+
+
+def _explain_failure(res: RunResult, tail: list[str]) -> None:
+    text_tail = "\n".join(tail[-60:])
+    if not res.error_message and (res.error_kind or res.exit_code):
+        res.error_message = _last_error_message(tail)
+    if not res.error_kind:
+        res.error_kind = _classify_error(res, text_tail)
+
+
+def _read_verdict(res: RunResult) -> None:
+    m = None
+    for m in RESULT_LINE.finditer(res.final_text or ""):
+        pass
+    if m:
+        res.verdict, res.verdict_reason = m.group(2).upper(), m.group(3).strip()
 
 
 def scratch_root(spec: RunSpec) -> Path:

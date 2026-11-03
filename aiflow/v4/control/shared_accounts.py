@@ -18,17 +18,17 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Request
 from pydantic import BaseModel, Field
 
 from .capacity import reported_run_tokens, reservation_tokens, unresolved_run_reservation_tokens
 from ..core.controlrepo import Account, ControlRepo
 from .application_context import ApplicationContext
 from .db import J
+from . import shared_accounts_routes as account_route_work
 from .features.fleet.events import (SharedAccountCreated, SharedAccountMachineEnabled, SharedAccountMachineRemoved,
                                     SharedAccountRemoved, SharedAccountSessionLimitSet, SharedAccountSignInRetried)
 from .platform.events.wiring import publish_for
@@ -510,232 +510,107 @@ class SigninCompleteBody(BaseModel):
     request_id: str = Field(min_length=1, max_length=160)
 
 
+def _account_view(ctx: ApplicationContext, account: Account, *, include_signin: bool = False) -> dict[str, Any]:
+    return account_route_work.account_view(
+        ctx, account, include_signin=include_signin, online_nodes_fn=online_nodes,
+        running_by_node_fn=running_by_node, machines_view_fn=machines_view)
+
+
 def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_auth) -> None:
     sync_accounts = app.state.sync_accounts
 
     def sync() -> list[str]:
-        warnings = sync_accounts()
-        for row in ctx.db.all("SELECT id,provider,tier,roles FROM shared_accounts WHERE managed"):
-            ctx.db.run("INSERT INTO accounts (id,provider,node,tier,roles,status)"
-                       " VALUES (%s,%s,'',%s,%s,'signed_out') ON CONFLICT (id) DO NOTHING",
-                       (row["id"], row["provider"], row["tier"], row["roles"] or []))
-        return warnings
+        return account_route_work.sync_managed_accounts(ctx, sync_accounts)
 
     app.state.sync_accounts = sync
+    install_account_listing_and_creation(app, ctx, console_user, sync)
+    install_session_limit_route(app, ctx, console_user)
+    install_machine_enable_and_retry_routes(app, ctx, console_user, sync)
+    install_machine_removal_route(app, ctx, console_user)
+    install_account_removal_route(app, ctx, console_user)
+    install_node_signin_routes(app, ctx, node_auth)
 
-    def account_or_404(account_id: str) -> Account:
-        acc = ctx.repo().account(account_id)
-        if not acc:
-            raise HTTPException(404, f"unknown account {account_id}")
-        return acc
 
-    def view(acc: Account, *, include_signin: bool = False) -> dict[str, Any]:
-        status = {r["name"]: "online" if r["name"] in online_nodes(ctx.db) else "offline"
-                  for r in ctx.db.all("SELECT name FROM nodes")}
-        running = sum(running_by_node(ctx.db, acc.id).values())
-        return {"id": acc.id, "provider": acc.provider, "tier": acc.tier, "roles": acc.roles,
-                "session_limit": acc.sessions, "sessions_active": running,
-                "machines": machines_view(ctx.db, acc, status, include_signin=include_signin)}
-
+def install_account_listing_and_creation(app, ctx, console_user, sync_accounts) -> None:
     @app.get("/v1/shared-accounts")
     def list_accounts(request: Request) -> dict:
         user = console_user(request, {"console.read"})
         include_signin = "nodes.manage" in user.permissions or "*" in user.permissions
-        return {"accounts": [view(a, include_signin=include_signin) for a in ctx.repo().accounts]}
+        return {"accounts": [_account_view(ctx, account, include_signin=include_signin)
+                              for account in ctx.repo().accounts]}
 
     @app.post("/v1/shared-accounts", status_code=201)
     def create_account(body: AccountBody, request: Request) -> dict:
         user = console_user(request, {"nodes.manage"}, target="account", action="create", node=body.id)
-        if not ACCOUNT_ID.match(body.id) or not PROVIDER.match(body.provider):
-            raise HTTPException(422, "account id and provider use lowercase letters, digits and dashes")
-        if ctx.repo().account(body.id):
-            raise HTTPException(409, f"account {body.id} already exists")
-        ctx.db.run("INSERT INTO shared_accounts (id, provider, tier, roles, explicit_only, session_limit, created_by)"
-                   " VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                   (body.id, body.provider, body.tier, body.roles, body.explicit_only, body.session_limit,
-                    user.subject))
-        sync()
+        account_route_work.create_account_record(ctx, body, user, sync_accounts, ACCOUNT_ID, PROVIDER)
         publish_for(ctx, SharedAccountCreated(account=body.id, actor=user.subject))
-        return view(account_or_404(body.id), include_signin=True)
+        return _account_view(ctx, account_route_work.account_or_404(ctx, body.id), include_signin=True)
 
+
+def install_session_limit_route(app, ctx, console_user) -> None:
     @app.put("/v1/shared-accounts/{account_id}/session-limit")
     def set_limit(account_id: str, body: LimitBody, request: Request) -> dict:
         user = console_user(request, {"nodes.manage"}, target="account", action="session_limit", node=account_id)
-        acc = account_or_404(account_id)
-        # same lock as claim_run: a claim sees either the old or the new limit, never a half-applied change
-        with ctx.db.pool.connection() as conn:
-            with conn.transaction():
-                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
-                active = int(conn.execute("SELECT count(*) AS n FROM runs WHERE account_id=%s AND status='running'",
-                                          (acc.id,)).fetchone()["n"])
-                if body.session_limit < active:
-                    raise HTTPException(409, {"error": "limit_below_active_sessions",
-                                              "message": f"{acc.id} has {active} running sessions; wait for "
-                                                         f"{active - body.session_limit} to finish before lowering "
-                                                         f"the limit to {body.session_limit}."})
-                conn.execute("INSERT INTO shared_accounts (id, provider, tier, roles, explicit_only, session_limit,"
-                             " managed, created_by) VALUES (%s,%s,%s,%s,%s,%s,false,%s)"
-                             " ON CONFLICT (id) DO UPDATE SET session_limit=EXCLUDED.session_limit",
-                             (acc.id, acc.provider, acc.tier, acc.roles, acc.explicit_only, body.session_limit,
-                              user.subject))
-        publish_for(ctx, SharedAccountSessionLimitSet(account=acc.id, actor=user.subject,
+        account = account_route_work.set_session_limit_record(ctx, account_id, body, user)
+        publish_for(ctx, SharedAccountSessionLimitSet(account=account.id, actor=user.subject,
                                                       session_limit=body.session_limit))
-        return view(account_or_404(account_id), include_signin=True)
+        return _account_view(ctx, account_route_work.account_or_404(ctx, account_id), include_signin=True)
 
+
+def install_machine_enable_and_retry_routes(app, ctx, console_user, sync_accounts) -> None:
     @app.post("/v1/shared-accounts/{account_id}/machines", status_code=201)
     def enable_machine(account_id: str, body: MachineBody, request: Request) -> dict:
         user = console_user(request, {"nodes.manage"}, target="account", action="enable_machine", node=account_id)
-        acc = account_or_404(account_id)
-        if not ctx.db.one("SELECT 1 AS x FROM nodes WHERE name=%s", (body.node,)):
-            raise HTTPException(404, f"machine {body.node} has not joined")
-        if acc.runs_on(body.node):
-            raise HTTPException(409, f"{acc.id} is already enabled on {body.node}")
-        # an account on several machines always has one total limit: keep what the account had per machine
-        ctx.db.run("INSERT INTO shared_accounts (id, provider, tier, roles, explicit_only, session_limit, managed,"
-                   " created_by) VALUES (%s,%s,%s,%s,%s,%s,false,%s) ON CONFLICT (id) DO NOTHING",
-                   (acc.id, acc.provider, acc.tier, acc.roles, acc.explicit_only, acc.sessions, user.subject))
-        with ctx.db.pool.connection() as conn:
-            with conn.transaction():
-                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
-                conn.execute("DELETE FROM account_machine_exclusions WHERE account_id=%s AND node=%s",
-                             (acc.id, body.node))
-                conn.execute("INSERT INTO account_machines (account_id, node, enabled_by) VALUES (%s,%s,%s)",
-                             (acc.id, body.node, user.subject))
-        sync()
-        publish_for(ctx, SharedAccountMachineEnabled(account=acc.id, actor=user.subject, node=body.node))
-        ctx.events.emit("account.machine_enabled", account=acc.id, node=body.node, outcome="pending")
-        return view(account_or_404(account_id), include_signin=True)
+        account = account_route_work.enable_machine_record(ctx, account_id, body, user, sync_accounts)
+        publish_for(ctx, SharedAccountMachineEnabled(account=account.id, actor=user.subject, node=body.node))
+        ctx.events.emit("account.machine_enabled", account=account.id, node=body.node, outcome="pending")
+        return _account_view(ctx, account_route_work.account_or_404(ctx, account_id), include_signin=True)
 
     @app.post("/v1/shared-accounts/{account_id}/machines/{node}/signin")
     def retry_signin(account_id: str, node: str, request: Request) -> dict:
         """Start a fresh sign-in attempt on one machine: a new request id makes its agent run the provider login
         again (a failed or expired attempt otherwise leaves the machine waiting without a link)."""
         user = console_user(request, {"nodes.manage"}, target="account", action="retry_signin", node=account_id)
-        acc = account_or_404(account_id)
-        changed = ctx.db.run(
-            "UPDATE account_machines SET signin_attempt=signin_attempt + 1, signin_link='', signin_code='',"
-            " signin_expires_at=NULL WHERE account_id=%s AND node=%s AND status='pending'", (acc.id, node))
-        if not changed:
-            raise HTTPException(409, f"{acc.id} has no pending sign-in on {node}")
-        publish_for(ctx, SharedAccountSignInRetried(account=acc.id, actor=user.subject, node=node))
-        return view(account_or_404(account_id), include_signin=True)
+        account = account_route_work.retry_signin_record(ctx, account_id, node, user)
+        publish_for(ctx, SharedAccountSignInRetried(account=account.id, actor=user.subject, node=node))
+        return _account_view(ctx, account_route_work.account_or_404(ctx, account_id), include_signin=True)
 
+
+def install_machine_removal_route(app, ctx, console_user) -> None:
     @app.delete("/v1/shared-accounts/{account_id}/machines/{node}")
     def remove_machine(account_id: str, node: str, request: Request, confirm: bool = False) -> dict:
         user = console_user(request, {"nodes.manage"}, target="account", action="remove_machine", node=account_id)
-        acc = account_or_404(account_id)
-        if not acc.runs_on(node):
-            raise HTTPException(404, f"{acc.id} is not enabled on {node}")
-        if ctx.db.one("SELECT 1 AS x FROM managed_ai_accounts WHERE id=%s AND removed_at IS NULL", (acc.id,)):
-            raise HTTPException(409, f"{acc.id} is managed from the machine account screen")
-        last = len(acc.machines) == 1
-        if last and not confirm:
-            raise HTTPException(409, {"error": "confirmation_required",
-                                      "message": f"{node} is the last machine of {acc.id}; removing it removes the "
-                                                 "account from every machine. Confirm to continue."})
-        detach_machine(acc, node, user.subject)
-        removed_account = False
-        if last:
-            removed_account = delete_account(acc)
-        publish_for(ctx, SharedAccountMachineRemoved(account=acc.id, actor=user.subject, node=node,
+        account, removed_account = account_route_work.remove_machine_record(ctx, account_id, node, user, confirm)
+        publish_for(ctx, SharedAccountMachineRemoved(account=account.id, actor=user.subject, node=node,
                                                      account_removed=removed_account))
-        ctx.events.emit("account.machine_removed", account=acc.id, node=node, outcome="removed")
-        return {"account": acc.id, "node": node, "account_removed": removed_account,
-                "machines": [] if removed_account else [n for n in acc.machines if n != node]}
+        ctx.events.emit("account.machine_removed", account=account.id, node=node, outcome="removed")
+        return {"account": account.id, "node": node, "account_removed": removed_account,
+                "machines": [] if removed_account else [name for name in account.machines if name != node]}
 
-    def detach_machine(acc: Account, node: str, actor: str) -> None:
-        """Remove one assignment and persist the opt-out for a configured primary machine."""
-        with ctx.db.pool.connection() as conn:
-            with conn.transaction():
-                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
-                conn.execute("DELETE FROM account_machines WHERE account_id=%s AND node=%s", (acc.id, node))
-                conn.execute("INSERT INTO account_machine_exclusions (account_id,node,detached_by) VALUES (%s,%s,%s)"
-                             " ON CONFLICT (account_id,node) DO UPDATE SET detached_by=EXCLUDED.detached_by,"
-                             " detached_at=now()", (acc.id, node, actor))
 
-    def delete_account(acc: Account) -> bool:
-        # Match claim_run's lock: once deletion returns, no stale account snapshot can insert a new run.
-        with ctx.db.pool.connection() as conn:
-            with conn.transaction():
-                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
-                row = conn.execute("SELECT managed FROM shared_accounts WHERE id=%s FOR UPDATE",
-                                   (acc.id,)).fetchone()
-                if not row or not row["managed"]:
-                    return False
-                conn.execute("DELETE FROM account_machines WHERE account_id=%s", (acc.id,))
-                conn.execute("DELETE FROM account_machine_exclusions WHERE account_id=%s", (acc.id,))
-                conn.execute("DELETE FROM shared_accounts WHERE id=%s", (acc.id,))
-                conn.execute("DELETE FROM accounts WHERE id=%s", (acc.id,))
-        return True
-
+def install_account_removal_route(app, ctx, console_user) -> None:
     @app.delete("/v1/shared-accounts/{account_id}")
     def remove_account(account_id: str, request: Request, confirm: bool = False) -> dict:
         user = console_user(request, {"nodes.manage"}, target="account", action="remove", node=account_id)
-        acc = account_or_404(account_id)
-        if ctx.db.one("SELECT 1 AS x FROM managed_ai_accounts WHERE id=%s AND removed_at IS NULL", (acc.id,)):
-            raise HTTPException(409, f"{acc.id} is managed from the machine account screen")
-        row = ctx.db.one("SELECT managed FROM shared_accounts WHERE id=%s", (acc.id,))
-        if not confirm:
-            raise HTTPException(409, {"error": "confirmation_required",
-                                      "message": f"Removing {acc.id} removes it from all {len(acc.machines)} "
-                                                 "machines. Confirm to continue."})
-        if row and row["managed"]:
-            delete_account(acc)
-            retained = False
-        else:
-            for node in acc.machines:
-                detach_machine(acc, node, user.subject)
-            retained = True
-        publish_for(ctx, SharedAccountRemoved(account=acc.id, actor=user.subject, source_retained=retained))
-        ctx.events.emit("account.removed", account=acc.id, outcome="removed")
-        return {"account": acc.id, "removed": True, "source_retained": retained, "machines": list(acc.machines)}
+        account, retained = account_route_work.remove_account_record(ctx, account_id, user, confirm)
+        publish_for(ctx, SharedAccountRemoved(account=account.id, actor=user.subject, source_retained=retained))
+        ctx.events.emit("account.removed", account=account.id, outcome="removed")
+        return {"account": account.id, "removed": True, "source_retained": retained,
+                "machines": list(account.machines)}
 
+
+def install_node_signin_routes(app, ctx, node_auth) -> None:
     @app.post("/v1/accounts/{account_id}/signin-prompt")
     def signin_prompt(account_id: str, body: SigninPromptBody, node: str = Depends(node_auth)) -> dict:
         """A machine reports the provider's sign-in link and device code so Command Center can show them. The
         credential itself is created by the provider CLI on the machine and never sent here."""
-        acc = ctx.repo().account(account_id)
-        if not acc or not acc.runs_on(node):
-            raise HTTPException(403, f"account {account_id} does not run on {node}")
-        parsed = urlparse(body.link)
-        if parsed.scheme != "https" or not parsed.netloc or not CODE.match(body.code):
-            raise HTTPException(422, "sign-in link must be https and the code a short device code")
-        changed = ctx.db.run(
-            "UPDATE account_machines SET signin_link=%s, signin_code=%s,"
-            " signin_expires_at=now() + make_interval(secs => %s) WHERE account_id=%s AND node=%s AND status='pending'",
-            (body.link, body.code, body.expires_in_s, acc.id, node))
-        return {"stored": bool(changed),
-                "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_s)).isoformat()}
+        return account_route_work.signin_prompt_record(ctx, account_id, body, node, CODE, datetime)
 
     @app.post("/v1/accounts/{account_id}/signin-complete")
     def signin_complete(account_id: str, body: SigninCompleteBody, node: str = Depends(node_auth)) -> dict:
         """A successful provider login unlocks the local worker's credential probe for this machine."""
-        acc = ctx.repo().account(account_id)
-        if not acc or not acc.runs_on(node):
-            raise HTTPException(403, f"account {account_id} does not run on {node}")
-        row = ctx.db.one("SELECT status,signin_attempt FROM account_machines WHERE account_id=%s AND node=%s",
-                         (acc.id, node))
-        if not row:
-            raise HTTPException(409, f"{acc.id} has no shared sign-in on {node}")
-        expected = f"shared:{node}:{acc.id}:{row['signin_attempt']}"
-        if body.request_id != expected:
-            raise HTTPException(409, "shared sign-in attempt is no longer current")
-        if row["status"] == "pending":
-            changed = ctx.db.run(
-                "UPDATE account_machines SET status='signed_in', signed_in_at=now(), signin_link='', signin_code='',"
-                " signin_expires_at=NULL WHERE account_id=%s AND node=%s AND status='pending' AND signin_attempt=%s",
-                (acc.id, node, row["signin_attempt"]))
-            if not changed:
-                current = ctx.db.one("SELECT status,signin_attempt FROM account_machines"
-                                     " WHERE account_id=%s AND node=%s", (acc.id, node))
-                if not current or current["signin_attempt"] != row["signin_attempt"] or current["status"] != "signed_in":
-                    raise HTTPException(409, "shared sign-in attempt is no longer current")
-            else:
-                ctx.events.emit("account.machine_signed_in", account=acc.id, node=node, outcome="completed")
-        elif row["status"] != "signed_in":
-            raise HTTPException(409, f"{acc.id} is not waiting for sign-in on {node}")
-        # Provider-owned login establishes auth health on this machine, without creating quota data.
-        ctx.db.run("UPDATE accounts SET last_probe_at=now(),status=CASE WHEN status='signed_out' THEN 'idle'"
-                   " ELSE status END,last_error=CASE WHEN status='signed_out' THEN '' ELSE last_error END,"
-                   "updated_at=now() WHERE id=%s", (acc.id,))
-        return {"completed": True, "account": acc.id, "node": node}
+        account, emit_completed = account_route_work.begin_signin_complete(ctx, account_id, body, node)
+        if emit_completed:
+            ctx.events.emit("account.machine_signed_in", account=account.id, node=node, outcome="completed")
+        account_route_work.finish_signin_complete(ctx, account.id)
+        return {"completed": True, "account": account.id, "node": node}

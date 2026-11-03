@@ -127,6 +127,23 @@ jobs:
           BASE: ${{ github.event.pull_request.base.ref == 'develop' && github.event.pull_request.base.sha || 'origin/develop' }}
         run: python3 -m aiflow.v4.core.duplicate_blocks --base "$BASE"
 
+  broad-except:
+    name: Broad exceptions
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check broad-except baseline
+        env:
+          BASE: ${{ github.event.pull_request.base.ref == 'develop' && github.event.pull_request.base.sha || 'origin/develop' }}
+        run: python3 -m aiflow.v4.core.broad_except check --base "$BASE" --head HEAD
+
   quality:
     name: Code quality
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'

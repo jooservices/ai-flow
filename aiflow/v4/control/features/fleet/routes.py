@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from ...system_check_api import HeartbeatBody
+from . import heartbeat
 from .bodies import CheckProbeBody, CheckProbeTokenBody, ConfirmBody, JoinBody, JoinCommandBody, JoinInspectBody, JoinTokenBody, ManagedAccountCreateBody, ManagedAccountSignInStatusBody, ManagedAccountUpdateBody, NodeOperationBody, NodeOperationCheckpointBody, NodeOperationResultBody
 from .events import (AiAccountAdded, AiAccountManagementChanged, AiAccountRemoved, AiAccountSignInCompleted,
                      AiAccountSignInRestarted, CheckProbeTokenIssued, NodeJoinCommandCreated, NodeJoined,
@@ -112,32 +113,15 @@ def install(app, ctx, deps) -> SimpleNamespace:
         prev = ctx.db.one("SELECT status,accepting_work,release_version,tools,metrics FROM nodes WHERE name=%s", (node,))
         reported_tools, reported_release, reported_metrics, reported_services = system_check_api.reported_heartbeat(body, prev)
         inventory = runtime_settings.sanitize_inventory(body.runtime_settings)
-        ctx.db.run("UPDATE nodes SET status=CASE WHEN accepting_work THEN 'online' ELSE 'draining' END,"
-                   " slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
-                   " metrics=%s, runtime_settings=%s, runtime_settings_public_key=%s,"
-                   " release_protocol=%s, last_heartbeat=now(),"
-                   " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
-                   (body.slots_total, body.slots_used, reported_release, J(reported_tools),
-                    J({**reported_metrics, "services": reported_services}),
-                    J(inventory), body.runtime_settings_public_key,
-                    body.release_protocol, body.slots_used, node))
+        heartbeat.update_node_heartbeat_row(ctx, node, body, reported_tools, reported_release,
+                                            reported_metrics, reported_services, inventory, J)
         load_policy.record_heartbeat(ctx, node)
         repo = ctx.repo()
         node_state = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
         environment_reports.confirm_node_environment(ctx, node, body.environment_items)
         tooling.resolve_available(ctx, node, node_state)
         tool_repairs = tooling.install_requests(ctx, node, node_state, repo)
-        for account_id, expires_at in body.credential_expiries.items():
-            # the account row keeps the earliest expiry of its machines; each machine's own date is kept beside it
-            reported = repo.account(account_id)
-            if not reported or not reported.runs_on(node):
-                continue
-            ctx.db.run("UPDATE account_machines SET credential_expires_at=%s WHERE account_id=%s AND node=%s",
-                       (expires_at, account_id, node))
-            ctx.db.run("UPDATE accounts SET credential_expires_at=(SELECT min(m.v) FROM (SELECT %s::timestamptz AS v"
-                       " UNION ALL SELECT credential_expires_at FROM account_machines WHERE account_id=%s"
-                       " AND node<>%s AND credential_expires_at IS NOT NULL) m) WHERE id=%s",
-                       (expires_at, account_id, node, account_id))
+        heartbeat.persist_heartbeat_credentials(ctx, node, body, repo, J)
         from ...sa import update_slot_pressure
         update_slot_pressure(ctx)
         heartbeat_status = "online" if not prev or prev.get("accepting_work", True) else "draining"
@@ -147,85 +131,12 @@ def install(app, ctx, deps) -> SimpleNamespace:
             ctx.events.emit("node.online", node=node, reason=f"was {prev['status']}")
             from ...incidents import close_incident
             close_incident(ctx, "node_down", node, "heartbeats are back")
-        merged: dict[str, dict] = {}
-        rank = {"working": 5, "probing": 4, "idle": 3, "unavailable": 2, "error": 1, "stopped": 0}
-        for w in body.workers:
-            acc = str(w.get("account", ""))
-            if not acc:
-                continue
-            st = str(w.get("state", "unknown")) if w.get("alive", True) else "stopped"
-            cur = merged.get(acc)
-            if cur is None or rank.get(st, 0) > rank.get(cur["_state"], 0):
-                merged[acc] = {**w, "_state": st, "instances": (cur or {}).get("instances", 0) + 1}
-            else:
-                cur["instances"] = cur.get("instances", 1) + 1
-        for acc, w in merged.items():
-            member = repo.account(acc)
-            if not member or not member.runs_on(node):
-                continue
-            state = w.pop("_state")
-            # "unavailable" (last probe failed) keeps the status the probe set: cooldown, signed_out or error
-            ctx.db.run("UPDATE accounts SET worker_state=%s, status=CASE WHEN status='signed_out' THEN status"
-                       " WHEN cooldown_until > now() THEN 'cooldown' WHEN %s = 'unavailable' THEN status"
-                       " WHEN status = 'working' AND %s = 'idle' THEN status ELSE %s END,"
-                       " updated_at=now() WHERE id=%s", (J(w), state, state, state, acc))
-            ctx.db.run("UPDATE account_machines SET worker_state=%s WHERE account_id=%s AND node=%s",
-                       (J({**w, "state": state}), acc, node))
-            ctx.db.run("UPDATE accounts SET idle_since=CASE WHEN status='idle' THEN coalesce(idle_since,now()) ELSE NULL END,"
-                       " cooldown_since=CASE WHEN status='cooldown' THEN coalesce(cooldown_since,now()) ELSE NULL END"
-                       " WHERE id=%s", (acc,))
+        merged = heartbeat.merge_worker_reports(body.workers)
+        heartbeat.persist_worker_reports(ctx, node, merged, repo, J)
         repo = ctx.repo()
-        sign_in_requests = ctx.db.all(
-            "SELECT id,provider,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
-            " WHERE node=%s AND removed_at IS NULL AND sign_in_status IN ('queued','starting','waiting')"
-            " ORDER BY created_at,id", (node,))
-        signing_in = {row["id"] for row in sign_in_requests}
-        # A shared account still waiting for sign-in on this machine gets no worker: its auth probe would fail and
-        # reset the sign-in attempt (link and code) the user is completing. Workers start once sign-in completes.
-        pending_shared = {row["account_id"] for row in ctx.db.all(
-            "SELECT account_id FROM account_machines WHERE node=%s AND status='pending'", (node,))}
-        assigned = [a for a in repo.accounts_on(node)
-                    if not a.paused and a.id not in signing_in and a.id not in pending_shared]
-        instances = [a.id if i == 1 else f"{a.id}.{i}" for a in assigned
-                     for i in range(1, a.sessions + 1)]
-        # Shared accounts are signed in independently on each machine. The node agent starts their provider CLI
-        # login and reports only the provider's short-lived link and code; credentials stay in its account home.
-        shared_signins = []
-        for row in ctx.db.all("SELECT account_id, signin_attempt FROM account_machines WHERE node=%s"
-                              " AND status='pending' ORDER BY account_id", (node,)):
-            account = repo.account(row["account_id"])
-            if account:
-                shared_signins.append({"account": account.id, "provider": account.provider,
-                                       "request_id": f"shared:{node}:{account.id}:{row['signin_attempt']}",
-                                       "shared_account": True})
-        # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
-        # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
-        # Signed-release agents follow the fleet rollout (canary, waves, rollback: docs/v4/fleet-upgrade.md).
-        release = fleet_release(node, body.release_version) if body.release_protocol >= 1 else ""
-        joined_node = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (node,)) or {}
-        node_projects = repo.projects_for_node(node, joined_node.get("projects") or [], joined_node.get("dynamic", False))
-        project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
-                                else repo.projects[key].stack)
-                          for key in node_projects if key in repo.projects}
-        system_check_api.refresh_heartbeat(ctx, node, body, prev, reported_release)
-        runtime_settings_bootstrap = runtime_settings.bootstrap_settings_for_node(
-            ctx, node, node_projects, inventory, body.runtime_settings_public_key, body.workers)
-        return {"desired": {"accounts": [a.id for a in assigned], "workers": instances,
-                            "sign_ins": [{"account": row["id"], "provider": row["provider"],
-                                          "request_id": row["sign_in_request_id"], "status": row["sign_in_status"]}
-                                         for row in sign_in_requests], "signin": shared_signins,
-                            "release": release,
-                            "projects": node_projects,
-                            "project_stacks": project_stacks,
-                            "project_environment": {key: [item.name for item in repo.projects[key].environment_items
-                                                           if item.secret]
-                                                    for key in node_projects if key in repo.projects},
-                            "project_services": {key: repo.projects[key].required_services for key in node_projects
-                                                 if key in repo.projects and repo.projects[key].required_services},
-                            "runtime_settings_bootstrap": runtime_settings_bootstrap,
-                            "tool_repairs": tool_repairs,
-                            "check_probes": tooling.pending_probes(ctx, node, node_projects),
-                            "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}
+        return heartbeat.desired_heartbeat_state(
+            ctx, node, body, prev, reported_release, inventory, repo, tool_repairs,
+            tooling, system_check_api, runtime_settings, fleet_release)
 
     @app.get("/v1/nodes/{name}/health")
     def node_health(name: str, node: str = Depends(node_auth)) -> dict:

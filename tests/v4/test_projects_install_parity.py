@@ -65,5 +65,7 @@ def test_project_route_helpers_match_golden_cases(case):
             actual = helper(*args)
         except HTTPException as exc:
             actual = {"error": {"status": exc.status_code, "detail": exc.detail}}
+    if isinstance(actual, tuple):  # the golden file is JSON, which has no tuples
+        actual = list(actual)
     expected = case.get("expected", {"error": case.get("error")})
     assert actual == expected

@@ -17,7 +17,7 @@ from .events import (EnvironmentRemovalsRecorded, GitHubAppConnected, GitHubAppI
                      GitHubTokenConnectionAdded, GitHubTokenConnectionReplaced, ProjectAdded,
                      ProjectEnvironmentSaved, ProjectEnvironmentScanned, ProjectPauseChanged,
                      ProjectRemoved, ProjectRepositoriesSaved, ProjectServicesChanged)
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, urlsplit
 import yaml
 from fastapi import Depends, HTTPException, Request
@@ -34,6 +34,127 @@ from ...github import GitHubApp
 from ...github_connect import GitHubSecretStore, app_metadata
 from ...github_connections import DEFAULT_ID, Connection, verify_token
 from ... import inventory
+
+
+def load_project_repository_save_context(key: str, actor: str, ctx: Any, jira_project_epics: Callable,
+                                        github_catalog: Callable, github_connection_list: Callable
+                                        ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], set[str]]:
+    """Load Jira epics, the connected GitHub catalog, and gateways for one repository save."""
+    epics = jira_project_epics(key)
+    available_repositories = github_catalog(actor, "project_repository_save")
+    available = {str(item["full_name"]).lower(): item for item in available_repositories}
+    gateways = {conn.id: conn.gateway for conn in github_connection_list(ctx)}
+    epic_keys = {item["key"] for item in epics}
+    return available, gateways, epic_keys
+
+
+def collect_requested_project_repositories(body: ProjectRepositoriesBody, available: dict[str, dict[str, Any]],
+                                           default_base: str
+                                           ) -> tuple[dict[str, dict[str, Any]], dict[str, str], str]:
+    """Normalize requested repository entries and return the first request validation refusal."""
+    chosen: dict[str, str] = {}
+    repos: dict[str, dict[str, Any]] = {}
+    error = ""
+    for item in body.repositories:
+        name = item.repo.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name) or name.lower() not in available:
+            error = f"repository {name} is not visible to any connected GitHub account"
+            break
+        if item.connection:
+            if item.connection not in available[name.lower()]["connections"]:
+                error = f"GitHub connection {item.connection} cannot reach {name}"
+                break
+            chosen[name.lower()] = item.connection
+        if name.lower() in repos:
+            error = f"repository {name} is listed more than once"
+            break
+        base = item.base.strip()
+        effective_base = base or default_base
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", effective_base) or ".." in effective_base:
+            error = f"invalid base branch for {name}"
+            break
+        if item.stack and item.stack not in STACK_TOOLS:
+            error = f"unsupported stack for {name}"
+            break
+        repos[name.lower()] = {"repo": name, "base": base,
+                               "checks": [check.strip() for check in item.checks if check.strip()],
+                               "stack": item.stack.strip(),
+                               **({"containers": item.containers} if item.containers is not None else {})}
+    return repos, chosen, error
+
+
+def project_epic_repository_mappings(body: ProjectRepositoriesBody) -> dict[str, str]:
+    """Trim Jira epic keys and repository names, omitting mappings whose repository name is blank."""
+    return {str(epic).strip(): str(name).strip() for epic, name in body.epic_repositories.items()
+            if str(name).strip()}
+
+
+def add_epic_repository_mappings(key: str, mappings: dict[str, str], epic_keys: set[str],
+                                 available: dict[str, dict[str, Any]],
+                                 repos: dict[str, dict[str, Any]]) -> str:
+    """Validate epic targets and add visible mapped repositories that were not explicitly requested."""
+    for epic, name in mappings.items():
+        if epic not in epic_keys:
+            return f"{epic} is not an epic in Jira project {key}"
+        if name.lower() not in available:
+            return f"repository {name} is not visible to any connected GitHub account"
+        if name.lower() not in repos:
+            repos[name.lower()] = {"repo": name, "base": "", "checks": [], "stack": ""}
+    return ""
+
+
+def include_default_project_repository(project: Any, repos: dict[str, dict[str, Any]]) -> None:
+    """Add the project's primary repository when the request and epic mappings did not include it."""
+    if project.repo.lower() not in repos:
+        repos[project.repo.lower()] = {"repo": project.repo, "base": "", "checks": [], "stack": ""}
+
+
+def first_project_repository_branch_error(project: Any, repos: dict[str, dict[str, Any]],
+                                          chosen: dict[str, str], available: dict[str, dict[str, Any]],
+                                          gateways: dict[str, Any]) -> str:
+    """Return the first missing connection or base branch across the selected repository set."""
+    for item in repos.values():
+        lowered = item["repo"].lower()
+        connection = chosen.get(lowered) or (available.get(lowered) or {}).get("connection", "")
+        if not connection or connection not in gateways:
+            return f"no GitHub connection can reach {item['repo']}"
+        branch = item["base"] or project.base
+        if not gateways[connection].branch_exists(item["repo"].split("/", 1)[-1], branch):
+            return f"base branch {branch} is missing from {item['repo']}"
+    return ""
+
+
+def validate_project_repository_save(body: ProjectRepositoriesBody, key: str, project: Any,
+                                     epic_keys: set[str], available: dict[str, dict[str, Any]],
+                                     gateways: dict[str, Any]
+                                     ) -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, str], str]:
+    """Build the complete repository set and return its first request, epic, or branch refusal."""
+    repos, chosen, error = collect_requested_project_repositories(body, available, project.base)
+    mappings = project_epic_repository_mappings(body)
+    if not error:
+        error = add_epic_repository_mappings(key, mappings, epic_keys, available, repos)
+    if not error:
+        include_default_project_repository(project, repos)
+        error = first_project_repository_branch_error(project, repos, chosen, available, gateways)
+    return repos, chosen, mappings, error
+
+
+def commit_project_repository_settings(ctx: Any, config_path: Path, key: str,
+                                       repos: dict[str, dict[str, Any]], mappings: dict[str, str],
+                                       control_gateway: Callable
+                                       ) -> tuple[list[dict[str, Any]], str | None]:
+    """Write the normalized repository settings to the control repository through GitHub."""
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    normalized = sorted(repos.values(), key=lambda item: item["repo"].lower())
+    config["repositories"] = normalized
+    config["epic_repositories"] = mappings
+    content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    control_name = Path(ctx.settings.control_repo).name
+    github = control_gateway(ctx)
+    branch = github.default_branch(control_name)
+    commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
+                               f"projects: update repositories for {key} via AI Flow console")
+    return normalized, commit
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
@@ -764,68 +885,14 @@ def install(app, ctx, deps) -> SimpleNamespace:
                           "Jira and GitHub must be connected")
             raise HTTPException(503, "Jira and GitHub must be connected")
         try:
-            epics = jira_project_epics(key)
-            available_repositories = github_catalog(user.subject, "project_repository_save")
+            available, gateways, epic_keys = load_project_repository_save_context(
+                key, user.subject, ctx, jira_project_epics, github_catalog, github_connection_list)
         except Exception as exc:
             project_audit("save_project_repositories", key, user.subject, False, "could not load providers")
             log.warning("project repository save preflight failed (%s)", type(exc).__name__)
             raise HTTPException(502, "could not load Jira epics and GitHub repositories") from exc
-        available = {str(item["full_name"]).lower(): item for item in available_repositories}
-        gateways = {conn.id: conn.gateway for conn in github_connection_list(ctx)}
-        chosen: dict[str, str] = {}  # repository -> connection the owner picked on this save
-        epic_keys = {item["key"] for item in epics}
-        repos: dict[str, dict[str, Any]] = {}
-        error = ""
-        for item in body.repositories:
-            name = item.repo.strip()
-            if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name) or name.lower() not in available:
-                error = f"repository {name} is not visible to any connected GitHub account"
-                break
-            if item.connection:
-                if item.connection not in available[name.lower()]["connections"]:
-                    error = f"GitHub connection {item.connection} cannot reach {name}"
-                    break
-                chosen[name.lower()] = item.connection
-            if name.lower() in repos:
-                error = f"repository {name} is listed more than once"
-                break
-            base = item.base.strip()
-            effective_base = base or project.base
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", effective_base) or ".." in effective_base:
-                error = f"invalid base branch for {name}"
-                break
-            if item.stack and item.stack not in STACK_TOOLS:
-                error = f"unsupported stack for {name}"
-                break
-            repos[name.lower()] = {"repo": name, "base": base,
-                                   "checks": [check.strip() for check in item.checks if check.strip()],
-                                   "stack": item.stack.strip(),
-                                   **({"containers": item.containers} if item.containers is not None else {})}
-        mappings = {str(epic).strip(): str(name).strip() for epic, name in body.epic_repositories.items()
-                    if str(name).strip()}
-        if not error:
-            for epic, name in mappings.items():
-                if epic not in epic_keys:
-                    error = f"{epic} is not an epic in Jira project {key}"
-                    break
-                if name.lower() not in available:
-                    error = f"repository {name} is not visible to any connected GitHub account"
-                    break
-                if name.lower() not in repos:
-                    repos[name.lower()] = {"repo": name, "base": "", "checks": [], "stack": ""}
-        if not error and project.repo.lower() not in repos:
-            repos[project.repo.lower()] = {"repo": project.repo, "base": "", "checks": [], "stack": ""}
-        if not error:
-            for item in repos.values():
-                lowered = item["repo"].lower()
-                connection = chosen.get(lowered) or (available.get(lowered) or {}).get("connection", "")
-                if not connection or connection not in gateways:
-                    error = f"no GitHub connection can reach {item['repo']}"
-                    break
-                branch = item["base"] or project.base
-                if not gateways[connection].branch_exists(item["repo"].split("/", 1)[-1], branch):
-                    error = f"base branch {branch} is missing from {item['repo']}"
-                    break
+        repos, chosen, mappings, error = validate_project_repository_save(
+            body, key, project, epic_keys, available, gateways)
         if error:
             project_audit("save_project_repositories", key, user.subject, False, error,
                           {"epic_repositories": mappings, "repositories": list(repos.values())})
@@ -833,16 +900,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
 
         config_path = ctx.repo().root / "projects" / f"{key}.yaml"
         try:
-            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-            normalized = sorted(repos.values(), key=lambda item: item["repo"].lower())
-            config["repositories"] = normalized
-            config["epic_repositories"] = mappings
-            content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
-            control_name = Path(ctx.settings.control_repo).name
-            github = github_control_gateway(ctx)
-            branch = github.default_branch(control_name)
-            commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
-                                       f"projects: update repositories for {key} via AI Flow console")
+            normalized, commit = commit_project_repository_settings(
+                ctx, config_path, key, repos, mappings, github_control_gateway)
         except HTTPException:
             raise
         except Exception as exc:

@@ -529,86 +529,105 @@ def _site(value: str) -> str | None:
     return f"https://{parts.netloc}"
 
 
-def mount(app: FastAPI, ctx: ApplicationContext) -> None:
-    def auth() -> JiraAuth:
-        a = getattr(ctx, "jira_auth", None)
-        if a is None:
-            raise HTTPException(503, "Jira connect is not configured")
-        return a
+def _jira_auth(ctx: ApplicationContext) -> JiraAuth:
+    auth = getattr(ctx, "jira_auth", None)
+    if auth is None:
+        raise HTTPException(503, "Jira connect is not configured")
+    return auth
 
-    def owner(request: Request, action: str = "read") -> str:
-        """The owner bearer token or a signed console session with `integrations.manage`; anyone else is refused."""
-        def writable() -> None:
-            try:
-                licensing.require_writable(ctx.db, ctx.settings.license_public_key)
-            except licensing.LicenseError as exc:
-                raise HTTPException(423, str(exc)) from None
 
-        scheme, _, token = request.headers.get("authorization", "").partition(" ")
-        configured = ctx.settings.owner_token
-        if scheme.lower() == "bearer" and token.strip() and configured and secrets.compare_digest(
-                token.strip().encode(), configured.encode()):
-            if action != "read":
-                writable()
-            return "owner"
-        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
-        user = resolve_session_user(ctx.db, claims) if claims else None
-        if user and role_satisfies(user.effective_roles, {"integrations.manage"}):
-            if action != "read":
-                writable()
-            return user.subject
+def _require_jira_writable(ctx: ApplicationContext) -> None:
+    try:
+        licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+    except licensing.LicenseError as exc:
+        raise HTTPException(423, str(exc)) from None
+
+
+def _has_jira_owner_bearer(ctx: ApplicationContext, request: Request) -> bool:
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    configured = ctx.settings.owner_token
+    return bool(scheme.lower() == "bearer" and token.strip() and configured and secrets.compare_digest(
+        token.strip().encode(), configured.encode()))
+
+
+def _require_jira_owner(ctx: ApplicationContext, request: Request, action: str = "read") -> str:
+    """Require the owner bearer token or a signed session with ``integrations.manage``."""
+    if _has_jira_owner_bearer(ctx, request):
         if action != "read":
-            write_audit(ctx, action, user.subject if user else "", False, "not available for your role")
-        if user:
-            raise HTTPException(403, "not available for your role")
-        raise HTTPException(401, "owner authorization required", headers={"WWW-Authenticate": "Bearer"})
+            _require_jira_writable(ctx)
+        return "owner"
+    claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+    user = resolve_session_user(ctx.db, claims) if claims else None
+    if user and role_satisfies(user.effective_roles, {"integrations.manage"}):
+        if action != "read":
+            _require_jira_writable(ctx)
+        return user.subject
+    if action != "read":
+        write_audit(ctx, action, user.subject if user else "", False, "not available for your role")
+    if user:
+        raise HTTPException(403, "not available for your role")
+    raise HTTPException(401, "owner authorization required", headers={"WWW-Authenticate": "Bearer"})
 
-    async def body_of(request: Request) -> dict:
-        # parsed by hand: a validation error of a model would echo the submitted secret back in its answer
-        try:
-            data = await request.json()
-        except ValueError:
-            data = None
-        if not isinstance(data, dict):
-            raise HTTPException(400, "expected a JSON object")
-        return data
 
+async def _jira_body_of(request: Request) -> dict:
+    # Parse by hand so a validation response cannot echo a submitted secret.
+    try:
+        data = await request.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise HTTPException(400, "expected a JSON object")
+    return data
+
+
+def _jira_callback_redirect(result: str) -> RedirectResponse:
+    response = RedirectResponse(f"{INTEGRATIONS_PAGE}?jira={result}", status_code=303)
+    response.delete_cookie(STATE_COOKIE, path="/v1/integrations/jira/oauth")
+    return response
+
+
+def _mount_jira_status_route(app: FastAPI, ctx: ApplicationContext) -> None:
     @app.get("/v1/integrations/jira")
     @checks_bearer
     def jira_status(request: Request) -> dict:
-        owner(request)
-        return auth().status()
+        _require_jira_owner(ctx, request)
+        return _jira_auth(ctx).status()
 
+
+def _mount_jira_oauth_start_route(app: FastAPI, ctx: ApplicationContext) -> None:
     @app.post("/v1/integrations/jira/oauth/start")
     @checks_bearer
     async def jira_oauth_start(request: Request):
-        actor = owner(request, "connect")
-        a = auth()
-        data = await body_of(request)
-        client_id, client_secret = _clean(data.get("client_id"), 200), _clean(data.get("client_secret"), 500)
-        current = a.store.app()
-        # an empty secret keeps the stored one (it is never shown again), as long as the client id is the same
+        actor = _require_jira_owner(ctx, request, "connect")
+        auth = _jira_auth(ctx)
+        data = await _jira_body_of(request)
+        client_id = _clean(data.get("client_id"), 200)
+        client_secret = _clean(data.get("client_secret"), 500)
+        current = auth.store.app()
+        # An empty secret keeps the stored one while the client id remains the same.
         new_id = client_id or current.get("client_id", "")
         new_secret = client_secret or (current.get("client_secret", "") if current.get("client_id") == new_id else "")
         if new_id and new_secret and (new_id, new_secret) != (current.get("client_id"), current.get("client_secret")):
-            a.store.save_app(new_id, new_secret)
+            auth.store.save_app(new_id, new_secret)
             write_audit(ctx, "oauth_app", actor, True, "OAuth app saved", {"client_id": new_id})
-        current = a.store.app()
+        current = auth.store.app()
         if client_id and current.get("client_id") != client_id:
-            current = {}  # a new client id without its secret
+            current = {}  # A new client id without its secret.
         if not (current.get("client_id") and current.get("client_secret")):
             write_audit(ctx, "connect", actor, False, "OAuth app client id and secret are required")
             raise HTTPException(400, "enter the client id and client secret of the Atlassian OAuth app")
         state = secrets.token_urlsafe(32)
         ctx.leases.r.set(_state_key(ctx, state), json.dumps({"actor": actor, "at": int(_now())}), ex=STATE_TTL_S)
-        response = JSONResponse({"authorize_url": a.authorize_url(state), "expires_in_s": STATE_TTL_S})
+        response = JSONResponse({"authorize_url": auth.authorize_url(state), "expires_in_s": STATE_TTL_S})
         response.set_cookie(STATE_COOKIE, state, max_age=STATE_TTL_S, path="/v1/integrations/jira/oauth",
                             httponly=True, samesite="lax", secure=ctx.settings.public_url.startswith("https://"))
         return response
 
+
+def _mount_jira_oauth_callback_route(app: FastAPI, ctx: ApplicationContext) -> None:
     @app.get(CALLBACK_PATH)
     def jira_oauth_callback(request: Request, state: str = "", code: str = "", error: str = ""):
-        a = auth()
+        auth = _jira_auth(ctx)
         cookie = request.cookies.get(STATE_COOKIE, "")
         pending = None
         if state:
@@ -621,59 +640,67 @@ def mount(app: FastAPI, ctx: ApplicationContext) -> None:
             write_audit(ctx, "connect", "", False, "OAuth callback refused: missing or invalid state")
             raise HTTPException(400, "invalid or expired OAuth state; press Connect Jira again")
         actor = str(pending.get("actor") or "owner")
-
-        def back(result: str) -> RedirectResponse:
-            response = RedirectResponse(f"{INTEGRATIONS_PAGE}?jira={result}", status_code=303)
-            response.delete_cookie(STATE_COOKIE, path="/v1/integrations/jira/oauth")
-            return response
-
         if error or not code:
             write_audit(ctx, "connect", actor, False, f"consent not given: {_clean(error, 60) or 'no code'}")
-            return back("denied")
+            return _jira_callback_redirect("denied")
+        _require_jira_writable(ctx)
         try:
-            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
-        except licensing.LicenseError as exc:
-            raise HTTPException(423, str(exc)) from None
-        try:
-            data = a.connect_oauth(code, actor)
-        except OAuthFailed as e:
-            log.warning("jira oauth connect failed: %s", e)
-            write_audit(ctx, "connect", actor, False, f"OAuth connect failed: {e}")
-            return back("failed")
+            data = auth.connect_oauth(code, actor)
+        except OAuthFailed as exc:
+            log.warning("jira oauth connect failed: %s", exc)
+            write_audit(ctx, "connect", actor, False, f"OAuth connect failed: {exc}")
+            return _jira_callback_redirect("failed")
         write_audit(ctx, "connect", actor, True, "connected with OAuth 2.0 (3LO)", safe_payload(data))
         ctx.events.emit("jira.connected", account=actor, outcome="oauth", reason=data.get("site_name", ""))
         close_incident(ctx, INCIDENT_KIND, INCIDENT_SUBJECT, "Jira connected")
-        return back("connected")
+        return _jira_callback_redirect("connected")
 
+
+def _mount_jira_oauth_routes(app: FastAPI, ctx: ApplicationContext) -> None:
+    _mount_jira_oauth_start_route(app, ctx)
+    _mount_jira_oauth_callback_route(app, ctx)
+
+
+def _mount_jira_api_token_route(app: FastAPI, ctx: ApplicationContext) -> None:
     @app.post("/v1/integrations/jira/api-token")
     @checks_bearer
     async def jira_api_token(request: Request) -> dict:
-        actor = owner(request, "connect")
-        a = auth()
-        data = await body_of(request)
-        email, token = _clean(data.get("email"), 320), _clean(data.get("api_token"), 2000)
+        actor = _require_jira_owner(ctx, request, "connect")
+        auth = _jira_auth(ctx)
+        data = await _jira_body_of(request)
+        email = _clean(data.get("email"), 320)
+        token = _clean(data.get("api_token"), 2000)
         site = _site(_clean(data.get("site"), 300) or ctx.settings.jira_site)
         if not email or "@" not in email or not token or not site:
             write_audit(ctx, "connect", actor, False, "fallback API token refused: email, API token and an"
-                                                      " https site are required")
+                                                          " https site are required")
             raise HTTPException(400, "enter the Atlassian email, API token and an https:// site URL")
         try:
-            saved = a.connect_api_token(email, token, site, actor)
-        except OAuthFailed as e:
-            write_audit(ctx, "connect", actor, False, f"fallback API token refused: {e}")
-            raise HTTPException(400, str(e)) from None
+            saved = auth.connect_api_token(email, token, site, actor)
+        except OAuthFailed as exc:
+            write_audit(ctx, "connect", actor, False, f"fallback API token refused: {exc}")
+            raise HTTPException(400, str(exc)) from None
         write_audit(ctx, "connect", actor, True, "connected with email and API token", safe_payload(saved))
         ctx.events.emit("jira.connected", account=actor, outcome="api_token", reason=saved["site_name"])
         close_incident(ctx, INCIDENT_KIND, INCIDENT_SUBJECT, "Jira connected")
-        return a.status()
+        return auth.status()
 
+
+def _mount_jira_disconnect_route(app: FastAPI, ctx: ApplicationContext) -> None:
     @app.post("/v1/integrations/jira/disconnect")
     @checks_bearer
     def jira_disconnect(request: Request) -> dict:
-        actor = owner(request, "disconnect")
-        result = auth().disconnect(actor)
+        actor = _require_jira_owner(ctx, request, "disconnect")
+        result = _jira_auth(ctx).disconnect(actor)
         write_audit(ctx, "disconnect", actor, True,
                     "disconnected; token revoked at Atlassian" if result["revoked"] else "disconnected",
                     {**safe_payload(result["data"]), "revoked": result["revoked"]})
         ctx.events.emit("jira.disconnected", account=actor, outcome="revoked" if result["revoked"] else "deleted")
-        return {**auth().status(), "revoked": result["revoked"]}
+        return {**_jira_auth(ctx).status(), "revoked": result["revoked"]}
+
+
+def mount(app: FastAPI, ctx: ApplicationContext) -> None:
+    _mount_jira_status_route(app, ctx)
+    _mount_jira_oauth_routes(app, ctx)
+    _mount_jira_api_token_route(app, ctx)
+    _mount_jira_disconnect_route(app, ctx)

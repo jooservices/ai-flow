@@ -2,25 +2,23 @@
 
 `install` registers them on the app. What they still need from the app (helpers and shared state defined there) arrives
 as `deps`; the names the routes define for the rest of the app are returned."""
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from types import SimpleNamespace
 
 from .bodies import FenceBody, MasterActionBody, MasterBudgetBody, MasterFlowBugsBody, MasterPlanOutcomeBody, ResultBody
 from typing import Any
 from fastapi import Depends, HTTPException, Query, Request
-from ... import (escalations,
-               knowledge, load_policy, quota_refresh, role_health, support_bundle, tooling)
+from ... import (knowledge, load_policy, quota_refresh, role_health, support_bundle, tooling)
 from ... import run_inbox as run_inbox_control
 from ... import environment as environment_reports
-from ... import quota as quota_reporting
 from ...db import J
 from ...features.work.constants import utcnow
 from ...features.work.listeners import run_finished
+from . import autonomy, plan_outcome
 from .events import MasterActionCompleted, MasterDailyBudgetUpdated
 from ...platform.events.wiring import publish_for
 from .master_actions import (MasterActionState, decide, deny_policy_decision, escalate, master_action_event,
-                             open_bug, pause_account, require_intent, restart_run, retry_or_move,
-                             validate_ticket_action)
+                             perform_action, require_intent, validate_ticket_action)
 
 
 def _prepare_run_result(ctx, run, body, node, still_owner):
@@ -144,15 +142,19 @@ def _evaluate_run_result_health(ctx, run, run_id, late_result, last_dev, log):
 
 def install(app, ctx, deps) -> SimpleNamespace:
     from ...api import log  # noqa: PLC0415 - api imports this module
-    audit = deps.audit
-    console_user = deps.console_user
+    runs = _install_run_routes(app, ctx, deps, log)
+    master = _install_master_routes(app, ctx, deps, log)
+    return SimpleNamespace(run_heartbeat=runs.run_heartbeat, run_result=runs.run_result, run_release=runs.run_release,
+                           master_context=master.master_context, master_flow_bugs=master.master_flow_bugs,
+                           master_plan_outcome=master.master_plan_outcome, autonomy_report=master.autonomy_report,
+                           master_autonomy=master.master_autonomy, master_budget_update=master.master_budget_update,
+                           master_report=master.master_report, master_action=master.master_action)
+
+
+def _install_run_routes(app, ctx, deps, log) -> SimpleNamespace:
     last_dev = deps.last_dev
     mark_machine_auth_failure = deps.mark_machine_auth_failure
-    master_budget_state = deps.master_budget_state
-    master_run = deps.master_run
-    master_snapshot = deps.master_snapshot
     node_auth = deps.node_auth
-    process_flow_bugs = deps.process_flow_bugs
     refresh_quota_forecast = deps.refresh_quota_forecast
     run_row = deps.run_row
     # --- runs -----------------------------------------------------------------------------------------------
@@ -194,6 +196,17 @@ def install(app, ctx, deps) -> SimpleNamespace:
                         account=run["account_id"], node=node, outcome="released" if released else "not_owner")
         return {"released": released}
 
+    return SimpleNamespace(run_heartbeat=run_heartbeat, run_result=run_result, run_release=run_release)
+
+
+def _install_master_routes(app, ctx, deps, log) -> SimpleNamespace:
+    audit = deps.audit
+    console_user = deps.console_user
+    master_budget_state = deps.master_budget_state
+    master_run = deps.master_run
+    master_snapshot = deps.master_snapshot
+    node_auth = deps.node_auth
+    process_flow_bugs = deps.process_flow_bugs
     @app.get("/v1/master/context")
     def master_context(run_id: str, fence: int, node: str = Depends(node_auth)) -> dict:
         master_run(run_id, fence, node, "context")
@@ -207,98 +220,10 @@ def install(app, ctx, deps) -> SimpleNamespace:
     @app.post("/v1/master/plan-outcome")
     def master_plan_outcome(body: MasterPlanOutcomeBody, node: str = Depends(node_auth)) -> dict:
         run = master_run(body.run_id, body.fence, node, "plan-outcome", {"valid": body.valid})
-        inserted = ctx.db.one("INSERT INTO master_plan_cycles (run_id, valid) VALUES (%s,%s)"
-                              " ON CONFLICT (run_id) DO NOTHING RETURNING run_id",
-                              (body.run_id, body.valid))
-        recorded = (ctx.db.one("SELECT valid FROM master_plan_cycles WHERE run_id=%s", (body.run_id,))
-                    if not inserted else {"valid": body.valid})
-        valid = bool(recorded["valid"])
-        if inserted:
-            ctx.events.emit("master.plan", ticket=run["ticket_key"], run_id=body.run_id, fence=body.fence,
-                            account=run["account_id"], node=node, outcome="valid" if valid else "invalid",
-                            reason="strict-format retry completed" if not valid else "valid action plan")
-        streak_row = ctx.db.one(
-            "SELECT count(*) AS n FROM master_plan_cycles WHERE NOT valid AND recorded_at > "
-            "coalesce((SELECT max(recorded_at) FROM master_plan_cycles WHERE valid), 'epoch'::timestamptz)") or {}
-        hour_row = ctx.db.one("SELECT count(*) AS n FROM master_plan_cycles WHERE NOT valid"
-                              " AND recorded_at >= now()-interval '1 hour'") or {}
-        streak, last_hour = int(streak_row.get("n") or 0), int(hour_row.get("n") or 0)
-        incident_open = False
-        if valid:
-            from ...incidents import close_incident
-            close_incident(ctx, "master_invalid_plan", "global", "master returned a valid action plan")
-        elif streak >= 3 or last_hour >= 5:
-            from ...incidents import open_incident
-            incident_open = open_incident(
-                ctx, "master_invalid_plan", "global", "critical", "master repeatedly returned an invalid plan",
-                f"Invalid plan cycles: {streak} in a row and {last_hour} in the last hour. "
-                "The master retried once with a strict JSON reminder on each cycle.")
-        return {"valid": valid, "invalid_streak": streak, "invalid_last_hour": last_hour,
-                "incident_opened": incident_open}
+        return plan_outcome.record_plan_outcome(ctx, run, body, node)
 
     def autonomy_report(weeks: int = 8, scope: tuple[str, ...] | None = None) -> dict[str, Any]:
-        now = utcnow()
-        this_monday = now.date() - timedelta(days=now.weekday())
-        first_monday = this_monday - timedelta(days=(weeks - 1) * 7)
-        start = datetime.combine(first_monday, datetime.min.time(), tzinfo=timezone.utc)
-        end = now
-        trend = []
-        for index in range(weeks):
-            week = first_monday + timedelta(days=index * 7)
-            trend.append({"week_start": week.isoformat(), "finished_without_person": 0,
-                          "needed_person": 0, "repeated_failures": 0})
-        def trend_index(value: datetime) -> int | None:
-            date = value.astimezone(timezone.utc).date() if value.tzinfo else value.date()
-            offset = (date - first_monday).days // 7
-            return offset if 0 <= offset < weeks else None
-
-        # A person limited to some projects gets the report of those projects only.
-        ticket_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))" if scope is not None else ""
-        scope_params: tuple = (list(scope),) if scope is not None else ()
-        finished = ctx.db.all(
-            "SELECT DISTINCT t.key, t.summary, t.done_at FROM tickets t WHERE t.status='Done'"
-            + (" AND t.project=ANY(%s)" if scope is not None else "") +
-            " AND t.done_at >= %s AND t.done_at <= %s AND EXISTS (SELECT 1 FROM runs r"
-            " WHERE r.ticket_key=t.key AND r.status<>'running' AND lower(r.outcome) IN ('done','pass','passed')"
-            " AND r.started_at <= t.done_at AND NOT EXISTS (SELECT 1 FROM runs later"
-            " WHERE later.ticket_key=t.key AND later.started_at > r.started_at AND later.started_at <= t.done_at))"
-            " AND NOT EXISTS (SELECT 1 FROM write_audit w WHERE w.ticket=t.key AND w.action='transition'"
-            " AND w.payload->>'source'='human-review' AND w.result='Done' AND w.ts <= t.done_at)", scope_params + (start, end))
-        for item in finished:
-            i = trend_index(item["done_at"])
-            if i is not None:
-                trend[i]["finished_without_person"] += 1
-        needed = ctx.db.all("SELECT observation_key, ticket, reason, options, sent_at FROM master_escalations"
-                            " WHERE sent_at >= %s AND sent_at <= %s" + ticket_filter + " ORDER BY sent_at DESC",
-                            (start, end) + scope_params)
-        for item in needed:
-            i = trend_index(item["sent_at"])
-            if i is not None:
-                trend[i]["needed_person"] += 1
-        repeated = ctx.db.all("SELECT ts, type FROM events WHERE type IN ('flow_bug.created','flow_bug.repeated')"
-                              " AND ts >= %s AND ts <= %s" + ticket_filter, (start, end) + scope_params)
-        for item in repeated:
-            i = trend_index(item["ts"])
-            if i is not None:
-                trend[i]["repeated_failures"] += 1
-        week_start = datetime.combine(this_monday, datetime.min.time(), tzinfo=timezone.utc)
-        current_finished = [row for row in finished if row["done_at"] >= week_start]
-        current_needed = [row for row in needed if row["sent_at"] >= week_start]
-        current_repeated = ctx.db.all(
-            "SELECT f.ticket_key, f.signature, f.repeat_count, f.updated_at, t.summary, t.status"
-            " FROM flow_bug_tracker f LEFT JOIN tickets t ON t.key=f.ticket_key"
-            " WHERE f.updated_at >= %s" + (" AND t.project=ANY(%s)" if scope is not None else "") +
-            " ORDER BY f.updated_at DESC LIMIT 50", (week_start,) + scope_params)
-        # Accounts are shared infrastructure, not project data.
-        quota_accounts = ctx.db.all("SELECT id,provider,quota,quota_source,quota_observed_at FROM accounts ORDER BY id") \
-            if scope is None else []
-        quota_state = quota_reporting.assessments(ctx.db, quota_accounts, now)
-        return {"week_start": this_monday.isoformat(),
-                "finished_without_person": current_finished[:50], "needed_person": current_needed[:50],
-                "repeated_failures": current_repeated, "trend": trend,
-                "escalations": escalations.weekly_metrics(ctx.db, weeks),
-                "quota_accounts": [{"id": a["id"], "provider": a["provider"],
-                                    "quota_awareness": quota_state.get(a["id"], {})} for a in quota_accounts]}
+        return autonomy.autonomy_report(ctx, weeks, scope)
 
     @app.get("/v1/master/autonomy")
     def master_autonomy(request: Request) -> dict:
@@ -338,16 +263,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         if decision.decision != "allow":
             deny_policy_decision(ctx, audit, state, decision)
         ticket_row = validate_ticket_action(ctx, audit, state)
-        result = "ok"
-        if body.action in ("retry", "move_to_todo"):
-            result = retry_or_move(ctx, audit, state, ticket_row)
-        elif body.action == "pause_account":
-            result = pause_account(ctx, audit, state)
-            ticket = ""
-        elif body.action == "restart_run":
-            result = restart_run(ctx, audit, state, ticket_row)
-        elif body.action == "open_bug":
-            result, ticket = open_bug(ctx, audit, state, process_flow_bugs)
+        result, ticket = perform_action(ctx, audit, state, ticket_row, process_flow_bugs, ticket)
         publish_for(ctx, MasterActionCompleted(run_id=body.run_id, fence=body.fence, ticket=ticket,
                                                actor=run["account_id"], action=body.action,
                                                result=str(result)[:500], intent=body.intent[:1000],
@@ -356,4 +272,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         master_action_event(ctx, state, "completed", body.why or body.intent or str(result))
         return {"ok": True, "result": result, "escalated": False}
 
-    return SimpleNamespace(run_heartbeat=run_heartbeat, run_result=run_result, run_release=run_release, master_context=master_context, master_flow_bugs=master_flow_bugs, master_plan_outcome=master_plan_outcome, autonomy_report=autonomy_report, master_autonomy=master_autonomy, master_budget_update=master_budget_update, master_report=master_report, master_action=master_action)
+    return SimpleNamespace(master_context=master_context, master_flow_bugs=master_flow_bugs,
+                           master_plan_outcome=master_plan_outcome, autonomy_report=autonomy_report,
+                           master_autonomy=master_autonomy, master_budget_update=master_budget_update,
+                           master_report=master_report, master_action=master_action)

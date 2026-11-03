@@ -338,3 +338,18 @@ def open_bug(ctx, audit, state: MasterActionState, process_flow_bugs) -> tuple[s
     return f"{matching['action']} {ticket}".strip(), ticket
 
 
+def perform_action(ctx, audit, state, ticket_row, process_flow_bugs, ticket: str):
+    """Run the allowed action; returns (result, ticket) - the ticket is blank after pause_account and is the opened
+    bug after open_bug."""
+    action = state.body.action
+    result = "ok"
+    if action in ("retry", "move_to_todo"):
+        result = retry_or_move(ctx, audit, state, ticket_row)
+    elif action == "pause_account":
+        result = pause_account(ctx, audit, state)
+        ticket = ""
+    elif action == "restart_run":
+        result = restart_run(ctx, audit, state, ticket_row)
+    elif action == "open_bug":
+        result, ticket = open_bug(ctx, audit, state, process_flow_bugs)
+    return result, ticket

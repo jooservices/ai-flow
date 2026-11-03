@@ -1,0 +1,10 @@
+{"helper":"validate_project_keys","input":null,"expected":null}
+{"helper":"validate_project_keys","input":[" BETA ","ALPHA","BETA",""," ALPHA "],"expected":["BETA","ALPHA"]}
+{"helper":"validate_project_keys","input":["MISSING"],"error":{"status":400,"detail":"unknown project: MISSING"}}
+{"helper":"layout_page","input":"dashboard","expected":"dashboard"}
+{"helper":"layout_page","input":"not-a-page","error":{"status":404,"detail":"unknown console page"}}
+{"helper":"notification_admin","input":{"action":"write"},"expected":{"result":"authorized","permission":["notifications.manage"],"target":"notifications","action":"write"}}
+{"helper":"notification_json","input":{"payload":{"enabled":true}},"expected":{"enabled":true}}
+{"helper":"notification_json","input":{"payload":[]},"error":{"status":400,"detail":"invalid notification settings"}}
+{"helper":"notification_json","input":{"raises":"ValueError"},"error":{"status":400,"detail":"invalid notification settings"}}
+{"helper":"notification_json","input":{"raises":"UnicodeDecodeError"},"error":{"status":400,"detail":"invalid notification settings"}}

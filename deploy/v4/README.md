@@ -128,6 +128,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring errors in the maintenance project as prioritized Bug tickets
 - [Jira routes](../../docs/v4/route-module-jira.md): the jira routes are served from their own router module
 - [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
+- [Knowledge route installer structure](../../docs/v4/knowledge-install-structure.md): item, resource and policy approval routes register through ordered route-group installers
 - [Analytics routes](../../docs/v4/route-module-analytics.md): the analytics routes are served from their own router module
 - [Persistent learning and run context](../../docs/v4/knowledge-learning.md): automatically capture run, ticket and incident learning, then hand scoped semantic context to each run
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console

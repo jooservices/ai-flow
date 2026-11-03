@@ -37,6 +37,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Route contract snapshot](../../docs/v4/route-contract-snapshot.md): a checked-in record of every route's method, path, authentication and response model, compared by a test
 - [Project repository save structure](../../docs/v4/project_repositories-structure.md): ordered validation and commit steps for `PUT /v1/projects/{key}/repositories`
 - [Release routes structure](../../docs/v4/release-install-structure.md): the release routes split into files on disk, downloads and node reports
+- [Route install registrations](../../docs/v4/route-install-registrations.md): a recorded list of what every feature's install function registers, kept identical when an install is split
 
 Feature documents live in `docs/v4/`. Normally, add one line per feature in `deploy/v4/topics/<topic>.md` (see
 [Fewer merge conflicts](../../docs/v4/merge-conflicts.md)); tickets that explicitly require a README link may add

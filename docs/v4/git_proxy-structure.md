@@ -18,3 +18,7 @@ steps around it are module-level functions in `aiflow/v4/control/features/github
 
 To add a check or a purpose, add a step beside these helpers and call it explicitly from the handler; do not route
 event publishing or auditing through a lookup table, because the documentation checker follows plain calls.
+
+## Dotted repository names (JAIF-536)
+
+The relay splits `owner/name.git/<operation path>` at the last `.git/` (`_split_git_path`), so a repository whose name contains `.git`, such as `person/ai.github.io`, is no longer cut at `.github`. The credential's repository is still compared with the whole name, and a path with no `.git` segment is still refused with 403.

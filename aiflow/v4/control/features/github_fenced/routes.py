@@ -29,9 +29,20 @@ from .events import (GitHubBranchDeleted, GitHubBranchUpdated, GitHubCommentPost
                      GitHubPrClosed, GitHubPrCreated, GitHubPrLookedUp, GitHubPushAccepted, GitHubTokenIssued)
 
 
+def _split_git_path(git_path: str) -> tuple[str, str, str]:
+    """Split `owner/name.git/<operation path>` at the LAST `.git/`, so a repository name that itself contains `.git`
+    (for example `ai.github.io`) is kept whole. Returns (repository, ".git" or "", the rest after ".git")."""
+    index = git_path.rfind(".git/")
+    if index < 0 and git_path.endswith(".git"):
+        index = len(git_path) - len(".git")
+    if index < 0:
+        return git_path, "", ""
+    return git_path[:index], ".git", git_path[index + len(".git"):]
+
+
 def _git_transfer_request(git_path: str, request: Request, capability: dict) -> tuple[str, str, str]:
     """Resolve the repository, path suffix and Git operation of one relay request."""
-    repository, separator, suffix = git_path.partition(".git")
+    repository, separator, suffix = _split_git_path(git_path)
     if (not separator or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
             or repository.lower() != str(capability.get("repo", ""))):
         raise HTTPException(403, "Git repository transfer is outside this credential's scope")

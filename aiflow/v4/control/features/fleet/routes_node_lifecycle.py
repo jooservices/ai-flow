@@ -10,6 +10,8 @@ from .events import NodeJoined
 from fastapi import Depends, HTTPException
 from ... import licensing, load_policy, runtime_settings, system_check_api, tooling
 from ... import environment as environment_reports
+from ...db import J
+from ...route_deps import h
 
 
 def _node_preflight_gaps(repo, node, node_projects, tools, metrics):

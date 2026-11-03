@@ -343,3 +343,28 @@ def test_authorized_git_transfer_rejects_an_unknown_purpose():
                                  repository_for_run=None)
     assert (failed.value.status_code, failed.value.detail) == (
         403, "Git repository transfer credential has an unsupported purpose")
+
+
+# --- JAIF-536: a repository name that contains ".git" is kept whole ---------------------------------------------
+@pytest.mark.parametrize("git_path, expected", [
+    ("person/ai.github.io.git/info/refs", ("person/ai.github.io", ".git", "/info/refs")),
+    ("person/tool.git/git-receive-pack", ("person/tool", ".git", "/git-receive-pack")),
+    ("person/.github.git/git-upload-pack", ("person/.github", ".git", "/git-upload-pack")),
+    ("person/tool.git", ("person/tool", ".git", "")),
+    ("person/tool", ("person/tool", "", "")),
+])
+def test_git_path_is_split_at_the_last_git_segment(git_path, expected):
+    from aiflow.v4.control.features.github_fenced.routes import _split_git_path
+    assert _split_git_path(git_path) == expected
+
+
+def test_a_dotted_repository_name_can_use_the_relay():
+    capability = {"repo": "person/ai.github.io"}
+    assert _git_transfer_request("person/ai.github.io.git/info/refs", _request("GET", service="git-upload-pack"),
+                                 capability) == ("person/ai.github.io", ".git/info/refs", "git-upload-pack")
+    assert _git_transfer_request("person/ai.github.io.git/git-receive-pack", _request("POST"),
+                                 capability) == ("person/ai.github.io", ".git/git-receive-pack", "git-receive-pack")
+    with pytest.raises(HTTPException) as failed:  # the credential's repository is still enforced
+        _git_transfer_request("person/ai.github.io.git/info/refs", _request("GET", service="git-upload-pack"),
+                              {"repo": "person/ai"})
+    assert failed.value.status_code == 403

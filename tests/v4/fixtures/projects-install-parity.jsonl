@@ -1,0 +1,19 @@
+{"helper":"github_install_url","args":["my app"],"expected":"https://github.com/apps/my%20app/installations/new"}
+{"helper":"github_installation_settings","args":["acme","Organization",42],"expected":"https://github.com/organizations/acme/settings/installations/42"}
+{"helper":"github_installation_settings","args":["octocat","User",42],"expected":"https://github.com/settings/installations/42"}
+{"helper":"project_key_from_input","args":["newapp","https://jira.example.test"],"expected":"NEWAPP"}
+{"helper":"project_key_from_input","args":["https://jira.example.test/jira/software/c/projects/newapp-123/boards/1","https://jira.example.test/"],"expected":"NEWAPP"}
+{"helper":"project_key_from_input","args":["https://other.example.test/projects/NEWAPP","https://jira.example.test"],"error":{"status":422,"detail":"Jira project URL must belong to the selected connected site"}}
+{"helper":"project_key_from_input","args":["bad key","https://jira.example.test"],"error":{"status":422,"detail":"Jira project must be a project key or project URL"}}
+{"helper":"repository_settings_payload","project":{"repositories":[{"repo":"org/app","base":"main","checks":["lint"],"stack":"python","containers":true}],"configured_repositories":["org/app","org/other"]},"expected":[{"repo":"org/app","base":"main","checks":["lint"],"stack":"python","containers":true,"effective":{"repo":"org/app"}},{"repo":"org/other","base":"","checks":[],"stack":"","containers":null,"effective":{"repo":"org/other"}}]}
+{"helper":"_repository_snapshot_changes","args":[["Org/Old","Org/Keep"],["org/keep","Org/New"]],"expected":[["Org/New"],["Org/Old"]]}
+{"helper":"_decode_github_import","args":["{}"],"expected":[{},""]}
+{"helper":"_decode_github_import","args":["not json"],"expected":[null,"invalid App import request"]}
+{"helper":"_github_private_key_is_valid","args":["short"],"expected":false}
+{"helper":"_unknown_project_services","args":[["postgres","unknown",""]],"expected":["unknown"]}
+{"helper":"_new_project_config","key":"NEWAPP","body":{"repo":"org/app","base":"main","stack":"python-3.12","services":["postgres"],"checks":[" lint ",""],"containers":false,"merge_method":"squash","parallel_limit":2,"priority":3},"expected":{"key":"NEWAPP","repo":"org/app","base":"main","stack":"python-3.12","services":["postgres"],"checks":["lint"],"containers":false,"merge":{"method":"squash"},"limits":{"parallel":2,"work_minutes":{"target":15,"warn":30,"hard":45}},"priority":3,"paused":false}}
+{"helper":"_github_import_result","args":["pending-1",{"id":901,"name":"AI Flow","slug":"ai-flow"}],"expected":{"pending_id":"pending-1","app":{"id":"901","name":"AI Flow","slug":"ai-flow"},"install_url":"https://github.com/apps/ai-flow/installations/new"}}
+{"helper":"_project_preflight_failure","body":{"base":"main","repo":"org/app"},"result":{"missing_statuses":["Done"],"branch_exists":false,"nodes":[]},"expected":[["missing Jira statuses: Done","base branch main is missing from org/app"],{"message":"missing Jira statuses: Done; base branch main is missing from org/app","missing_statuses":["Done"],"branch_exists":false,"nodes":[]}]}
+{"helper":"_project_environment_is_invalid","args":[["environment kind is required"],[],[{"name":"DATABASE_URL"}]],"expected":true}
+{"helper":"_project_environment_error","args":["NEWAPP",["environment kind is required"],[{"name":"DATABASE_URL"}]],"expected":["environment kind is required",{"project":"NEWAPP","names":["DATABASE_URL"]}]}
+{"helper":"_project_environment_content","config":{"key":"TESTWP"},"items":[{"name":"DATABASE_URL","kind":"secret","value":"postgres://db","runs":["dev"],"description":""}],"expected":"key: TESTWP\nenvironment:\n- name: DATABASE_URL\n  kind: secret\n  value: postgres://db\n  runs:\n  - dev\n"}

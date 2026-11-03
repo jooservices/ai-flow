@@ -5,7 +5,7 @@ import logging
 import re  # noqa: F401 - review_queue_mount resolves this module global at request time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Query, Request  # noqa: F401 - kept as module globals for the route
 

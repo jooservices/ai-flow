@@ -104,17 +104,16 @@ def _tree_texts(root: Path, revision: str) -> dict[str, str]:
 
 
 def _decode_blobs(output: bytes, entries: list[tuple[str, str]]) -> dict[str, str]:
+    """Read the answer of ``git cat-file --batch``: a header line, the blob bytes and one newline for each entry."""
     decoded: dict[str, str] = {}
-    cursor = 0
+    stream = io.BytesIO(output)
     for path, expected_id in entries:
-        header_end = output.find(b"\n", cursor)
-        if header_end < 0:
+        header = stream.readline()
+        if not header.endswith(b"\n"):
             raise RuntimeError("Git returned an incomplete blob header")
-        object_id, kind, size_text = output[cursor:header_end].split()
-        size = int(size_text)
-        cursor = header_end + 1
-        content = output[cursor:cursor + size]
-        cursor += size + 1
+        object_id, kind, size_text = header.split()
+        content = stream.read(int(size_text))
+        stream.read(1)  # the protocol's trailing newline
         if object_id.decode("ascii") != expected_id or kind != b"blob":
             raise RuntimeError("Git returned a different object than requested")
         decoded[path] = content.decode("utf-8")

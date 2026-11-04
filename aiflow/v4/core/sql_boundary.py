@@ -31,7 +31,7 @@ ALLOWED_PATH_PATTERNS = (
 SQL_START = re.compile(
     r"^\s*(?:SELECT\b|INSERT\s+INTO\b|UPDATE\b[\s\S]*?\bSET\b|DELETE\s+FROM\b|"
     r"WITH\b[\s\S]*?\bAS(?:\s+(?:NOT\s+)?MATERIALIZED)?\s*\(|"
-    r"CREATE\s+(?:TEMP(?:ORARY)?\s+)?(?:TABLE|INDEX|TYPE|SCHEMA|VIEW|FUNCTION|TRIGGER|SEQUENCE|EXTENSION)\b|"
+    r"CREATE\s+(?:TEMP(?:ORARY)?\s+)?(?:TABLE|(?:UNIQUE\s+)?INDEX|TYPE|SCHEMA|VIEW|FUNCTION|TRIGGER|SEQUENCE|EXTENSION)\b|"
     r"ALTER\s+(?:TABLE|INDEX|TYPE|SCHEMA|VIEW|SEQUENCE)\b|"
     r"DROP\s+(?:TABLE|INDEX|TYPE|SCHEMA|VIEW|FUNCTION|TRIGGER|SEQUENCE|EXTENSION)\b|"
     r"TRUNCATE\s+(?:TABLE\s+)?[\w\"]+|COPY\s+[^\n]+\s+(?:FROM|TO)\b|"
@@ -46,7 +46,15 @@ SELECT_FROM = re.compile(
 
 def is_data_access(path: str) -> bool:
     """Whether a repository-relative path is an architectural SQL owner."""
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in ALLOWED_PATH_PATTERNS)
+    for pattern in ALLOWED_PATH_PATTERNS:
+        if pattern == "aiflow/v4/control/features/*/repository.py":
+            parts = path.split("/")
+            if (len(parts) == 6 and parts[:4] == ["aiflow", "v4", "control", "features"]
+                    and parts[4] and parts[5] == "repository.py"):
+                return True
+        elif fnmatch.fnmatchcase(path, pattern):
+            return True
+    return False
 
 
 def _docstring_ids(tree: ast.AST) -> set[int]:
@@ -132,11 +140,19 @@ def _read_baseline(path: Path) -> dict[str, int]:
 
 
 def _baseline_at(root: Path, revision: str) -> dict[str, int] | None:
+    listed = subprocess.run(
+        ["git", "ls-tree", "--name-only", revision, "--", BASELINE],
+        cwd=root, capture_output=True, text=True,
+    )
+    if listed.returncode:
+        raise ValueError(f"Could not inspect baseline at {revision} (git ls-tree exited {listed.returncode})")
+    if not listed.stdout.strip():
+        return None
     result = subprocess.run(
         ["git", "show", f"{revision}:{BASELINE}"], cwd=root, capture_output=True, text=True,
     )
     if result.returncode:
-        return None
+        raise ValueError(f"Could not read baseline at {revision} (git show exited {result.returncode})")
     value = json.loads(result.stdout)
     if not isinstance(value, dict) or any(
         not isinstance(name, str) or not isinstance(count, int) or isinstance(count, bool) or count < 1

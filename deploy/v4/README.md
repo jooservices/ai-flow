@@ -8,6 +8,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 ## Topics
 
 - [Fleet route installation structure](../../docs/v4/fleet-install-structure.md): named route groups preserve the fleet API registration order and helper return values
+- [SQL boundary](../../docs/v4/sql-boundary.md): AST-based SQL detection outside aggregate repositories and database platform modules, with a shrink-only baseline
 - [Provider sign-in run structure](../../docs/v4/provider_sign_in_run-structure.md): provider sign-in setup, PTY monitoring, handoff relay and result reporting are explicit named steps
 - [Technical decisions](../../docs/v4/technical-decisions.md): engineering questions are decided and recorded by the SA role and never sent to the owner
 - [CLI structure](../../docs/v4/cli-structure.md): how the developer and CI parser and dispatcher are organized

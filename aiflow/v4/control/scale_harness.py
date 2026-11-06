@@ -44,6 +44,7 @@ from typing import Any, Callable, Iterator
 from . import scale_proof
 from . import system_check
 from .scale_proof import BUDGETS, Budget, percentile
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 PROVIDERS = ("codex", "claude", "opencode", "grok")
 REQUIRED_JIRA_STATUSES = ("Backlog", "Intake", "To Do", "In Progress", "In Verify", "Needs owner", "Done")
@@ -330,18 +331,16 @@ def _activate_business_license(ctx) -> None:
     licensing.activate(ctx.db, token, public, "scale-proof-test")
 
 
-def _load_history(db, sc: Scenario, pl: dict[str, Any], sessions: list[dict[str, str]]) -> None:
+def _load_history(db, sc: Scenario, pl: dict[str, Any], sessions: list[dict[str, str]], ticket_repository) -> None:
     hosts = serving(sc)
     by_node = {s["node"]: s for s in sessions}
     with db.pool.connection() as c:
         with c.cursor() as cur:
-            cur.executemany(
-                "INSERT INTO tickets (key, project, status, labels, summary, description, priority, jira_created,"
-                " jira_updated, synced_at, done_at) VALUES (%s,%s,%s,%s,%s,%s,'Medium',%s,%s,%s,%s)",
-                [(t["key"], t["project"], t["status"], [], f"Earlier work {t['key']}", "Acceptance criteria:\n- AC1: ok",
-                  EPOCH + timedelta(seconds=i), EPOCH + timedelta(seconds=i), EPOCH + timedelta(seconds=i),
-                  EPOCH + timedelta(seconds=i) if t["status"] == "Done" else None)
-                 for i, t in enumerate(pl["history"])])
+            ticket_repository.scale_history_tickets(
+                cur, [(t["key"], t["project"], t["status"], [], f"Earlier work {t['key']}",
+                       "Acceptance criteria:\n- AC1: ok", EPOCH + timedelta(seconds=i), EPOCH + timedelta(seconds=i),
+                       EPOCH + timedelta(seconds=i), EPOCH + timedelta(seconds=i) if t["status"] == "Done" else None)
+                      for i, t in enumerate(pl["history"])])
             cur.executemany(
                 "INSERT INTO runs (id, ticket_key, project, step, account_id, provider, node, fence, status, outcome,"
                 " started_at, ended_at) VALUES (%s,%s,%s,'dev',%s,%s,%s,1,'finished','done',%s,%s)",
@@ -351,15 +350,13 @@ def _load_history(db, sc: Scenario, pl: dict[str, Any], sessions: list[dict[str,
                  for i, t in enumerate(pl["history"]) if t["status"] == "Done"])
 
 
-def _insert_wave(db, wave: list[dict[str, Any]], offset: int) -> None:
+def _insert_wave(db, wave: list[dict[str, Any]], offset: int, ticket_repository) -> None:
     with db.pool.connection() as c:
         with c.cursor() as cur:
-            cur.executemany(
-                "INSERT INTO tickets (key, project, status, labels, summary, description, priority, blocked_by,"
-                " jira_created) VALUES (%s,%s,'To Do',%s,%s,%s,%s,%s,%s)",
-                [(t["key"], t["project"], ["aiflow-ready", "aiflow-hold"] if t["held"] else ["aiflow-ready"],
-                  f"Traffic {t['key']}", "Acceptance criteria:\n- AC1: works", t["priority"], t["blocked_by"],
-                  EPOCH + timedelta(days=1, seconds=offset + i)) for i, t in enumerate(wave)])
+            ticket_repository.scale_wave_tickets(
+                cur, [(t["key"], t["project"], ["aiflow-ready", "aiflow-hold"] if t["held"] else ["aiflow-ready"],
+                       f"Traffic {t['key']}", "Acceptance criteria:\n- AC1: works", t["priority"], t["blocked_by"],
+                       EPOCH + timedelta(days=1, seconds=offset + i)) for i, t in enumerate(wave)])
 
 
 # --- the run ----------------------------------------------------------------------------------------------------
@@ -786,7 +783,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
                     errors.append(f"node {name} is not ready for {project}: "
                                   + ", ".join(f"{item.get('id')}={item.get('result')}" for item in blockers))
     last_node_heartbeat = time.perf_counter()
-    _load_history(db, sc, pl, sessions)
+    _load_history(db, sc, pl, sessions, ticket_repository_of(ctx))
     log(f"fleet ready: {len(headers)} machines, {len(sessions)} sessions, {len(pl['history'])} earlier tickets")
 
     per_node = max(1, sc.sessions // sc.machines)
@@ -832,7 +829,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
             # A real worker moves the ticket in Jira before it reports the result, so the ticket is never offered
             # again between the release and the transition. Mirror that order: marking it Done after the release left
             # a window in which a concurrent claim could pick the same ticket twice on a slow machine.
-            db.run("UPDATE tickets SET status='Done' WHERE key=%s", (key,))  # what Jira sync mirrors back
+            ticket_repository_of(ctx).scale_mark_done(key)  # what Jira sync mirrors back
             for path, body in ((f"/v1/runs/{run_id}/result", {"fence": fence, "outcome": "done",
                                                                "summary": "simulated session"}),
                                (f"/v1/runs/{run_id}/release", {"fence": fence})):
@@ -842,7 +839,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
         finally:
             keeper.complete(run_id)
         if issues:
-            db.run("UPDATE tickets SET status='To Do' WHERE key=%s AND status='Done'", (key,))  # the run did not finish
+            ticket_repository_of(ctx).scale_restore_todo(key)  # the run did not finish
         if not issues:
             # The next poll pass can run while completions are still draining. Publish a dependent ticket's
             # ready time as soon as its blocker is done so that early claim is measured from the real transition.
@@ -852,7 +849,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
         return key, issues
 
     for wave_no, wave in enumerate(pl["waves"]):
-        _insert_wave(db, wave, offset)
+        _insert_wave(db, wave, offset, ticket_repository_of(ctx))
         offset += len(wave)
         now = time.perf_counter()
         for t in wave:

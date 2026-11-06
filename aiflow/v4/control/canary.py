@@ -11,6 +11,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from typing import Any, Iterable
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 @dataclass(frozen=True)
@@ -179,11 +180,7 @@ def retry_pending_flow_bugs(ctx, *, target: str | None = None) -> dict[str, str]
             issue = existing["key"] if existing else ctx.jira.create_issue(
                 row["project"], row["summary"], row["description"], issuetype="Bug", labels=labels)
             status = ctx.jira.status(issue)
-            ctx.db.run(
-                "INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
-                " VALUES (%s,%s,%s,'Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
-                (issue, row["project"], status, labels, row["summary"], row["description"]),
-            )
+            ticket_repository_of(ctx).insert_bug_ticket_if_absent((issue, row['project'], status, labels, row['summary'], row['description']))
             from .db import J
             ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
                        " VALUES ('jira','create',%s,'aiflow4-autodeploy',true,%s,%s)",

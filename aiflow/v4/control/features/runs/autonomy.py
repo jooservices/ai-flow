@@ -5,6 +5,7 @@ from typing import Any
 from ... import escalations
 from ... import quota as quota_reporting
 from ...features.work.constants import utcnow
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def trend_index(first_monday, weeks: int, value: datetime) -> int | None:
@@ -19,41 +20,19 @@ def empty_trend(first_monday, weeks: int) -> list[dict[str, Any]]:
 
 
 def finished_without_person(ctx, scope, start, end) -> list[dict]:
-    scope_params: tuple = (list(scope),) if scope is not None else ()
-    return ctx.db.all(
-        "SELECT DISTINCT t.key, t.summary, t.done_at FROM tickets t WHERE t.status='Done'"
-        + (" AND t.project=ANY(%s)" if scope is not None else "") +
-        " AND t.done_at >= %s AND t.done_at <= %s AND EXISTS (SELECT 1 FROM runs r"
-        " WHERE r.ticket_key=t.key AND r.status<>'running' AND lower(r.outcome) IN ('done','pass','passed')"
-        " AND r.started_at <= t.done_at AND NOT EXISTS (SELECT 1 FROM runs later"
-        " WHERE later.ticket_key=t.key AND later.started_at > r.started_at AND later.started_at <= t.done_at))"
-        " AND NOT EXISTS (SELECT 1 FROM write_audit w WHERE w.ticket=t.key AND w.action='transition'"
-        " AND w.payload->>'source'='human-review' AND w.result='Done' AND w.ts <= t.done_at)", scope_params + (start, end))
+    return ticket_repository_of(ctx).finished_without_person(scope, start, end)
 
 
 def needed_a_person(ctx, scope, start, end) -> list[dict]:
-    # A person limited to some projects gets the report of those projects only.
-    ticket_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))" if scope is not None else ""
-    scope_params: tuple = (list(scope),) if scope is not None else ()
-    return ctx.db.all("SELECT observation_key, ticket, reason, options, sent_at FROM master_escalations"
-                      " WHERE sent_at >= %s AND sent_at <= %s" + ticket_filter + " ORDER BY sent_at DESC",
-                      (start, end) + scope_params)
+    return ticket_repository_of(ctx).needed_a_person(scope, start, end)
 
 
 def repeated_failure_events(ctx, scope, start, end) -> list[dict]:
-    ticket_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))" if scope is not None else ""
-    scope_params: tuple = (list(scope),) if scope is not None else ()
-    return ctx.db.all("SELECT ts, type FROM events WHERE type IN ('flow_bug.created','flow_bug.repeated')"
-                      " AND ts >= %s AND ts <= %s" + ticket_filter, (start, end) + scope_params)
+    return ticket_repository_of(ctx).repeated_failure_events(scope, start, end)
 
 
 def current_repeated_failures(ctx, scope, week_start) -> list[dict]:
-    scope_params: tuple = (list(scope),) if scope is not None else ()
-    return ctx.db.all(
-        "SELECT f.ticket_key, f.signature, f.repeat_count, f.updated_at, t.summary, t.status"
-        " FROM flow_bug_tracker f LEFT JOIN tickets t ON t.key=f.ticket_key"
-        " WHERE f.updated_at >= %s" + (" AND t.project=ANY(%s)" if scope is not None else "") +
-        " ORDER BY f.updated_at DESC LIMIT 50", (week_start,) + scope_params)
+    return ticket_repository_of(ctx).current_repeated_failures(scope, week_start)
 
 
 def count_into_trend(trend: list[dict], first_monday, weeks: int, rows: list[dict], date_key: str, field: str) -> None:

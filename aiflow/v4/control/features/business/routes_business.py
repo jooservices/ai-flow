@@ -7,6 +7,7 @@ from ... import business
 from ...platform.events.wiring import publish_for
 from .bodies import ChangeRequestBody
 from .events import ChangeRequestFiled
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def install_business_routes(app, ctx) -> SimpleNamespace:
@@ -18,24 +19,29 @@ def install_business_routes(app, ctx) -> SimpleNamespace:
     @app.get("/v1/business/{key}/change-requests")
     def business_change_requests(key: str) -> dict:
         project = business_project(key)
-        return {"project": project, "jira_site": ctx.settings.jira_site, "epics": business.epics(ctx.db, project),
-                "change_requests": business.change_requests(ctx.db, project, ctx.settings.jira_site)}
+        return {"project": project, "jira_site": ctx.settings.jira_site,
+                "epics": business.epics(ticket_repository_of(ctx), project),
+                "change_requests": business.change_requests(ticket_repository_of(ctx), ctx.db, project,
+                                                             ctx.settings.jira_site)}
 
     @app.get("/v1/business/{key}/release-readiness")
     def business_release_readiness(key: str) -> dict:
         project = business_project(key)
-        return {"project": project, "versions": business.release_readiness(ctx.db, project)}
+        return {"project": project,
+                "versions": business.release_readiness(ctx.db, project, ticket_repository_of(ctx))}
 
     @app.get("/v1/business/{key}/release-progress")
     def business_release_progress(key: str) -> dict:
         project = business_project(key)
-        return {"project": project, "versions": business.release_progress_of(ctx.db, project)}
+        return {"project": project,
+                "versions": business.release_progress_of(ctx.db, project, ticket_repository_of(ctx))}
 
     @app.post("/v1/business/{key}/change-requests")
     def business_change_request(key: str, body: ChangeRequestBody) -> dict:
         project = business_project(key)
         try:
-            title, description, epic = business.validate(ctx.db, project, body.title, body.description, body.epic)
+            title, description, epic = business.validate(ticket_repository_of(ctx), project, body.title,
+                                                        body.description, body.epic)
         except business.Invalid as e:
             raise HTTPException(400, str(e)) from e
         if not ctx.jira:

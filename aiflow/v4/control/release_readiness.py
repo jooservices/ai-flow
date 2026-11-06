@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from .report import _verify_verdict
+from .features.tickets.repository import TicketRepository
 
 REWORK_LABEL = "rework"
 RELEASE_QA_LABEL = "release-qa"
@@ -73,20 +74,18 @@ def evaluate(members: Iterable[dict], tickets_by_key: dict[str, dict],
             "tickets": [t["key"] for t in members], "reasons": reasons}
 
 
-def _load(db, versions: list[dict]) -> list[dict[str, Any]]:
+def _load(db, versions: list[dict], ticket_repository: TicketRepository | None = None) -> list[dict[str, Any]]:
     if not versions:
         return []
+    ticket_repository = ticket_repository or TicketRepository(db)
     ids = [v["id"] for v in versions]
-    links = db.all("SELECT version_id, ticket_key FROM ticket_versions WHERE version_id = ANY(%s)", (ids,))
+    links = ticket_repository.version_links(ids)
     member_keys = {link["ticket_key"] for link in links}
-    rows = db.all("SELECT key, status, type, labels, summary, blocked_by FROM tickets WHERE key = ANY(%s)",
-                  (list(member_keys),))
+    rows = ticket_repository.readiness_tickets(list(member_keys))
     by_key = {r["key"]: r for r in rows}
     blocker_keys = {b for r in rows for b in r["blocked_by"] or []} - set(by_key)
     if blocker_keys:
-        by_key.update({r["key"]: r for r in db.all(
-            "SELECT key, status, type, labels, summary, blocked_by FROM tickets WHERE key = ANY(%s)",
-            (list(blocker_keys),))})
+        by_key.update({r["key"]: r for r in ticket_repository.blocker_tickets(list(blocker_keys))})
     latest_verify = {r["ticket_key"]: r for r in db.all(
         "SELECT DISTINCT ON (ticket_key) ticket_key, outcome, details FROM runs"
         " WHERE ticket_key = ANY(%s) AND step='verify' AND status='finished'"
@@ -102,13 +101,13 @@ def _load(db, versions: list[dict]) -> list[dict[str, Any]]:
     return out
 
 
-def project_versions(db, project: str) -> list[dict[str, Any]]:
+def project_versions(db, project: str, ticket_repository: TicketRepository | None = None) -> list[dict[str, Any]]:
     """Readiness of each unreleased version of one project."""
     return _load(db, db.all("SELECT id, project, name FROM versions WHERE project=%s AND NOT released"
-                            " ORDER BY name, id", (project,)))
+                            " ORDER BY name, id", (project,)), ticket_repository)
 
 
-def all_versions(db, projects: Iterable[str]) -> list[dict[str, Any]]:
+def all_versions(db, projects: Iterable[str], ticket_repository: TicketRepository | None = None) -> list[dict[str, Any]]:
     """Readiness of each unreleased version of the configured projects (for /v1/state)."""
     return _load(db, db.all("SELECT id, project, name FROM versions WHERE project = ANY(%s) AND NOT released"
-                            " ORDER BY project, name, id", (list(projects),)))
+                            " ORDER BY project, name, id", (list(projects),)), ticket_repository)

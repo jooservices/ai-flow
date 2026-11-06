@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from ...platform.events.wiring import publish_for
 from ...stakeholder_screenshot import decode_screenshot
 from .events import StakeholderAccepted, StakeholderBugFiled
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def configured_project(ctx, key: str):
@@ -16,13 +17,7 @@ def configured_project(ctx, key: str):
 
 
 def recent_changes(ctx, project: str) -> list[dict[str, Any]]:
-    rows = ctx.db.all(
-        "SELECT DISTINCT ON (t.key) t.key, t.summary, t.type, t.status, t.parent_key, p.type AS parent_type,"
-        " r.branch, r.head_sha, r.summary AS change_summary, r.details, r.started_at, r.ended_at"
-        " FROM runs r JOIN tickets t ON t.key=r.ticket_key LEFT JOIN tickets p ON p.key=t.parent_key"
-        " WHERE r.project=%s AND t.project=%s AND r.step='dev' AND r.status<>'running'"
-        " AND r.outcome IN ('done','merged')"
-        " ORDER BY t.key, r.started_at DESC", (project, project))
+    rows = ticket_repository_of(ctx).list_recent_dev_changes_for_project((project, project))
     rows.sort(key=lambda r: r["ended_at"] or r["started_at"], reverse=True)
     out = []
     for row in rows[:30]:
@@ -45,15 +40,13 @@ def check_verdict(ctx, key: str, body):
     sender = body.sender.strip()
     if not sender:
         raise HTTPException(400, "sender is required")
-    change = ctx.db.one("SELECT key, summary, type, parent_key FROM tickets WHERE key=%s AND project=%s",
-                        (body.change_key, key))
+    change = ticket_repository_of(ctx).get_ticket_in_project((body.change_key, key))
     if not change:
         raise HTTPException(400, "change must belong to this project")
     target = body.target_key.strip() or body.change_key
     if target != body.change_key and target != change["parent_key"]:
         raise HTTPException(400, "acceptance target must be the related ticket or its epic")
-    if target != body.change_key and not ctx.db.one(
-            "SELECT key FROM tickets WHERE key=%s AND project=%s AND type='Epic'", (target, key)):
+    if target != body.change_key and not ticket_repository_of(ctx).get_epic_key_in_project((target, key)):
         raise HTTPException(400, "acceptance target must be the related epic")
     if body.verdict == "not_expected" and (not body.expected.strip() or not body.actual.strip()):
         raise HTTPException(400, "expected and actual behaviour are required for UAT feedback")
@@ -97,11 +90,7 @@ def file_uat_feedback(ctx, log, key: str, body, change: dict, sender: str, scree
         log.warning("Stakeholder UAT issue creation failed for project %s", key)
         raise HTTPException(502, "Jira could not record the UAT feedback") from exc
     with ctx.db.transaction():
-        ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
-                   " VALUES (%s,%s,'Intake','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
-                   " status='Intake', type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
-                   " description=EXCLUDED.description, synced_at=now()",
-                   (issue_key, key, ["uat-bug"], summary, description))
+        ticket_repository_of(ctx).upsert_intake_bug_ticket((issue_key, key, ['uat-bug'], summary, description))
         publish_for(ctx, StakeholderBugFiled(project=key, actor=sender, ticket=issue_key, status=status,
                                              change=body.change_key, environment=body.environment,
                                              screenshot=bool(screenshot)))

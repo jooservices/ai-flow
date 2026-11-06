@@ -4,6 +4,7 @@ Route decorators stay with their handlers to preserve the published route contra
 """
 from types import SimpleNamespace
 from . import routes as compat
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def _install_managed_projects_route(app, ctx, deps, runtime, support):
@@ -16,7 +17,7 @@ def _install_managed_projects_route(app, ctx, deps, runtime, support):
         repo = ctx.repo()
         readiness_by_project = compat.system_check_api.projects_readiness(ctx, repo)
         counts = {row["project"]: int(row["count"]) for row in
-                  ctx.db.all("SELECT project,count(*) AS count FROM tickets GROUP BY project")}
+                  ticket_repository_of(ctx).count_tickets_by_project()}
         probes = compat.tooling.probe_report(ctx)
         projects = [{"key": project.key, "repo": project.repo,
                               "repositories": project.configured_repositories,

@@ -7,6 +7,7 @@ from fastapi import Depends, HTTPException
 
 from ... import rollout
 from .bodies import ReleaseFailureBody, WorktreeSweepBody
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def removable_worktrees(ctx, dirs: list[str]) -> list[str]:
@@ -19,7 +20,7 @@ def removable_worktrees(ctx, dirs: list[str]) -> list[str]:
         if not m or not project or "/" in directory or ".." in entry:
             continue
         key, rest = m.group(1), m.group(2)
-        ticket = ctx.db.one("SELECT status FROM tickets WHERE key=%s", (key,))
+        ticket = ticket_repository_of(ctx).get_ticket_status((key,))
         running = ctx.db.one("SELECT 1 AS x FROM runs WHERE ticket_key=%s AND status='running' LIMIT 1", (key,))
         per_run = bool(re.fullmatch(r"--(intake|impact|triage-.+)", rest))
         if running:

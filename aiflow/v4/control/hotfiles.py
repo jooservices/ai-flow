@@ -20,6 +20,8 @@ import re
 from datetime import datetime
 from typing import Any, Callable, Iterable
 
+from .features.tickets.repository import TicketRepository
+
 # Files that many tickets change at once. Entries are fnmatch globs on the repository path.
 HOT_FILES: tuple[str, ...] = (
     # Oversized files present in the develop baseline (JAIF-273). The old-flow paths stay covered without changing
@@ -84,13 +86,10 @@ def areas_in(text: str) -> dict[str, list[str]]:
     return out
 
 
-def _past_files(db, ticket: dict[str, Any], epic: str) -> list[str]:
+def _past_files(db, ticket: dict[str, Any], epic: str, ticket_repository: TicketRepository | None = None) -> list[str]:
     """Files changed by the latest dev runs of the same epic (the ticket's own earlier runs included)."""
-    rows = db.all(
-        "SELECT r.details->'changed_files' AS files FROM runs r JOIN tickets t ON t.key = r.ticket_key"
-        " WHERE r.step = 'dev' AND r.outcome = 'done' AND r.details ? 'changed_files'"
-        " AND (r.ticket_key = %s OR (%s <> '' AND t.parent_key = %s))"
-        " ORDER BY r.started_at DESC LIMIT %s", (ticket["key"], epic, epic, HISTORY_RUNS))
+    tickets = ticket_repository or TicketRepository(db)
+    rows = tickets.hotfile_past_files(ticket["key"], epic, HISTORY_RUNS)
     files: list[str] = []
     for row in rows:
         files += [f for f in (row["files"] or []) if isinstance(f, str)]
@@ -98,9 +97,10 @@ def _past_files(db, ticket: dict[str, Any], epic: str) -> list[str]:
 
 
 def predict(db, ticket: dict[str, Any], epic: str = "", hot: Iterable[str] = HOT_FILES, *,
-            include_history: bool = True) -> dict[str, Any]:
+            include_history: bool = True, ticket_repository: TicketRepository | None = None) -> dict[str, Any]:
     """The footprint of a ticket: {"files", "areas", "hot", "sources"}. `hot` is the part that can conflict."""
-    epic_row = db.one("SELECT summary, description FROM tickets WHERE key=%s", (epic,)) if epic else None
+    tickets = ticket_repository or TicketRepository(db)
+    epic_row = tickets.hotfile_epic(epic) if epic else None
     texts = (("ticket", f"{ticket.get('summary', '')}\n{ticket.get('description', '')}"),
              ("epic", f"{epic_row['summary']}\n{epic_row['description']}" if epic_row else ""))
     files: dict[str, str] = {}
@@ -113,7 +113,7 @@ def predict(db, ticket: dict[str, Any], epic: str = "", hot: Iterable[str] = HOT
             for path in area_files:
                 files.setdefault(path, source)
     if include_history:
-        for path in _past_files(db, ticket, epic):
+        for path in _past_files(db, ticket, epic, tickets):
             files.setdefault(path, "history")
     hot_files = sorted(p for p in files if is_hot(p, hot))
     return {"files": sorted(files), "areas": sorted(areas), "hot": hot_files,
@@ -134,17 +134,15 @@ def blocking_ticket(footprint: dict[str, Any], in_flight: dict[str, Iterable[str
     return None
 
 
-def in_flight_hot_files(db, footprint_of: Callable[[dict], dict], exclude: str = "") -> dict[str, list[str]]:
+def in_flight_hot_files(db, footprint_of: Callable[[dict], dict], exclude: str = "", *,
+                        ticket_repository: TicketRepository | None = None) -> dict[str, list[str]]:
     """Hot files of tickets that are being worked on: a running development run, or waiting in verification or review.
 
     A ticket sent back for rework that still has an open pull request holds nothing while it waits: it updates its
     branch when it resumes. Counting it deadlocked the flow (thirteen waiting tickets, each blocked by the open pull
     requests of the others, and nothing could start)."""
-    rows = db.all(
-        "SELECT * FROM tickets WHERE key <> %s AND (status IN ('In Verify', 'Human review', 'Ready to merge')"
-        " OR EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
-        " AND r.step = 'dev' AND r.status = 'running'))",
-        (exclude,))
+    tickets = ticket_repository or TicketRepository(db)
+    rows = tickets.hotfile_in_flight(exclude)
     return {t["key"]: footprint_of(t)["hot"] for t in rows}
 
 
@@ -162,7 +160,8 @@ def clear_blocked(db, ticket_key: str) -> None:
 RESERVATION_GRACE_S = 120  # a claim inserts its running run row right after it reserved
 
 
-def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str], slots: int = 1) -> tuple[str, list[str]] | None:
+def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str], slots: int = 1, *,
+            ticket_repository: TicketRepository | None = None) -> tuple[str, list[str]] | None:
     """Reserve the hot files of a claimed dev run, atomically with the claim.
 
     Everything runs in one transaction under an advisory lock, so of two simultaneous claims only the first gets a
@@ -172,15 +171,11 @@ def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str], slots: int = 1
     paths = sorted(set(hot))
     if not paths:
         return None
+    tickets = ticket_repository or TicketRepository(db)
     with db.pool.connection() as conn:
         with conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(hashtext('aiflow4-hot-file-reservations'))")
-            conn.execute(
-                "DELETE FROM hot_file_reservations h WHERE h.reserved_at < now() - %s * interval '1 second'"
-                " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.id::text = h.run_id AND r.status = 'running')"
-                " AND NOT EXISTS (SELECT 1 FROM tickets t WHERE t.key = h.ticket_key AND ("
-                " t.status IN ('In Verify', 'Human review', 'Ready to merge')))",
-                (RESERVATION_GRACE_S,))
+            tickets.cleanup_hot_file_reservations(conn, RESERVATION_GRACE_S)
             rows = conn.execute("SELECT path, ticket_key FROM hot_file_reservations"
                                 " WHERE path = ANY(%s) AND ticket_key <> %s ORDER BY path, reserved_at",
                                 (paths, ticket_key)).fetchall()

@@ -8,6 +8,7 @@ comment with the last three runs. Removing the label is the explicit release: th
 from __future__ import annotations
 
 import logging
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.retry_hold")
 
@@ -53,8 +54,7 @@ def streaks(db) -> dict[str, tuple[int, str, int]]:
 def release_removed_holds(ctx) -> list[str]:
     """Close the hold of every ticket whose hold label was removed (the coordinator's explicit release)."""
     released = []
-    for hold in ctx.db.all("SELECT h.id, h.ticket_key FROM retry_holds h LEFT JOIN tickets t ON t.key = h.ticket_key"
-                           " WHERE h.released_at IS NULL AND t.key IS NOT NULL AND NOT (%s = ANY(t.labels))", (HOLD_LABEL,)):
+    for hold in ticket_repository_of(ctx).list_holds_missing_label((HOLD_LABEL,)):
         ctx.db.run("UPDATE retry_holds SET released_at = now() WHERE id = %s AND released_at IS NULL", (hold["id"],))
         ctx.events.emit("ticket.hold_released", ticket=hold["ticket_key"], reason="hold label removed")
         released.append(hold["ticket_key"])
@@ -104,8 +104,7 @@ def record_hold(ctx, key: str, fails: int, step: str, run_ids: list[str]) -> boo
     """Remember a hold locally: the label in the registry and one active row, so releasing it resets the streak.
 
     True when this call inserted the row, False when the hold was already recorded."""
-    ctx.db.run("UPDATE tickets SET labels = array_append(labels, %s) WHERE key = %s AND NOT (%s = ANY(labels))",
-               (HOLD_LABEL, key, HOLD_LABEL))
+    ticket_repository_of(ctx).append_label_when_absent((HOLD_LABEL, key, HOLD_LABEL))
     return bool(ctx.db.all("INSERT INTO retry_holds (ticket_key, step, fails, run_ids) VALUES (%s,%s,%s,%s)"
                            " ON CONFLICT DO NOTHING RETURNING id", (key, step, fails, run_ids)))
 
@@ -118,7 +117,7 @@ def apply(ctx) -> list[str]:
     for key, (fails, step, requeues) in streaks(ctx.db).items():
         if key in active:
             continue
-        ticket = ctx.db.one("SELECT status, labels FROM tickets WHERE key = %s", (key,))
+        ticket = ticket_repository_of(ctx).get_ticket_status_and_labels((key,))
         if not ticket or ticket["status"] in ("Done", "Declined"):
             continue
         if HOLD_LABEL in (ticket["labels"] or []):

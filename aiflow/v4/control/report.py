@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from statistics import median
 from typing import Any
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 class ReportNotFound(LookupError):
@@ -125,9 +126,7 @@ def _requirement_coverage(tickets: list[dict], latest_verify: dict[str, dict], r
 
 def load_project_tickets(ctx, project_key: str) -> list[dict]:
     """Read every ticket in the project, ordered by key."""
-    return ctx.db.all(
-        "SELECT key, project, status, type, summary, description, parent_key, labels, jira_created, jira_updated, done_at"
-        " FROM tickets WHERE project=%s ORDER BY key", (project_key,))
+    return ticket_repository_of(ctx).list_project_tickets_for_report((project_key,))
 
 
 def build_project_close_suggestion(all_tickets: list[dict]) -> dict[str, Any]:

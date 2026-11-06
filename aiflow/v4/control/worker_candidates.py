@@ -7,6 +7,8 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Mapping
 
+from .features.tickets.repository import DEV_TICKET_SQL  # noqa: F401 - public compatibility for existing callers
+
 
 def _minute_bucket(value: Any) -> str | None:
     """Return a stable minute bucket for database datetimes or API timestamp strings."""
@@ -60,16 +62,6 @@ SPLIT_PARENT = "aiflow-split-parent"
 def is_split_child(labels: Any) -> bool:
     return any(str(label).startswith("aiflow-split-") and str(label) != SPLIT_PARENT
                for label in (labels or ()))
-
-
-DEV_TICKET_SQL = (
-    " AND NOT ('aiflow-hold' = ANY(labels))"
-    " AND NOT ('aiflow-split-parent' = ANY(labels))"
-    " AND ((status = 'To Do' AND 'aiflow-ready' = ANY(labels))"
-    "      OR (status IN ('To Do', 'Backlog')"
-    "          AND EXISTS (SELECT 1 FROM unnest(labels) AS label"
-    "                      WHERE starts_with(label, 'aiflow-split-') AND label <> 'aiflow-split-parent')))"
-)
 
 
 def may_offer_dev(ticket: Mapping[str, Any], done: set[str],

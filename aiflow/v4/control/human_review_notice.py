@@ -5,11 +5,12 @@ from typing import Any
 
 from . import notify
 from .db import J
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def notify_human_review(ctx: Any, key: str, ticket: dict | None = None) -> list[str]:
     """Notify the Jira assignee, or the configured owner, when a required human review starts."""
-    ticket = ticket or ctx.db.one("SELECT key, project, labels, summary, fields FROM tickets WHERE key=%s", (key,))
+    ticket = ticket or ticket_repository_of(ctx).get_ticket_notice_fields((key,))
     if not ticket or "require-human" not in (ticket.get("labels") or []):
         return []
     fields = ticket.get("fields") or {}

@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from . import release_readiness, scale_proof
+from .features.tickets.repository import TicketRepository
 
 RELEASED_SHOWN = 10  # most recent released versions listed per project
 STEPS = ("check", "changelog", "pr", "merge", "tag", "release")
@@ -121,20 +122,18 @@ def _extra_reasons(version: dict, release: dict, proof: dict | None = None) -> l
     return out
 
 
-def _load(db, versions: list[dict]) -> list[dict[str, Any]]:
+def _load(db, versions: list[dict], ticket_repository: TicketRepository | None = None) -> list[dict[str, Any]]:
     if not versions:
         return []
+    ticket_repository = ticket_repository or TicketRepository(db)
     ids = [v["id"] for v in versions]
-    links = db.all("SELECT version_id, ticket_key FROM ticket_versions WHERE version_id = ANY(%s)", (ids,))
+    links = ticket_repository.version_links(ids)
     keys = list({link["ticket_key"] for link in links})
-    rows = db.all("SELECT key, status, type, labels, summary, blocked_by, first_in_progress_at FROM tickets"
-                  " WHERE key = ANY(%s)", (keys,)) if keys else []
+    rows = ticket_repository.progress_tickets(keys) if keys else []
     by_key = {r["key"]: r for r in rows}
     blockers = {b for r in rows for b in r["blocked_by"] or []} - set(by_key)
     if blockers:
-        by_key.update({r["key"]: r for r in db.all(
-            "SELECT key, status, type, labels, summary, blocked_by FROM tickets WHERE key = ANY(%s)",
-            (list(blockers),))})
+        by_key.update({r["key"]: r for r in ticket_repository.blocker_tickets(list(blockers))})
     latest_verify = {r["ticket_key"]: r for r in db.all(
         "SELECT DISTINCT ON (ticket_key) ticket_key, outcome, details FROM runs"
         " WHERE ticket_key = ANY(%s) AND step='verify' AND status='finished'"
@@ -180,9 +179,9 @@ def _select(db, projects: list[str]) -> list[dict]:
     return out
 
 
-def project_versions(db, project: str) -> list[dict[str, Any]]:
-    return _load(db, _select(db, [project]))
+def project_versions(db, project: str, ticket_repository: TicketRepository | None = None) -> list[dict[str, Any]]:
+    return _load(db, _select(db, [project]), ticket_repository)
 
 
-def all_versions(db, projects: Iterable[str]) -> list[dict[str, Any]]:
-    return _load(db, _select(db, list(projects)))
+def all_versions(db, projects: Iterable[str], ticket_repository: TicketRepository | None = None) -> list[dict[str, Any]]:
+    return _load(db, _select(db, list(projects)), ticket_repository)

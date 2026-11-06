@@ -77,6 +77,34 @@ def timeouts(db, days: int = 30, project_keys: list[str] | tuple[str, ...] | Non
                         for row in ticket_rows]}
 
 
+TARGET_MERGED_PER_100 = 40.0
+
+
+def _yield_ratios(developer_runs: int, merged: int, tokens: int) -> dict[str, float | int | None]:
+    merged_per_100 = round(100 * merged / developer_runs, 2) if developer_runs else 0.0
+    runs_per_merged = round(developer_runs / merged, 2) if merged else None
+    tokens_per_merged = round(tokens / merged, 1) if merged else None
+    return {"merged_per_100_runs": merged_per_100, "runs_per_merged": runs_per_merged,
+            "tokens_per_merged": tokens_per_merged}
+
+
+def yield_metrics(db, days: int = 14, project_keys: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+    """Merged tickets per 100 completed developer runs, and related per-day yield figures."""
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 90:
+        raise ValueError("days must be between 1 and 90")
+    daily_rows = developer_runs.yield_analytics(db, days, project_keys)
+    runs = sum(int(row["developer_runs"]) for row in daily_rows)
+    merged = sum(int(row["merged"]) for row in daily_rows)
+    tokens = sum(int(row["tokens"]) for row in daily_rows)
+    totals = _yield_ratios(runs, merged, tokens)
+    return {"days": days, "developer_runs": runs, "merged": merged, "tokens": tokens,
+            "target_merged_per_100": TARGET_MERGED_PER_100, **totals,
+            "daily": [{"day": row["day"].isoformat(), "developer_runs": int(row["developer_runs"]),
+                       "merged": int(row["merged"]), "tokens": int(row["tokens"]),
+                       **_yield_ratios(int(row["developer_runs"]), int(row["merged"]), int(row["tokens"]))}
+                      for row in daily_rows]}
+
+
 USAGE_DIMENSIONS = {"account": "account_id", "ai": "provider", "machine": "node", "project": "project",
                     "ticket": "ticket_key"}
 

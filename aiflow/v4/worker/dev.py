@@ -23,7 +23,7 @@ from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
                                parse_missing_requirements)
-from . import timeout_handover
+from . import mechanical, timeout_handover
 from .client import Conflict, ControlClient
 from . import gate_step
 from .gitops import Git
@@ -518,18 +518,22 @@ def publish_no_changes(run: DevRun) -> dict:
 
 def publish_existing_work(run: DevRun, existing_pr: dict | None) -> dict:
     c, wt = run.claim, run.worktree
-    pushed = False
-    if run.branch_commit_count:
-        credential = run.api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
-                                                                  "repo": run.repo, "branch": run.branch})
-        run.git.push(wt, run.branch, credential["token"])
-        pushed = True
-    sha = (run.git.run("rev-parse", "HEAD", cwd=wt).strip() if pushed or not existing_pr
-           else existing_pr.get("head_sha") or run.git.run("rev-parse", "HEAD", cwd=wt).strip())
+    refused = mechanical.refresh_base(run)
+    if refused is not None:
+        return refused
+    gate_note = mechanical.checks_after_refresh(run, run_local_gate)
+    if isinstance(gate_note, dict):
+        return gate_note
+    credential = run.api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                              "repo": run.repo, "branch": run.branch})
+    run.git.push(wt, run.branch, credential["token"])
+    sha = run.git.run("rev-parse", "HEAD", cwd=wt).strip()
     pr = existing_pr or open_existing_work_pr(run)
     note_text = (f"The existing pull request already contains the ticket work: {pr['url']}" if existing_pr else
                  f"The ticket branch already contains {run.branch_commit_count} committed change(s); "
                  f"AI Flow opened a draft pull request: {pr['url']}")
+    if gate_note:
+        note_text = f"{note_text}\n\n{gate_note.strip()}"
     summary_done = f"Already done: no new changes were needed; {note_text}."
     run.result.setdefault("details", {}).update(already_done=True, no_changes=True,
                                                  branch_commits=run.branch_commit_count)
@@ -601,14 +605,18 @@ def publish_changes(run: DevRun) -> dict:
     set_run_progress(run.heartbeat, "commit", files=len(run.changed))
     message = commit_message(run.claim, run.summary)
     sha = run.git.commit_all(run.worktree, message, run.claim.identity)
-    gate_note = run_local_gate(run)
+    refused = mechanical.refresh_base(run)
+    if refused is not None:
+        return refused
+    gate_note = mechanical.checks_after_refresh(run, run_local_gate)
     if isinstance(gate_note, dict):
         return gate_note
+    sha = run.git.run("rev-parse", "HEAD", cwd=run.worktree).strip()
     credential = run.api.call("POST", "/v1/github/token", {"run_id": run.claim.run_id,
                                                               "fence": run.claim.fence, "repo": run.repo,
                                                               "branch": run.branch})
     run.git.push(run.worktree, run.branch, credential["token"])
-    pr = open_changes_pr(run, gate_note)
+    pr = open_changes_pr(run, gate_note if isinstance(gate_note, str) else "")
     report_published(run, sha, pr)
     run.result.update(outcome="done", pr_url=pr["url"], head_sha=sha)
     return run.result

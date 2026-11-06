@@ -142,6 +142,20 @@
   },
   "status": 200
  },
+ "/v1/dashboard/yield": {
+  "shape": {
+   "daily": [],
+   "days": "int",
+   "developer_runs": "int",
+   "merged": "int",
+   "merged_per_100_runs": "float",
+   "runs_per_merged": "null",
+   "target_merged_per_100": "float",
+   "tokens": "int",
+   "tokens_per_merged": "null"
+  },
+  "status": 200
+ },
  "/v1/deploy/state": {
   "shape": {
    "accounts": [

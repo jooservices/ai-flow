@@ -1,0 +1,1 @@
+- [Fewer mechanical verification returns](../../../docs/v4/mechanical-returns.md): refresh the base and fast checks before hand-over, trivial conflict resolution, and Dashboard yield figures

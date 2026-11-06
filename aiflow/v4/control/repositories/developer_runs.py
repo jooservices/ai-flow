@@ -13,6 +13,17 @@ WHERE step='dev'
 GROUP BY 1 ORDER BY 1 DESC
 """
 
+YIELD_DAILY_SQL = """
+SELECT (started_at AT TIME ZONE 'UTC')::date AS day,
+       count(*) FILTER (WHERE step='dev' AND ended_at IS NOT NULL) AS developer_runs,
+       count(*) FILTER (WHERE outcome='merged') AS merged,
+       coalesce(sum(tokens_in + tokens_out) FILTER (WHERE step='dev' AND ended_at IS NOT NULL), 0) AS tokens
+FROM runs
+WHERE started_at >= ((now() AT TIME ZONE 'UTC')::date - %s::int)::timestamp AT TIME ZONE 'UTC'
+  AND (%s OR project = ANY(%s))
+GROUP BY 1 ORDER BY 1 DESC
+"""
+
 TIMEOUT_TICKET_SQL = """
 SELECT ticket_key AS ticket, project,
        count(*) AS developer_runs,
@@ -43,3 +54,9 @@ def timeout_analytics(db, days: int, project_keys: list[str] | tuple[str, ...] |
     """Load daily and per-ticket timeout totals within the caller's project scope."""
     params = (days - 1, project_keys is None, list(project_keys or ()))
     return (db.all(TIMEOUT_DAILY_SQL, params), db.all(TIMEOUT_TICKET_SQL, params))
+
+
+def yield_analytics(db, days: int, project_keys: list[str] | tuple[str, ...] | None):
+    """Load per-UTC-day developer-run yield totals within the caller's project scope."""
+    params = (days - 1, project_keys is None, list(project_keys or ()))
+    return db.all(YIELD_DAILY_SQL, params)

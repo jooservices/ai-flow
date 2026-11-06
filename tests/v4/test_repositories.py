@@ -234,6 +234,15 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
         def commit_all(self, *_args):
             return "a" * 40
 
+        def merge_base_resolving(self, *_args, **_kwargs):
+            return []
+
+        def behind(self, *_args, **_kwargs):
+            return 0
+
+        def run(self, *args, **_kwargs):
+            return "a" * 40
+
         def push(self, _path, branch, token):
             calls["pushes"].append((branch, token))
 
@@ -251,7 +260,8 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
     result = dev.run_dev(api, _claim(project), str(tmp_path), "https://control", 3600, [])
 
     assert result["outcome"] == "done"
-    assert calls["mirrors"] == [("jooservices/wordpress-core", "github-token")]
+    assert calls["mirrors"] == [("jooservices/wordpress-core", "github-token"),
+                                ("jooservices/wordpress-core", "github-token")]
     assert calls["worktrees"][0][3] == "main"
     assert calls["prs"][0]["repo"] == "jooservices/wordpress-core"
     assert calls["prs"][0]["base"] == "main"
@@ -287,6 +297,9 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
         def merge_base_in(self, _path, base, _identity, commit=False):
             calls["bases"].append((base, commit))
             return []
+
+        def merge_base_resolving(self, path, base, identity, commit=False):
+            return self.merge_base_in(path, base, identity, commit=commit)
 
         def behind(self, *_args, **_kwargs):
             return 0
@@ -341,6 +354,9 @@ def test_verify_reworks_instead_of_merging_a_pass_with_an_unmapped_deferred_crit
             return ref
 
         def merge_base_in(self, *_args, **_kwargs):
+            return []
+
+        def merge_base_resolving(self, *_args, **_kwargs):
             return []
 
         def behind(self, *_args, **_kwargs):

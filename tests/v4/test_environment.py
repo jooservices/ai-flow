@@ -55,7 +55,7 @@ HOSTY = REWRITE.replace("Technical notes: WordPress theme template.",
 
 def test_wording_that_names_a_host_ip_machine_network_or_access_is_found():
     cases = {
-        "Use the Dev VM for the tests": "machine", "the lab machines have it": "machine", "run it on WSL": "machine",
+        "Use the Dev VM for the tests": "machine", "run it on WSL": "machine",
         "use the shared Docker": "machine", "connect to 192.168.1.20": "ip address",
         "open https://wp.example.com for the smoke test": "host", "connect to 2001:db8::1": "ip address",
         "browse http://wp.office.local:8080/": "host", "through the VPN": "network", "ssh into the box": "access instruction",
@@ -67,11 +67,55 @@ def test_wording_that_names_a_host_ip_machine_network_or_access_is_found():
     for text, kind in cases.items():
         assert kind in {f["kind"] for f in find_server_wording(text)}, text
     for requirement in ("Tests need a seeded site", "Visitors can add a comment", "PHP 8.3.36 is required",
-                        "The page lists the projects at /portfolio"):
+                        "The page lists the projects at /portfolio", "The server responds to requests",
+                        "The product supports Ubuntu, WSL and macOS"):
         assert find_server_wording(requirement) == [], requirement
     assert redact("run it on the Dev VM now") == "run it on the [server detail removed] now"
     assert "[server detail removed]" in redact("open https://wp.example.com")
     assert "[server detail removed]" in redact("connect to 2001:db8::1")
+
+
+def test_jaif_80_event_fields_and_lock_file_are_not_server_wording():
+    text = ("Events record their source field and write dependency versions to uv.lock. "
+            "The `source` value identifies where each event came from.")
+
+    assert find_server_wording(text) == []
+    description = REWRITE.replace("Technical notes: WordPress theme template.", f"Technical notes: {text}")
+    answer = f"DESCRIPTION:\n<<<\n{description}\n>>>\nINTAKE: REWRITE"
+    assert intake.parse(answer)[0] == "rewrite"
+
+
+def test_jaif_104_supported_operating_systems_are_not_server_wording():
+    text = "The installer supports Ubuntu, the Linux-on-Windows subsystem (WSL), and macOS."
+
+    assert find_server_wording(text) == []
+    description = REWRITE.replace("Technical notes: WordPress theme template.", f"Technical notes: {text}")
+    answer = f"DESCRIPTION:\n<<<\n{description}\n>>>\nINTAKE: REWRITE"
+    assert intake.parse(answer)[0] == "rewrite"
+
+
+@pytest.mark.parametrize("sentence", [
+    "Run the test suite on the Dev VM.",
+    "Connect to 192.168.1.20 to inspect the service.",
+    "Log in remotely to build-node-4.",
+    "Use https://wp.example.com for the smoke test.",
+])
+def test_system_use_instructions_are_refused_with_sentence_and_rewrite(sentence):
+    text = REWRITE.replace("Technical notes: WordPress theme template.", f"Technical notes: {sentence}")
+
+    kind, why = intake.parse(f"DESCRIPTION:\n<<<\n{text}\n>>>\nINTAKE: REWRITE")
+
+    assert kind == "invalid"
+    assert sentence in why
+    assert "rewrite it to state" in why.lower()
+
+
+def test_code_identifiers_and_non_instruction_machine_words_pass():
+    text = ("The event schema has a `host` field, the product has a server-side renderer, "
+            "and its dependency file is `uv.lock`. The example is `run tests on the Dev VM`. "
+            "Use the host field to filter events and open the file archive.xyz as a sample.")
+
+    assert find_server_wording(text) == []
 
 
 def test_a_ticket_naming_a_host_is_rejected_and_the_same_requirement_without_it_is_accepted():
@@ -105,7 +149,8 @@ def test_intake_rejects_a_host_bearing_summary_and_keeps_the_ticket_in_intake(ic
     comments = [text for key, text in ctx.jira.comments if key == "TESTWP-46"]
     assert result["outcome"] == "failed" and "ticket summary" in result["summary"]
     assert len(comments) == 1 and "rewrite rejected" in comments[0]
-    assert "http://localhost" not in comments[0] and "describe the requirement instead" in comments[0]
+    assert "Deploy the site at http://localhost" in comments[0]
+    assert "rewrite it to state what the product must do" in comments[0]
     assert not getattr(ctx.jira, "descriptions", [])
     assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-46'")["status"] == "Intake"
 
@@ -118,8 +163,34 @@ def test_intake_run_rejects_a_host_in_the_rewrite_and_writes_nothing(iclient, ct
     assert getattr(ctx.jira, "descriptions", []) == []
     comments = [text for key, text in ctx.jira.comments if key == "TESTWP-40"]
     assert len(comments) == 1 and "rewrite rejected" in comments[0]
-    assert "10.0.0.5" not in comments[0] and "shared Docker" not in comments[0]
+    assert "Run the tests on the shared Docker at 10.0.0.5 via ssh into the Dev VM." in comments[0]
+    assert "rewrite it to state what the product must do" in comments[0]
     assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-40'")["status"] == "Intake"
+
+
+def test_intake_passes_after_two_durable_wording_refusals(iclient, ctx, tmp_path, monkeypatch):
+    add_ticket(ctx.db, "TESTWP-48", status="Intake", labels=())
+    rejected = REWRITE.replace("Technical notes: WordPress theme template.",
+                                "Technical notes: Run tests on the Dev VM.")
+    answer = f"DESCRIPTION:\n<<<\n{rejected}\n>>>\nINTAKE: REWRITE\n"
+
+    for refusal_number in (1, 2):
+        result, _adapter = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-48", answer)
+        assert result["outcome"] == "failed"
+        stored = ctx.db.one("SELECT count(*) AS n FROM runs WHERE ticket_key='TESTWP-48' "
+                            "AND details->>'server_wording_refusal'='true'")["n"]
+        assert stored == refusal_number
+        ctx.db.run("UPDATE runs SET started_at=now()-interval '20 minutes', ended_at=now()-interval '11 minutes' "
+                   "WHERE ticket_key='TESTWP-48' AND step='intake'")
+
+    result, _adapter = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-48", answer)
+
+    assert result["outcome"] == "refined"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-48'")["status"] == "To Do"
+    assert ctx.jira.descriptions[-1] == ("TESTWP-48", rejected)
+    comments = [text for key, text in ctx.jira.comments if key == "TESTWP-48"]
+    assert sum("rewrite rejected" in text for text in comments) == 2
+    assert any("refused this ticket twice; intake passed it through" in text for text in comments)
 
 
 def test_intake_server_question_is_answered_without_asking_the_owner(iclient, ctx, tmp_path, monkeypatch, envrepo):

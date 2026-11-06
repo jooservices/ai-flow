@@ -65,7 +65,9 @@ def post_merge_extras(work: Claim) -> dict[str, Any]:
 
 
 def intake_extras(work: Claim) -> dict[str, Any]:
-    """Return recent owner comments, keeping comment lookup failure non-blocking."""
+    """Return recent owner comments and the durable server-wording refusal count."""
+    refusals = work.store.intake_wording_refusals(work.ticket["key"])
+    work.ticket_data = {**(work.ticket_data or {}), "intake_wording_refusals": refusals}
     try:
         comments = work.ctx.jira.recent_comments(work.ticket["key"], limit=10) if work.ctx.jira else []
         return {"recent_comments": comments}

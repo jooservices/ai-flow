@@ -18,6 +18,11 @@ class WorkRepository:
     def set_run_details(self, run_id: str, details: dict) -> None:
         self.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(details), run_id))
 
+    def intake_wording_refusals(self, ticket: str) -> int:
+        row = self.db.one("SELECT count(*) AS refusals FROM runs WHERE ticket_key=%s AND step='intake' "
+                          "AND details->>'server_wording_refusal'='true'", (ticket,)) or {}
+        return int(row.get("refusals") or 0)
+
     def inherit_pull_request(self, run_id: str, prior_dev: dict) -> None:
         """A rework run carries the PR identity the previous developer run recorded, so the CI-log endpoint can bind
         branch and SHA requests to the ticket's pull request and role health does not blame a later run for it."""

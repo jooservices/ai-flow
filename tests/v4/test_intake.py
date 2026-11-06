@@ -1,6 +1,7 @@
 """Intake step: Intake tickets go to intake_refiner accounts, the worker rewrites them into the template through
 the fenced description endpoint, or sends questions to the owner."""
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -225,11 +226,13 @@ def run_worker(iclient, ctx, tmp_path, monkeypatch, key, answer, spec=FakeGit.sp
     monkeypatch.setattr(intake, "Git", FakeGit)
     monkeypatch.setattr(intake, "get_adapter", lambda provider: adapter)
     r = claim(iclient, key)
+    ticket = r["ticket"]
     c = Claimed(run_id=r["run_id"], fence=r["fence"], run_token=r["run_token"], account=r["account"],
-                provider=r["provider"], model=r["model"], effort=r["effort"], ticket=r["ticket"], project=r["project"],
+                provider=r["provider"], model=r["model"], effort=r["effort"], ticket=ticket, project=r["project"],
                 identity=tuple(r["identity"]), step="intake", recent_comments=r.get("recent_comments") or [])
     res = intake.run_intake(Api(iclient), c, str(tmp_path), "http://control", 3600, [])
     iclient.post(f"/v1/runs/{c.run_id}/result", json=res)
+    iclient.post(f"/v1/runs/{c.run_id}/release", json={"fence": c.fence})
     return res, adapter
 
 
@@ -405,3 +408,71 @@ def test_parse():
 def test_parse_rejects_rewrites_that_miss_the_template(broken, lacks):
     kind, why = intake.parse(f"DESCRIPTION:\n<<<\n{broken}\n>>>\nINTAKE: REWRITE")
     assert kind == "invalid" and lacks in why
+
+
+def test_intake_jira_writer_keeps_the_current_run_fence():
+    class Api:
+        def call(self, *args):
+            self.request = args
+            return {"ok": True}
+
+    api = Api()
+    c = SimpleNamespace(run_id="run-1", fence=7)
+
+    assert intake._jira_write(api, c, "TESTWP-1", "comment", body="text") == {"ok": True}
+    assert api.request == ("POST", "/v1/jira/TESTWP-1/comment",
+                           {"run_id": "run-1", "fence": 7, "body": "text"})
+
+
+def test_intake_progress_callback_updates_the_heartbeat(monkeypatch):
+    monkeypatch.setattr(intake.time, "time", lambda: 25.0)
+    heartbeat = SimpleNamespace(progress={})
+    events = {"n": 0}
+
+    intake._intake_progress(heartbeat, events, 4.0, {})
+
+    assert events == {"n": 1}
+    assert heartbeat.progress == {"phase": "intake-ai", "events": 1, "elapsed_s": 21}
+
+
+def test_intake_argv_callback_preserves_the_worker_identity_prefix():
+    command = intake._argv_with_prefix(["setpriv", "--reuid=worker"], lambda _spec: ["provider", "run"], None)
+
+    assert command == ["setpriv", "--reuid=worker", "provider", "run"]
+
+
+def test_summary_wording_refusal_names_the_sentence_and_offers_a_rewrite():
+    c = SimpleNamespace(run_id="run-1", fence=7, step="intake", account="grok-01", provider="grok", model="",
+                        ticket={"summary": "Deploy the site at http://localhost"})
+    comments = []
+    result = {}
+    jira = lambda path, **body: comments.append((path, body))
+
+    assert intake._reject_summary_wording(c, jira, result, None, False) == (True, True)
+    assert result["details"]["server_wording_refusal"] is True
+    assert "Deploy the site at http://localhost" in comments[0][1]["body"]
+    assert "rewrite it to state" in comments[0][1]["body"]
+
+
+def test_environment_removal_is_persisted_and_redacted_for_the_original_comment():
+    class Api:
+        def call(self, *args):
+            self.request = args
+            return {"environment_tickets": [{"need": "tests need a seeded site", "ticket": "ENV-1", "created": True}]}
+
+    api = Api()
+    c = SimpleNamespace(run_id="run-1", fence=7)
+    result = {}
+    original = "Run tests on the Dev VM."
+    found = [{"kind": "machine", "text": "Dev VM", "sentence": original}]
+
+    kept, lines = intake._record_environment_removal(c, api, result, original, found,
+                                                      ["machine: run tests on the Dev VM"],
+                                                      ["tests need a seeded site"])
+
+    assert "Dev VM" not in kept and "[server detail removed]" in kept
+    assert "Dev VM" not in "\n".join(lines)
+    assert result["details"]["removed_wording"] == ["machine"]
+    assert result["details"]["environment_tickets"] == ["ENV-1"]
+    assert api.request[0:2] == ("POST", "/v1/environment/removals")
+    assert api.request[2]["removed"] == ["machine: run tests on the Dev VM", "machine: Dev VM"]

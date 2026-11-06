@@ -1,0 +1,1 @@
+- [Upgrade host layout and promotion failures](../../../docs/v4/upgrade-layout.md): create missing secret and settings files before services start; CRITICAL promotion alerts and two-strike same-cause retry stop

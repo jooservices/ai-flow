@@ -183,16 +183,50 @@ def update_env(path: Path, *, keep: dict[str, str] | None = None, force: dict[st
     return True
 
 
+def ensure_runtime_layout(secrets_root: Path, projects_dir: Path | None = None) -> list[str]:
+    """Create missing host files and directories that compose mounts and the control plane expect.
+
+    `secrets_root` is the secrets directory (production default `/etc/aiflow/secrets`, overridable with
+    `AIFLOW4_SECRETS_DIR`). Fresh installs already create these; upgrades and promotions call the same helper
+    so an older layout never blocks a candidate. Returns the relative names that were created or
+    first-written. Existing values are left untouched. A failure to create a path raises and must stop the
+    caller before services start.
+    """
+    created: list[str] = []
+    ensure_dir(secrets_root)
+    for name, mode in (("control", 0o700), ("github", 0o700), ("jira", 0o700), ("console", 0o700)):
+        path = secrets_root / name
+        if not path.is_dir():
+            ensure_dir(path, mode)
+            created.append(name)
+        else:
+            os.chmod(path, mode)
+    runtime = secrets_root / "runtime.env"
+    if update_env(runtime, header="Owner-managed runtime secrets (Command Center)"):
+        created.append("runtime.env")
+    if runtime.is_file():
+        os.chmod(runtime, 0o600)
+    # Same override the control plane uses (AIFLOW4_PROJECT_ENV_DIR); else sibling of secrets (…/aiflow/projects).
+    if projects_dir is not None:
+        projects = projects_dir
+    elif configured := os.environ.get("AIFLOW4_PROJECT_ENV_DIR"):
+        projects = Path(configured)
+    else:
+        projects = secrets_root.parent / "projects"
+    if not projects.is_dir():
+        ensure_dir(projects)
+        created.append("projects")
+    return created
+
+
 def ensure_internal(secret_dir: Path, public_url: str, gatus_url: str) -> list[str]:
     """Create the internal secrets that are missing; returns the names of the files that changed."""
     ensure_dir(secret_dir)
     # These owner-managed runtime files have their own lifecycle and UI. Keep them separate from the generated
     # control credentials, Jira OAuth material, and GitHub App keys.
-    update_env(secret_dir.parent / "runtime.env", header="Owner-managed runtime secrets (Command Center)")
-    ensure_dir(secret_dir.parent.parent / "projects")
+    changed = ensure_runtime_layout(secret_dir.parent)
     pg = read_env(secret_dir / POSTGRES_ENV).get("POSTGRES_PASSWORD") or secrets.token_urlsafe(32)
     o2 = read_env(secret_dir / OPENOBSERVE_ENV).get("ZO_ROOT_USER_PASSWORD") or secrets.token_urlsafe(24)
-    changed = []
     if update_env(secret_dir / POSTGRES_ENV, header="registry database (aiflow4 install control; do not edit by hand)",
                   keep={"POSTGRES_USER": DB_USER, "POSTGRES_DB": DB_NAME, "POSTGRES_PASSWORD": pg}):
         changed.append(POSTGRES_ENV)

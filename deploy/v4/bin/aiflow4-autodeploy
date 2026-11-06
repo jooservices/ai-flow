@@ -11,6 +11,7 @@ RELEASES=$ROOT/control/releases
 CURRENT_FILE=$RELEASES/CURRENT
 CANARY_FILE=$RELEASES/CANARY.json
 REJECTED_FILE=$RELEASES/CANARY_REJECTED
+FAILURES_FILE=$RELEASES/PROMOTION_FAILURES.json
 CUR=$(cat "$CURRENT_FILE" 2>/dev/null || true)
 CANARY_MIN_AGE_S=${AIFLOW4_CANARY_MIN_AGE_S:-1200}
 CANARY_MIN_RUNS=${AIFLOW4_CANARY_MIN_RUNS:-5}
@@ -56,6 +57,35 @@ upgrade_blocked() {
 }
 canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
+# Promotion helpers live in the ai-flow checkout (docs/v4/upgrade-layout.md).
+promotion_py() {
+  local src=$R
+  [ -d "$R/aiflow/v4/install" ] || src=
+  PYTHONPATH="${src:+$src}${src:+:}${PYTHONPATH:-}" python3 "$@"
+}
+ensure_host_layout() {
+  # AIFLOW4_SECRETS_DIR overrides the production default so lab/tests can point at a writable tree.
+  local secrets=${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets}
+  promotion_py - "$secrets" <<'P' || { echo "host layout could not be prepared under $secrets" >&2; return 1; }
+from pathlib import Path
+import sys
+from aiflow.v4.install.secrets import ensure_runtime_layout
+ensure_runtime_layout(Path(sys.argv[1]))
+P
+}
+merged_not_live() {
+  local previous=$1 target=$2
+  git -C "$R" rev-list --count "${previous}..${target}" 2>/dev/null || echo unknown
+}
+extract_deploy_error() {
+  local log=$1
+  # Prefer a missing-file line; otherwise the last non-empty deploy line (sed only: no tail).
+  if grep -Eiq 'not found|no such file|env file' "$log" 2>/dev/null; then
+    grep -Ei 'not found|no such file|env file' "$log" | sed -n '$p'
+    return
+  fi
+  sed '/^$/d' "$log" | sed -n '$p'
+}
 # Retry Jira work even when the rollback incident already exists and CANARY.json has been removed.
 canary_cli retry-tickets || echo "could not retry pending canary flow-bug tickets" >&2
 write_canary() {
@@ -159,9 +189,23 @@ else
   TARGET=$(git -C "$R" tag --merged origin/master --list 'v[0-9]*' --sort=-version:refname | head -n 1)
   [ -n "$TARGET" ] || { echo "no versioned release tag on master"; exit 0; }
   [ "$TARGET" != "$CUR" ] || exit 0
+  ensure_host_layout || exit 1
   REJECTED=$(cat "$REJECTED_FILE" 2>/dev/null || true)
-  if [ "$TARGET" = "$REJECTED" ]; then
-    echo "release $TARGET already failed its canary; waiting for a newer release"
+  TRY=$(promotion_py - "$REJECTED_FILE" "$FAILURES_FILE" "$TARGET" <<'P'
+import sys
+from pathlib import Path
+from aiflow.v4.install.promotion import load_failures, should_try_build
+rejected = Path(sys.argv[1]).read_text().strip() if Path(sys.argv[1]).is_file() else ""
+ok, reason = should_try_build(rejected=rejected, target=sys.argv[3],
+                              failures=load_failures(Path(sys.argv[2])))
+print("yes" if ok else "no")
+print(reason)
+P
+) || TRY=$'no\ncould not read promotion failure state'
+  TRY_OK=$(printf '%s\n' "$TRY" | sed -n '1p')
+  TRY_REASON=$(printf '%s\n' "$TRY" | sed -n '2p')
+  if [ "$TRY_OK" != yes ]; then
+    echo "${TRY_REASON:-release $TARGET is blocked until its promotion cause changes}"
     exit 0
   fi
   ASSETS=$(gh release view "$TARGET" --repo jooservices/ai-flow --json assets --jq '.assets[].name' 2>/dev/null) || {
@@ -231,17 +275,50 @@ fi
 
 # A promoted release is deployed to the control plane, then CURRENT starts the rolling node upgrade
 # (canary node, then waves; docs/v4/fleet-upgrade.md).
-aiflow4-deploy "$TARGET"; RC=$?
+DEPLOY_LOG=$RELEASES/deploy-attempt.log
+if ! ensure_host_layout; then
+  DEPLOY_ERROR="host layout could not be prepared under ${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets}"
+  RC=1
+else
+  aiflow4-deploy "$TARGET" >"$DEPLOY_LOG" 2>&1; RC=$?
+  cat "$DEPLOY_LOG"
+fi
+[ "$RC" -ne 9 ] || rm -f "$DEPLOY_LOG"
 [ "$RC" -ne 9 ] || upgrade_blocked
 if [ "$RC" -eq 0 ]; then
   sleep 20
   if curl -fsS "$CONTROL_URL/healthz" >/dev/null && control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
      && curl -fsS -o /dev/null "$CONTROL_URL/cc"; then
     echo "deployed $TARGET to the control plane; remaining nodes will update from CURRENT"
+    promotion_py - "$FAILURES_FILE" <<'P'
+from pathlib import Path
+import sys
+from aiflow.v4.install.promotion import clear_failures
+clear_failures(Path(sys.argv[1]))
+P
+    rm -f "$DEPLOY_LOG"
     alert "[INFO] AI Flow: deployed $TARGET" "Canary on $NODE passed; release $TARGET is now desired by the fleet (previous $CUR)."
     exit 0
   fi
+  DEPLOY_ERROR="deploy unhealthy: healthz, registry state or Command Center check failed after promoting $TARGET"
+else
+  [ -n "${DEPLOY_ERROR:-}" ] || DEPLOY_ERROR=$(extract_deploy_error "$DEPLOY_LOG")
+  [ -n "$DEPLOY_ERROR" ] || DEPLOY_ERROR="aiflow4-deploy exited $RC"
 fi
+rm -f "$DEPLOY_LOG"
+NOT_LIVE=$(merged_not_live "${CUR:-$PREVIOUS}" "$TARGET")
+STATE=$(promotion_py - "$FAILURES_FILE" "$TARGET" "deploy" "$DEPLOY_ERROR" "$NOT_LIVE" "${CUR:-$PREVIOUS}" <<'P'
+import json, sys
+from pathlib import Path
+from aiflow.v4.install.promotion import alert_detail, record_failure
+state = record_failure(Path(sys.argv[1]), build=sys.argv[2], step=sys.argv[3], error=sys.argv[4])
+detail = alert_detail(build=sys.argv[2], step=sys.argv[3], error=sys.argv[4], not_live=sys.argv[5],
+                      previous=sys.argv[6], count=state["count"], exhausted=state["exhausted"])
+print(json.dumps({"exhausted": state["exhausted"], "detail": detail, "cause": state["cause"]}))
+P
+) || STATE='{"exhausted": false, "detail": "promotion failed", "cause": "unknown"}'
+EXHAUSTED=$(promotion_py -c 'import json,sys; print("yes" if json.load(sys.stdin)["exhausted"] else "no")' <<<"$STATE")
+DETAIL=$(promotion_py -c 'import json,sys; print(json.load(sys.stdin)["detail"])' <<<"$STATE")
 
 # Keep the existing control-plane rollback for a health failure after the fleet promotion.
 echo "deploy of $TARGET unhealthy; rolling back to ${CUR:-none}"
@@ -250,9 +327,13 @@ if [[ $CUR =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
   # the pre-upgrade check would refuse the older release: the newer one may have applied migrations it lacks
   AIFLOW4_SKIP_UPGRADE_CHECK=1 aiflow4-deploy "$CUR" && ROLLED_BACK=yes
 fi
+if [ "$EXHAUSTED" = yes ]; then
+  printf '%s\n' "$TARGET" > "$REJECTED_FILE.tmp" && mv -f "$REJECTED_FILE.tmp" "$REJECTED_FILE"
+fi
 if [ "$ROLLED_BACK" = yes ]; then
-  alert "[CRITICAL] AI Flow: auto-deploy of $TARGET rolled back" "The control plane was unhealthy after promoting $TARGET; it runs $CUR again. Look at the release checks and control logs."
+  alert "[CRITICAL] AI Flow: promotion of $TARGET failed" "$DETAIL Rolled back to $CUR."
 else
-  alert "[CRITICAL] AI Flow: auto-deploy of $TARGET failed, NOT rolled back" "The control plane was unhealthy after promoting $TARGET and could not be rolled back to ${CUR:-none}; restore it by hand, then look at the release checks and control logs."
+  alert "[CRITICAL] AI Flow: promotion of $TARGET failed, NOT rolled back" \
+    "$DETAIL Could not roll back to ${CUR:-none}; restore it by hand."
 fi
 exit 1

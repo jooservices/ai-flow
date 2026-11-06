@@ -532,7 +532,9 @@ def _autodeploy(tmp_path, current, image_present=True, build_present=True):
         "systemctl": f'echo "systemctl $*" >> {log}\n',
         "python3": f'exec {sys.executable} "$@"\n',
     }
-    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root)}
+    secrets = tmp_path / "secrets"
+    secrets.mkdir(exist_ok=True)
+    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_SECRETS_DIR": str(secrets)}
     result = subprocess.run(["bash", str(AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
     return result, log.read_text(), (releases / "CURRENT").read_text().strip()
 
@@ -583,7 +585,10 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, reque
         "python3": py,
         "sleep": "exit 0\n",
     }
-    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret"}
+    secrets = tmp_path / "secrets"
+    secrets.mkdir(exist_ok=True)
+    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret",
+           "AIFLOW4_SECRETS_DIR": str(secrets)}
     result = subprocess.run(["bash", str(AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
     canary_file = releases / "CANARY.json"
     current = (releases / "CURRENT").read_text().strip()
@@ -654,7 +659,7 @@ def test_autodeploy_rolls_back_the_control_plane_with_aiflow4_deploy_when_promot
     assert "deploy v4.2.0" in calls
     assert current == "v4.2.0"
     assert state is None
-    assert "alert [CRITICAL] AI Flow: auto-deploy of v4.3.0 rolled back" in calls
+    assert "alert [CRITICAL] AI Flow: promotion of v4.3.0 failed" in calls
 
 
 def test_autodeploy_rolls_back_only_the_canary_when_fake_registry_rate_exceeds_baseline(tmp_path):
@@ -752,7 +757,10 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
         "python3": py,
         "sleep": "exit 0\n",
     }
-    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret"}
+    secrets = tmp_path / "secrets"
+    secrets.mkdir(exist_ok=True)
+    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret",
+           "AIFLOW4_SECRETS_DIR": str(secrets)}
     if api_port is not None:
         env["AIFLOW4_CONTROL_URL"] = f"http://127.0.0.1:{api_port}"
     result = subprocess.run(["bash", str(DEVELOP_AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)

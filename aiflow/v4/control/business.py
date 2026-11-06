@@ -18,6 +18,7 @@ from typing import Any
 
 from . import release_progress, release_readiness as readiness
 from .projects import reopen_for_new_ticket
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 LABEL = "change-request"
 ACTOR = "business-console"
@@ -27,14 +28,12 @@ class Invalid(ValueError):
     """The change request form is incomplete or names an epic outside the project."""
 
 
-def epics(db, project: str) -> list[dict]:
-    return db.all("SELECT key, summary, status FROM tickets WHERE project=%s AND type='Epic' ORDER BY key", (project,))
+def epics(tickets, project: str) -> list[dict]:
+    return tickets.epics(project)
 
 
-def change_requests(db, project: str, jira_site: str = "") -> list[dict[str, Any]]:
-    rows = db.all("SELECT key, status, summary, parent_key, jira_created FROM tickets"
-                  " WHERE project=%s AND %s = ANY(labels) ORDER BY jira_created DESC NULLS LAST, key DESC",
-                  (project, LABEL))
+def change_requests(tickets, db, project: str, jira_site: str = "") -> list[dict[str, Any]]:
+    rows = tickets.change_requests(project, LABEL)
     assessed = {r["ticket_key"]: r for r in db.all(
         "SELECT DISTINCT ON (ticket_key) ticket_key, details, ended_at FROM runs"
         " WHERE project=%s AND step='impact' AND outcome='assessed' ORDER BY ticket_key, started_at DESC", (project,))}
@@ -49,20 +48,20 @@ def change_requests(db, project: str, jira_site: str = "") -> list[dict[str, Any
     return out
 
 
-def release_progress_of(db, project: str) -> list[dict[str, Any]]:
-    return release_progress.project_versions(db, project)
+def release_progress_of(db, project: str, ticket_repository=None) -> list[dict[str, Any]]:
+    return release_progress.project_versions(db, project, ticket_repository)
 
 
-def release_readiness(db, project: str) -> list[dict[str, Any]]:
-    return readiness.project_versions(db, project)
+def release_readiness(db, project: str, ticket_repository=None) -> list[dict[str, Any]]:
+    return readiness.project_versions(db, project, ticket_repository)
 
 
-def validate(db, project: str, title: str, description: str, epic: str) -> tuple[str, str, str]:
+def validate(tickets, project: str, title: str, description: str, epic: str) -> tuple[str, str, str]:
     title, description, epic = title.strip(), description.strip(), epic.strip()
     missing = [name for name, v in (("title", title), ("description", description)) if not v]
     if missing:
         raise Invalid(" and ".join(missing) + " required")
-    if epic and not db.one("SELECT key FROM tickets WHERE key=%s AND project=%s AND type='Epic'", (epic, project)):
+    if epic and not tickets.epic_in_project(epic, project):
         raise Invalid(f"{epic} is not an epic of project {project}")
     return title, description, epic
 
@@ -73,9 +72,6 @@ def create(ctx, project: str, title: str, description: str, epic: str) -> dict[s
     status = ctx.jira.status(key)
     if status != "Backlog":  # projects whose workflow starts elsewhere: a change request waits in Backlog
         status = ctx.jira.transition_to(key, "Backlog")
-    ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, parent_key, jira_created,"
-               " jira_updated) VALUES (%s,%s,%s,'Story',%s,%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
-               " status=EXCLUDED.status, labels=EXCLUDED.labels, parent_key=EXCLUDED.parent_key, synced_at=now()",
-               (key, project, status, [LABEL], title, description, epic or None))
+    ticket_repository_of(ctx).upsert_story_ticket((key, project, status, [LABEL], title, description, epic or None))
     reopen_for_new_ticket(ctx, project, key)
     return {"key": key, "status": status, "epic": epic or None, "url": f"{ctx.settings.jira_site.rstrip('/')}/browse/{key}"}

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Request
 
 from .. import quota as quota_reporting
 from .. import merge_flow, route_deps
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 router = APIRouter()
 
@@ -28,7 +29,7 @@ def dashboard_disagreements(request: Request) -> dict:
     user = (route_deps.console_user_for(request, "view.dashboard") if ctx.settings.console_login
             else route_deps.optional_console_user(ctx, request))
     scope = list(user.project_keys) if user and user.project_keys is not None else None
-    rows = merge_flow.disagreements(ctx.db, scope)
+    rows = merge_flow.disagreements(ctx.db, scope, ticket_repository=ticket_repository_of(ctx))
     return {"after_s": merge_flow.DISAGREEMENT_AFTER_S, "tickets": rows}
 
 

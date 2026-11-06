@@ -16,6 +16,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .features.tickets.repository import TicketRepository
+
 READY = "aiflow-ready"
 WAITING = {"Needs owner", "Human review"}
 STATUS_EVENTS = ("ticket.status", "jira.transition")
@@ -77,8 +79,10 @@ def _run_segments(runs: list[dict], now: datetime) -> list[dict]:
     return segs
 
 
-def timeline(db, key: str, now: datetime | None = None) -> dict[str, Any] | None:
-    t = db.one("SELECT key, status, labels, done_at FROM tickets WHERE key=%s", (key,))
+def timeline(db, key: str, now: datetime | None = None,
+             ticket_repository: TicketRepository | None = None) -> dict[str, Any] | None:
+    ticket_repository = ticket_repository or TicketRepository(db)
+    t = ticket_repository.timeline_ticket(key)
     if not t:
         return None
     now = now or datetime.now(timezone.utc)

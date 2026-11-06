@@ -4,6 +4,7 @@ from __future__ import annotations
 import secrets
 import uuid
 from dataclasses import dataclass, field
+from inspect import Parameter, signature
 from typing import Any
 
 from fastapi import HTTPException
@@ -15,6 +16,7 @@ from ...platform.events.wiring import publish_for
 from .events import RunStarted
 from ..work.constants import utcnow
 from ...route_deps import h
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 @dataclass
@@ -46,6 +48,18 @@ class Claim:
     selected_repo: dict[str, Any] = field(default_factory=dict)
     run_details: dict[str, Any] = field(default_factory=dict)
     quota_reservation_tokens: int | None = None
+
+
+def _ticket_repository_kwargs(function, ctx) -> dict[str, Any]:
+    """Pass the shared repository when the hot-file operation accepts the dependency."""
+    try:
+        parameters = signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return {"ticket_repository": ticket_repository_of(ctx)}
+    if any(parameter.name == "ticket_repository" or parameter.kind == Parameter.VAR_KEYWORD
+           for parameter in parameters):
+        return {"ticket_repository": ticket_repository_of(ctx)}
+    return {}
 
 
 def refuse_early(work: Claim) -> JSONResponse | None:
@@ -133,8 +147,10 @@ def reserve_hot_files(work: Claim) -> JSONResponse | None:
         ticket = work.ticket
         taken = hotfiles.reserve(
             work.ctx.db, ticket["key"], work.run_id,
-            hotfiles.predict(work.ctx.db, ticket, work.deps.ticket_epic(ticket))["hot"],
-            slots=work.ctx.settings.hot_file_slots)
+            hotfiles.predict(work.ctx.db, ticket, work.deps.ticket_epic(ticket),
+                             **_ticket_repository_kwargs(hotfiles.predict, work.ctx))["hot"],
+            slots=work.ctx.settings.hot_file_slots,
+            **_ticket_repository_kwargs(hotfiles.reserve, work.ctx))
         if taken:
             work.ctx.leases.release(ticket["key"], work.run_id, work.lease.fence)
             if work.probation_id is not None:

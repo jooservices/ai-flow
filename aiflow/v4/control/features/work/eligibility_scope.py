@@ -30,9 +30,6 @@ class Scope:
     held: set[str] = field(default_factory=set)
     role_modes: dict[str, str] = field(default_factory=dict)
     quota_at_risk: bool = False
-    scoped_key: str = ""
-    scoped_tickets_key: str = ""
-    scoped_ticket: tuple[str, ...] = ()
     backoff_sql: str | None = None
     intake_backoff_sql: str | None = None
     now: Callable | None = None
@@ -43,9 +40,6 @@ class Scope:
 
     def __post_init__(self) -> None:
         """Prepare the optional ticket SQL fragments and late-bound default helpers."""
-        self.scoped_key = " AND key=%s" if self.ticket_key is not None else ""
-        self.scoped_tickets_key = " AND tickets.key=%s" if self.ticket_key is not None else ""
-        self.scoped_ticket = (self.ticket_key,) if self.ticket_key is not None else ()
         if self.backoff_sql is None:
             self.backoff_sql = constants.BACKOFF_SQL
         if self.intake_backoff_sql is None:

@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+from .features.tickets.repository import TicketRepository
+
 KINDS = ("study_case", "knowledge", "skill", "agent", "guide", "policy")
 FOLDERS = {"study_case": "study-cases", "knowledge": "knowledge", "skill": "skills",
            "agent": "agents", "guide": "guides"}
@@ -72,13 +74,14 @@ def _signature(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest() if normalized else ""
 
 
-def _ticket_epic(db, ticket: str, parent: str = "") -> str:
+def _ticket_epic(db, ticket: str, parent: str = "", ticket_repository: TicketRepository | None = None) -> str:
     """Resolve a mirrored ticket's epic ancestor, including nested parent links."""
     current = parent
+    tickets = ticket_repository or TicketRepository(db)
     seen: set[str] = set()
     while current and current not in seen:
         seen.add(current)
-        row = db.one("SELECT type,parent_key FROM tickets WHERE key=%s", (current,))
+        row = tickets.knowledge_ticket_ancestor(current)
         if not row:
             break
         if row["type"] == "Epic":
@@ -137,10 +140,11 @@ def save_item(db, *, project: str = "", epic: str = "", scope: str = "project", 
     return {}
 
 
-def capture_run(db, run_id: str, jira_site: str = "", actor: str = "AI Flow") -> dict | None:
+def capture_run(db, run_id: str, jira_site: str = "", actor: str = "AI Flow",
+                ticket_repository: TicketRepository | None = None) -> dict | None:
     """Write one durable decision record for every completed run, plus a case for time-costing outcomes."""
-    run = db.one("SELECT r.*,t.summary AS ticket_summary,t.description AS ticket_description,t.parent_key "
-                 "FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.id=%s AND r.status='finished'", (run_id,))
+    tickets = ticket_repository or TicketRepository(db)
+    run = tickets.knowledge_capture_run(run_id)
     if not run:
         return None
     details = run.get("details") or {}
@@ -161,7 +165,7 @@ def capture_run(db, run_id: str, jira_site: str = "", actor: str = "AI Flow") ->
     jira_url = f"{jira_site.rstrip('/')}/browse/{run['ticket_key']}" if jira_site else ""
     scope = "project" if run["project"] else "general"
     item = save_item(db, project=run["project"], scope=scope,
-                     epic=_ticket_epic(db, run["ticket_key"], run.get("parent_key") or ""), kind="decision",
+                     epic=_ticket_epic(db, run["ticket_key"], run.get("parent_key") or "", tickets), kind="decision",
                      title=f"{run['ticket_key']} {run['step']} run", content=_redact_sensitive("\n".join(lines)), actor=actor,
                      source_type="run", source_ref=str(run["id"]), source_url=jira_url,
                      ticket_key=run["ticket_key"], run_id=str(run["id"]), pr_url=run.get("pr_url") or "",
@@ -174,7 +178,7 @@ def capture_run(db, run_id: str, jira_site: str = "", actor: str = "AI Flow") ->
             "Resolve the recorded cause before retrying; ask the ticket owner when the run is blocked.")
         prevention = details.get("avoid_next_time") or details.get("prevention") or (
             "Review this case before repeating the affected verification or implementation step.")
-        write_study_case(db, project=run["project"], epic=_ticket_epic(db, run["ticket_key"], run.get("parent_key") or ""),
+        write_study_case(db, project=run["project"], epic=_ticket_epic(db, run["ticket_key"], run.get("parent_key") or "", tickets),
                          title=f"{run['ticket_key']} {run['step']} {run['outcome']}",
                          situation=f"{run['ticket_summary'] or run['ticket_key']}: {run['summary']}",
                          cause=str(cause), fix=str(fix), prevention=str(prevention), source_type="run",
@@ -183,11 +187,12 @@ def capture_run(db, run_id: str, jira_site: str = "", actor: str = "AI Flow") ->
     return item
 
 
-def capture_reviewer_run(db, run_id: str, jira_site: str = "", *, ticket_key: str, outcome: str) -> dict | None:
+def capture_reviewer_run(db, run_id: str, jira_site: str = "", *, ticket_key: str, outcome: str,
+                         ticket_repository: TicketRepository | None = None) -> dict | None:
     """Capture a reviewer run and backfill its ticket only after a successful merge."""
-    item = capture_run(db, run_id, jira_site)
+    item = capture_run(db, run_id, jira_site, ticket_repository=ticket_repository)
     if outcome in {"merged", "skipped_gate"}:
-        capture_closed_tickets(db, jira_site, ticket_key=ticket_key)
+        capture_closed_tickets(db, jira_site, ticket_key=ticket_key, ticket_repository=ticket_repository)
     return item
 
 
@@ -222,17 +227,11 @@ def write_study_case(db, *, project: str, title: str, situation: str, cause: str
         raise
 
 
-def capture_closed_tickets(db, jira_site: str = "", *, ticket_key: str = "") -> int:
+def capture_closed_tickets(db, jira_site: str = "", *, ticket_key: str = "",
+                           ticket_repository: TicketRepository | None = None) -> int:
     """Backfill study cases for closed tickets, optionally limiting the work to one newly closed ticket."""
-    query = ("SELECT t.key,t.project,t.summary,t.description,t.parent_key FROM tickets t WHERE t.status='Done' "
-             "AND NOT EXISTS (SELECT 1 FROM knowledge_items k WHERE k.kind='study_case' "
-             "AND k.source_type='ticket' AND k.source_ref=t.key) "
-             "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key=t.key AND r.status='running')")
-    params = ()
-    if ticket_key:
-        query += " AND t.key=%s"
-        params = (ticket_key,)
-    rows = db.all(query, params)
+    tickets = ticket_repository or TicketRepository(db)
+    rows = tickets.knowledge_closed_tickets(ticket_key)
     count = 0
     for ticket in rows:
         runs = db.all("SELECT id,step,outcome,summary,details,pr_url FROM runs WHERE ticket_key=%s "
@@ -252,7 +251,7 @@ def capture_closed_tickets(db, jira_site: str = "", *, ticket_key: str = "") -> 
                 "\nAvoid next time: Follow the recorded decisions and checks when similar work returns.")
         url = f"{jira_site.rstrip('/')}/browse/{ticket['key']}" if jira_site else ""
         try:
-            item = save_item(db, project=ticket["project"], epic=_ticket_epic(db, ticket["key"], ticket.get("parent_key") or ""), kind="study_case",
+            item = save_item(db, project=ticket["project"], epic=_ticket_epic(db, ticket["key"], ticket.get("parent_key") or "", tickets), kind="study_case",
                              title=_redact_sensitive(f"Completed ticket {ticket['key']}: {ticket['summary'][:150]}"), content=_redact_sensitive(body),
                              source_type="ticket", source_ref=ticket["key"], source_url=url,
                              ticket_key=ticket["key"], run_id=str(runs[-1]["id"]) if runs else "",

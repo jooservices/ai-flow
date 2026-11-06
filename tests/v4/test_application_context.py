@@ -16,6 +16,7 @@ from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.fencing import Leases
 from aiflow.v4.core.settings import Settings
 from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS
+from aiflow.v4.control.features.tickets.repository import FakeTicketRepository, TicketRepository
 
 
 SNAPSHOT = Path(__file__).parent / "fixtures" / "application-context-route-snapshot.json"
@@ -37,6 +38,7 @@ def test_application_context_exposes_typed_dependencies(ctx):
     assert isinstance(ctx.clock, SystemClock)
     assert get_type_hints(ApplicationContext)["clock"] is Clock
     assert get_type_hints(ApplicationContext)["repo_configuration"] is str
+    assert isinstance(ctx.ticket_repository, TicketRepository)
     assert ctx.clock.now().tzinfo is not None
     assert replace(ctx, repo_configuration="").repo_configuration == ctx.settings.control_repo
 
@@ -53,6 +55,10 @@ def test_application_context_accepts_repository_and_clock_replacements(ctx):
 
     fixed_clock = FixedClock()
     assert replace(ctx, clock=fixed_clock).clock.now() == fixed_clock.now()
+
+    fake_tickets = FakeTicketRepository()
+    ctx.ticket_repository = fake_tickets
+    assert ctx.ticket_repository is fake_tickets
 
     with pytest.raises(TypeError, match="repositories must be callable"):
         ctx.repositories = object()

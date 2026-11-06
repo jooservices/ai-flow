@@ -452,26 +452,10 @@ def enforce_work_entitlement(ctx, account_id: str, node: str, *, public_key: str
     return state
 
 
-def usage_report(db) -> list[dict[str, Any]]:
+def usage_report(db, ticket_repository=None) -> list[dict[str, Any]]:
     """Count tickets by their final Done time and report AI usage by run start month."""
-    rows = db.all(
-        "WITH run_usage AS ("
-        " SELECT project, date_trunc('month', started_at AT TIME ZONE 'UTC') AS month_at,"
-        " coalesce(sum(tokens_in),0) AS tokens_in, coalesce(sum(tokens_out),0) AS tokens_out,"
-        " coalesce(sum(cost_usd),0)::numeric(12,6) AS cost_usd"
-        " FROM runs GROUP BY project, date_trunc('month', started_at AT TIME ZONE 'UTC')"
-        "), finished AS ("
-        " SELECT project, date_trunc('month', done_at AT TIME ZONE 'UTC') AS month_at,"
-        " count(*)::int AS tickets_finished FROM tickets"
-        " WHERE status='Done' AND done_at IS NOT NULL"
-        " GROUP BY project, date_trunc('month', done_at AT TIME ZONE 'UTC')"
-        ") SELECT coalesce(r.project,f.project) AS project,"
-        " to_char(coalesce(r.month_at,f.month_at),'YYYY-MM') AS month,"
-        " coalesce(f.tickets_finished,0)::int AS tickets_finished,"
-        " coalesce(r.tokens_in,0) AS tokens_in, coalesce(r.tokens_out,0) AS tokens_out,"
-        " coalesce(r.cost_usd,0)::numeric(12,6) AS cost_usd"
-        " FROM run_usage r FULL OUTER JOIN finished f USING (project,month_at)"
-        " ORDER BY month DESC, project")
+    from .features.tickets.repository import TicketRepository
+    rows = (ticket_repository or TicketRepository(db)).licensing_usage_report()
     return [{"project": row["project"], "month": row["month"],
              "tickets_finished": int(row["tickets_finished"]), "tokens_in": int(row["tokens_in"]),
              "tokens_out": int(row["tokens_out"]), "cost_usd": float(row["cost_usd"])} for row in rows]

@@ -33,6 +33,7 @@ from typing import Any, Callable
 
 from . import merge_queue
 from .db import J
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.merge_flow")
 
@@ -164,8 +165,7 @@ def _move(ctx, t: dict, target: str, cause: str, detail: str, *, done_at: dateti
     status = live if live == target else ctx.jira.transition_to(key, target)
     if status != target:
         raise RuntimeError(f"Jira is at {status}, not {target}")
-    ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN %s='Done' THEN coalesce(%s, done_at, now())"
-               " ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, done_at, key))
+    ticket_repository_of(ctx).update_status_with_optional_done_at((status, status, done_at, key))
     _audit(ctx, "jira", "transition", key, True, status, {"to": target, "cause": cause, "detail": detail[:300]})
     record_move(ctx, key, t["status"], status, cause, detail)
     return status
@@ -186,8 +186,7 @@ def send_to_dev(ctx, t: dict, ref: dict[str, Any] | None, reason: str, cause: st
     _keep(hold)
     try:
         ctx.jira.add_label(key, "rework")
-        ctx.db.run("UPDATE tickets SET labels=CASE WHEN 'rework'=ANY(labels) THEN labels"
-                   " ELSE array_append(labels,'rework') END WHERE key=%s", (key,))
+        ticket_repository_of(ctx).append_rework_label_if_missing((key,))
     except Exception as e:  # noqa: BLE001
         log.warning("could not label %s: %s", key, e)
     _comment(ctx, key, "AI Flow · merge · back to development\nWhat: The pull request could not be merged.\n"
@@ -200,7 +199,7 @@ def send_to_dev(ctx, t: dict, ref: dict[str, Any] | None, reason: str, cause: st
             log.warning("could not comment on PR #%s: %s", ref["number"], e)
     _note_run(ctx, key, t["project"], "rework", f"merge blocked: {reason}", findings)
     _move(ctx, t, "To Do", cause, reason, hold=hold)
-    ctx.db.run("UPDATE tickets SET approved_at=NULL, merge_note=%s WHERE key=%s", (reason[:500], key))
+    ticket_repository_of(ctx).clear_approval_and_set_merge_note((reason[:500], key))
 
 
 def _merge_facts(ctx, key: str, ref: dict[str, Any] | None, state: str, data: dict, merged_by: str = "") -> None:
@@ -208,10 +207,7 @@ def _merge_facts(ctx, key: str, ref: dict[str, Any] | None, state: str, data: di
     github_time = _parse_time(data.get("merged_at"))
     sha = str(data.get("merge_commit_sha") or data.get("sha") or "")
     login = merged_by or str((data.get("merged_by") or {}).get("login") or "")
-    ctx.db.run("UPDATE tickets SET pr_url=%s, pr_state=%s, merged_at=coalesce(%s, merged_at, now()),"
-               " merge_sha=CASE WHEN %s<>'' THEN %s ELSE merge_sha END,"
-               " merged_by=CASE WHEN %s<>'' THEN %s ELSE merged_by END, merge_note='', pr_checked_at=now() WHERE key=%s",
-               (ref["url"] if ref else "", state, github_time, sha, sha, login, login, key))
+    ticket_repository_of(ctx).update_merge_facts((ref['url'] if ref else '', state, github_time, sha, sha, login, login, key))
 
 
 def record_merge(ctx, key: str, ref: dict[str, Any] | None, sha: str, merged_by: str = "flow",
@@ -220,10 +216,7 @@ def record_merge(ctx, key: str, ref: dict[str, Any] | None, sha: str, merged_by:
 
     merged_at is the time of the merge itself (GitHub's, or the clock right after the merge call), never the time of
     the Jira move that follows. settled=False keeps the stored pull request state until the move to Done is made."""
-    ctx.db.run("UPDATE tickets SET pr_url=coalesce(nullif(%s,''),pr_url), pr_state=CASE WHEN %s THEN 'merged' ELSE pr_state END,"
-               " merged_at=coalesce(%s, merged_at, now()), merge_sha=%s, merged_by=%s,"
-               " approved_at=coalesce(approved_at, now()), merge_note='', pr_checked_at=now() WHERE key=%s",
-               (ref["url"] if ref else "", settled, merged_at, sha, merged_by, key))
+    ticket_repository_of(ctx).record_merge_on_ticket((ref['url'] if ref else '', settled, merged_at, sha, merged_by, key))
     ctx.db.run("DELETE FROM ticket_disagreements WHERE ticket=%s", (key,))
 
 
@@ -232,9 +225,7 @@ def merge_ready(ctx) -> list[str]:
     """Merge every approved ticket whose pull request can merge; returns the keys merged in this pass."""
     if not ctx.jira:
         return []
-    rows = ctx.db.all(
-        "SELECT * FROM tickets WHERE status=%s OR (status='Human review' AND approved_at IS NOT NULL AND merged_at IS NULL)"
-        " ORDER BY approved_at NULLS FIRST, key", (READY_TO_MERGE,))
+    rows = ticket_repository_of(ctx).list_merge_ready_tickets((READY_TO_MERGE,))
     merged: list[str] = []
     for t in rows:
         try:
@@ -242,7 +233,8 @@ def merge_ready(ctx) -> list[str]:
                 merged.append(t["key"])
         except Exception as e:  # noqa: BLE001 - one ticket must not stop the others
             log.warning("merge step for %s failed: %s", t["key"], e)
-            ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s", (f"merge step failed: {e}"[:500], t["key"]))
+            ticket_repository_of(ctx).set_merge_note(
+                (f"merge step failed: {e}"[:500], t["key"]))
     return merged
 
 
@@ -250,10 +242,10 @@ def _merge_one(ctx, t: dict) -> bool:
     key = t["key"]
     ref = latest_pr(ctx.db, key)
     if not ref:
-        ctx.db.run("UPDATE tickets SET merge_note='waiting: the ticket has no pull request' WHERE key=%s", (key,))
+        ticket_repository_of(ctx).set_merge_note_missing_pull_request((key,))
         return False
     if not t["approved_at"]:
-        ctx.db.run("UPDATE tickets SET approved_at=now() WHERE key=%s AND approved_at IS NULL", (key,))
+        ticket_repository_of(ctx).stamp_approved_at_now((key,))
     with Hold(ctx, key) as hold:
         if not hold.ok:
             return False  # a run owns the ticket now; the next pass looks again
@@ -274,8 +266,7 @@ def _check_queue_updated(ctx, key: str, ref: dict[str, Any], result: dict) -> bo
     _audit(ctx, "github", "update-branch", key, True, message, {"number": ref["number"]})
     ctx.events.emit("github.merge_queue", ticket=key, account="merge-flow", node="control",
                     outcome="updated", reason=message[:200])
-    ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-               ("waiting: the branch was updated, the checks run again", key))
+    ticket_repository_of(ctx).set_merge_note(('waiting: the branch was updated, the checks run again', key))
     return True
 
 
@@ -289,16 +280,16 @@ def _check_queue_conflict(ctx, t: dict, ref: dict[str, Any], result: dict, hold:
 def _check_queue_busy(ctx, key: str, result: dict) -> bool:
     if not result.get("queued"):
         return False
-    ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-               (f"waiting: {result.get('message', 'the repository merge queue is busy')}"[:500], key))
+    ticket_repository_of(ctx).set_merge_note(
+        (f"waiting: {result.get('message', 'the repository merge queue is busy')}"[:500], key))
     return True
 
 
 def _check_branch_update_failed(ctx, key: str, result: dict) -> bool:
     if not result.get("update_failed"):
         return False
-    ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-               (f"waiting: {result.get('message', 'the branch update failed')}"[:500], key))
+    ticket_repository_of(ctx).set_merge_note(
+        (f"waiting: {result.get('message', 'the branch update failed')}"[:500], key))
     return True
 
 
@@ -343,21 +334,21 @@ def _check_failed_checks(ctx, t: dict, ref: dict[str, Any], checks: list[dict], 
 def _check_pending_checks(ctx, key: str, checks: list[dict]) -> bool:
     if not any(check["state"] == "pending" for check in checks):
         return False
-    ctx.db.run("UPDATE tickets SET merge_note='waiting: the checks are still running' WHERE key=%s", (key,))
+    ticket_repository_of(ctx).set_merge_note_checks_running((key,))
     return True
 
 
 def _check_head_changed(ctx, key: str, result: dict) -> bool:
     if not str(result.get("message", "")).startswith("409"):
         return False
-    ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-               ("waiting: the branch changed after its checks were read; it is checked again", key))
+    ticket_repository_of(ctx).set_merge_note(
+        ("waiting: the branch changed after its checks were read; it is checked again", key))
     return True
 
 
 def _record_github_refusal(ctx, key: str, result: dict) -> None:
-    ctx.db.run("UPDATE tickets SET merge_note=%s WHERE key=%s",
-               (f"waiting: GitHub refused the merge ({result.get('message', '')})"[:500], key))
+    ticket_repository_of(ctx).set_merge_note(
+        (f"waiting: GitHub refused the merge ({result.get('message', '')})"[:500], key))
 
 
 def _handle_github_refusal(ctx, key: str, t: dict, ref: dict[str, Any], result: dict, hold: Hold) -> None:
@@ -380,8 +371,8 @@ def _complete_successful_merge(ctx, key: str, t: dict, ref: dict[str, Any], gate
     sha = str(result.get("sha") or "")
     record_merge(ctx, key, ref, sha, settled=False, merged_at=merged_at)
     _move(ctx, t, "Done", FLOW_MERGE, f"PR #{ref['number']} merged as {sha[:10]}", done_at=merged_at, hold=hold)
-    ctx.db.run("UPDATE tickets SET pr_state='merged' WHERE key=%s", (key,))
-    row = ctx.db.one("SELECT * FROM tickets WHERE key=%s", (key,))
+    ticket_repository_of(ctx).mark_pull_request_merged((key,))
+    row = ticket_repository_of(ctx).get_full_ticket_row((key,))
     seconds = facts(row)["approval_to_merge_s"]
     hold.keep()
     _comment(ctx, key, f"AI Flow · merge · merged\nWhat: PR #{ref['number']} merged as {sha[:10]}"
@@ -532,7 +523,7 @@ def _reconcile_move(ctx, t: dict, ref: dict[str, Any], data: dict, state: str, t
         _move(ctx, t, "To Do", RECONCILE, reason, hold=hold)
         _store_state(ctx, key, ref, state, data)
         _note_run(ctx, key, t["project"], "rework", "pull request closed without merge", f"- {reason}")
-        ctx.db.run("UPDATE tickets SET approved_at=NULL, merge_note=%s WHERE key=%s", (reason, key))
+        ticket_repository_of(ctx).clear_approval_and_set_merge_note((reason, key))
         hold.keep()
         _comment(ctx, key, f"AI Flow · reconcile · back to To Do\nWhat: {reason}\nWhy: Jira follows GitHub; closed work is"
                            " not done.\nNext: The next dev run continues from the branch or opens a new pull request.")
@@ -549,29 +540,28 @@ def _reconcile_move(ctx, t: dict, ref: dict[str, Any], data: dict, state: str, t
 def _store_state(ctx, key: str, ref: dict[str, Any], state: str, data: dict, keep: bool = False) -> None:
     """Remember what GitHub says. A state is only stored once the ticket follows it (keep: leave it unchanged)."""
     if keep:
-        ctx.db.run("UPDATE tickets SET pr_url=%s, pr_checked_at=now() WHERE key=%s", (ref["url"], key))
+        ticket_repository_of(ctx).store_pr_url((ref['url'], key))
     elif state == "merged":
         _merge_facts(ctx, key, ref, state, data)
     else:
-        ctx.db.run("UPDATE tickets SET pr_url=%s, pr_state=%s, pr_checked_at=now() WHERE key=%s", (ref["url"], state, key))
+        ticket_repository_of(ctx).store_pr_url_and_state((ref['url'], state, key))
 
 
 def _reconcile_ticket(ctx, t: dict, ref: dict[str, Any]) -> tuple[int, int, int]:
     """One pull request of a pass: (checked, moved, failed)."""
     if ref["url"] != t["pr_url"]:  # a new pull request for the ticket: its history starts again
         t["pr_state"] = ""
-        ctx.db.run("UPDATE tickets SET pr_state='', pr_url=%s, merged_at=NULL, merge_sha='', merged_by='' WHERE key=%s",
-                   (ref["url"], t["key"]))
+        ticket_repository_of(ctx).clear_merge_state_keep_pr_url((ref['url'], t['key']))
     try:
         data = _gateway(ctx, ref).pr(ref["name"], ref["number"]) or {}
-        before = ctx.db.one("SELECT status FROM tickets WHERE key=%s", (t["key"],))["status"]
+        before = ticket_repository_of(ctx).get_ticket_status((t["key"],))["status"]
         reconcile_one(ctx, t, ref, data)
-        after = ctx.db.one("SELECT status FROM tickets WHERE key=%s", (t["key"],))["status"]
+        after = ticket_repository_of(ctx).get_ticket_status((t["key"],))["status"]
         return 1, int(before != after), 0
     except Exception as e:  # noqa: BLE001
         log.warning("reconcile of %s could not read GitHub: %s", t["key"], e)
         # looked at, so a pull request GitHub cannot answer for does not keep the front of the queue
-        ctx.db.run("UPDATE tickets SET pr_checked_at=now() WHERE key=%s", (t["key"],))
+        ticket_repository_of(ctx).touch_pr_checked_at((t['key'],))
         return 0, 0, 1
 
 
@@ -586,12 +576,7 @@ def reconcile(ctx, only: tuple[str, int] | None = None, *, budget_s: float = REC
     if not ctx.jira:
         return out
     deadline = clock() + budget_s
-    rows = ctx.db.all(
-        "SELECT t.*, r.pr_url AS latest_pr FROM tickets t JOIN LATERAL ("
-        " SELECT pr_url FROM runs WHERE ticket_key=t.key AND pr_url<>'' ORDER BY started_at DESC LIMIT 1) r ON true"
-        " WHERE t.type <> 'Epic' AND (t.pr_state <> 'merged' OR t.status <> 'Done' OR t.merged_at IS NULL)"
-        " AND NOT (t.pr_state='closed' AND t.status='Done' AND t.pr_checked_at > now() - interval '10 minutes')"
-        " ORDER BY t.pr_checked_at NULLS FIRST, t.key LIMIT %s", (MAX_PER_PASS,))
+    rows = ticket_repository_of(ctx).list_tickets_needing_pr_reconcile((MAX_PER_PASS,))
     todo = []
     for t in rows:
         ref = pr_ref(t["latest_pr"])
@@ -614,11 +599,9 @@ def reconcile(ctx, only: tuple[str, int] | None = None, *, budget_s: float = REC
     return out
 
 
-def disagreements(db, project_scope: list[str] | None = None) -> list[dict]:
+def disagreements(db, project_scope: list[str] | None = None, *, ticket_repository=None) -> list[dict]:
     """Tickets whose Jira state and pull request have disagreed for more than five minutes."""
-    rows = db.all(
-        "SELECT d.ticket AS key, t.project, t.summary, d.jira_status, d.github_state, d.expected, d.detail, d.since,"
-        " t.pr_url, extract(epoch FROM (now()-d.since))::int AS age_s FROM ticket_disagreements d"
-        " JOIN tickets t ON t.key=d.ticket WHERE d.since < now() - make_interval(secs => %s) ORDER BY d.since",
-        (DISAGREEMENT_AFTER_S,))
+    from .features.tickets.repository import TicketRepository
+    tickets = ticket_repository or TicketRepository(db)
+    rows = tickets.disagreements(DISAGREEMENT_AFTER_S)
     return [r for r in rows if project_scope is None or r["project"] in project_scope]

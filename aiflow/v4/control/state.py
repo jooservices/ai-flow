@@ -13,6 +13,7 @@ from . import tooling
 from . import load_policy
 from .sa import dashboard_data, thresholds
 from .shared_accounts import machines_views
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
@@ -25,13 +26,13 @@ def _iso(ts: datetime | None) -> str | None:
     return None if ts is None else ts.isoformat()
 
 
-def _active_run_context(db, repo):
+def _active_run_context(db, repo, ticket_repository=None):
+    ticket_repository = ticket_repository or ticket_repository_of(db=db)
     assigned: dict[str, int] = {}
     for account in repo.accounts:
         for machine in account.machines:
             assigned[machine] = assigned.get(machine, 0) + 1
-    active_rows = db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
-                         " WHERE r.status='running' ORDER BY r.started_at")
+    active_rows = ticket_repository.active_run_rows()
     active_by_node: dict[str, int] = {}
     runs_per_account: dict[str, int] = {}
     running: dict[str, dict] = {}
@@ -107,7 +108,8 @@ def _node_view(ctx, repo, releases, sa_thresholds, n, assigned, active_by_node, 
 
 
 def _node_section(ctx, db, repo, releases, sa_thresholds):
-    assigned, active_rows, active_by_node, runs_per_account, running = _active_run_context(db, repo)
+    assigned, active_rows, active_by_node, runs_per_account, running = _active_run_context(
+        db, repo, ticket_repository_of(ctx))
     host_load = {row["hostname"]: row for row in db.all(
         "SELECT hostname,cpu_load_per_cpu,state FROM machine_host_load_limits")}
     nodes = [_node_view(ctx, repo, releases, sa_thresholds, node, assigned, active_by_node, host_load)
@@ -246,15 +248,15 @@ def _recent_run_view(row):
             "already_done": bool((row["details"] or {}).get("already_done")), "ended_age_s": _age(row["ended_at"])}
 
 
-def _recent_runs_section(db):
-    rows = db.all("SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key"
-                  " WHERE r.status<>'running' ORDER BY r.started_at DESC LIMIT 30")
+def _recent_runs_section(db, ticket_repository=None):
+    ticket_repository = ticket_repository or ticket_repository_of(db=db)
+    rows = ticket_repository.recent_run_rows()
     return [_recent_run_view(row) for row in rows]
 
 
-def _ticket_base_rows(db, repo):
-    tickets = db.all("SELECT key, project, status, type, priority, labels, summary, parent_key, blocked_by, done_at,"
-                     " jira_updated FROM tickets ORDER BY project, key")
+def _ticket_base_rows(db, repo, ticket_repository=None):
+    ticket_repository = ticket_repository or ticket_repository_of(db=db)
+    tickets = ticket_repository.snapshot_tickets()
     ticket_index = {ticket["key"]: ticket for ticket in tickets}
     for ticket in tickets:
         ticket["epic"] = epic_for_ticket(ticket, ticket_index)
@@ -280,8 +282,9 @@ def _verified_run_markers(db, tickets):
     return already_done
 
 
-def _ticket_section(db, repo, active, recent):
-    tickets, by_status = _ticket_base_rows(db, repo)
+def _ticket_section(db, repo, active, recent, ticket_repository=None):
+    ticket_repository = ticket_repository or ticket_repository_of(db=db)
+    tickets, by_status = _ticket_base_rows(db, repo, ticket_repository)
     run_by_ticket = {run["ticket"]: run for run in active}
     last_by_ticket: dict[str, dict] = {}
     for run in recent:
@@ -341,8 +344,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
     accounts = _account_section(ctx, db, repo, node_status, sa_thresholds,
                                 runs_per_account, running, include_signin)
     active = _active_runs_section(ctx, active_rows)
-    recent = _recent_runs_section(db)
-    tickets, by_status = _ticket_section(db, repo, active, recent)
+    recent = _recent_runs_section(db, ticket_repository_of(ctx))
+    tickets, by_status = _ticket_section(db, repo, active, recent, ticket_repository_of(ctx))
     today, incidents, incidents_recent, events, projects = _operational_section(db, repo, by_status)
     sa = dashboard_data(ctx, nodes, accounts)
     return {
@@ -354,8 +357,9 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "tool_waits": tooling.waiting_summary(ctx),
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets,
-        "release_readiness": release_readiness.all_versions(db, repo.projects),
-        "release_progress": release_progress.all_versions(db, repo.projects), "scale_proof": scale_proof.summary(db),
+        "release_readiness": release_readiness.all_versions(db, repo.projects, ticket_repository_of(ctx)),
+        "release_progress": release_progress.all_versions(db, repo.projects, ticket_repository_of(ctx)),
+        "scale_proof": scale_proof.summary(db),
         "incidents": incidents, "incidents_recent": incidents_recent,
         "events": events, "sa": sa, "role_health": role_health.summary(ctx), "rollout": rollout.summary(db),
         "version_policy": {"control": ctx.settings.control_version or VERSION,

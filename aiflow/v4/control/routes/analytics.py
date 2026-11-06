@@ -7,6 +7,7 @@ from typing import Literal
 from .. import conflict_loss, route_deps
 from ..console_auth import ConsoleUser, has_permission
 from ..platform.auth import can
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 router = APIRouter()
 
@@ -76,7 +77,7 @@ def analytics_usage(request: Request, days: int = Query(7, ge=1, le=90),
         if project and project not in project_keys:
             refuse()
         if ticket:
-            ticket_row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket,))
+            ticket_row = ticket_repository_of(ctx).get_ticket_project((ticket,))
             projects = ({ticket_row["project"]} if ticket_row else set())
             if not projects:
                 projects = {row["project"] for row in ctx.db.all(

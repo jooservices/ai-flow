@@ -33,6 +33,7 @@ from . import rollout
 from . import version_release
 from .application_context import ApplicationContext
 from .db import J
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.loops")
 OWNER = f"{socket.gethostname()}:{os.getpid()}"
@@ -54,8 +55,7 @@ def _reconcile_epics(ctx: ApplicationContext, projects: list[str], changed_ticke
                      first_seen_ticket_keys: set[str], preexisting_ticket_keys: set[str]) -> None:
     """Close epics whose mirrored children are all Done, and reopen on newly active child work."""
     for project in projects:
-        rows = ctx.db.all("SELECT key, project, status, type, parent_key, labels FROM tickets WHERE project=%s ORDER BY key",
-                          (project,))
+        rows = ticket_repository_of(ctx).list_project_tickets_for_epic_reconcile((project,))
         by_key = {row["key"]: row for row in rows}
         epics = [row for row in rows if row["type"] == "Epic"]
         for epic in epics:
@@ -82,9 +82,7 @@ def _reconcile_epics(ctx: ApplicationContext, projects: list[str], changed_ticke
                 if status != target:
                     continue
                 now = datetime.now(timezone.utc)
-                ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done'"
-                           " THEN %s ELSE done_at END, synced_at=now() WHERE key=%s",
-                           (status, status, now, epic["key"]))
+                ticket_repository_of(ctx).update_status_with_done_timestamp((status, status, now, epic['key']))
                 epic["status"] = status
                 ready = "aiflow-ready" in (epic.get("labels") or [])
                 ctx.events.emit("ticket.status", ticket=epic["key"], project=project, outcome=status,
@@ -137,33 +135,16 @@ def _mirror_versions(ctx: ApplicationContext, keys: list[str]) -> None:
 
 def _mirror_ticket(ctx: ApplicationContext, t: dict, done_at) -> None:
     """Upsert a ticket read from Jira, replace its Fix versions and record when they were attached."""
-    ctx.db.run(
-        "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by,"
-        " jira_created, jira_updated, done_at, fields, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
-        " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s,%(fields)s, now())"
-        " ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority,"
-        " labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description,"
-        " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, fields=EXCLUDED.fields,"
-        " done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
-        " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
-        " ELSE tickets.done_at END, synced_at=now()",
-        {**t, "done_at": done_at, "fields": J({"assignee": t.get("assignee")})})
+    ticket_repository_of(ctx).upsert_mirrored_ticket_row({**t, 'done_at': done_at, 'fields': J({'assignee': t.get('assignee')})})
     # Replace the complete relationship for each ticket received from Jira, so removals are mirrored too.
-    ctx.db.run(
-        "WITH removed AS (DELETE FROM ticket_versions WHERE ticket_key=%s RETURNING ticket_key)"
-        " INSERT INTO ticket_versions (ticket_key, version_id)"
-        " SELECT %s, fix.version_id FROM unnest(%s::text[]) AS fix(version_id)"
-        " CROSS JOIN (SELECT count(*) FROM removed) AS deletion_done"
-        " ON CONFLICT (ticket_key, version_id) DO NOTHING",
-        (t["key"], t["key"], t["fix_versions"]))
+    ticket_repository_of(ctx).replace_ticket_version_links((t['key'], t['key'], t['fix_versions']))
     # Jira change history: when each Fix version was attached, and the first move to In Progress.
     for version_id, added_at in (t.get("fix_version_added") or {}).items():
         ctx.db.run("INSERT INTO ticket_version_added (ticket_key, version_id, added_at) VALUES (%s,%s,%s)"
                    " ON CONFLICT (ticket_key, version_id) DO UPDATE SET added_at=EXCLUDED.added_at",
                    (t["key"], version_id, added_at))
     if t.get("first_in_progress"):
-        ctx.db.run("UPDATE tickets SET first_in_progress_at=LEAST(first_in_progress_at, %s) WHERE key=%s",
-                   (t["first_in_progress"], t["key"]))
+        ticket_repository_of(ctx).earliest_first_in_progress_at((t['first_in_progress'], t['key']))
 
 
 def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
@@ -182,7 +163,7 @@ def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
     preexisting_ticket_keys = {
         row["key"]
         for project in keys
-        for row in ctx.db.all("SELECT key FROM tickets WHERE project=%s", (project,))
+        for row in ticket_repository_of(ctx).list_ticket_keys_in_project((project,))
     }
     # The sync reads each issue with its change history (Fix version attach dates, first In Progress).
     search = getattr(ctx.jira, "search_history", ctx.jira.search)
@@ -192,7 +173,7 @@ def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
         jira_flow_actor = ""
     for issue in search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
-        old = ctx.db.one("SELECT status, labels, parent_key, jira_updated FROM tickets WHERE key=%s", (t["key"],))
+        old = ticket_repository_of(ctx).get_ticket_sync_fields((t['key'],))
         if old and jira_flow_actor:
             for change in ctx.jira.operator_changes(issue, old.get("jira_updated"), jira_flow_actor):
                 flow_doctor.record_operator_intervention(
@@ -227,7 +208,7 @@ def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
         n += 1
     _reconcile_epics(ctx, keys, changed_ticket_keys, first_seen_ticket_keys, preexisting_ticket_keys)
     try:
-        knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
+        knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site, ticket_repository=ticket_repository_of(ctx))
     except Exception as exc:  # noqa: BLE001 - knowledge capture must not stop Jira mirroring
         log.warning("closed ticket knowledge capture failed: %s", type(exc).__name__)
     return n
@@ -317,7 +298,7 @@ def run_loops(ctx: ApplicationContext, stop: threading.Event | None = None) -> N
                 system_check.refresh_all(ctx, "hourly")
                 last_system_check = now
             if now - last_mem >= 60 and ctx.leases.leader("memory_index", OWNER, 120_000):
-                written = memory.index(ctx.db)
+                written = memory.index(ctx.db, ticket_repository_of(ctx))
                 if any(written.values()):
                     log.info("memory indexed: %s", written)
                 last_mem = now

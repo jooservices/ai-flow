@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 
 from . import routes as _routes
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def install_review_queue_routes(app, ctx, deps, runtime) -> SimpleNamespace:
@@ -94,7 +95,7 @@ def install_review_approval_routes(app, ctx, deps, runtime):
                 raise _routes.HTTPException(409, "ticket has no pull request to approve")
             run = deps.fenced(run_id, fence, "github", "merge", {"number": number})
             project = ctx.repo().projects[ticket["project"]]
-            ctx.db.run("UPDATE tickets SET approved_at=coalesce(approved_at, now()) WHERE key=%s", (key,))
+            ticket_repository_of(ctx).stamp_approved_at_if_empty((key,))
             result = deps.queued_merge(run, number, f"{key}: {ticket['summary']}",
                                        (project.merge or {}).get("method", "squash"), "control")
             if not result.get("merged"):
@@ -183,10 +184,7 @@ def install_review_rejection_and_question_routes(app, ctx, deps, runtime, review
             repository = deps.repository_for_run(run, project)
             gateway = runtime.github_gateway(ctx, repository)
             # A rejection is final: reconcile must not send the rejected ticket back because its PR is closed.
-            ctx.db.run("UPDATE tickets SET pr_state='closed', pr_url=coalesce(nullif(%s,''),pr_url),"
-                       " merge_note=%s, pr_checked_at=now() WHERE key=%s",
-                       ((_routes.merge_flow.latest_pr(ctx.db, key) or {}).get("url", ""),
-                        f"rejected in human review: {reason}"[:500], key))
+            ticket_repository_of(ctx).close_pull_request_on_ticket(((_routes.merge_flow.latest_pr(ctx.db, key) or {}).get('url', ''), f'rejected in human review: {reason}'[:500], key))
             closed = gateway.close_pr(repository.split("/", 1)[-1], number)
             _routes.publish_for(ctx, _routes.GitHubPrClosed(
                 run_id=run_id, fence=fence, ticket=key, actor=run["account_id"], repo=repository, number=number))

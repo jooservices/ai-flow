@@ -18,6 +18,7 @@ import httpx
 
 from ..core import secretbox
 from .db import J
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.notify")
 CHANNEL_KINDS = ("email", "telegram", "slack", "teams", "webhook")
@@ -330,7 +331,7 @@ def _envelope(ctx, title: str, detail: str, link: str, alert_kind: str, project:
     if not ticket:
         match = TICKET_KEY.search(sample)
         ticket = match.group(0).upper() if match else "System"
-    ticket_row = ctx.db.one("SELECT project, summary FROM tickets WHERE key=%s", (ticket,)) if ticket != "System" else None
+    ticket_row = ticket_repository_of(ctx).get_ticket_project_and_summary((ticket,)) if ticket != "System" else None
     if ticket_row:
         project = project or ticket_row["project"]
         ticket_label = f"{ticket} — {ticket_row['summary']}" if ticket_row.get("summary") else ticket
@@ -571,8 +572,7 @@ def _summary(ctx, start: datetime, end: datetime, period: str, label: str) -> tu
                       " AND ended_at < %s ORDER BY ended_at DESC", (start, end))
     finished = [row for row in rows if row["outcome"] in ("done", "merged")]
     failed = [row for row in rows if row["outcome"] in ("failed", "timeout", "lost")]
-    waiting = ctx.db.all("SELECT key, project, summary, status FROM tickets WHERE status IN ('Needs owner',"
-                         " 'Human review') ORDER BY jira_updated DESC NULLS LAST LIMIT 10")
+    waiting = ticket_repository_of(ctx).list_recent_human_attention_tickets()
     cost = sum(float(row["cost_usd"] or 0) for row in rows)
 
     def items(values: list[dict]) -> str:

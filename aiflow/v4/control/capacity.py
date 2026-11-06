@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..core.quota import as_utc
+from .features.tickets.repository import TicketRepository
 
 MIN_HISTORY = 3
 SIZES = ("XS", "S", "M", "L", "XL")
@@ -77,18 +78,11 @@ def ticket_facts(ticket: dict[str, Any]) -> dict[str, str]:
             "area": ticket_area(ticket)}
 
 
-def history(db, project_keys: list[str] | tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+def history(db, project_keys: list[str] | tuple[str, ...] | None = None,
+            ticket_repository: TicketRepository | None = None) -> list[dict[str, Any]]:
     """One completed ticket sample, summing its development and verification runs."""
-    rows = db.all(
-        "SELECT t.key,t.project,t.type,t.labels,t.summary,t.description,t.fields,"
-        "sum(greatest(0,r.tokens_in)+greatest(0,r.tokens_out))::bigint AS tokens,"
-        "sum(greatest(0,extract(epoch FROM r.ended_at-r.started_at)))::float8 AS duration_s,"
-        "bool_or(r.outcome='rework') AS reworked "
-        "FROM runs r JOIN tickets t ON t.key=r.ticket_key "
-        "WHERE r.step IN ('dev','verify') AND r.status='finished' AND r.ended_at IS NOT NULL "
-        "AND (%s OR t.project=ANY(%s)) GROUP BY t.key,t.project,t.type,t.labels,t.summary,t.description,t.fields "
-        "HAVING count(*) FILTER (WHERE r.tokens_in>0 OR r.tokens_out>0 OR r.ended_at>r.started_at)>0",
-        (project_keys is None, list(project_keys or ())))
+    ticket_repository = ticket_repository or TicketRepository(db)
+    rows = ticket_repository.capacity_history(project_keys)
     samples = []
     for row in rows:
         samples.append({**ticket_facts(row), "ticket": row["key"], "tokens": max(0, int(row.get("tokens") or 0)),
@@ -382,15 +376,14 @@ def error_report(estimate_value: dict[str, Any], actual_tokens: int, actual_minu
 
 def dashboard(db, account_rows: list[dict[str, Any]], forecasts: dict[str, dict[str, Any]],
               project_keys: list[str] | tuple[str, ...] | None = None,
-              now: datetime | None = None) -> dict[str, Any]:
+              now: datetime | None = None,
+              ticket_repository: TicketRepository | None = None) -> dict[str, Any]:
     """Build the console's next-week quota plan, assignment explanations and completed estimate errors."""
+    ticket_repository = ticket_repository or TicketRepository(db)
     now = now or datetime.now(timezone.utc)
     project_filter = (project_keys is None, list(project_keys or ()))
-    samples = history(db, project_keys)
-    ready = db.all(
-        "SELECT key,project,type,priority,labels,summary,description,fields FROM tickets "
-        "WHERE status='To Do' AND 'aiflow-ready'=ANY(labels) AND NOT ('aiflow-hold'=ANY(labels)) "
-        "AND (%s OR project=ANY(%s)) ORDER BY priority,key", project_filter)
+    samples = history(db, project_keys, ticket_repository)
+    ready = ticket_repository.capacity_ready_tickets(project_filter)
     ready_estimates = [estimate(ticket, samples) for ticket in ready]
     if ready_estimates:
         average_tokens = sum(item["tokens"]["high"] for item in ready_estimates) / len(ready_estimates)
@@ -411,24 +404,12 @@ def dashboard(db, account_rows: list[dict[str, Any]], forecasts: dict[str, dict[
     known_accounts = [row for row in account_plan if row["known"]]
     limiting = min(known_accounts, key=lambda row: (row["tickets"], row["account"])) if known_accounts else None
     total_capacity = sum(row["tickets"] for row in known_accounts)
-    decisions_rows = db.all(
-        "SELECT DISTINCT ON (r.ticket_key) r.ticket_key,t.project,t.summary,r.account_id,r.provider,r.started_at,"
-        "r.details->'capacity'->'estimate' AS estimate,r.details->'capacity'->'assignment_reason' AS reason "
-        "FROM runs r JOIN tickets t ON t.key=r.ticket_key "
-        "WHERE r.step='dev' AND r.details->'capacity' ? 'estimate' "
-        "AND (%s OR t.project=ANY(%s)) ORDER BY r.ticket_key,r.started_at DESC LIMIT 100",
-        project_filter)
+    decisions_rows = ticket_repository.capacity_decisions(project_filter)
     decisions = [{"ticket": row["ticket_key"], "project": row["project"], "summary": row["summary"],
                   "account": row["account_id"], "provider": row["provider"],
                   "assigned_at": row["started_at"].isoformat(), "estimate": row.get("estimate") or {},
                   "reason": row.get("reason") or ""} for row in decisions_rows]
-    estimate_rows = db.all(
-        "SELECT DISTINCT ON (r.ticket_key) r.ticket_key,t.project,t.summary,r.started_at,"
-        "r.details->'capacity'->'estimate' AS estimate "
-        "FROM runs r JOIN tickets t ON t.key=r.ticket_key "
-        "WHERE r.step='dev' AND r.details->'capacity' ? 'estimate' AND t.status IN ('Done','Closed') "
-        "AND (%s OR t.project=ANY(%s)) ORDER BY r.ticket_key,r.started_at LIMIT 100",
-        project_filter)
+    estimate_rows = ticket_repository.capacity_estimate_rows(project_filter)
     errors = []
     for row in estimate_rows:
         estimate_value = row.get("estimate") or {}

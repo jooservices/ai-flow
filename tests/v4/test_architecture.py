@@ -5,6 +5,8 @@ import ast
 import importlib.util
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[2]
 ARCHITECTURE = ROOT / "docs/v4/architecture.md"
@@ -96,6 +98,15 @@ def test_control_and_core_keep_the_documented_dependency_direction():
     assert not violations, "\n".join(violations)
 
 
+def test_adapters_do_not_import_control_worker_or_node():
+    violations = []
+    for path in _source_files(ROOT / "aiflow/v4/adapters"):
+        for imported in _imported_modules(path):
+            if imported.startswith(("aiflow.v4.control", "aiflow.v4.worker", "aiflow.v4.node")):
+                violations.append(f"{path.relative_to(ROOT)} imports {imported}")
+    assert not violations, "\n".join(violations)
+
+
 def test_feature_route_installers_are_registered_in_create_app():
     """The current extraction bridge keeps explicit installers reachable from the app entry point."""
     control = ROOT / "aiflow/v4/control"
@@ -175,3 +186,24 @@ def test_event_architecture_document_states_the_structure_and_is_linked():
         assert requirement.casefold() in doc, f"event architecture is missing {requirement!r}"
     assert "event-architecture.md" in ARCHITECTURE.read_text(encoding="utf-8")
     assert (ROOT / "deploy/v4/topics/event-architecture.md").exists()
+
+
+def test_architecture_tests_run_on_every_pull_request():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["architecture"]
+    assert job["name"] == "Architecture"
+    condition = str(job.get("if", ""))
+    assert "github.event_name == 'pull_request'" in condition
+    assert "github.event_name == 'merge_group'" in condition
+    commands = "\n".join(str(step.get("run", "")) for step in job["steps"])
+    assert "pytest tests/v4/test_architecture.py" in commands
+
+
+def test_architecture_tests_are_documented_and_linked():
+    document = ROOT / "docs/v4/architecture-tests.md"
+    assert document.is_file()
+    text = document.read_text(encoding="utf-8")
+    for requirement in ("tests/v4/test_architecture.py", "Architecture", "pull request", "## Adding a rule"):
+        assert requirement in text, f"the architecture-test page is missing {requirement!r}"
+    topics = (ROOT / "deploy/v4/README.md").read_text(encoding="utf-8").split("## Topics", 1)[1]
+    assert "[Architecture tests on every pull request](../../docs/v4/architecture-tests.md)" in topics

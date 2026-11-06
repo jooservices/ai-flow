@@ -188,6 +188,30 @@ jobs:
           BASE: ${{ github.event.pull_request.base.ref == 'develop' && github.event.pull_request.base.sha || 'origin/develop' }}
         run: uv run --frozen python -m aiflow.v4.core.quality_checks check --base "$BASE"
 
+  architecture:
+    name: Architecture
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache uv downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: uv-${{ runner.os }}-
+
+      - name: Install
+        run: pip install uv==0.13.4 && uv sync --frozen --group dev
+
+      - name: Architecture rules of docs/v4/architecture.md
+        run: uv run --frozen pytest tests/v4/test_architecture.py -p no:warnings
+
   # The v4 suite runs on parallel runners (JAIF-431): balanced shards of the test files, the browser journeys, and the
   # scale proof (JAIF-432, not a required check). Each runner has its own Redis and PostgreSQL. The required check
   # "Test (v4)" is the job `v4` below: it passes only when every shard and the browser journeys passed.

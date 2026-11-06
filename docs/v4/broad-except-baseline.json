@@ -35,7 +35,6 @@
   "aiflow/v4/control/support_bundle.py": 1,
   "aiflow/v4/control/tooling.py": 1,
   "aiflow/v4/control/ui/__init__.py": 1,
-  "aiflow/v4/control/watchdog.py": 3,
   "aiflow/v4/core/backups.py": 5,
   "aiflow/v4/install/backup.py": 1,
   "aiflow/v4/node/agent.py": 1,

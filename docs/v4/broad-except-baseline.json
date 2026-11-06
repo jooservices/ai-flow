@@ -8,7 +8,6 @@
   "aiflow/v4/control/features/console/routes_console_user_create.py": 1,
   "aiflow/v4/control/features/github_fenced/routes_reviews.py": 6,
   "aiflow/v4/control/features/knowledge/routes_proposals.py": 2,
-  "aiflow/v4/control/features/knowledge/routes_resources.py": 1,
   "aiflow/v4/control/features/projects/routes.py": 6,
   "aiflow/v4/control/features/projects/routes_integrations.py": 10,
   "aiflow/v4/control/features/projects/routes_project_environment.py": 1,

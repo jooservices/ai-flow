@@ -8,6 +8,7 @@ RELEASES=$ROOT/control/releases
 CURRENT_FILE=$RELEASES/CURRENT
 CANARY_FILE=$RELEASES/CANARY.json
 REJECTED_FILE=$RELEASES/CANARY_REJECTED
+FAILURES_FILE=$RELEASES/PROMOTION_FAILURES.json
 CUR=$(cat "$CURRENT_FILE" 2>/dev/null || true)
 CANARY_MIN_AGE_S=${AIFLOW4_CANARY_MIN_AGE_S:-1200}
 CANARY_MIN_RUNS=${AIFLOW4_CANARY_MIN_RUNS:-5}
@@ -43,6 +44,35 @@ control_get() { printf 'Authorization: Bearer %s\n' "$(owner_token)" | curl -fsS
 control_state() { control_get /v1/deploy/state; }
 canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
+promotion_py() {
+  local src=$R
+  [ -d "$R/aiflow/v4/install" ] || src=
+  PYTHONPATH="${src:+$src}${src:+:}${PYTHONPATH:-}" python3 "$@"
+}
+ensure_host_layout() {
+  # AIFLOW4_SECRETS_DIR overrides the production default so lab/tests can point at a writable tree.
+  local secrets=${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets}
+  promotion_py - "$secrets" <<'P' || { echo "host layout could not be prepared under $secrets" >&2; return 1; }
+from pathlib import Path
+import sys
+from aiflow.v4.install.secrets import ensure_runtime_layout
+ensure_runtime_layout(Path(sys.argv[1]))
+P
+}
+merged_not_live() {
+  local previous=$1 target=$2
+  git -C "$R" rev-list --count "${previous}..${target}" 2>/dev/null || \
+    git -C "$R" rev-list --count "${previous}..origin/develop" 2>/dev/null || echo unknown
+}
+extract_deploy_error() {
+  local log=$1
+  # Prefer a missing-file line; otherwise the last non-empty deploy line (sed only: no tail).
+  if grep -Eiq 'not found|no such file|env file' "$log" 2>/dev/null; then
+    grep -Ei 'not found|no such file|env file' "$log" | sed -n '$p'
+    return
+  fi
+  sed '/^$/d' "$log" | sed -n '$p'
+}
 write_canary() {
   python3 - "$CANARY_FILE" "$1" "$2" "$3" "$4" "$5" <<'P'
 import json, os, sys
@@ -134,19 +164,54 @@ P
       fi
       rm -f "$CANARY_FILE"
       echo "develop canary $TARGET on $NODE is stable; promoting to the control plane and remaining nodes"
-      if aiflow4-deploy-develop "" "$TARGET"; then
+      DEPLOY_LOG=$RELEASES/deploy-attempt.log
+      if ! ensure_host_layout; then
+        DEPLOY_ERROR="host layout could not be prepared under ${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets}"
+        RC=1
+      else
+        aiflow4-deploy-develop "" "$TARGET" >"$DEPLOY_LOG" 2>&1; RC=$?
+        cat "$DEPLOY_LOG"
+      fi
+      if [ "$RC" -eq 0 ]; then
         sleep 20
         if curl -fsS "$CONTROL_URL/healthz" >/dev/null && control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
            && curl -fsS -o /dev/null "$CONTROL_URL/cc"; then
           echo "deployed develop $TARGET to the control plane; remaining nodes will update from CURRENT"
+          promotion_py - "$FAILURES_FILE" <<'P'
+from pathlib import Path
+import sys
+from aiflow.v4.install.promotion import clear_failures
+clear_failures(Path(sys.argv[1]))
+P
+          rm -f "$DEPLOY_LOG"
           alert "[INFO] AI Flow: deployed develop $TARGET" "Canary on $NODE passed; develop release $TARGET is now desired by the fleet (previous $PREVIOUS)."
           exit 0
         fi
+        DEPLOY_ERROR="deploy unhealthy: healthz, registry state or Command Center check failed after promoting $TARGET"
+      else
+        [ -n "${DEPLOY_ERROR:-}" ] || DEPLOY_ERROR=$(extract_deploy_error "$DEPLOY_LOG")
+        [ -n "$DEPLOY_ERROR" ] || DEPLOY_ERROR="aiflow4-deploy-develop exited $RC"
       fi
+      rm -f "$DEPLOY_LOG"
+      NOT_LIVE=$(merged_not_live "$PREVIOUS" "$TARGET")
+      STATE=$(promotion_py - "$FAILURES_FILE" "$TARGET" "deploy" "$DEPLOY_ERROR" "$NOT_LIVE" "$PREVIOUS" <<'P'
+import json, sys
+from pathlib import Path
+from aiflow.v4.install.promotion import alert_detail, record_failure
+state = record_failure(Path(sys.argv[1]), build=sys.argv[2], step=sys.argv[3], error=sys.argv[4])
+detail = alert_detail(build=sys.argv[2], step=sys.argv[3], error=sys.argv[4], not_live=sys.argv[5],
+                      previous=sys.argv[6], count=state["count"], exhausted=state["exhausted"])
+print(json.dumps({"exhausted": state["exhausted"], "detail": detail}))
+P
+) || STATE='{"exhausted": false, "detail": "promotion failed"}'
+      EXHAUSTED=$(promotion_py -c 'import json,sys; print("yes" if json.load(sys.stdin)["exhausted"] else "no")' <<<"$STATE")
+      DETAIL=$(promotion_py -c 'import json,sys; print(json.load(sys.stdin)["detail"])' <<<"$STATE")
       echo "develop deploy of $TARGET unhealthy; rolling back to $PREVIOUS"
       aiflow4-deploy-develop "" "$PREVIOUS" || true
-      alert "[CRITICAL] AI Flow: develop auto-deploy of $TARGET rolled back" \
-        "The control plane was unhealthy after promoting $TARGET; it was returned to $PREVIOUS."
+      if [ "$EXHAUSTED" = yes ]; then
+        printf '%s\n' "$TARGET" > "$REJECTED_FILE.tmp" && mv -f "$REJECTED_FILE.tmp" "$REJECTED_FILE"
+      fi
+      alert "[CRITICAL] AI Flow: develop promotion of $TARGET failed" "$DETAIL Rolled back to $PREVIOUS."
       exit 1
       ;;
     *) echo "unknown canary decision: $ACTION" >&2; exit 1 ;;
@@ -158,9 +223,22 @@ FULL=$(git -C "$R" rev-parse origin/develop)
 TARGET=$(git -C "$R" rev-parse --short=10 "$FULL")
 [ -n "$CUR" ] || { echo "cannot canary develop $TARGET without a current release to roll back to" >&2; exit 1; }
 [ "$TARGET" = "$CUR" ] && exit 0
-REJECTED=$(cat "$REJECTED_FILE" 2>/dev/null || true)
-if [ "$TARGET" = "$REJECTED" ]; then
-  echo "develop $TARGET already failed its canary; waiting for a newer commit"
+ensure_host_layout || exit 1
+TRY=$(promotion_py - "$REJECTED_FILE" "$FAILURES_FILE" "$TARGET" <<'P'
+import sys
+from pathlib import Path
+from aiflow.v4.install.promotion import load_failures, should_try_build
+rejected = Path(sys.argv[1]).read_text().strip() if Path(sys.argv[1]).is_file() else ""
+ok, reason = should_try_build(rejected=rejected, target=sys.argv[3],
+                              failures=load_failures(Path(sys.argv[2])))
+print("yes" if ok else "no")
+print(reason)
+P
+) || TRY=$'no\ncould not read promotion failure state'
+TRY_OK=$(printf '%s\n' "$TRY" | sed -n '1p')
+TRY_REASON=$(printf '%s\n' "$TRY" | sed -n '2p')
+if [ "$TRY_OK" != yes ]; then
+  echo "${TRY_REASON:-develop $TARGET is blocked until its promotion cause changes}"
   exit 0
 fi
 CI=$(control_get "/v1/deploy/ci-state?repo=jooservices/ai-flow&sha=$FULL" 2>/dev/null \

@@ -46,6 +46,15 @@ if ! docker image inspect "aiflow4/control:$SHA" >/dev/null 2>&1; then
 fi
 docker tag "aiflow4/control:$SHA" aiflow4/control:latest
 CF="$B/deploy/v4/control/compose.yaml"
+# Create host files a fresh install would have written (runtime.env, secret dirs, projects) before compose
+# mounts them; an older layout must not block this candidate (docs/v4/upgrade-layout.md).
+SECRETS_ROOT=${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets}
+PYTHONPATH="$B${PYTHONPATH:+:$PYTHONPATH}" python3 - <<PY
+from pathlib import Path
+from aiflow.v4.install.secrets import ensure_runtime_layout
+created = ensure_runtime_layout(Path("$SECRETS_ROOT"))
+print("host layout ready" + (f" (created {', '.join(created)})" if created else ""))
+PY
 healthy() { [ "$(docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null)" = healthy ]; }
 for svc in control-api-a control-api-b; do               # one at a time: the other keeps serving
   AIFLOW4_IMAGE_REPOSITORY=aiflow4/control AIFLOW4_IMAGE_TAG=$SHA docker compose -f "$CF" up -d --no-deps "$svc" 2>&1 | grep -v -e '^$' | tail -1

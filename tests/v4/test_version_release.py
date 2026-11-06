@@ -1144,18 +1144,12 @@ def test_ai_flow_repository_never_becomes_a_version_release_candidate(client, ct
     assert getattr(ctx.github, "releases", {}) == {}
 
 
-def test_testwp_default_release_scope_names_both_trial_versions(ctx):
+def test_unconfigured_project_has_no_default_release_profile(ctx):
     configure(ctx)
     project = ctx.repo().projects["TESTWP"]
     project.version_release = {}
-    ctx.jira.version_data["TESTWP"] = [{"id": "101", "name": CORE, "released": False},
-                                       {"id": "102", "name": THEME, "released": False},
-                                       {"id": "103", "name": "WordPress Core 0.6.0", "released": False}]
-
-    eligible = version_release.project_versions(ctx, project)
-
-    assert [item["name"] for item in eligible] == [CORE, THEME]
-    assert version_release.release_tag(project, CORE) == "core-v0.5.0-beta"
+    assert version_release.config(project) == {}
+    assert not version_release.enabled(project)
 
 
 def test_manifest_update_pyproject_bumps_project_version_only():

@@ -6,7 +6,7 @@ checks, and findings. GitHub diff totals are left blank when the PR details cann
 
 ## Preview link
 
-For project `TESTFLOW`, the queue reads the preview URL from the project's control repo configuration:
+For project `JAIF`, the queue reads the preview URL from the project's control repo configuration:
 
 ```yaml
 environments:
@@ -14,8 +14,10 @@ environments:
     url: https://preview.example.test
 ```
 
-The queue only includes this link after Jira epic `TESTFLOW-5` is mirrored as `Done`. A missing epic, incomplete
-epic, or missing preview URL keeps the link hidden.
+The queue only includes this link after the configured review preview epic is mirrored as `Done`. Set
+`AIFLOW4_REVIEW_PREVIEW_EPIC` in the control service environment to the Jira epic key. It defaults to an empty
+string, which disables preview links. A missing or incomplete epic, or a missing preview URL, also keeps the link
+hidden.
 
 ## Notifications
 

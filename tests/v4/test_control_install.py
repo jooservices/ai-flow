@@ -739,7 +739,7 @@ def test_bootstrap_rejects_bad_arguments_before_touching_the_host(tmp_path):
 def test_docs_describe_install_secrets_upgrade_rollback_pins_and_profiles():
     doc = (ROOT / "docs/v4/control-install.md").read_text()
     for needle in ("aiflow4 install control --version", "--domain", "aiflow4 secret set", "--rollback",
-                   "v1.1.0", "plan", "apply", "--preflight", "SI_PHP_VERSION=8.3", "TESTWP", "aiflow-control",
+                   "v1.1.0", "plan", "apply", "--preflight", "SI_PHP_VERSION=8.3", "SI_PHP_MODE", "aiflow-control",
                    "aiflow-node", "/etc/aiflow/secrets", "0600", "22.04", "24.04", "Owner-verified",
                    "control-install-smoke.sh", "10 minutes"):
         assert needle in doc, needle

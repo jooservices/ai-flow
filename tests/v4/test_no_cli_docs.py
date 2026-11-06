@@ -29,8 +29,7 @@ def test_inventory_covers_requested_owner_and_user_operations():
     ):
         assert operation in inventory
 
-    for ticket in ("TESTFLOW-54", "TESTFLOW-55", "TESTFLOW-70", "TESTFLOW-71", "TESTFLOW-76", "TESTFLOW-77", "TESTFLOW-81"):
-        assert ticket in inventory
+    assert "TESTFLOW" not in inventory
 
 
 def test_uncovered_operations_are_explicit_lead_backlog_proposals():
@@ -48,7 +47,7 @@ def test_uncovered_operations_are_explicit_lead_backlog_proposals():
     assert "Pause or drain a node" in inventory
     assert "[Host and service logs](log-viewer.md)" in inventory
     assert "A console viewer for host/service logs is Proposed" not in inventory
-    assert "no invented TESTFLOW keys" in inventory
+    assert "no Jira keys are guessed" in inventory
 
 
 def test_agents_states_ui_principle_and_deployment_readme_links_inventory():

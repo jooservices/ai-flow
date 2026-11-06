@@ -31,14 +31,16 @@ def add_review_ticket(ctx, key="TESTWP-80", labels=("require-human",)):
                    details={"verdict": "PASS", "checks": "unit tests passed"})
 
 
-def test_review_queue_shows_summary_pr_diff_verify_and_gated_preview(client, ctx):
+@pytest.mark.parametrize("preview_epic", ("TESTFLOW-5", "TESTFLOW-101"))
+def test_review_queue_shows_summary_pr_diff_verify_and_gated_preview(client, ctx, preview_epic):
+    ctx.settings.review_preview_epic = preview_epic
     ctx.repo().projects["TESTFLOW"] = Project(
         key="TESTFLOW", repo="jooservices/testflow", environments={"preview": {"url": "https://preview.testflow.test"}}
     )
     ctx.github.repositories.append({"full_name": "jooservices/testflow", "name": "testflow",
                                     "default_branch": "develop"})
-    add_ticket(ctx.db, "TESTFLOW-5", status="To Do", labels=())
-    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTFLOW-5'")
+    add_ticket(ctx.db, preview_epic, status="To Do", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key=%s", (preview_epic,))
     add_ticket(ctx.db, "TESTFLOW-28", status="Human review", labels=("require-human",))
     add_review_run(ctx, "TESTFLOW-28", pr_url="https://github.com/jooservices/testflow/pull/42", summary="Implemented queue")
     add_review_run(ctx, "TESTFLOW-28", step="verify", pr_url="", outcome="human", summary="PASS: verified",
@@ -58,8 +60,23 @@ def test_review_queue_shows_summary_pr_diff_verify_and_gated_preview(client, ctx
                                 "checks": "pytest passed", "findings": ""}
     assert ticket["preview_url"] == ""
 
-    ctx.db.run("UPDATE tickets SET status='Done' WHERE key='TESTFLOW-5'")
+    ctx.db.run("UPDATE tickets SET status='Done' WHERE key=%s", (preview_epic,))
     assert client.get("/v1/reviews").json()["tickets"][0]["preview_url"] == "https://preview.testflow.test"
+
+
+def test_review_queue_hides_preview_when_no_epic_is_configured(client, ctx):
+    ctx.settings.review_preview_epic = ""
+    ctx.repo().projects["TESTFLOW"] = Project(
+        key="TESTFLOW", repo="jooservices/testflow", environments={"preview": {"url": "https://preview.testflow.test"}}
+    )
+    add_ticket(ctx.db, "TESTFLOW-5", status="Done", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTFLOW-5'")
+    add_ticket(ctx.db, "TESTFLOW-28", status="Human review", labels=("require-human",))
+
+    ticket = client.get("/v1/reviews").json()["tickets"][0]
+
+    assert ticket["key"] == "TESTFLOW-28"
+    assert ticket["preview_url"] == ""
 
 
 def test_review_page_is_routed_by_traefik():

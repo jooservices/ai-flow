@@ -116,7 +116,7 @@ class FakeDatabase:
     def all(self, sql, params=()):
         if "SELECT key, project, type, summary" in sql:
             tag = "tickets"
-        elif "WHERE key='TESTFLOW-5'" in sql:
+        elif "WHERE key=%s" in sql:
             tag = "epics"
         elif "SELECT key,status FROM tickets" in sql:
             tag = "blockers"
@@ -183,8 +183,9 @@ def observe_case(spec, after_mount=None):
     repo = SimpleNamespace(projects=projects)
     db = FakeDatabase(spec["rows"] | {"tickets": spec["tickets"]}, events)
     ctx = SimpleNamespace(settings=SimpleNamespace(console_login=spec["console_login"],
-                                                   jira_site="https://jira.example.invalid/"), db=db,
-                         repo=lambda: (events.append(["repo"]), repo)[1])
+                                                   jira_site="https://jira.example.invalid/",
+                                                   review_preview_epic="TESTFLOW-5"), db=db,
+                          repo=lambda: (events.append(["repo"]), repo)[1])
 
     def auth(label):
         def check(request, *args):

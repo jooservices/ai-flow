@@ -55,7 +55,10 @@ def _human_review_actions(kind: str, match: Any, ticket: dict) -> list[str]:
     return actions
 
 
-def _human_review_preview_url(ticket: dict, project_config: Any, epics: dict[str, str]) -> str:
+def _human_review_preview_url(ticket: dict, project_config: Any, epics: dict[str, str],
+                              review_preview_epic: str) -> str:
+    if not review_preview_epic:
+        return ""
     preview = (project_config.environments or {}).get("preview") if project_config else None
     if isinstance(preview, dict):
         preview_url = str(preview.get("url") or "")
@@ -63,7 +66,8 @@ def _human_review_preview_url(ticket: dict, project_config: Any, epics: dict[str
         preview_url = preview
     else:
         preview_url = ""
-    if ticket["project"] != "TESTFLOW" or epics.get("TESTFLOW-5") != "Done":
+    preview_project, separator, _number = review_preview_epic.rpartition("-")
+    if not separator or ticket["project"] != preview_project or epics.get(review_preview_epic) != "Done":
         return ""
     return preview_url
 
@@ -76,8 +80,10 @@ def _load_human_review_tickets(ctx: Any, selected_keys: list[str]) -> tuple[list
     blocker_keys = sorted({str(key) for ticket in tickets for key in ticket.get("blocked_by") or []})
     blocker_statuses = {row["key"]: row["status"] for row in ctx.db.all(
         "SELECT key,status FROM tickets WHERE key=ANY(%s)", (blocker_keys,))} if blocker_keys else {}
-    epics = {row["key"]: row["status"] for row in ctx.db.all(
-        "SELECT key, status FROM tickets WHERE key='TESTFLOW-5' AND type='Epic'")}
+    epic_key = ctx.settings.review_preview_epic
+    epic_rows = (ctx.db.all("SELECT key, status FROM tickets WHERE key=%s AND type='Epic'", (epic_key,))
+                 if epic_key else [])
+    epics = {row["key"]: row["status"] for row in epic_rows}
     return tickets, needs_owner_keys, blocker_statuses, epics
 
 
@@ -170,7 +176,8 @@ def _build_human_review_ticket(queue: Any, ctx: Any, repo: Any, ticket: dict, ro
         queue, ctx, ticket, dev, project_config)
     verify = rows.verify_runs.get(ticket["key"])
     details = (verify or {}).get("details") or {}
-    preview_url = _human_review_preview_url(ticket, project_config, rows.epics)
+    preview_url = _human_review_preview_url(ticket, project_config, rows.epics,
+                                            ctx.settings.review_preview_epic)
     open_blocker = any(str(blocker) not in rows.blocker_statuses
                        or rows.blocker_statuses[str(blocker)] not in ("Done", "Closed")
                        for blocker in (ticket.get("blocked_by") or []))

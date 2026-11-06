@@ -124,7 +124,7 @@ def test_sample_inventory_carries_ten_nodes_and_all_fleet_settings():
     for host, values in nodes.items():
         assert values["aiflow4_node_name"] == host
         assert values["aiflow4_node_role"] == "worker"
-        assert values["aiflow4_node_project"] == "TESTWP"
+        assert values["aiflow4_node_project"] == "JOOWP"
         assert values["aiflow4_node_cpu_limit"] > 0
         assert values["aiflow4_node_memory_limit"]
         assert values["aiflow4_node_slots"] > 0

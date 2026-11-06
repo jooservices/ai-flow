@@ -81,7 +81,7 @@ Project stacks are prepared automatically and checked against their `versions.lo
 project admission and retry behavior.
 
 Operating system components reuse the bash CLI of
-[`jooservices/server-installer`](https://github.com/jooservices/server-installer) (TESTFLOW-68), pinned to tag
+[`jooservices/server-installer`](https://github.com/jooservices/server-installer), pinned to tag
 `v1.1.0` at the fixed path `/opt/server-installer/v1.1.0/bin/server-installer`. The agent runs it without a
 shell, with an argv built from a fixed map; any other component name is rejected:
 
@@ -120,9 +120,9 @@ described in [Node join](node-join.md). The installer and node agent verify rele
 
 The random join token expires after five minutes, is accepted once, and is stored in PostgreSQL only as a
 SHA-256 hash with its node, role, and project grant. The join command never accepts SSH passwords or AI account
-credentials. VM creation remains the separate TESTFLOW-55 flow.
+credentials. VM creation remains a separate fleet-provisioning flow.
 
-AI account authorization remains the TESTFLOW-76 flow; node install and repair do not read or change account
+AI account authorization remains a separate flow; node install and repair do not read or change account
 credentials.
 
 Tests: `tests/v4/test_node_operations.py` and `tests/v4/test_console.py`.

@@ -4,8 +4,8 @@ Project deployment links live in the control repo at `projects/<KEY>.yaml`. Conf
 both; an omitted mapping, key, or empty value is treated as not deployed:
 
 ```yaml
-key: TESTWP
-repo: jooservices/test-aiflow-wp
+key: JOOWP
+repo: jooservices/wordpress-core
 urls:
   develop: https://uat.example.test
   production: https://www.example.test

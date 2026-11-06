@@ -30,7 +30,7 @@ QUERY_TAGS = (
     ("SELECT ticket_key,project,step,account_id,outcome", "metrics_runs"),
     ("SELECT ts,ticket,action,target,accepted,result,payload FROM write_audit", "metrics_audits"),
     ("SELECT key, project, type, summary, description", "tickets"),
-    ("key='TESTFLOW-5'", "epics"),
+    ("WHERE key=%s", "epics"),
     ("SELECT DISTINCT ON (ticket_key) ticket_key,pr_url", "dev_runs"),
     ("SELECT DISTINCT ON (ticket_key) ticket_key,step,outcome", "latest_runs"),
     ("SELECT DISTINCT ON (ticket_key) ticket_key,outcome", "verify_runs"),
@@ -84,7 +84,8 @@ class Context:
             "TESTFLOW": Project("Testflow", {"preview": "https://preview.example.test"}, trace),
         }
         self.repository = SimpleNamespace(projects=projects)
-        self.settings = SimpleNamespace(console_login=console_login, jira_site="https://jira.example.test")
+        self.settings = SimpleNamespace(console_login=console_login, jira_site="https://jira.example.test",
+                                         review_preview_epic="TESTFLOW-5")
         self.user = SimpleNamespace(project_keys=scope, subject="reviewer", effective_roles=["reviewer"])
 
     def repo(self):
@@ -380,14 +381,14 @@ def test_human_review_actions_preserve_item_and_pull_request_gates():
     assert _human_review_actions("blocked", object(), {}) == ["ask-ai"]
 
 
-def test_human_review_preview_is_only_exposed_after_testflow_epic_done():
+def test_human_review_preview_is_only_exposed_after_configured_epic_done():
     ticket = {"project": "TESTFLOW"}
     assert _human_review_preview_url(ticket, Project("Testflow", {"preview": {"url": "https://preview.example.test"}}),
-                                     {"TESTFLOW-5": "Done"}) == "https://preview.example.test"
+                                     {"TESTFLOW-5": "Done"}, "TESTFLOW-5") == "https://preview.example.test"
     assert _human_review_preview_url(ticket, Project("Testflow", {"preview": "https://preview.example.test"}),
-                                     {"TESTFLOW-5": "In Progress"}) == ""
+                                     {"TESTFLOW-5": "In Progress"}, "TESTFLOW-5") == ""
     assert _human_review_preview_url({"project": "DEMO"}, Project("Demo", {"preview": "https://preview.example.test"}),
-                                     {"TESTFLOW-5": "Done"}) == ""
+                                     {"TESTFLOW-5": "Done"}, "TESTFLOW-5") == ""
 
 
 def test_recent_human_review_threads_include_only_known_tickets_with_messages():

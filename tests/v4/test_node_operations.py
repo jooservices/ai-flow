@@ -945,6 +945,31 @@ def test_missing_server_installer_is_provisioned_from_its_pinned_archive(monkeyp
     assert calls[0][0] == [str(binary), "apply", "--modules", "docker"]
 
 
+def test_server_installer_source_rejects_invalid_archive(monkeypatch, tmp_path):
+    monkeypatch.setattr(operations, "_response", lambda *_args, **_kwargs: SimpleNamespace(content=b"invalid"))
+
+    with pytest.raises(operations.OperationError, match="archive is invalid"):
+        operations._server_installer_source(tmp_path)
+
+
+def test_replace_server_installer_swaps_the_staged_binary_and_keeps_backup(tmp_path):
+    install_dir = tmp_path / "opt" / "server-installer" / "v1.1.0"
+    (install_dir / "bin").mkdir(parents=True)
+    (install_dir / "bin" / "server-installer").write_text("old", encoding="utf-8")
+    source_dir = tmp_path / "extract" / "server-installer-v1.1.0"
+    (source_dir / "bin").mkdir(parents=True)
+    (source_dir / "bin" / "server-installer").write_text("new", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    operations._replace_server_installer(install_dir, source_dir, staging)
+
+    binary = install_dir / "bin" / "server-installer"
+    assert binary.read_text(encoding="utf-8") == "new"
+    assert binary.stat().st_mode & 0o111
+    assert (staging / "previous" / "bin" / "server-installer").read_text(encoding="utf-8") == "old"
+
+
 def test_unsafe_extra_packages_fail_before_running_server_installer(monkeypatch, tmp_path):
     binary = tmp_path / "server-installer" / "v1.1.0" / "bin" / "server-installer"
     binary.parent.mkdir(parents=True)

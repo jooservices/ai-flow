@@ -474,7 +474,7 @@ def test_tooling_ticket_opens_once_after_24_hours(client, ctx):
     opened = tooling.sweep(ctx)
     assert len(opened) == 1
     issue = ctx.jira.created[0]
-    assert issue["project"] == "JAIF" and issue["labels"] == ["tooling"]
+    assert issue["project"] == ctx.settings.maintenance_project and issue["labels"] == ["tooling"]
     assert "php" in issue["summary"]
     assert "TESTWP-1" in issue["description"] and "TESTWP-2" in issue["description"] and "TESTWP" in issue["description"]
     assert tooling.sweep(ctx) == [] and len(ctx.jira.created) == 1  # never a second ticket for the same tool

@@ -10,7 +10,7 @@ join. The control role only prepares its OS. After that, install the signed cont
 
 Copy `deploy/v4/ansible/inventory.example.yml`, replace its example addresses and control URL, and keep the
 ten node records in one `aiflow4_nodes` group. The sample sets each node's name, role, project, CPU quota,
-memory maximum, worker slot count and `SI_PHP_VERSION=8.3` / `SI_PHP_MODE=cli` for TESTWP. CPU and memory
+memory maximum, worker slot count and `SI_PHP_VERSION=8.3` / `SI_PHP_MODE=cli` for `JOOWP`. CPU and memory
 limits apply to a shared systemd slice containing the node-agent and its workers. Slots set `AIFLOW4_SLOTS`,
 which the agent reports on heartbeat. PHP and other project-specific host modules pass only through `SI_*`
 settings to server-installer.
@@ -69,7 +69,7 @@ export AIFLOW4_PROVISION_KEY  # populate this from the approved secret manager
 R=deploy/v4/bin/aiflow4-cloud-init-user-data
 ```
 
-- **Proxmox**: `$R --provider proxmox --name aiflow-node-01 --project TESTWP --control-url https://control
+- **Proxmox**: `$R --provider proxmox --name aiflow-node-01 --project JOOWP --control-url https://control
   --out /var/lib/vz/snippets/aiflow-node-01.yaml`, then
   `qm set VMID --cicustom user=local:snippets/aiflow-node-01.yaml && qm start VMID`. After the node shows up
   as joined, delete the snippet and run `qm set VMID --delete cicustom`.
@@ -100,7 +100,7 @@ Creating either profile is a change for the server-installer owner/lead, not thi
 
 ## Verification record
 
-Checks for this change (TESTFLOW-72), run on the AI Flow developer runner on 2026-10-21:
+Checks run on the AI Flow developer runner on 2026-10-21:
 
 - `ansible-playbook -i inventory.example.yml --syntax-check playbook.yml` (ansible-core via `uvx`): passed.
 - `ansible-lint --offline playbook.yml roles`: passed, 0 failures and 0 warnings, `production` profile.

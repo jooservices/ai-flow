@@ -542,7 +542,7 @@ class FakeGitHub:
 def ctx(db, leases, control_repo):
     s = Settings(join_token="join-secret", join_control_url="https://control.example.test",
                  reviewer_token="review-secret", owner_token="owner-secret", lease_ms=90_000,
-                 jira_projects=["TESTWP"], canary_bug_project="TESTFLOW")
+                 jira_projects=["TESTWP"], maintenance_project="TESTFLOW")
     snap = ControlRepo.load(control_repo)
     c = Ctx(settings=s, db=db, leases=leases, events=Events(db), repo=lambda: snap, jira=FakeJira(), github=FakeGitHub())
     # General integration fixtures exercise multi-node, multi-account flows; the licensing tests restore the

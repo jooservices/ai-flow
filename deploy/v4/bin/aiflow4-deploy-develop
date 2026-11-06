@@ -10,7 +10,7 @@ if [ "${1:-}" = --stage-only ]; then STAGE_ONLY=yes; shift; fi
 [ -r "${AIFLOW4_CONTROL_ENV:-/etc/aiflow/control.env}" ] && { set -a; . "${AIFLOW4_CONTROL_ENV:-/etc/aiflow/control.env}"; set +a; }   # node agent on/off, as aiflow4-deploy
 [ "${AIFLOW4_CHANNEL:-release}" = develop ] || { echo "this host is not on the develop channel (set AIFLOW4_CHANNEL=develop in /etc/aiflow/deploy.env)" >&2; exit 3; }
 exec 9>/run/aiflow4-deploy.lock; flock -w 1800 9 || { echo "another deploy is running" >&2; exit 8; }   # one deploy at a time
-BUNDLE=${1:-}; REF=${2:-TESTFLOW-30-v4-core}
+BUNDLE=${1:-}; REF=${2:-develop}
 ROOT=${AIFLOW4_ROOT:-/srv/aiflow}
 R=$ROOT/control/repos/ai-flow
 cd $R

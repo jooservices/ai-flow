@@ -36,7 +36,7 @@ AI_PACKAGES = {
     "grok": "@vibe-kit/grok-cli",
     "opencode": "opencode-ai",
 }
-# jooservices/server-installer (TESTFLOW-68) is a bash CLI, pinned to a reviewed tag at a fixed root-owned path.
+# jooservices/server-installer is a bash CLI, pinned to a reviewed tag at a fixed root-owned path.
 SERVER_INSTALLER_VERSION = "v1.1.0"
 SERVER_INSTALLER = Path(f"/opt/server-installer/{SERVER_INSTALLER_VERSION}/bin/server-installer")
 # Shared with the control installer so both hosts verify the same pinned cosign artifacts.
@@ -127,11 +127,44 @@ module_verify() {{
 '''
 
 
+def _server_installer_source(extract_dir: Path) -> Path:
+    payload = _response(
+        f"https://api.github.com/repos/jooservices/server-installer/tarball/{SERVER_INSTALLER_VERSION}",
+        timeout=900).content
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as archive:
+            archive.extractall(path=extract_dir, filter="data")
+    except (tarfile.TarError, OSError) as exc:
+        raise OperationError("pinned server-installer archive is invalid") from exc
+    candidates = [path for path in extract_dir.rglob("bin/server-installer")
+                  if path.is_file() and not path.is_symlink()]
+    if len(candidates) != 1:
+        raise OperationError("pinned server-installer archive is missing its CLI")
+    return candidates[0].parent.parent
+
+
+def _replace_server_installer(install_dir: Path, source_dir: Path, staging: Path) -> None:
+    staged_dir = staging / "install"
+    os.replace(source_dir, staged_dir)
+    binary = staged_dir / "bin" / "server-installer"
+    os.chmod(binary, binary.stat().st_mode | 0o111)
+    backup_dir = staging / "previous"
+    if install_dir.exists():
+        if install_dir.is_symlink() or not install_dir.is_dir():
+            raise OperationError("server-installer install path is not a regular directory")
+        os.replace(install_dir, backup_dir)
+    try:
+        os.replace(staged_dir, install_dir)
+    except OSError:
+        if backup_dir.exists():
+            os.replace(backup_dir, install_dir)
+        raise
+
+
 def _ensure_server_installer() -> None:
-    """Provision the pinned TESTFLOW-68 installer on first use, without requiring git on a new node."""
+    """Provision the pinned installer on first use, without requiring git on a new node."""
     if SERVER_INSTALLER.is_file():
         return
-
     install_dir = SERVER_INSTALLER.parent.parent
     root = install_dir.parent
     try:
@@ -140,35 +173,8 @@ def _ensure_server_installer() -> None:
             staging = Path(tmp)
             extract_dir = staging / "extract"
             extract_dir.mkdir()
-            payload = _response(
-                f"https://api.github.com/repos/jooservices/server-installer/tarball/{SERVER_INSTALLER_VERSION}",
-                timeout=900).content
-            try:
-                with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as archive:
-                    archive.extractall(path=extract_dir, filter="data")
-            except (tarfile.TarError, OSError) as exc:
-                raise OperationError("pinned server-installer archive is invalid") from exc
-            candidates = [path for path in extract_dir.rglob("bin/server-installer")
-                          if path.is_file() and not path.is_symlink()]
-            if len(candidates) != 1:
-                raise OperationError("pinned server-installer archive is missing its CLI")
-            source_dir = candidates[0].parent.parent
-            staged_dir = staging / "install"
-            os.replace(source_dir, staged_dir)
-            binary = staged_dir / "bin" / "server-installer"
-            os.chmod(binary, binary.stat().st_mode | 0o111)
-
-            backup_dir = staging / "previous"
-            if install_dir.exists():
-                if install_dir.is_symlink() or not install_dir.is_dir():
-                    raise OperationError("server-installer install path is not a regular directory")
-                os.replace(install_dir, backup_dir)
-            try:
-                os.replace(staged_dir, install_dir)
-            except OSError:
-                if backup_dir.exists():
-                    os.replace(backup_dir, install_dir)
-                raise
+            source_dir = _server_installer_source(extract_dir)
+            _replace_server_installer(install_dir, source_dir, staging)
     except OperationError:
         raise
     except (httpx.HTTPError, OSError, tarfile.TarError) as exc:

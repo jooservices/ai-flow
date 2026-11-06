@@ -217,75 +217,78 @@ def test_canary_waits_for_both_minimums_and_promotes_at_minimum_or_maximum_age()
     assert "too few" in late["reason"]
 
 
+class CanaryDB:
+    def __init__(self):
+        self.calls = []
+        self.incident_open = False
+        self.pending = {}
+
+    @contextmanager
+    def transaction(self):
+        yield self
+
+    def one(self, sql, params=None):
+        self.calls.append((sql, params))
+        if "INSERT INTO incidents" in sql:
+            if self.incident_open:
+                return None
+            self.incident_open = True
+            return {"id": 9}
+        if "SELECT ticket FROM canary_flow_bugs" in sql:
+            return {"ticket": self.pending.get(params[0], {}).get("ticket", "")}
+        return None
+
+    def all(self, sql, params=None):
+        self.calls.append((sql, params))
+        rows = [row for row in self.pending.values() if not row["ticket"]]
+        if params:
+            rows = [row for row in rows if row["target"] == params[0]]
+        return rows
+
+    def run(self, sql, params=None):
+        self.calls.append((sql, params))
+        if "INSERT INTO canary_flow_bugs" in sql:
+            target, node, previous, commit, project, summary, description, label = params
+            self.pending.setdefault(target, {"target": target, "ticket": ""}).update(
+                node=node, previous=previous, suspected_commit=commit, project=project, summary=summary,
+                description=description, dedupe_label=label)
+        elif "SET last_error=" in sql:
+            self.pending[params[1]]["last_error"] = params[0]
+        elif "SET ticket=" in sql:
+            self.pending[params[1]]["ticket"] = params[0]
+        return 1
+
+
+class CanaryJira:
+    def __init__(self):
+        self.created = []
+        self.issues = []
+        self.fail = True
+
+    def search(self, jql, fields, page):
+        return self.issues
+
+    def create_issue(self, project, summary, description, issuetype, labels):
+        if self.fail:
+            raise RuntimeError("Jira temporarily unavailable")
+        key = f"TESTFLOW-{999 + len(self.created)}"
+        self.created.append((project, summary, description, issuetype, labels))
+        self.issues.append({"key": key, "fields": {"labels": labels}})
+        return key
+
+    def status(self, key):
+        return "Backlog"
+
+
+class CanaryEvents:
+    def emit(self, *args, **kwargs):
+        return None
+
+
 def test_canary_rollback_opens_incident_and_flow_bug_with_suspected_commit():
-    class DB:
-        def __init__(self):
-            self.calls = []
-            self.incident_open = False
-            self.pending = {}
-
-        @contextmanager
-        def transaction(self):
-            yield self
-
-        def one(self, sql, params=None):
-            self.calls.append((sql, params))
-            if "INSERT INTO incidents" in sql:
-                if self.incident_open:
-                    return None
-                self.incident_open = True
-                return {"id": 9}
-            if "SELECT ticket FROM canary_flow_bugs" in sql:
-                return {"ticket": self.pending.get(params[0], {}).get("ticket", "")}
-            return None
-
-        def all(self, sql, params=None):
-            self.calls.append((sql, params))
-            rows = [row for row in self.pending.values() if not row["ticket"]]
-            if params:
-                rows = [row for row in rows if row["target"] == params[0]]
-            return rows
-
-        def run(self, sql, params=None):
-            self.calls.append((sql, params))
-            if "INSERT INTO canary_flow_bugs" in sql:
-                target, node, previous, commit, project, summary, description, label = params
-                self.pending.setdefault(target, {"target": target, "ticket": ""}).update(
-                    node=node, previous=previous, suspected_commit=commit, project=project, summary=summary,
-                    description=description, dedupe_label=label)
-            elif "SET last_error=" in sql:
-                self.pending[params[1]]["last_error"] = params[0]
-            elif "SET ticket=" in sql:
-                self.pending[params[1]]["ticket"] = params[0]
-            return 1
-
-    class Jira:
-        def __init__(self):
-            self.created = []
-            self.issues = []
-            self.fail = True
-
-        def search(self, jql, fields, page):
-            return self.issues
-
-        def create_issue(self, project, summary, description, issuetype, labels):
-            if self.fail:
-                raise RuntimeError("Jira temporarily unavailable")
-            key = f"TESTFLOW-{999 + len(self.created)}"
-            self.created.append((project, summary, description, issuetype, labels))
-            self.issues.append({"key": key, "fields": {"labels": labels}})
-            return key
-
-        def status(self, key):
-            return "Backlog"
-
-    class Events:
-        def emit(self, *args, **kwargs):
-            return None
-
-    db, jira = DB(), Jira()
-    ctx = SimpleNamespace(db=db, jira=jira, events=Events(),
-                          settings=SimpleNamespace(canary_bug_project="TESTFLOW", public_url="http://test"))
+    db, jira = CanaryDB(), CanaryJira()
+    ctx = SimpleNamespace(db=db, jira=jira, events=CanaryEvents(),
+                          settings=SimpleNamespace(maintenance_project="TESTFLOW", public_url="http://test"))
     measurements = {"canary": {"runs": 5, "infra_failures": 3, "failure_rate": 0.6},
                     "baseline": {"runs": 10, "infra_failures": 1, "failure_rate": 0.1}}
     result = record_rollback(ctx, node="canary", target="v4.3.0", previous="v4.2.0",

@@ -175,11 +175,11 @@ PHP and other OS-level toolchains go to server-installer only as `SI_*` variable
 dropped, so only the values given on the command line reach it:
 
 ```sh
-sudo aiflow4 install control --version vX.Y.Z --domain aiflow.example.com --stack php-8.3     # TESTWP
+sudo aiflow4 install control --version vX.Y.Z --domain aiflow.example.com --stack php-8.3     # JOOWP
 sudo aiflow4 install control ... --si SI_PHP_VERSION=8.3 --si SI_PHP_MODE=fpm
 ```
 
-`--stack php-8.3` sets `SI_PHP_VERSION=8.3` and `SI_PHP_MODE=cli` and adds the `php` module. That is what TESTWP
+`--stack php-8.3` sets `SI_PHP_VERSION=8.3` and `SI_PHP_MODE=cli` and adds the `php` module. That is what JOOWP
 (stack `php-8.3`) needs. Userland tools (uv, Node, the AI CLIs, Composer) belong to AI Flow and are installed on
 nodes ([Project toolchains](project-toolchains.md)).
 

@@ -15,16 +15,17 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from pathlib import Path
 
 from ..core import work_limits
-from ..adapters import RunSpec, get_adapter
+from ..adapters import get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
+from .dev import Claimed, Heartbeat, LeaseLost
 from .gitops import Git
 from .intake import read_spec
-from .notes import note
+from .run_steps import (REPO_ROOT, adapter_for_run, api_node, make_run_spec, note, run_reporter,
+                        run_result_metadata, run_with_inbox, start_run, stop_heartbeat,
+                        set_run_progress, with_knowledge_context, worktree_path)
 
 log = logging.getLogger("aiflow4.impact")
 DONE = re.compile(r"^IMPACT:\s*DONE\b", re.M)
@@ -95,33 +96,26 @@ def build_prompt(c: Claimed, spec: str) -> str:
 def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,
                run_as: list[str]) -> dict:
     key, project = c.ticket["key"], c.project
-    git = Git(srv_root, run_as=run_as)
-    hb = Heartbeat(api, c, heartbeat_s)
-    hb.start()
-    t0 = time.time()
+    started = start_run(api, c, srv_root, run_as, heartbeat_s, Git, Heartbeat)
+    git, hb, t0 = started.git, started.heartbeat, started.started_at
     result: dict = {"fence": c.fence, "outcome": "failed"}
     try:
+        reporter = run_reporter(api, c)
         credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
                                                               "repo": project["repo"]})
         token = credential["token"]
         mirror = git.mirror(project["repo"], token, credential.get("transport_url", ""))
-        wt = Path(srv_root) / "work" / project["key"] / f"{key}--impact"
+        wt = worktree_path(srv_root, project["key"], key, "--impact")
         head = git.detached(mirror, wt, f"origin/{project['base']}")
-        hb.progress = {"phase": "impact", "head": head[:10]}
+        set_run_progress(hb, "impact", head=head[:10])
         logs = Path(srv_root) / "logs" / "runs"
         logs.mkdir(parents=True, exist_ok=True)
-        spec = RunSpec(prompt=build_prompt(c, read_spec(wt)), cwd=str(wt),
-                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("target", work_limits.TARGET)) * 60, control_url=control_url,
-                       run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
-        adapter = get_adapter(c.provider)
-        base_argv = adapter.argv
-        adapter.argv = lambda s: run_as + base_argv(s)
+        timeout_s = int(project.get("work_minutes", {}).get("target", work_limits.TARGET)) * 60
+        spec = make_run_spec(build_prompt(c, read_spec(wt)), wt, srv_root, c, project, control_url,
+                             logs / f"{key}-{c.run_id}.jsonl", {}, timeout_s)
+        adapter = adapter_for_run(c.provider, run_as, get_adapter)
         res = run_with_inbox(adapter, spec, hb, lambda ev: None)
-        result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
-                      quota_observed_at=(getattr(res, "quota_observed_at", None).isoformat()
-                                         if getattr(res, "quota_observed_at", None) else None),
-                      error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
+        result.update(run_result_metadata(res),
                       details={"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})
         if hb.lost.is_set():
             raise LeaseLost()
@@ -133,10 +127,10 @@ def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             result["summary"] = (f"no usable assessment ({res.error_kind or 'missing IMPACT: DONE, SIZE, RISKS or CONFLICTS'}): "
                                  f"{(res.error_message or (res.final_text or '').strip())[-400:]}")[:1000]
             return result
-        api.call("POST", f"/v1/jira/{key}/comment", {"run_id": c.run_id, "fence": c.fence, "body": note(
+        reporter.jira("comment", body=note(
             c, "change request impact", what="The change request is assessed before the owner decides on it",
             result=render(impact), next_="The ticket stays in Backlog; the owner moves it to Intake to go ahead",
-            t0=t0, node=api_node(api))})
+            t0=t0, node=api_node(api)))
         result.update(outcome="assessed", summary=f"impact {impact['size']}: {len(impact['epics'])} epics,"
                       f" {len(impact['tickets'])} tickets, {len(impact['conflicts'])} conflicts")
         result["details"]["impact"] = impact
@@ -152,4 +146,4 @@ def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         result.update(outcome="failed", summary=f"impact worker error: {e}"[:1000])
         return result
     finally:
-        hb.stop.set()
+        stop_heartbeat(hb)

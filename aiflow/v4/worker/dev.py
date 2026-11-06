@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import re
 import threading
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,13 +27,13 @@ from . import timeout_handover
 from .client import Conflict, ControlClient
 from . import gate_step
 from .gitops import Git
-from .notes import environment_notes, environment_status, note, project_env
-from .run_steps import (REPO_ROOT as REPO_ROOT, RunReporter, adapter_for_run, api_node,
-                        build_prompt as _build_prompt, classify_question, commit_message, fetch_ci_log,
-                        machine_block as machine_block, make_run_spec, pr_title, project_environment,
+from .run_steps import (REPO_ROOT as REPO_ROOT, RunProgress, RunReporter, adapter_for_run, api_node,
+                        build_prompt as _build_prompt, classify_question, commit_message, environment_notes,
+                        environment_status, fetch_ci_log, machine_block as machine_block, make_run_spec, note,
+                        pr_title, project_env, project_environment, run_result_metadata,
                         related_block as related_block,
                         run_reporter, run_with_inbox, runtime_for_run, start_run, stop_heartbeat,
-                        with_knowledge_context as with_knowledge_context, worktree_path)
+                        set_run_progress, with_knowledge_context as with_knowledge_context, worktree_path)
 from .wordpress import declares_wordpress, start_site as start_wordpress_site
 
 log = logging.getLogger("aiflow4.dev")
@@ -204,19 +203,6 @@ class DevBrief:
     on_progress: Any
 
 
-@dataclass
-class DevProgress:
-    heartbeat: Heartbeat
-    started_at: float
-    events: int = 0
-
-    def __call__(self, event: dict) -> None:
-        self.events += 1
-        self.heartbeat.progress = {"phase": "ai", "events": self.events,
-                                   "last": str(event.get("type", ""))[:40],
-                                   "elapsed_s": int(time.time() - self.started_at)}
-
-
 def prepare(run: DevRun) -> None:
     """Prepare the branch, worktree and environment, then record the started ticket state."""
     c, project = run.claim, run.project
@@ -233,9 +219,9 @@ def prepare(run: DevRun) -> None:
                                if start == f"origin/{run.branch}" else 0)
     if start != f"origin/{project['base']}":
         run.conflicts = run.git.merge_base_in(wt, project["base"], c.identity)
-    run.heartbeat.progress = {"phase": "worktree", "start": start, "conflicts": len(run.conflicts)}
+    progress = set_run_progress(run.heartbeat, "worktree", start=start, conflicts=len(run.conflicts))
     if moved:
-        run.heartbeat.progress["repo_change"] = f"{moved['old_repo']} -> {run.repo}"
+        progress["repo_change"] = f"{moved['old_repo']} -> {run.repo}"
     run.env = project_environment(project["key"], project, "dev", project_env)
     report_started(run, start)
     run.ci_log = fetch_ci_log(run.api, c, run.branch)
@@ -281,14 +267,15 @@ def brief(run: DevRun) -> DevBrief:
     adapter = adapter_for_run(run.claim.provider, run.run_as, get_adapter)
     wordpress = declares_wordpress(run.project.get("stacks") or run.project.get("stack"))
     runtime = runtime_for_run(spec, run.run_as, run.project, wordpress)
-    return DevBrief(spec, adapter, runtime, wordpress, DevProgress(run.heartbeat, run.started_at))
+    return DevBrief(spec, adapter, runtime, wordpress,
+                    RunProgress(run.heartbeat, run.started_at, "ai", include_last_event=True))
 
 
 def run_ai(run: DevRun, prepared: DevBrief) -> None:
     """Run the provider inside the configured runtime, starting WordPress first when requested."""
     with prepared.runtime as containers:
         if prepared.wordpress:
-            run.heartbeat.progress = {"phase": "wordpress-site"}
+            set_run_progress(run.heartbeat, "wordpress-site")
             start_wordpress_site(containers, run.worktree, run.project, run.claim.run_id, prepared.spec)
             run.reporter.jira("comment", body=note(
                 run.claim, "WordPress test site ready", what="A temporary WordPress test site is ready",
@@ -329,12 +316,7 @@ def collect(run: DevRun) -> dict | None:
 
 def record_response(run: DevRun) -> None:
     response = run.response
-    run.result.update(tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
-                      quota=response.quota,
-                      quota_observed_at=(getattr(response, "quota_observed_at", None).isoformat()
-                                         if getattr(response, "quota_observed_at", None) else None),
-                      error_kind=response.error_kind,
-                      reset_at=response.reset_at.isoformat() if response.reset_at else None,
+    run.result.update(run_result_metadata(response),
                       details={"verdict": response.verdict, "permission_denials": response.permission_denials,
                                "token_usage_reported": bool(getattr(response, "token_usage_reported", False)),
                                "verdict_reason": (response.verdict_reason or "")[:2000],
@@ -616,7 +598,7 @@ def publish_invalid_title(run: DevRun, problems: list[str]) -> dict:
 
 
 def publish_changes(run: DevRun) -> dict:
-    run.heartbeat.progress = {"phase": "commit", "files": len(run.changed)}
+    set_run_progress(run.heartbeat, "commit", files=len(run.changed))
     message = commit_message(run.claim, run.summary)
     sha = run.git.commit_all(run.worktree, message, run.claim.identity)
     gate_note = run_local_gate(run)
@@ -635,7 +617,7 @@ def publish_changes(run: DevRun) -> dict:
 def run_local_gate(run: DevRun) -> str | dict:
     if not gate_step.enabled(run.project):
         return ""
-    run.heartbeat.progress = {"phase": "gate"}
+    set_run_progress(run.heartbeat, "gate")
     try:
         gate = gate_step.run(run.worktree, run.project, pr_title(run.claim.ticket), run.env, run.run_as)
         reason = gate_step.failure_text(gate) if gate.failed else ""

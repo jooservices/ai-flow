@@ -20,13 +20,12 @@ from typing import Any
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, pr_title
-from .dev import related_block, run_with_inbox, with_knowledge_context
+from .dev import Claimed, Heartbeat, LeaseLost
 from .gitops import Git
-from .notes import environment_notes, note, project_env
-from .run_steps import (RunReporter, adapter_for_run, api_node, make_run_spec,
-                        project_environment, run_reporter, runtime_for_run, start_run,
-                        stop_heartbeat, worktree_path)
+from .run_steps import (REPO_ROOT, RunProgress, RunReporter, adapter_for_run, api_node, environment_notes,
+                        make_run_spec, note, pr_title, project_env, project_environment, related_block,
+                        run_reporter, run_result_metadata, run_with_inbox, runtime_for_run, set_run_progress,
+                        start_run, stop_heartbeat, with_knowledge_context, worktree_path)
 from .wordpress import declares_wordpress, start_site as start_wordpress_site
 
 log = logging.getLogger("aiflow4.verify")
@@ -97,18 +96,6 @@ class VerifyWorkspace:
     worktree: Path
     head: str
     auto_updated: bool = False
-
-
-@dataclass
-class VerifyProgress:
-    heartbeat: Heartbeat
-    started_at: float
-    events: int = 0
-
-    def __call__(self, _event: dict) -> None:
-        self.events += 1
-        self.heartbeat.progress = {"phase": "verify-ai", "events": self.events,
-                                   "elapsed_s": int(time.time() - self.started_at)}
 
 
 @dataclass
@@ -195,7 +182,7 @@ def prepare_verify(state: VerifyRun) -> VerifyWorkspace | dict:
             head = pr["head_sha"]
             state.result["head_sha"] = head
         conflicts = state.git.merge_base_in(wt, project["base"], c.identity, commit=False)
-    state.heartbeat.progress = {"phase": "verify", "head": head[:10]}
+    set_run_progress(state.heartbeat, "verify", head=head[:10])
     workspace = VerifyWorkspace(mirror, wt, head, auto_updated)
     if conflicts:
         state.git.abort_merge(wt)
@@ -235,12 +222,7 @@ def execute_verify(state: VerifyRun, workspace: VerifyWorkspace) -> VerifyReview
     wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
     runtime = runtime_for_run(spec, state.run_as, project, wordpress)
     response = run_verify_ai(state, workspace, spec, adapter, runtime, wordpress)
-    state.result.update(tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
-                        quota=response.quota,
-                        quota_observed_at=(getattr(response, "quota_observed_at", None).isoformat()
-                                           if getattr(response, "quota_observed_at", None) else None),
-                        error_kind=response.error_kind, reset_at=response.reset_at.isoformat() if response.reset_at else None,
-                        head_sha=workspace.head)
+    state.result.update(run_result_metadata(response), head_sha=workspace.head)
     if state.heartbeat.lost.is_set():
         raise LeaseLost()
     review = parse_verify_review(response)
@@ -262,10 +244,11 @@ def run_verify_ai(state: VerifyRun, workspace: VerifyWorkspace, spec: RunSpec, a
                   runtime: Any, wordpress: bool) -> Any:
     with runtime as containers:
         if wordpress:
-            state.heartbeat.progress = {"phase": "wordpress-site"}
+            set_run_progress(state.heartbeat, "wordpress-site")
             start_wordpress_site(containers, workspace.worktree, state.claim.project, state.claim.run_id, spec)
             report_wordpress_ready(state)
-        return run_with_inbox(adapter, spec, state.heartbeat, VerifyProgress(state.heartbeat, state.started_at))
+        return run_with_inbox(adapter, spec, state.heartbeat,
+                              RunProgress(state.heartbeat, state.started_at, "verify-ai"))
 
 
 def report_wordpress_ready(state: VerifyRun) -> None:
@@ -448,7 +431,7 @@ def wait_for_ci(api: ControlClient, c: Claimed, sha: str, hb: Heartbeat, max_wai
             return []
         if not any(x["state"] == "pending" for x in ci) or time.time() > t_end or hb.lost.is_set():
             return ci
-        hb.progress = {"phase": "waiting for CI", "pending": [x["name"] for x in ci if x["state"] == "pending"]}
+        set_run_progress(hb, "waiting for CI", pending=[x["name"] for x in ci if x["state"] == "pending"])
         time.sleep(30)
 
 

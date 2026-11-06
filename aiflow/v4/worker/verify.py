@@ -20,13 +20,12 @@ from typing import Any
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, pr_title
-from .dev import related_block, run_with_inbox, with_knowledge_context
+from .dev import Claimed, Heartbeat, LeaseLost
 from .gitops import Git
-from .notes import environment_notes, note, project_env
-from .run_steps import (RunReporter, adapter_for_run, api_node, make_run_spec,
-                        project_environment, run_reporter, runtime_for_run, start_run,
-                        stop_heartbeat, worktree_path)
+from .run_steps import (REPO_ROOT, RunProgress, RunReporter, adapter_for_run, api_node, environment_notes,
+                        make_run_spec, note, pr_title, project_env, project_environment, related_block,
+                        run_reporter, run_result_metadata, run_with_inbox, runtime_for_run, set_run_progress,
+                        start_run, stop_heartbeat, with_knowledge_context, worktree_path)
 from .wordpress import declares_wordpress, start_site as start_wordpress_site
 
 log = logging.getLogger("aiflow4.verify")
@@ -97,18 +96,6 @@ class VerifyWorkspace:
     worktree: Path
     head: str
     auto_updated: bool = False
-
-
-@dataclass
-class VerifyProgress:
-    heartbeat: Heartbeat
-    started_at: float
-    events: int = 0
-
-    def __call__(self, _event: dict) -> None:
-        self.events += 1
-        self.heartbeat.progress = {"phase": "verify-ai", "events": self.events,
-                                   "elapsed_s": int(time.time() - self.started_at)}
 
 
 @dataclass
@@ -195,7 +182,7 @@ def prepare_verify(state: VerifyRun) -> VerifyWorkspace | dict:
             head = pr["head_sha"]
             state.result["head_sha"] = head
         conflicts = state.git.merge_base_in(wt, project["base"], c.identity, commit=False)
-    state.heartbeat.progress = {"phase": "verify", "head": head[:10]}
+    set_run_progress(state.heartbeat, "verify", head=head[:10])
     workspace = VerifyWorkspace(mirror, wt, head, auto_updated)
     if conflicts:
         state.git.abort_merge(wt)
@@ -217,7 +204,7 @@ def report_verify_conflict(state: VerifyRun, conflicts: list[str]) -> dict:
 
 def report_verify_started(state: VerifyRun, head: str) -> None:
     c, pr, project = state.claim, state.pr, state.claim.project
-    state.reporter.jira("comment", body=note(
+    state.reporter.comment(body=note(
         c, "started", what=f"Verify PR #{pr['number']} at {head[:10]} merged with the latest {project['base']}",
         why=f"Developed by {pr.get('dev_account', 'another account')}; work is never graded by its author",
         next_="Check every acceptance criterion, run the checks, then merge or send findings back",
@@ -235,12 +222,7 @@ def execute_verify(state: VerifyRun, workspace: VerifyWorkspace) -> VerifyReview
     wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
     runtime = runtime_for_run(spec, state.run_as, project, wordpress)
     response = run_verify_ai(state, workspace, spec, adapter, runtime, wordpress)
-    state.result.update(tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
-                        quota=response.quota,
-                        quota_observed_at=(getattr(response, "quota_observed_at", None).isoformat()
-                                           if getattr(response, "quota_observed_at", None) else None),
-                        error_kind=response.error_kind, reset_at=response.reset_at.isoformat() if response.reset_at else None,
-                        head_sha=workspace.head)
+    state.result.update(run_result_metadata(response), head_sha=workspace.head)
     if state.heartbeat.lost.is_set():
         raise LeaseLost()
     review = parse_verify_review(response)
@@ -262,14 +244,15 @@ def run_verify_ai(state: VerifyRun, workspace: VerifyWorkspace, spec: RunSpec, a
                   runtime: Any, wordpress: bool) -> Any:
     with runtime as containers:
         if wordpress:
-            state.heartbeat.progress = {"phase": "wordpress-site"}
+            set_run_progress(state.heartbeat, "wordpress-site")
             start_wordpress_site(containers, workspace.worktree, state.claim.project, state.claim.run_id, spec)
             report_wordpress_ready(state)
-        return run_with_inbox(adapter, spec, state.heartbeat, VerifyProgress(state.heartbeat, state.started_at))
+        return run_with_inbox(adapter, spec, state.heartbeat,
+                              RunProgress(state.heartbeat, state.started_at, "verify-ai"))
 
 
 def report_wordpress_ready(state: VerifyRun) -> None:
-    state.reporter.jira("comment", body=note(
+    state.reporter.comment(body=note(
         state.claim, "WordPress test site ready", what="A temporary WordPress test site is ready",
         result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
         next_="Use \x60npx playwright test\x60 with the project config; Chromium, Firefox, and WebKit are installed",
@@ -351,12 +334,12 @@ def publish_verification(state: VerifyRun, workspace: VerifyWorkspace, collected
 def publish_human_review(state: VerifyRun, checks: str) -> dict:
     c, pr = state.claim, state.pr
     PRCommenter(state.api, c, pr)(f"AI Flow verify: PASS by {c.account}.\n\nChecks: {checks}\n\nWaiting for a human review before merge.")
-    state.reporter.jira("comment", body=note(
+    state.reporter.comment(body=note(
         c, "passed, waiting for a person", what=f"PR {pr['url']} meets the acceptance criteria",
         why="The ticket or project requires a human review before merge", result=f"Checks: {checks}",
         next_="Approve and merge the PR, or comment what to change", t0=state.started_at,
         node=api_node(state.api)))
-    state.reporter.jira("transition", to="Human review")
+    state.reporter.transition(to="Human review")
     state.result["outcome"] = "human"
     return state.result
 
@@ -372,7 +355,7 @@ def report_merge_conflict_after_ci(state: VerifyRun, checks: str) -> dict:
 
 def report_merge_refused(state: VerifyRun, merged: dict) -> dict:
     state.result.update(outcome="failed", summary=f"verify passed but the merge was refused: {merged.get('message')}"[:500])
-    state.reporter.jira("comment", body=note(
+    state.reporter.comment(body=note(
         state.claim, "merge refused", what="Verify passed but GitHub refused the merge",
         why=str(merged.get("message")), next_="The next verify run merges the latest base and tries again",
         t0=state.started_at, node=api_node(state.api)))
@@ -382,13 +365,13 @@ def report_merge_refused(state: VerifyRun, merged: dict) -> dict:
 def report_merged(state: VerifyRun, merged: dict, checks: str, head: str) -> dict:
     c = state.claim
     project = c.project
-    state.reporter.jira("comment", body=note(
+    state.reporter.comment(body=note(
         c, "merged", what=f"PR #{state.pr['number']} merged into {project['base']} as {merged.get('sha', '')[:10]}",
         why="Every acceptance criterion is met and the checks pass", result=f"Checks: {checks}",
         next_="Ticket Done; tickets blocked by it can start", t0=state.started_at, node=api_node(state.api)))
-    state.reporter.jira("transition", to="Done")
+    state.reporter.transition(to="Done")
     try:
-        state.reporter.jira("fields", remove_labels=["rework"])
+        state.reporter.fields(remove_labels=["rework"])
     except Exception:  # noqa: BLE001
         pass
     state.result.update(outcome="merged", head_sha=merged.get("sha", head))
@@ -448,7 +431,7 @@ def wait_for_ci(api: ControlClient, c: Claimed, sha: str, hb: Heartbeat, max_wai
             return []
         if not any(x["state"] == "pending" for x in ci) or time.time() > t_end or hb.lost.is_set():
             return ci
-        hb.progress = {"phase": "waiting for CI", "pending": [x["name"] for x in ci if x["state"] == "pending"]}
+        set_run_progress(hb, "waiting for CI", pending=[x["name"] for x in ci if x["state"] == "pending"])
         time.sleep(30)
 
 

@@ -1,4 +1,4 @@
-"""Shared setup and reporting steps for fenced developer and verification runs."""
+"""Shared workspace, environment, progress and result steps for worker runs."""
 from __future__ import annotations
 
 import logging
@@ -14,7 +14,6 @@ from ..core import commit_rules, handover, work_limits
 from . import gate_step
 from .client import Conflict, ControlClient
 from .gitops import Git
-from .notes import environment_notes, project_env
 
 log = logging.getLogger("aiflow4.dev")
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -28,6 +27,31 @@ class StartedRun:
     started_at: float
 
 
+def set_run_progress(heartbeat: Any, phase: str, **details) -> dict:
+    """Write the same explicit phase payload to a worker heartbeat."""
+    progress = {"phase": phase, **details}
+    heartbeat.progress = progress
+    return progress
+
+
+@dataclass
+class RunProgress:
+    """Translate provider events into the progress shape used by a worker's heartbeat."""
+    heartbeat: Any
+    started_at: float
+    phase: str
+    include_last_event: bool = False
+    events: int = 0
+
+    def __call__(self, event: dict) -> None:
+        self.events += 1
+        details = {"events": self.events}
+        if self.include_last_event:
+            details["last"] = str(event.get("type", ""))[:40]
+        details["elapsed_s"] = int(time.time() - self.started_at)
+        set_run_progress(self.heartbeat, self.phase, **details)
+
+
 @dataclass(frozen=True)
 class RunReporter:
     api: ControlClient
@@ -35,9 +59,20 @@ class RunReporter:
     run_id: str
     fence: int
 
+    def _payload(self, body: dict) -> dict:
+        return {"run_id": self.run_id, "fence": self.fence, **body}
+
+    def comment(self, body: str) -> dict:
+        return self.api.call("POST", f"/v1/jira/{self.key}/comment", self._payload({"body": body}))
+
+    def transition(self, to: str) -> dict:
+        return self.api.call("POST", f"/v1/jira/{self.key}/transition", self._payload({"to": to}))
+
+    def fields(self, **body) -> dict:
+        return self.api.call("POST", f"/v1/jira/{self.key}/fields", self._payload(body))
+
     def jira(self, path: str, **body) -> dict:
-        payload = {"run_id": self.run_id, "fence": self.fence, **body}
-        return self.api.call("POST", f"/v1/jira/{self.key}/{path}", payload)
+        return self.api.call("POST", f"/v1/jira/{self.key}/{path}", self._payload(body))
 
 
 def start_run(api: ControlClient, claim: Any, srv_root: str, run_as: list[str], heartbeat_s: int,
@@ -50,8 +85,39 @@ def start_run(api: ControlClient, claim: Any, srv_root: str, run_as: list[str], 
 
 
 def run_reporter(api: ControlClient, claim: Any) -> RunReporter:
-    """Create the fenced Jira writer used by both worker roles."""
+    """Create the fenced Jira writer used by developer, verify and impact runs."""
     return RunReporter(api, claim.ticket["key"], claim.run_id, claim.fence)
+
+
+def note(c, headline: str, what: str = "", why: str = "", result: str = "", next_: str = "",
+         t0: float | None = None, node: str = "") -> str:
+    """Build the standard run note shared by worker steps."""
+    lines = [f"AI Flow · {c.step} · {headline}"]
+    for label, text in (("What", what), ("Why", why), ("Result", result), ("Next", next_)):
+        if text:
+            lines.append(f"{label}: {text.strip()}")
+    took = f" · {int((time.time() - t0) // 60)} min {int((time.time() - t0) % 60)} s" if t0 else ""
+    model = f"/{c.model}" if c.model else ""
+    lines.append(f"Run: {c.account} ({c.provider}{model}){took} · run {c.run_id[:8]} · fence {c.fence}")
+    return "\n".join(lines)
+
+
+def project_env(project_key: str, items: list[dict] | None = None, step: str = "dev",
+                runtime_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment of a project's AI runs. The environment section of the project configuration (`items`, as the
+    claim carries it) gives the values of its test services, URLs, databases and browsers to the runs allowed to use
+    them, and the node-local project environment file holds the secrets those items name. Only configured items
+    permitted for this step and explicit safe built-ins reach a run. Per-run values (such as a temporary test site)
+    take precedence over configured values."""
+    from ..core.environment import items_of, run_environment
+    from ..core.settings import read_env_file
+    from ..core.toolchains import PLAYWRIGHT_BROWSERS_DIR
+
+    node_env = read_env_file(f"/etc/aiflow/projects/{project_key}.env")
+    configured = items_of(items or [])
+    # Unlisted node-local values are never ambient run variables. The project configuration is the allowlist.
+    return {"PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
+            **run_environment(configured, step, node_env), **(runtime_env or {})}
 
 
 def project_environment(project_key: str, project: dict, phase: str,
@@ -60,8 +126,34 @@ def project_environment(project_key: str, project: dict, phase: str,
     return environment_factory(project_key, project.get("environment"), phase)
 
 
+def environment_notes(items: list[dict] | None, step: str, env: dict[str, str]) -> str:
+    """The names (never the values of secrets) of the environment items of this run, for the run notes."""
+    from ..core.environment import items_of, notes_block
+
+    return notes_block(items_of(items or []), step, env)
+
+
+def environment_status(items: list[dict] | None, step: str, env: dict[str, str]) -> str:
+    """A ticket-safe status string: configured item names and presence, never a node or value."""
+    from ..core.environment import for_step, items_of
+
+    rows = [f"{item.name} ({'provided' if item.name in env else 'not provided'})"
+            for item in for_step(items_of(items or []), step)]
+    return ", ".join(rows) or "No environment items configured"
+
+
+def run_result_metadata(response: RunResult) -> dict:
+    """Return the provider usage fields shared by the developer, verify and impact results."""
+    return {"tokens_in": response.tokens_in, "tokens_out": response.tokens_out, "cost_usd": response.cost_usd,
+            "quota": response.quota,
+            "quota_observed_at": (getattr(response, "quota_observed_at", None).isoformat()
+                                   if getattr(response, "quota_observed_at", None) else None),
+            "error_kind": response.error_kind,
+            "reset_at": response.reset_at.isoformat() if response.reset_at else None}
+
+
 def worktree_path(srv_root: str, project_key: str, name: str, suffix: str = "") -> Path:
-    """Resolve a developer or verifier worktree under the project workspace."""
+    """Resolve a worker worktree under the project workspace."""
     return Path(srv_root) / "work" / project_key / f"{name}{suffix}"
 
 
@@ -71,9 +163,10 @@ def account_home(srv_root: str, account: str) -> str:
 
 
 def make_run_spec(prompt: str, worktree: Path, srv_root: str, claim: Any, project: dict,
-                  control_url: str, log_path: Path, env: dict[str, str]) -> RunSpec:
-    """Build the provider request shared by developer and verifier runs."""
-    timeout = int(project.get("work_minutes", {}).get("hard", work_limits.HARD)) * 60
+                  control_url: str, log_path: Path, env: dict[str, str], timeout_s: int | None = None) -> RunSpec:
+    """Build a worker provider request, with an optional phase-specific timeout."""
+    timeout = (int(project.get("work_minutes", {}).get("hard", work_limits.HARD)) * 60
+               if timeout_s is None else timeout_s)
     return RunSpec(prompt=prompt, cwd=str(worktree), account_home=account_home(srv_root, claim.account),
                    model=claim.model, effort=claim.effort, timeout_s=timeout, control_url=control_url,
                    run_token=claim.run_token, log_path=str(log_path), extra_env=env)

@@ -204,7 +204,7 @@ def report_verify_conflict(state: VerifyRun, conflicts: list[str]) -> dict:
 
 def report_verify_started(state: VerifyRun, head: str) -> None:
     c, pr, project = state.claim, state.pr, state.claim.project
-    state.reporter.jira("comment", body=note(
+    state.reporter.comment(body=note(
         c, "started", what=f"Verify PR #{pr['number']} at {head[:10]} merged with the latest {project['base']}",
         why=f"Developed by {pr.get('dev_account', 'another account')}; work is never graded by its author",
         next_="Check every acceptance criterion, run the checks, then merge or send findings back",
@@ -252,7 +252,7 @@ def run_verify_ai(state: VerifyRun, workspace: VerifyWorkspace, spec: RunSpec, a
 
 
 def report_wordpress_ready(state: VerifyRun) -> None:
-    state.reporter.jira("comment", body=note(
+    state.reporter.comment(body=note(
         state.claim, "WordPress test site ready", what="A temporary WordPress test site is ready",
         result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
         next_="Use \x60npx playwright test\x60 with the project config; Chromium, Firefox, and WebKit are installed",
@@ -334,12 +334,12 @@ def publish_verification(state: VerifyRun, workspace: VerifyWorkspace, collected
 def publish_human_review(state: VerifyRun, checks: str) -> dict:
     c, pr = state.claim, state.pr
     PRCommenter(state.api, c, pr)(f"AI Flow verify: PASS by {c.account}.\n\nChecks: {checks}\n\nWaiting for a human review before merge.")
-    state.reporter.jira("comment", body=note(
+    state.reporter.comment(body=note(
         c, "passed, waiting for a person", what=f"PR {pr['url']} meets the acceptance criteria",
         why="The ticket or project requires a human review before merge", result=f"Checks: {checks}",
         next_="Approve and merge the PR, or comment what to change", t0=state.started_at,
         node=api_node(state.api)))
-    state.reporter.jira("transition", to="Human review")
+    state.reporter.transition(to="Human review")
     state.result["outcome"] = "human"
     return state.result
 
@@ -355,7 +355,7 @@ def report_merge_conflict_after_ci(state: VerifyRun, checks: str) -> dict:
 
 def report_merge_refused(state: VerifyRun, merged: dict) -> dict:
     state.result.update(outcome="failed", summary=f"verify passed but the merge was refused: {merged.get('message')}"[:500])
-    state.reporter.jira("comment", body=note(
+    state.reporter.comment(body=note(
         state.claim, "merge refused", what="Verify passed but GitHub refused the merge",
         why=str(merged.get("message")), next_="The next verify run merges the latest base and tries again",
         t0=state.started_at, node=api_node(state.api)))
@@ -365,13 +365,13 @@ def report_merge_refused(state: VerifyRun, merged: dict) -> dict:
 def report_merged(state: VerifyRun, merged: dict, checks: str, head: str) -> dict:
     c = state.claim
     project = c.project
-    state.reporter.jira("comment", body=note(
+    state.reporter.comment(body=note(
         c, "merged", what=f"PR #{state.pr['number']} merged into {project['base']} as {merged.get('sha', '')[:10]}",
         why="Every acceptance criterion is met and the checks pass", result=f"Checks: {checks}",
         next_="Ticket Done; tickets blocked by it can start", t0=state.started_at, node=api_node(state.api)))
-    state.reporter.jira("transition", to="Done")
+    state.reporter.transition(to="Done")
     try:
-        state.reporter.jira("fields", remove_labels=["rework"])
+        state.reporter.fields(remove_labels=["rework"])
     except Exception:  # noqa: BLE001
         pass
     state.result.update(outcome="merged", head_sha=merged.get("sha", head))

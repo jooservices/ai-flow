@@ -59,9 +59,20 @@ class RunReporter:
     run_id: str
     fence: int
 
+    def _payload(self, body: dict) -> dict:
+        return {"run_id": self.run_id, "fence": self.fence, **body}
+
+    def comment(self, body: str) -> dict:
+        return self.api.call("POST", f"/v1/jira/{self.key}/comment", self._payload({"body": body}))
+
+    def transition(self, to: str) -> dict:
+        return self.api.call("POST", f"/v1/jira/{self.key}/transition", self._payload({"to": to}))
+
+    def fields(self, **body) -> dict:
+        return self.api.call("POST", f"/v1/jira/{self.key}/fields", self._payload(body))
+
     def jira(self, path: str, **body) -> dict:
-        payload = {"run_id": self.run_id, "fence": self.fence, **body}
-        return self.api.call("POST", f"/v1/jira/{self.key}/{path}", payload)
+        return self.api.call("POST", f"/v1/jira/{self.key}/{path}", self._payload(body))
 
 
 def start_run(api: ControlClient, claim: Any, srv_root: str, run_as: list[str], heartbeat_s: int,

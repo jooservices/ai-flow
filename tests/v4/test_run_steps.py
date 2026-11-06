@@ -113,6 +113,27 @@ def test_run_result_metadata_keeps_provider_values_and_reset_format():
     }
 
 
+def test_run_reporter_jira_keeps_literal_paths_and_fenced_payloads():
+    calls = []
+
+    class API:
+        def call(self, method, path, body=None, params=None):
+            calls.append((method, path, body))
+            return {"ok": True}
+
+    reporter = run_steps.RunReporter(API(), "SHOP-4", "run-1", 7)
+
+    reporter.jira("fields", add_labels=["x"])
+    reporter.comment("note")
+    reporter.transition("Done")
+
+    assert calls == [
+        ("POST", "/v1/jira/SHOP-4/fields", {"run_id": "run-1", "fence": 7, "add_labels": ["x"]}),
+        ("POST", "/v1/jira/SHOP-4/comment", {"run_id": "run-1", "fence": 7, "body": "note"}),
+        ("POST", "/v1/jira/SHOP-4/transition", {"run_id": "run-1", "fence": 7, "to": "Done"}),
+    ]
+
+
 class _RecordingAPI:
     node_name = "test-node"
 

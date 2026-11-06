@@ -127,7 +127,7 @@ def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             result["summary"] = (f"no usable assessment ({res.error_kind or 'missing IMPACT: DONE, SIZE, RISKS or CONFLICTS'}): "
                                  f"{(res.error_message or (res.final_text or '').strip())[-400:]}")[:1000]
             return result
-        reporter.jira("comment", body=note(
+        reporter.comment(body=note(
             c, "change request impact", what="The change request is assessed before the owner decides on it",
             result=render(impact), next_="The ticket stays in Backlog; the owner moves it to Intake to go ahead",
             t0=t0, node=api_node(api)))

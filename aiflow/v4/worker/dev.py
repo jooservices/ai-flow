@@ -233,7 +233,7 @@ def report_foreign_worktree(run: DevRun, moved: dict, worktree: Path) -> None:
     work = (f"{len(moved['commits'])} committed change(s) on branch {branch} in {moved['old_repo']}"
             + (" (the branch is also pushed there):\n" if moved["pushed"] else " (not pushed anywhere):\n")
             + "\n".join(f"- {item}" for item in moved["commits"][:20])) if moved["commits"] else "no committed work on the old branch"
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "repository changed", what=f"The ticket's repository changed from {moved['old_repo']} to {repo}",
         why="The old worktree belongs to the old repository, so the AI could not find the code in it",
         result=f"Old worktree and branch {branch} removed; {work}",
@@ -243,13 +243,13 @@ def report_foreign_worktree(run: DevRun, moved: dict, worktree: Path) -> None:
 
 def report_started(run: DevRun, start: str) -> None:
     c, project = run.claim, run.project
-    run.reporter.jira("transition", to="In Progress")
-    run.reporter.jira("fields", fields={"Workspace": environment_status(project.get("environment"), "dev", run.env),
+    run.reporter.transition(to="In Progress")
+    run.reporter.fields(fields={"Workspace": environment_status(project.get("environment"), "dev", run.env),
                                         "Agent (AI)": {"value": PROVIDER_NAME.get(c.provider, c.provider)}})
     what = f"Develop the ticket on branch {run.branch} from {start}"
     if run.conflicts:
         what += f", with the latest {project['base']} merged in ({len(run.conflicts)} conflicted files to resolve)"
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         c, "started", what=what,
         why=("Rework after verify findings" if c.findings else "The ticket is ready and its blockers are done"),
         next_="The AI implements the acceptance criteria and runs the checks; AI Flow commits and opens a draft PR",
@@ -277,7 +277,7 @@ def run_ai(run: DevRun, prepared: DevBrief) -> None:
         if prepared.wordpress:
             set_run_progress(run.heartbeat, "wordpress-site")
             start_wordpress_site(containers, run.worktree, run.project, run.claim.run_id, prepared.spec)
-            run.reporter.jira("comment", body=note(
+            run.reporter.comment(body=note(
                 run.claim, "WordPress test site ready", what="A temporary WordPress test site is ready",
                 result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
                 next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
@@ -341,12 +341,12 @@ def collect_quota(run: DevRun) -> dict | None:
     if response.error_kind not in ("quota", "auth"):
         return None
     run.result["outcome"] = "quota"
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "paused", what="The run stopped before finishing",
         why=f"{run.claim.account} cannot work now ({response.error_kind}): {response.error_message[:200]}",
         result="No change was pushed", next_="Back to To Do for another account; this account pauses until its limit resets",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="To Do")
+    run.reporter.transition(to="To Do")
     return run.result
 
 
@@ -364,23 +364,23 @@ def collect_environment(run: DevRun) -> dict | None:
         return run.result
     run.result["outcome"] = "environment_missing"
     run.result["details"]["missing_environment"] = names
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "waiting for an environment item",
         what="The run needs an item of the project environment that is not provided",
         why=f"Missing environment item(s): {', '.join(names)}",
         result="No question goes to the owner; the item is recorded by name",
         next_="Back to To Do; AI Flow provides the item or raises one environment ticket",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="To Do")
+    run.reporter.transition(to="To Do")
     return run.result
 
 
 def report_check_failure(run: DevRun, reason: str, result: str) -> None:
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "check could not run", what="The run ended without a change AI Flow can push",
         why=reason[:600], result=result, next_="Back to To Do; the next run retries after a short wait",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="To Do")
+    run.reporter.transition(to="To Do")
 
 
 def collect_missing_tools(run: DevRun) -> dict | None:
@@ -433,13 +433,13 @@ def report_auto_answer(run: DevRun, raised: dict, missing_tools: bool = False) -
     label = raised.get("label", "Resolved automatically") if missing_tools else raised["label"]
     reason = raised.get("reason", "the register answered this") if missing_tools else raised["reason"]
     answer = raised.get("answer", "") if missing_tools else raised["answer"]
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "question answered without the owner",
         what="The developer AI stopped with a question that AI Flow answered automatically",
         why=redact(f"Classified as: {label} ({reason}).{cited}"), result=redact(answer),
         next_="Back to To Do; the next run gets this answer in its prompt",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="To Do")
+    run.reporter.transition(to="To Do")
     return run.result
 
 
@@ -452,13 +452,13 @@ def report_missing_tools(run: DevRun, raised: dict, missing: list[str], commands
     run.result["details"]["tool_missing_evidence"] = (
         "explicit_marker" if parse_missing_requirements(response.verdict_reason or "") else "command_not_found")
     run.result["details"]["escalation_class"] = raised["class"]
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "waiting for a check tool", what="A configured check could not run",
         why=f"Missing tool(s): {', '.join(missing)}. {redact(response.verdict_reason)[:300]}",
         result="No question goes to the owner; the missing tool is recorded by name",
         next_="Back to To Do; AI Flow offers it again when a worker with the tool is available",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="To Do")
+    run.reporter.transition(to="To Do")
     return run.result
 
 
@@ -471,11 +471,11 @@ def collect_blocked(run: DevRun) -> dict | None:
         return report_auto_answer(run, raised)
     label = f" [{raised['label']}]" if raised and raised.get("label") else ""
     run.result["outcome"] = "blocked"
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "question for the owner", what="The developer AI stopped before changing code",
         why=response.verdict_reason + label, next_="Answer in a comment and move the ticket back to To Do",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="Needs owner")
+    run.reporter.transition(to="Needs owner")
     return run.result
 
 
@@ -534,11 +534,11 @@ def publish_existing_work(run: DevRun, existing_pr: dict | None) -> dict:
     run.result.setdefault("details", {}).update(already_done=True, no_changes=True,
                                                  branch_commits=run.branch_commit_count)
     run.result.update(outcome="done", summary=summary_done[:1000], pr_url=pr["url"], head_sha=sha)
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         c, "already done; sent to verification", what="The developer found the work already on the ticket branch",
         result=note_text, next_="Another account verifies the pull request against the acceptance criteria",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="In Verify")
+    run.reporter.transition(to="In Verify")
     return run.result
 
 
@@ -563,12 +563,12 @@ def publish_no_work(run: DevRun) -> dict:
     reason = (f"no changes to verify: branch {run.branch} has no committed work for this ticket and no open pull request")
     run.result.update(outcome="failed", error_kind="no_work", summary=reason[:1000])
     run.result.setdefault("details", {}).update(no_changes=True, no_work_reason=reason)
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "no work to verify", what="The developer found no changes and the ticket branch has no committed work",
         why=reason, result=run.summary[:600] if run.summary else "The developer reported no changes needed",
         next_="The flow doctor records the cause and decides whether to retry after the normal backoff",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="To Do")
+    run.reporter.transition(to="To Do")
     return run.result
 
 
@@ -577,23 +577,23 @@ def publish_failure(run: DevRun, reason: str) -> dict:
     if reason == "timeout":
         run.result["error_kind"] = "timeout"
     run.result["summary"] = f"{reason}: {run.summary}"[:1000]
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "no usable change", what="The run ended without a change AI Flow can push",
         why=reason, result=(run.summary[:600] if run.summary else "no output"),
         next_="Back to To Do; the next run retries after a short wait",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="To Do")
+    run.reporter.transition(to="To Do")
     return run.result
 
 
 def publish_invalid_title(run: DevRun, problems: list[str]) -> dict:
     reason = "invalid title or commit message: " + "; ".join(problems)
     run.result.update(outcome="failed", error_kind="invalid_title", summary=reason[:1000])
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "invalid title", what="The commit message or title breaks the repository rules",
         why=reason[:400], next_="Back to To Do; nothing was committed or pushed",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="To Do")
+    run.reporter.transition(to="To Do")
     return run.result
 
 
@@ -634,11 +634,11 @@ def report_gate_failure(run: DevRun, reason: str, error_kind: str) -> dict:
         run.git, run.worktree, Path(run.srv_root) / "logs" / "runs" / f"{run.key}-{run.claim.run_id}")
     run.git.run("reset", "--soft", "HEAD~1", cwd=run.worktree)
     run.result.update(outcome="failed", error_kind=error_kind, summary=reason[:1000])
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "local gate failed", what="The CI checks fail on the local commit",
         why=redact(reason)[:900], next_=f"Back to To Do; nothing was pushed; the failed work is saved as {saved}",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="To Do")
+    run.reporter.transition(to="To Do")
     return run.result
 
 
@@ -656,12 +656,12 @@ def open_changes_pr(run: DevRun, gate_note: str) -> dict:
 
 
 def report_published(run: DevRun, sha: str, pr: dict) -> None:
-    run.reporter.jira("comment", body=note(
+    run.reporter.comment(body=note(
         run.claim, "draft PR opened", what=run.summary[:700],
         result=f"{len(run.changed)} files committed as {sha[:10]} on {run.branch}; draft PR {pr['url']}. Tests: {run.tests or 'not reported'}",
         next_="Another account verifies the PR against the acceptance criteria and merges it",
         t0=run.started_at, node=api_node(run.api)))
-    run.reporter.jira("transition", to="In Verify")
+    run.reporter.transition(to="In Verify")
 
 
 def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,
@@ -689,11 +689,11 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         log.exception("dev step failed")
         result.update(outcome="failed", summary=f"worker error: {e}"[:1000])
         try:
-            run.reporter.jira("comment", body=note(
+            run.reporter.comment(body=note(
                 c, "worker error", what="The worker failed before the AI could finish", why=str(e)[:400],
                 next_="Back to To Do; the next run retries after a short wait",
                 t0=started.started_at, node=api_node(api)))
-            run.reporter.jira("transition", to="To Do")
+            run.reporter.transition(to="To Do")
         except Exception:  # noqa: BLE001
             pass
         return result

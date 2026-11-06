@@ -5,6 +5,7 @@ import stat
 from types import SimpleNamespace
 
 from aiflow.v4.node import agent, cleanup, operations, release
+from aiflow.v4.node.heartbeat_providers import HEARTBEAT_PROVIDERS
 
 
 def test_reconcile_can_prepare_a_new_console_account_home(monkeypatch, tmp_path):
@@ -158,6 +159,46 @@ def test_collect_heartbeat_gathers_metrics_tools_workers_and_settings(monkeypatc
         "runtime_settings_public_key": "public-key", "environment_items": {"DEMO": ["API_KEY"]},
     }
     assert state.previous_metrics == (100, 20)
+
+
+def test_heartbeat_provider_registry_names_and_validates_every_payload_field():
+    expected = (
+        "slots_total", "slots_used", "release_version", "release_protocol", "tools", "services", "metrics",
+        "workers", "credential_expiries", "system_conditions", "credential_checks", "auto_fixed_tools",
+        "auto_fixed_conditions", "runtime_settings", "runtime_settings_public_key", "environment_items",
+    )
+    assert tuple(HEARTBEAT_PROVIDERS) == expected
+    valid_by_type = {int: 1, str: "", dict: {}, list: []}
+    invalid_by_type = {int: [], str: {}, dict: [], list: {}}
+    for name, provider in HEARTBEAT_PROVIDERS.items():
+        assert provider.validate(valid_by_type[provider.value_type]) is valid_by_type[provider.value_type]
+        try:
+            provider.validate(invalid_by_type[provider.value_type])
+        except TypeError as error:
+            assert name in str(error)
+        else:
+            raise AssertionError(f"{name} provider accepted the wrong value type")
+
+
+def test_heartbeat_tools_provider_refreshes_a_stale_inventory():
+    clock = iter((601.0, 602.0))
+    state = SimpleNamespace(tools={}, tools_at=0.0)
+    context = SimpleNamespace(state=state, sources=SimpleNamespace(
+        now=lambda: next(clock), tool_versions=lambda: {"git": "git 1"}))
+    prepare = HEARTBEAT_PROVIDERS["tools"].prepare
+    assert prepare is not None
+
+    prepare(context)
+
+    assert state.tools == {"git": "git 1"} and state.tools_at == 602.0
+
+
+def test_control_heartbeat_schema_ignores_undeclared_fields():
+    from aiflow.v4.control.system_check_api import HeartbeatBody
+
+    body = HeartbeatBody.model_validate({"slots_total": 4, "unregistered_field": "discard me"})
+    assert body.slots_total == 4
+    assert "unregistered_field" not in body.model_dump()
 
 
 def test_send_heartbeat_posts_collected_body_and_returns_desired():

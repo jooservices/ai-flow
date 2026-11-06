@@ -8,6 +8,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 ## Topics
 
 - [Watchdog loop structure](../../docs/v4/watchdog-loop.md): each watchdog check is its own module and the loop calls the checks in order
+- [Node heartbeat providers](../../docs/v4/node-heartbeat-providers.md): named field providers collect and validate heartbeat values; the control schema declares accepted fields
 - [Fleet route installation structure](../../docs/v4/fleet-install-structure.md): named route groups preserve the fleet API registration order and helper return values
 - [SQL boundary](../../docs/v4/sql-boundary.md): AST-based SQL detection outside aggregate repositories and database platform modules, with a shrink-only baseline
 - [Provider sign-in run structure](../../docs/v4/provider_sign_in_run-structure.md): provider sign-in setup, PTY monitoring, handoff relay and result reporting are explicit named steps

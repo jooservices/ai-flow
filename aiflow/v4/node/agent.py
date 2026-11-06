@@ -34,6 +34,7 @@ from .operator_audit import (_audit_interventions as _audit_interventions,
 from .provider_sign_in import (ensure_account_home as ensure_account_home,
                                run_provider_sign_in as run_provider_sign_in,
                                sync_provider_sign_ins as sync_provider_sign_ins)
+from .heartbeat_providers import HeartbeatContext, HeartbeatSources, collect_heartbeat_fields
 from .cleanup import (_run_disk_cleanup as _run_disk_cleanup, _test_database_urls as _test_database_urls,
                       clean_scratch as clean_scratch, clean_worktrees as clean_worktrees,
                       sweep_test_databases as sweep_test_databases)
@@ -492,36 +493,14 @@ class _AgentLoopState:
 def collect_heartbeat(state: _AgentLoopState, name: str, slots: int, relay: PolicyRelay | None,
                        runtime_settings_public_key: str) -> dict:
     """Collect the node metrics, tools, workers and settings reported in each heartbeat."""
-    node_metrics, state.previous_metrics = metrics(state.previous_metrics)
-    if time.time() - state.tools_at > 600:
-        state.tools, state.tools_at = tool_versions(), time.time()
-    workers = worker_states()
-    used = sum(1 for worker in workers if worker.get("state") == "working" and worker.get("alive"))
-    environment_items = {}
-    for project, names in state.project_environment.items():
-        local = read_env_file(f"/etc/aiflow/projects/{project}.env")
-        present = [name for name in names if local.get(name)]
-        if present:
-            environment_items[project] = present
-    return {
-        "slots_total": slots,
-        "slots_used": used,
-        "release_version": installed_release() or VERSION,
-        "release_protocol": 1,
-        "tools": state.tools,
-        "services": _services_snapshot(state.service_state, state.service_lock),
-        "metrics": {**node_metrics, "hostname": socket.gethostname(),
-                    "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
-        "workers": workers,
-        "credential_expiries": credential_expiries(workers),
-        "system_conditions": _system_machine_conditions(node_metrics, state.auto_fixed_conditions),
-        "credential_checks": _credential_conditions(workers),
-        "auto_fixed_tools": sorted(state.auto_fixed_tools),
-        "auto_fixed_conditions": sorted(state.auto_fixed_conditions),
-        "runtime_settings": runtime_settings_inventory(),
-        "runtime_settings_public_key": runtime_settings_public_key,
-        "environment_items": environment_items,
-    }
+    sources = HeartbeatSources(
+        metrics=metrics, tool_versions=tool_versions, worker_states=worker_states,
+        installed_release=installed_release, credential_expiries=credential_expiries,
+        system_conditions=_system_machine_conditions, credential_checks=_credential_conditions,
+        services_snapshot=_services_snapshot, runtime_settings_inventory=runtime_settings_inventory,
+        read_env_file=read_env_file, hostname=socket.gethostname, now=time.time, version=VERSION,
+    )
+    return collect_heartbeat_fields(HeartbeatContext(state, slots, relay, runtime_settings_public_key, sources))
 
 
 def send_heartbeat(api: ControlClient, name: str, heartbeat: dict, state: _AgentLoopState | None = None) -> dict:

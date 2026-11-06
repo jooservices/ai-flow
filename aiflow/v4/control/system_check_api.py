@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import system_check
 from .github import GITHUB_APP_REQUIRED_PERMISSIONS
@@ -28,6 +28,8 @@ def validate_github_app_permissions(details: dict[str, Any]) -> None:
 
 class HeartbeatBody(BaseModel):
     """Heartbeat fields from node agents, including the sanitized readiness report."""
+
+    model_config = ConfigDict(extra="ignore")
 
     slots_total: int = 1
     slots_used: int = 0

@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -99,7 +100,7 @@ def template_gaps(description: str, issue_type: str | None = "Story") -> list[st
     return gaps
 
 
-def parse(text: str, issue_type: str | None = "Story") -> tuple[str, Any]:
+def parse(text: str, issue_type: str | None = "Story", *, allow_server_wording: bool = False) -> tuple[str, Any]:
     """AI answer -> ("rewrite", description) | ("questions", bullet list) | ("split", plan)
     | ("invalid", why) | ("", "") when neither is usable."""
     text = text or ""
@@ -113,7 +114,7 @@ def parse(text: str, issue_type: str | None = "Story") -> tuple[str, Any]:
         if gaps:
             return "invalid", "the rewrite does not follow the template; it lacks " + ", ".join(gaps)
         wording = find_server_wording(d.group(1).strip())
-        if wording:  # not ready: a ticket names the requirement, not the host (docs/v4/environment.md)
+        if wording and not allow_server_wording:  # wording has been refused twice; stop the intake loop
             return "invalid", "the rewrite is not a requirement only: " + rejection_message(wording)
         return "rewrite", d.group(1).strip()
     if kind == "QUESTIONS" and q:
@@ -261,72 +262,112 @@ def _provider_result(res) -> dict:
             "details": {"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path}}
 
 
+def _jira_write(api: ControlClient, c: Claimed, key: str, path: str, **body) -> dict:
+    """Send a fenced Jira write for the current intake run."""
+    return api.call("POST", f"/v1/jira/{key}/{path}", {"run_id": c.run_id, "fence": c.fence, **body})
+
+
+def _intake_progress(hb: Heartbeat, events: dict[str, int], t0: float, _event: dict) -> None:
+    """Keep intake progress visible while the provider is working."""
+    events["n"] += 1
+    hb.progress = {"phase": "intake-ai", "events": events["n"], "elapsed_s": int(time.time() - t0)}
+
+
+def _argv_with_prefix(run_as: list[str], argv, spec) -> list[str]:
+    """Run the provider command under the worker's configured unprivileged identity."""
+    return run_as + argv(spec)
+
+
+def _execute_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, run_as: list[str],
+                    git: Git, hb: Heartbeat, t0: float):
+    """Prepare the intake workspace, build the prompt and run the provider."""
+    key, project = c.ticket["key"], c.project
+    credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                         "repo": project["repo"]})
+    mirror = git.mirror(project["repo"], credential["token"], credential.get("transport_url", ""))
+    wt = Path(srv_root) / "work" / project["key"] / f"{key}--intake"
+    head = git.detached(mirror, wt, f"origin/{project['base']}")
+    hb.progress = {"phase": "intake", "head": head[:10]}
+    logs = Path(srv_root) / "logs" / "runs"
+    logs.mkdir(parents=True, exist_ok=True)
+    needs_split = _ticket_needs_split(c.ticket)
+    spec = RunSpec(prompt=build_prompt(c, read_spec(wt), needs_split=needs_split), cwd=str(wt),
+                   account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
+                   timeout_s=int(project.get("work_minutes", {}).get("target", work_limits.TARGET)) * 60,
+                   control_url=control_url, run_token=c.run_token,
+                   log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
+    adapter = get_adapter(c.provider)
+    adapter.argv = partial(_argv_with_prefix, run_as, adapter.argv)
+    events = {"n": 0}
+    answer = run_with_inbox(adapter, spec, hb, partial(_intake_progress, hb, events, t0))
+    return answer, needs_split
+
+
+def _reject_rewrite(c: Claimed, jira, result: dict, why: str, t0: float) -> dict:
+    """Record a rejected rewrite and persist wording refusals with the intake run."""
+    wording_refusal = why.startswith("the rewrite is not a requirement only:")
+    if wording_refusal:
+        result.setdefault("details", {})["server_wording_refusal"] = True
+    result["summary"] = why[:1000]
+    jira("comment", body=note(c, "rewrite rejected", what="The intake rewrite did not meet the ready check",
+                              why=why if wording_refusal else redact(why),
+                              result="The ticket remains in Intake and its description was not changed",
+                              next_=("Describe the product requirement and observable acceptance criteria; "
+                                     "remove where or how it runs"),
+                              t0=t0))
+    return result
+
+
+def _handle_intake_answer(api: ControlClient, c: Claimed, result: dict, res, needs_split: bool,
+                          t0: float, jira) -> dict:
+    """Route a provider answer through the existing intake outcomes."""
+    final_text = res.final_text or ""
+    refusal_count = int(c.ticket.get("intake_wording_refusals", 0) or 0)
+    kind, text = parse(final_text, c.ticket.get("type"), allow_server_wording=refusal_count >= 2)
+    if kind == "questions":
+        if is_server_question(text):
+            return environment_questions(c, jira, result, c.project.get("environment") or [], t0)
+        return questions(c, jira, result, text, t0, api_node(api))
+    if needs_split:
+        return _split_result(result, kind, text)
+    if kind == "split":
+        result["summary"] = "this ticket does not need splitting; use the rewrite path"
+        return result
+    if kind == "rewrite":
+        removed, needs = parse_removals(final_text)
+        return refined(c, jira, result, text, t0, api_node(api), api=api, removed=removed, needs=needs,
+                       allow_wording_bypass=refusal_count >= 2)
+    if kind == "invalid":
+        return _reject_rewrite(c, jira, result, text, t0)
+    result["summary"] = (f"no usable answer ({res.error_kind or 'missing INTAKE line'}): "
+                         f"{(res.error_message or final_text.strip())[-400:]}")[:1000]
+    return result
+
+
+def _perform_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, run_as: list[str],
+                    git: Git, hb: Heartbeat, result: dict, t0: float, jira) -> dict:
+    """Run the intake provider and dispatch its answer."""
+    res, needs_split = _execute_intake(api, c, srv_root, control_url, run_as, git, hb, t0)
+    result.update(_provider_result(res))
+    if hb.lost.is_set():
+        raise LeaseLost()
+    if res.error_kind in ("quota", "auth"):
+        result.update(outcome="quota", summary=(f"{c.account} cannot work now ({res.error_kind}): "
+                                                f"{res.error_message}")[:500])
+        return result
+    return _handle_intake_answer(api, c, result, res, needs_split, t0, jira)
+
+
 def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,
                run_as: list[str]) -> dict:
-    key, project = c.ticket["key"], c.project
     git = Git(srv_root, run_as=run_as)
     hb = Heartbeat(api, c, heartbeat_s)
     hb.start()
     t0 = time.time()
     result: dict = {"fence": c.fence, "outcome": "failed"}
-
-    def jira(path: str, **body) -> dict:
-        return api.call("POST", f"/v1/jira/{key}/{path}", {"run_id": c.run_id, "fence": c.fence, **body})
-
+    jira = partial(_jira_write, api, c, c.ticket["key"])
     try:
-        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
-                                                              "repo": project["repo"]})
-        token = credential["token"]
-        mirror = git.mirror(project["repo"], token, credential.get("transport_url", ""))
-        wt = Path(srv_root) / "work" / project["key"] / f"{key}--intake"
-        head = git.detached(mirror, wt, f"origin/{project['base']}")
-        hb.progress = {"phase": "intake", "head": head[:10]}
-        logs = Path(srv_root) / "logs" / "runs"
-        logs.mkdir(parents=True, exist_ok=True)
-        needs_split = _ticket_needs_split(c.ticket)
-        spec = RunSpec(prompt=build_prompt(c, read_spec(wt), needs_split=needs_split), cwd=str(wt),
-                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("target", work_limits.TARGET)) * 60, control_url=control_url,
-                       run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
-        adapter = get_adapter(c.provider)
-        base_argv = adapter.argv
-        adapter.argv = lambda s: run_as + base_argv(s)
-        events = {"n": 0}
-
-        def on_progress(ev: dict) -> None:
-            events["n"] += 1
-            hb.progress = {"phase": "intake-ai", "events": events["n"], "elapsed_s": int(time.time() - t0)}
-
-        res = run_with_inbox(adapter, spec, hb, on_progress)
-        result.update(_provider_result(res))
-        if hb.lost.is_set():
-            raise LeaseLost()
-        if res.error_kind in ("quota", "auth"):
-            result.update(outcome="quota", summary=f"{c.account} cannot work now ({res.error_kind}): {res.error_message}"[:500])
-            return result
-        kind, text = parse(res.final_text or "", c.ticket.get("type"))
-        if kind == "questions":
-            if is_server_question(text):
-                return environment_questions(c, jira, result, project.get("environment") or [], t0)
-            return questions(c, jira, result, text, t0, api_node(api))
-        if needs_split:
-            return _split_result(result, kind, text)
-        if kind == "split":
-            result["summary"] = "this ticket does not need splitting; use the rewrite path"
-            return result
-        if kind == "rewrite":
-            removed, needs = parse_removals(res.final_text or "")
-            return refined(c, jira, result, text, t0, api_node(api), api=api, removed=removed, needs=needs)
-        if kind == "invalid":
-            result["summary"] = text[:1000]
-            jira("comment", body=note(c, "rewrite rejected", what="The intake rewrite did not meet the ready check",
-                                      why=redact(text), result="The ticket remains in Intake and its description was not changed",
-                                      next_="Describe the product requirement and observable acceptance criteria; remove where or how it runs",
-                                      t0=t0))
-            return result
-        result["summary"] = (f"no usable answer ({res.error_kind or 'missing INTAKE line'}): "
-                             f"{(res.error_message or (res.final_text or '').strip())[-400:]}")[:1000]
-        return result
+        return _perform_intake(api, c, srv_root, control_url, run_as, git, hb, result, t0, jira)
     except LeaseLost:
         result.update(outcome="lost", summary="lease lost during intake; stopped without writing")
         return result
@@ -341,55 +382,91 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         hb.stop.set()
 
 
-def refined(c: Claimed, jira, result: dict, description: str, t0: float | None, node: str, api=None,
-            removed: list[str] | None = None, needs: list[str] | None = None) -> dict:
-    """Keep the author's text as a comment first, then replace the description, mark it ready and queue it.
-
-    When the author named a host, an address, a machine, a network or an access instruction, that wording is not kept
-    in Jira: the comment holds the original with a marker in its place and a record of what was removed, the full
-    record is stored by the control plane, and a real need behind the wording becomes (or joins) an environment ticket."""
+def _reject_summary_wording(c: Claimed, jira, result: dict, t0: float | None, allow_bypass: bool) -> tuple[bool, bool]:
+    """Reject a system-use title unless this ticket has exhausted its two wording refusals."""
     summary_problems = summary_readiness_problems(c.ticket.get("summary") or "")
     if summary_problems:
         reason = "the ticket summary is not a requirement only: " + summary_problems[0]
-        result["summary"] = redact(reason)[:1000]
+        if allow_bypass:
+            return False, True
+        result.setdefault("details", {})["server_wording_refusal"] = True
+        result["summary"] = reason[:1000]
         jira("comment", body=note(c, "rewrite rejected", what="The ticket title did not meet the ready check",
-                                  why=redact(reason), result="The ticket remains in Intake and its description was not changed",
+                                  why=reason,
+                                  result="The ticket remains in Intake and its description was not changed",
                                   next_="Describe the product requirement in the title and remove where or how it runs",
                                   t0=t0))
-        return result
-    original = (c.ticket.get("description") or "").strip() or "(empty)"
-    found = find_server_wording(original)
-    removal_lines: list[str] = []
-    if found or removed or needs:
-        stored = list(dict.fromkeys([*(removed or []), *(f"{f['kind']}: {f['text']}" for f in found)]))
-        tickets = []
-        if api is not None:
-            reply = api.call("POST", "/v1/environment/removals", {"run_id": c.run_id, "fence": c.fence,
-                                                                   "removed": stored[:50], "needs": (needs or [])[:20]})
-            tickets = reply.get("environment_tickets") or []
-        if found:
-            removal_lines.append("Removed from the ticket: " + ", ".join(kinds_of(found)) + f" ({len(found)} place(s));"
-                                 " the requirement behind it is kept")
-        removal_lines += [f"Removed: {redact(line)}" for line in (removed or [])]
-        removal_lines += [f"Environment need: {redact(t['need'])} -> {t['ticket'] or 'recorded for an environment ticket'}"
-                          + (" (opened)" if t.get("created") else " (linked)") for t in tickets]
-        result.setdefault("details", {})["removed_wording"] = [f["kind"] for f in found]
-        result["details"]["environment_tickets"] = [t["ticket"] for t in tickets if t.get("ticket")]
-        original = redact(original)
-    kept = "Original description:\n\n" + original
+        return True, True
+    return False, False
+
+
+def _stored_removals(found: list[dict[str, str]], removed: list[str] | None) -> list[str]:
+    """Combine AI-reported and rule-detected wording for the durable environment record."""
+    return list(dict.fromkeys([*(removed or []), *(f"{item['kind']}: {item['text']}" for item in found)]))
+
+
+def _environment_removal_lines(found: list[dict[str, str]], removed: list[str] | None,
+                               tickets: list[dict]) -> list[str]:
+    """Format the environment removal note without repeating a host or address."""
+    lines = []
+    if found:
+        lines.append("Removed from the ticket: " + ", ".join(kinds_of(found)) + f" ({len(found)} place(s));"
+                     " the requirement behind it is kept")
+    lines += [f"Removed: {redact(line)}" for line in (removed or [])]
+    lines += [f"Environment need: {redact(t['need'])} -> {t['ticket'] or 'recorded for an environment ticket'}"
+              + (" (opened)" if t.get("created") else " (linked)") for t in tickets]
+    return lines
+
+
+def _record_environment_removal(c: Claimed, api, result: dict, original: str,
+                                found: list[dict[str, str]], removed: list[str] | None,
+                                needs: list[str] | None) -> tuple[str, list[str]]:
+    """Persist removed wording and return the ticket-safe original plus its comment lines."""
+    if not (found or removed or needs):
+        return original, []
+    stored = _stored_removals(found, removed)
+    reply = (api.call("POST", "/v1/environment/removals", {"run_id": c.run_id, "fence": c.fence,
+                                                             "removed": stored[:50], "needs": (needs or [])[:20]})
+             if api is not None else {})
+    tickets = reply.get("environment_tickets") or []
+    lines = _environment_removal_lines(found, removed, tickets)
+    result.setdefault("details", {})["removed_wording"] = [f["kind"] for f in found]
+    result["details"]["environment_tickets"] = [t["ticket"] for t in tickets if t.get("ticket")]
+    return redact(original), lines
+
+
+def _write_refined_ticket(c: Claimed, jira, result: dict, description: str, kept: str,
+                          removal_lines: list[str], t0: float | None, node: str) -> dict:
+    """Keep the original comment before replacing, marking ready and transitioning the ticket."""
     if removal_lines:
         kept += "\n\n" + "\n".join(removal_lines)
+    why = ("The description lacked parts of the template" if not removal_lines else
+           "The description lacked parts of the template and named where or how something runs")
     jira("comment", body=note(c, "original description kept", what="The ticket is rewritten into the AI Flow template",
-                              why=("The description lacked parts of the template" if not removal_lines else
-                                   "The description lacked parts of the template and named where or how something runs")
-                                  + "; this comment keeps the author's words",
-                              result=kept, t0=t0, node=node))
+                              why=why + "; this comment keeps the author's words", result=kept, t0=t0, node=node))
     jira("description", body=description)
     jira("fields", add_labels=["aiflow-ready"])
     jira("transition", to="To Do")
     result.update(outcome="refined", summary=f"description rewritten ({len(description)} chars); ticket ready in To Do")
     result.setdefault("details", {})["description_chars"] = len(description)
     return result
+
+
+def refined(c: Claimed, jira, result: dict, description: str, t0: float | None, node: str, api=None,
+            removed: list[str] | None = None, needs: list[str] | None = None,
+            allow_wording_bypass: bool = False) -> dict:
+    """Keep the author's text, record removed wording and environment needs, then mark the ticket ready."""
+    summary_refused, summary_has_wording = _reject_summary_wording(c, jira, result, t0, allow_wording_bypass)
+    if summary_refused:
+        return result
+    original = (c.ticket.get("description") or "").strip() or "(empty)"
+    found = find_server_wording(original)
+    original, removal_lines = _record_environment_removal(c, api, result, original, found, removed, needs)
+    if allow_wording_bypass and (find_server_wording(description) or summary_has_wording):
+        removal_lines.append("The wording check refused this ticket twice; intake passed it through to stop "
+                             "the retry loop.")
+    kept = "Original description:\n\n" + original
+    return _write_refined_ticket(c, jira, result, description, kept, removal_lines, t0, node)
 
 
 def questions(c: Claimed, jira, result: dict, text: str, t0: float | None, node: str) -> dict:

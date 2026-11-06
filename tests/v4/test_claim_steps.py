@@ -262,11 +262,13 @@ def test_each_step_extras_builder_returns_its_step_payload(monkeypatch):
     ticket = _ticket()
     timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store = SimpleNamespace(
+        intake_wording_refusals=lambda _key: 2,
         node_tools=lambda _node: SimpleNamespace(as_row=lambda: {"tools": []}),
         latest_rework=lambda _key: None, latest_answered_triage=lambda _key: None,
         dev_finished_since=lambda *_args: False, blocked_question_before=lambda *_args: "",
         open_project_tickets=lambda *_args: [_BoardRow("TESTWP-OTHER", "Task", "To Do", "Other", None)])
-    ctx = SimpleNamespace(db=object(), jira=SimpleNamespace(recent_comments=lambda *_a, **_kw: ["comment"]))
+    ctx = SimpleNamespace(db=SimpleNamespace(),
+                          jira=SimpleNamespace(recent_comments=lambda *_a, **_kw: ["comment"]))
     work = claim_steps.Claim(ctx=ctx, deps=SimpleNamespace(related_hits=lambda _ticket: ["hit"]),
                              body=_body(), node="cc", store=store, ticket=ticket, prior_dev={
                                  "started_at": timestamp, "branch": "feature/x", "pr_url": "https://example/pull/7",
@@ -282,6 +284,7 @@ def test_each_step_extras_builder_returns_its_step_payload(monkeypatch):
     assert claim_extras.triage_extras(work) == {"question": "Which?"}
     assert claim_extras.post_merge_extras(work) == {"post_merge_criteria": []}
     assert claim_extras.intake_extras(work) == {"recent_comments": ["comment"]}
+    assert work.ticket_data == {"intake_wording_refusals": 2}
     assert claim_extras.impact_extras(work)["project_tickets"][0]["key"] == "TESTWP-OTHER"
     assert claim_extras.master_extras(work) == {"master_scope": "global"}
     assert claim_extras.related_extras(work) == {"related": ["hit"]}

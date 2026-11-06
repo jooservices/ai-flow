@@ -49,57 +49,70 @@ class EnvItem:
 
 def parse_items(raw: Any) -> tuple[list[EnvItem], list[str]]:
     """The environment section as written in the project file -> (valid items, one message per problem)."""
+    entries = _environment_entries(raw)
+    if entries is None:
+        return [], ["the environment section must be a list of items"]
     items: list[EnvItem] = []
     errors: list[str] = []
-    if raw in (None, "", [], {}):
-        return items, errors
-    if isinstance(raw, dict):  # {NAME: {kind: ..}} is accepted too
-        raw = [{"name": name, **(value if isinstance(value, dict) else {"value": value})} for name, value in raw.items()]
-    if not isinstance(raw, list):
-        return items, ["the environment section must be a list of items"]
     seen: set[str] = set()
-    for index, entry in enumerate(raw[:MAX_ITEMS + 1], 1):
+    for index, entry in enumerate(entries[:MAX_ITEMS + 1], 1):
         if index > MAX_ITEMS:
             errors.append(f"at most {MAX_ITEMS} environment items are allowed")
             break
-        if not isinstance(entry, dict):
-            errors.append(f"item {index} must be a mapping with a name and a kind")
-            continue
-        name = str(entry.get("name") or "").strip()
-        kind = str(entry.get("kind") or "").strip().lower()
-        label = name or f"item {index}"
-        if not NAME_RE.fullmatch(name):
-            errors.append(f"{label}: the name must be an environment variable name such as WP_BASE_URL")
-            continue
-        if name in seen:
-            errors.append(f"{name}: listed more than once")
-            continue
-        if kind not in KINDS:
-            errors.append(f"{name}: the kind must be one of {', '.join(KINDS)}")
-            continue
-        runs = entry.get("runs")
-        runs = DEFAULT_RUN_STEPS if runs in (None, "", []) else tuple(
-            dict.fromkeys(str(r).strip().lower() for r in (runs if isinstance(runs, (list, tuple)) else [runs])))
-        if not set(runs) <= set(RUN_STEPS):
-            errors.append(f"{name}: runs may only be {', '.join(RUN_STEPS)}")
-            continue
-        value = str(entry.get("value") if entry.get("value") is not None else "").strip()
-        if kind == "secret" and value:
-            errors.append(f"{name}: a secret is listed by name only; its value lives on the machine, never in the file")
-            continue
-        if len(value) > MAX_VALUE or "\n" in value or "\r" in value:
-            errors.append(f"{name}: the value must be one line of at most {MAX_VALUE} characters")
-            continue
-        if CREDENTIAL_IN_VALUE.search(value):
-            errors.append(f"{name}: the value carries a credential; list the credential as a secret by name instead")
-            continue
-        if kind != "secret" and not value:
-            errors.append(f"{name}: a {kind} item needs a value")
-            continue
-        seen.add(name)
-        items.append(EnvItem(name=name, kind=kind, value=value, runs=runs,
-                             description=str(entry.get("description") or "").strip()[:200]))
+        item, error = _environment_item(entry, index, seen)
+        if error:
+            errors.append(error)
+        elif item:
+            items.append(item)
     return items, errors
+
+
+def _environment_entries(raw: Any) -> list | None:
+    if raw in (None, "", [], {}):
+        return []
+    if isinstance(raw, dict):  # {NAME: {kind: ..}} is accepted too
+        return [{"name": name, **(value if isinstance(value, dict) else {"value": value})}
+                for name, value in raw.items()]
+    return raw if isinstance(raw, list) else None
+
+
+def _environment_item(entry: Any, index: int, seen: set[str]) -> tuple[EnvItem | None, str | None]:
+    if not isinstance(entry, dict):
+        return None, f"item {index} must be a mapping with a name and a kind"
+    name = str(entry.get("name") or "").strip()
+    kind = str(entry.get("kind") or "").strip().lower()
+    runs = entry.get("runs")
+    runs = DEFAULT_RUN_STEPS if runs in (None, "", []) else tuple(
+        dict.fromkeys(str(r).strip().lower() for r in (runs if isinstance(runs, (list, tuple)) else [runs])))
+    value = str(entry.get("value") if entry.get("value") is not None else "").strip()
+    error = _environment_item_error(name, kind, runs, value, index, seen)
+    if error:
+        return None, error
+    seen.add(name)
+    return EnvItem(name=name, kind=kind, value=value, runs=runs,
+                   description=str(entry.get("description") or "").strip()[:200]), None
+
+
+def _environment_item_error(name: str, kind: str, runs: tuple[str, ...], value: str, index: int,
+                            seen: set[str]) -> str | None:
+    label = name or f"item {index}"
+    if not NAME_RE.fullmatch(name):
+        return f"{label}: the name must be an environment variable name such as WP_BASE_URL"
+    if name in seen:
+        return f"{name}: listed more than once"
+    if kind not in KINDS:
+        return f"{name}: the kind must be one of {', '.join(KINDS)}"
+    if not set(runs) <= set(RUN_STEPS):
+        return f"{name}: runs may only be {', '.join(RUN_STEPS)}"
+    if kind == "secret" and value:
+        return f"{name}: a secret is listed by name only; its value lives on the machine, never in the file"
+    if len(value) > MAX_VALUE or "\n" in value or "\r" in value:
+        return f"{name}: the value must be one line of at most {MAX_VALUE} characters"
+    if CREDENTIAL_IN_VALUE.search(value):
+        return f"{name}: the value carries a credential; list the credential as a secret by name instead"
+    if kind != "secret" and not value:
+        return f"{name}: a {kind} item needs a value"
+    return None
 
 
 def items_of(raw: Any) -> list[EnvItem]:
@@ -164,7 +177,8 @@ _HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _MACHINE_NOUN = r"(?:vms?|servers?|machines?|hosts?|boxes|box|computers?|nodes?|laptops?|pcs?)"
 RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(rx, re.I)) for kind, rx in (
     ("ip address", rf"(?<![\w.]){_OCTET}(?:\.{_OCTET}){{3}}(?:/\d{{1,2}})?(?::\d{{2,5}})?(?![\w]|\.\d)"),
-    ("host", rf"(?<![\w.@-])(?:{_HOST_LABEL}\.)+(?!(?:md|py|html?|css|js|json|yaml|yml|toml|txt|sh|rst|xml|in)\b)[a-z]{{2,63}}(?![\w-]|\.[a-z0-9])"),
+    ("host", rf"(?<![\w.@-])(?:{_HOST_LABEL}\.)+(?!(?:md|py|html?|css|js|json|yaml|yml|toml|txt|sh|rst|xml|in|"
+             rf"lock|lockb|sum|sql|conf|ini|cfg|log|env|gradle|mod)\b)[a-z]{{2,63}}(?![\w-]|\.[a-z0-9])"),
     ("host", r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|lan|internal|intranet|corp|home|localdomain)\b"),
     ("host", r"\blocalhost:\d{2,5}\b|\bssh://\S+|\bhost\s?name\s*(?:[:=]|is\b|called\b)"),
     # A local hostname is still a host when it appears in a URL without an explicit port.
@@ -180,6 +194,8 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(rx, re.
     # Local names such as node4 often have no DNS suffix. Match them when they are used as a run destination.
     ("host", r"\b(?:on|at|to|against|via|from)\s+(?:the\s+)?"
              r"(?:node|host|server|vm|machine|box|worker|runner|agent)[-_]?\d+\b"),
+    ("host", r"\b(?:on|at|to|against|via|from|into)\s+(?:the\s+)?"
+             r"(?=[a-z0-9-]*[a-z-])(?=[a-z0-9-]*\d)[a-z0-9-]+\b"),
     # Generic machine references still leave a run-location question, even when no hostname follows.
     ("machine", r"\b(?:run|test|execute|deploy|install|build|start)\b.{0,80}\b(?:on|at|against|to)\s+(?:the\s+)?(?:server|machine)\b"),
     ("host", r"\b(?:use|connect(?:\s+to)?|access|run|test|deploy)\s+(?:the\s+)?host"
@@ -190,8 +206,8 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(rx, re.
     ("network", r"\b(?:vpn|vlan|subnet|bastion|intranet|dmz)\b|\bjump\s?host\b|\bport[- ]forward\w*|\bfirewall rule\b"),
     ("access instruction", r"\b(?:ssh|rdp|scp|sftp|telnet)\s+(?:in)?to\b|\b(?:ssh|rdp)\s+(?:access|key|session|tunnel)\b|"
                            r"\bssh\s+[\w.-]+@"),
-    ("access instruction", rf"\b(?:log\s?in|login|sign\s?in|connect|remote\s+in)\s+(?:in)?to\s+(?:the\s+|a\s+|your\s+)?"
-                           rf"(?:server|vm|host|machine|box|node|jump\s?host|bastion|(?:shared|dev|lab|staging|prod\w*)\s+\w+)\b"),
+    ("access instruction", r"\b(?:log\s?in|login|sign\s?in|connect|remote\s+in)\s+(?:in)?to\s+(?:the\s+|a\s+|your\s+)?"
+                           r"(?:server|vm|host|machine|box|node|jump\s?host|bastion|(?:shared|dev|lab|staging|prod\w*)\s+\w+)\b"),
     ("access instruction", r"\b(?:ask|get|request)\s+(?:for\s+)?(?:access to|credentials|the password|a password)\b"),
     ("access instruction", r"\b(?:password|passwd|pwd|secret|token|api[_ -]?key)\s*[:=]\s*[^\s,;]{3,}"),
     ("jira action", r"\b(?:write|post|add|leave|put)\s+(?:a|an|the)\s+jira\s+(?:comment|note)\b|"
@@ -200,22 +216,116 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(rx, re.
 ))
 REPLACEMENT = "[server detail removed]"
 _IPV6_CANDIDATE = re.compile(r"(?<![0-9a-f:.])[0-9a-f:.]{2,}(?![0-9a-f:.])", re.I)
+_WEB_URL_AUTHORITY = re.compile(r"https?://[^/\s?#]+", re.I)
+_SYSTEM_ACTION = re.compile(r"\b(?:run|test|execute|deploy|install|build|start|connect|access|use|open|visit|browse|"
+                            r"log\s?in|login|sign\s?in|ssh|rdp|scp|sftp|telnet)\b", re.I)
+_LOCATION_CUE = re.compile(r"\b(?:on|at|to|against|via|from|into|through)\b", re.I)
+_NETWORK_LOCATION = re.compile(r"\b(?:via|through)\s+(?:the\s+)?$", re.I)
+_DIRECT_SYSTEM_ACTIONS = frozenset(("use", "open", "visit", "browse", "connect", "access"))
+_SYSTEM_WORDING_KINDS = frozenset(("ip address", "host", "machine", "network"))
+_DATA_LABEL = r"(?:field|property|column|attribute|key|variable|parameter)"
+_FILE_LABEL = r"(?:file|filename|path|script|module|package|lockfile)"
 
 
-def _wording_spans(text: str) -> list[tuple[int, int, str]]:
-    """Find all rule matches, validating IPv6 candidates with the standard library parser."""
-    text = text or ""
-    found = [(m.start(), m.end(), kind) for kind, rx in RULES for m in rx.finditer(text)]
+def _is_system_instruction(text: str, start: int, end: int, kind: str) -> bool:
+    """Keep a server or network match only when the sentence directs an action to it."""
+    sentence_match = next((match for match in re.finditer(r"[^\n]*?(?:[.!?]+(?=\s|$)|$)", text)
+                           if match.start() <= start and end <= match.end()), None)
+    raw_sentence = sentence_match.group() if sentence_match else text[start:end]
+    sentence = raw_sentence.strip()
+    offset = sentence_match.start() + len(raw_sentence) - len(raw_sentence.lstrip()) if sentence_match else start
+    relative_start, relative_end = start - offset, end - offset
+    before = text[max(0, start - 24):start]
+    if kind == "network" and _NETWORK_LOCATION.search(before):
+        return True
+    return _has_action_target(sentence, relative_start, relative_end, kind)
+
+
+def _has_action_target(sentence: str, start: int, end: int, kind: str) -> bool:
+    """Check that a command or location phrase connects an action to a system match."""
+    for action in _SYSTEM_ACTION.finditer(sentence):
+        if action.start() == start:
+            return True
+        if action.end() > start:
+            continue
+        gap = sentence[action.end():start]
+        if _LOCATION_CUE.search(gap + sentence[start:end]):
+            return True
+        if kind == "network" and _NETWORK_LOCATION.search(gap):
+            return True
+        if action.group().lower() in _DIRECT_SYSTEM_ACTIONS and len(gap.split()) <= 3:
+            return True
+    return False
+
+
+def _sentence_containing(text: str, start: int, end: int) -> str:
+    """Return the sentence around a matched phrase without splitting URLs or decimal addresses."""
+    for match in re.finditer(r"[^\n]*?(?:[.!?]+(?=\s|$)|$)", text or ""):
+        if match.start() <= start and end <= match.end():
+            return match.group().strip()
+    return (text or "")[start:end].strip()
+
+
+def _overlaps_code(start: int, end: int, code_spans: list[tuple[int, int]]) -> bool:
+    """Whether a candidate falls inside inline or fenced code."""
+    return any(start < code_end and code_start < end for code_start, code_end in code_spans)
+
+
+def _is_field_or_file_reference(text: str, start: int, end: int) -> bool:
+    """Ignore system-like words explicitly used as a field label or a file name."""
+    before, after = text[max(0, start - 48):start], text[end:end + 40]
+    matched = text[start:end]
+    label = r"\s+(?:(?:named|called)\s+)?$"
+    return bool(re.search(rf"\b{_DATA_LABEL}\b", matched, re.I)
+                or re.search(rf"\b{_FILE_LABEL}\b", matched, re.I)
+                or re.search(rf"\b{_DATA_LABEL}{label}", before, re.I)
+                or re.match(rf"\s+{_DATA_LABEL}\b", after, re.I)
+                or re.search(rf"\b{_FILE_LABEL}{label}", before, re.I)
+                or re.match(rf"\s+{_FILE_LABEL}\b", after, re.I))
+
+
+def _is_explicit_endpoint(text: str, start: int, end: int, kind: str) -> bool:
+    """A literal IP or a web URL names its endpoint even without a run instruction."""
+    if kind == "ip address":
+        return True
+    return kind == "host" and any(match.start() <= start < end <= match.end()
+                                   for match in _WEB_URL_AUTHORITY.finditer(text))
+
+
+def _ipv6_wording_spans(text: str, code_spans: list[tuple[int, int]]) -> list[tuple[int, int, str]]:
+    """Find valid IPv6 literals outside code, regardless of surrounding action wording."""
+    found = []
     for match in _IPV6_CANDIDATE.finditer(text):
-        candidate = match.group().rstrip(".")  # a final sentence period is punctuation, not part of the address
-        if candidate.count(":") < 2:
+        candidate = match.group().rstrip(".")
+        if candidate.count(":") < 2 or _overlaps_code(match.start(), match.end(), code_spans):
             continue
         try:
             ip = ip_address(candidate)
         except ValueError:
             continue
+        end = match.start() + len(candidate)
         if ip.version == 6:
-            found.append((match.start(), match.start() + len(candidate), "ip address"))
+            found.append((match.start(), end, "ip address"))
+    return found
+
+
+def _wording_spans(text: str) -> list[tuple[int, int, str]]:
+    """Find all rule matches, validating IPv6 candidates with the standard library parser."""
+    text = text or ""
+    code_spans = [m.span() for m in re.finditer(r"```[\s\S]*?```|`[^`\n]*`", text)]
+    found = []
+    for kind, rx in RULES:
+        for match in rx.finditer(text):
+            if _overlaps_code(match.start(), match.end(), code_spans):
+                continue
+            if kind in _SYSTEM_WORDING_KINDS and _is_field_or_file_reference(text, match.start(), match.end()):
+                continue
+            if (kind in _SYSTEM_WORDING_KINDS
+                    and not _is_explicit_endpoint(text, match.start(), match.end(), kind)
+                    and not _is_system_instruction(text, match.start(), match.end(), kind)):
+                continue
+            found.append((match.start(), match.end(), kind))
+    found.extend(_ipv6_wording_spans(text, code_spans))
     return sorted(found)
 
 
@@ -227,7 +337,8 @@ def find_server_wording(text: str) -> list[dict[str, str]]:
     for start, end, kind in found:  # overlapping hits count once
         if start < last_end:
             continue
-        out.append({"kind": kind, "text": (text or "")[start:end][:120]})
+        out.append({"kind": kind, "text": (text or "")[start:end][:120],
+                    "sentence": _sentence_containing(text or "", start, end)})
         last_end = end
     return out
 
@@ -270,9 +381,10 @@ def kinds_of(findings: list[dict[str, str]]) -> list[str]:
 
 
 def rejection_message(findings: list[dict[str, str]]) -> str:
-    """What the author is told. It names the kinds and the quoted words so they can be found."""
-    quoted = "; ".join(f"{f['kind']}: \"{f['text']}\"" for f in findings[:8])
-    return (f"the text names {', '.join(kinds_of(findings))} ({quoted}). A ticket states what the product must do and"
-            " how to know it is done; describe the requirement instead. Which computer, server, network, folder,"
-            " account or tool to use belongs to the project configuration (environment section) and the run"
-            " environment, not to the ticket")
+    """Name the refused sentence and tell the author how to rewrite it as a requirement."""
+    sentences = list(dict.fromkeys(f.get("sentence") or f["text"] for f in findings[:8]))
+    quoted = "; ".join(f'"{sentence}"' for sentence in sentences)
+    return (f"the server-wording check refused this sentence: {quoted}. Please describe the requirement instead: "
+            "rewrite it to state what the product must do and how to verify it, for example, 'The product must "
+            "<behavior>, and <observable result>'. Which computer, server, network, folder, account or tool to use "
+            "belongs to the project configuration (environment section) and the run environment, not to the ticket")

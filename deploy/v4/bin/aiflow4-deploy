@@ -89,6 +89,15 @@ if [ "${AIFLOW4_SKIP_UPGRADE_CHECK:-}" != 1 ]; then
 fi
 
 CF="$B/deploy/v4/control/compose.yaml"
+# Create host files a fresh install would have written (runtime.env, secret dirs, projects) before compose
+# mounts them; an older layout must not block this candidate (docs/v4/upgrade-layout.md).
+SECRETS_ROOT=${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets}
+PYTHONPATH="$B${PYTHONPATH:+:$PYTHONPATH}" python3 - <<PY
+from pathlib import Path
+from aiflow.v4.install.secrets import ensure_runtime_layout
+created = ensure_runtime_layout(Path("$SECRETS_ROOT"))
+print("host layout ready" + (f" (created {', '.join(created)})" if created else ""))
+PY
 healthy() { [ "$(docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null)" = healthy ]; }
 for svc in control-api-a control-api-b; do
   AIFLOW4_IMAGE_REPOSITORY=$IMAGE AIFLOW4_IMAGE_TAG=$VERSION AIFLOW4_VERSION=$VERSION \

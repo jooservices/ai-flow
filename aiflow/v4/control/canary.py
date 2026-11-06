@@ -128,7 +128,7 @@ def record_rollback(ctx, *, node: str, target: str, previous: str, commit: str,
               f"Previous release infrastructure failures: {baseline['infra_failures']}\n"
               f"Previous release infrastructure failure rate: {baseline['failure_rate']:.4f}")
     opened = open_incident(ctx, "canary_rollback", target, "critical", title, detail)
-    project = ctx.settings.canary_bug_project
+    project = ctx.settings.maintenance_project
     summary = f"[flow-bug] Canary rollback for {target} ({commit[:12]})"
     description = (f"AI Flow auto-deployer rolled back a canary release: {reason}.\n\n" + detail)
     label_hash = sha256(f"{target}\0{commit}".encode()).hexdigest()[:24]

@@ -332,7 +332,7 @@ def test_issue_type_document_covers_templates_labels_and_jira_setup_plan():
     for label in ("aiflow-ready", "aiflow-hold", "rework", "require-human", "tier-senior", "ai-", "area-", "regression",
                   "uat-bug", "blocked-external", "needs-design", "breaking-change", "perf", "a11y", "seo", "security"):
         assert label in doc
-    assert "TESTFLOW-50" in doc and "owner" in doc and "Task" in doc
+    assert "## Jira issue type setup plan" in doc and "owner" in doc and "Task" in doc
 
 
 def test_questions_move_the_ticket_to_needs_owner(iclient, ctx, tmp_path, monkeypatch):

@@ -1,11 +1,9 @@
 # Automatic Jira version releases
 
-AI Flow v4 releases an explicitly configured Jira project version without an owner approval step. The enabled
-trial scope is project `TESTWP` in `jooservices/test-aiflow-wp`, for Jira versions `WordPress Core 0.5.0-beta`
-and `WordPress Theme 0.5.0-beta`. The exact project and repository match is required; `jooservices/ai-flow`
-is rejected even if someone adds release settings to its project entry. In v4, the configured unreleased Jira
-version is the trigger; AI Flow creates one `Release` tracker and sets its Jira `Version` field when that field
-exists in the project.
+AI Flow v4 releases an explicitly configured Jira project version without an owner approval step. A project whose repository is `jooservices/ai-flow` is excluded even when version release is enabled and versions are listed. Version
+release is opt-in for each project and has no project-specific profile or default version list. In v4, the
+configured unreleased Jira version is the trigger; AI Flow creates one `Release` tracker and sets its Jira
+`Version` field when that field exists in the project.
 
 ## Readiness gate
 
@@ -64,10 +62,10 @@ AI Flow merges the PR automatically. Its body and the GitHub Release notes list 
 check results.
 
 After the PR merge, the tag points at the merge commit on `master`. By default, the tag combines the project key
-and normalized version name, for example `testwp-wordpress-core-0.5.0-beta`. A configured `tag_prefix` or
+and normalized version name, for example `joowp-wordpress-core-0.5.0-beta`. A configured `tag_prefix` or
 `tag_prefixes` is prepended literally to the numeric version: include any desired separator and `v` in the
-prefix. The TESTWP defaults use `core-v` and `theme-v`, producing `core-v0.5.0-beta` and `theme-v0.5.0-beta`.
-For another project, `widget-core-v` produces `widget-core-v1.2.0`.
+prefix. A configured `core-v` prefix produces `core-v0.5.0-beta`; `widget-core-v` produces
+`widget-core-v1.2.0`.
 The GitHub Release uses that exact tag. Jira's Released flag and release date are set last. An existing tag must
 point to the same commit; existing PRs, tags, Releases and Jira Released state are reused on retry. The registry
 records the merge commit, tag, GitHub Release URL and Jira version state. If Jira reports Released but the
@@ -88,8 +86,7 @@ commit, tag, Release URL and Jira status.
 
 ## Configure other projects
 
-The exact TESTWP repository has the two trial version names enabled by default. For another project, configure
-its project entry in the AI Flow control repository:
+Configure a project's entry in the AI Flow control repository:
 
 ```yaml
 release_check: # optional project-level override
@@ -114,7 +111,8 @@ version_release:
   bug_issue_type: Bug
 ```
 
-Only listed unreleased Jira version names are eligible. Set `enabled: false` to disable the TESTWP preset.
+Only listed unreleased Jira version names are eligible. Set `enabled: false` to disable version releases for a
+project.
 Project checks are trusted control-repository configuration and run on the node as the unprivileged AI worker,
 with the project's configured environment. The Jira integration account needs permission to update project
 versions. The GitHub App installation needs Contents, Pull requests and Workflows write permissions. It also

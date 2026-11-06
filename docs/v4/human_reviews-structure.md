@@ -6,7 +6,7 @@ The route keeps authentication, project-scope refusal and its access-denied audi
 `_build_human_reviews_response`, which loads the selected queue keys and metrics, ticket rows, thread rows, and finally
 the ticket and recent-thread response sections in the existing order.
 
-`HumanReviewRows` groups selected tickets with blocker statuses, the TESTFLOW epic status, the latest development,
+`HumanReviewRows` groups selected tickets with blocker statuses, the configured preview epic status, the latest development,
 overall and verify runs, and the latest ask and triage rows for Needs owner tickets. `_load_human_review_rows` calls
 `_load_human_review_tickets` for selected tickets, blocker statuses and epic status, then
 `_load_human_review_runs` for run and question rows. Run lookups are skipped when the queue is empty.
@@ -25,7 +25,8 @@ parent; without project configuration the repository is empty. It reads PR detai
 
 `_human_review_actions` starts from the item's existing action list, removes approve, reject and skip-gate without a
 matching PR, and removes skip-gate for review items without `require-human`. `_human_review_preview_url` reads a string
-preview or a dictionary's `url`, then exposes it only for TESTFLOW when epic `TESTFLOW-5` is Done.
+preview or a dictionary's `url`, then exposes it only for tickets in the project configured by
+`AIFLOW4_REVIEW_PREVIEW_EPIC` after that epic is Done.
 `_build_human_review_ticket` combines those values with the live blocker check, item kind, thread, Jira URL, PR and
 verify fields. `_build_recent_human_review_threads` includes only recent tickets that have both a ticket row and at
 least one message.

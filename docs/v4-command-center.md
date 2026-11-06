@@ -44,7 +44,7 @@ assigned to an individual project.
 
 ## Delivery sorting and remembered filters
 
-Delivery sorts epics by the numeric part of their key, so `TESTFLOW-2` comes before `TESTFLOW-10` instead of
+Delivery sorts epics by the numeric part of their key, so `JAIF-2` comes before `JAIF-10` instead of
 after it. The same order is used in the epic picker and the Epics panel.
 
 The selected project tab, type filter and epic are kept in `localStorage` under `aiflow4-delivery` and restored

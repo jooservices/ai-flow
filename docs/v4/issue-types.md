@@ -65,16 +65,16 @@ also preserved and ignored by intake.
 The routing behavior of `aiflow-ready`, `aiflow-hold` and `tier-senior` stays unchanged. Labels provide context;
 they do not authorize intake to add requirements that are absent from the ticket.
 
-## Jira issue type setup plan for TESTFLOW-50
+## Jira issue type setup plan
 
-Jira issue types are administrative configuration, so this ticket prepares the following plan for the owner to
-review and run with TESTFLOW-50. No Jira types or label definitions are created by the v4 application. Jira labels
+Jira issue types are administrative configuration, so this page prepares the following plan for the owner to
+review. No Jira types or label definitions are created by the v4 application. Jira labels
 are free-form and need no setup.
 
 1. The owner reviews the proposed names: Epic, Story, Feature, Bug, Hotfix, Tech Debt, Chore, Spike, Docs and
    Security. Keep the existing `Sub-task` type for splitting work; keep `Task` if the Jira instance uses it, since
    intake maps it to the Story template.
-2. During TESTFLOW-50, a Jira administrator checks the instance's existing issue types and the target project's
+2. A Jira administrator checks the instance's existing issue types and the target project's
    issue type scheme. Reuse matching types and create only missing types. Add the new types to the target scheme;
    use standard issue types except for the existing Sub-task type. Confirm Epic/parent linking remains available.
 3. Confirm the scheme's screens expose the fields AI Flow mirrors and writes: summary, description, priority,

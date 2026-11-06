@@ -11,14 +11,15 @@ handler keeps authentication and the access-denied audit call at the HTTP bounda
 scope and delegates queue assembly to `_human_reviews_response`, which returns the ticket list, thread list and
 metrics together.
 
-`_review_context` loads selected keys, metrics, tickets, blockers and the TESTFLOW epic status. `_review_runs` loads
+`_review_context` loads selected keys, metrics, tickets, blockers and the configured review preview epic status. `_review_runs` loads
 the latest development, overall, verification and applicable triage records. `_thread_filters` builds the event and
 run filters for the selected project or role scope; `_review_thread_context` loads and orders the 50 most recent
 threads, including tickets outside the active queue.
 
 `_review_ticket_rows` preserves ticket order while `_review_ticket` builds each response. `_ticket_repository`
 chooses the run or project repository and resolves a parent epic. `_pull_request_detail` loads a matched pull request
-and logs provider failures. `_ticket_preview` exposes a preview only for a TESTFLOW ticket after its epic is Done;
+and logs provider failures. `_ticket_preview` exposes a preview only for a ticket in the configured review preview
+project after its epic is Done;
 `_review_actions` applies the item-kind actions and removes pull-request or skip-gate actions when their conditions
 are absent. `_review_thread_rows` adds ticket details to recent threads that have messages.
 

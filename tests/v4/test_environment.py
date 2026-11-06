@@ -226,7 +226,7 @@ def test_removed_wording_is_recorded_and_the_real_need_opens_one_environment_tic
     assert "10.0.0.5" not in comment and "shared Docker" not in comment and "Dev VM" not in comment
     assert "Removed from the ticket: machine, ip address" in comment and "isolated seeded site" in comment
     created = ctx.jira.created
-    assert len(created) == 1 and created[0]["project"] == "JAIF" and created[0]["labels"] == ["environment"]
+    assert len(created) == 1 and created[0]["project"] == ctx.settings.maintenance_project and created[0]["labels"] == ["environment"]
     assert "seeded site" in created[0]["summary"]
     assert (created[0]["key"], "TESTWP-41", "Relates") in ctx.jira.issue_links
     assert f"Environment need: tests need a seeded site -> {created[0]['key']} (opened)" in comment

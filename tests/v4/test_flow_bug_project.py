@@ -6,7 +6,7 @@ from pathlib import Path
 
 from conftest import join_node
 from aiflow.v4.control.incidents import flow_bug_candidates, open_incident
-from aiflow.v4.core.settings import Settings
+from aiflow.v4.core.settings import Settings, _load_secret_settings
 
 
 ROOT = Path(__file__).parents[2]
@@ -90,10 +90,29 @@ def test_flow_bug_is_filed_in_the_maintenance_project(client, ctx):
 
 def test_the_default_maintenance_project_is_the_ai_flow_project(monkeypatch):
     monkeypatch.delenv("AIFLOW4_MAINTENANCE_PROJECT", raising=False)
+    monkeypatch.delenv("AIFLOW4_REVIEW_PREVIEW_EPIC", raising=False)
     assert Settings().maintenance_project == "JAIF"
+    assert Settings().review_preview_epic == ""
 
     monkeypatch.setenv("AIFLOW4_MAINTENANCE_PROJECT", "OPSX")
+    monkeypatch.setenv("AIFLOW4_REVIEW_PREVIEW_EPIC", "OPSX-12")
     assert Settings.from_env().maintenance_project == "OPSX"
+    assert Settings.from_env().review_preview_epic == "OPSX-12"
+
+
+def test_secret_settings_merge_environment_and_files(monkeypatch, tmp_path):
+    secret_file = tmp_path / "secrets.env"
+    secret_file.write_text("JIRA_EMAIL=file@example.test\nAIFLOW4_OWNER_TOKEN=file-token\n", encoding="utf-8")
+    monkeypatch.setenv("AIFLOW4_SECRET_FILES", str(secret_file))
+    monkeypatch.setenv("JIRA_EMAIL", "environment@example.test")
+    monkeypatch.setenv("AIFLOW4_OWNER_TOKEN", "environment-token")
+    settings = Settings()
+
+    secrets = _load_secret_settings(settings)
+
+    assert settings.jira_email == "environment@example.test"
+    assert settings.owner_token == "environment-token"
+    assert secrets["AIFLOW4_OWNER_TOKEN"] == "file-token"
 
 
 def test_flow_bug_code_prompt_and_docs_name_no_legacy_project_key():

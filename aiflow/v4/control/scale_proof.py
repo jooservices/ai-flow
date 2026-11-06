@@ -255,7 +255,7 @@ def _file_finding_locked(ctx, finding: dict[str, Any], run_id: int, report: dict
         ctx.db.run("UPDATE scale_proof_findings SET last_error='Jira is not configured' WHERE signature=%s",
                    (signature,))
         return {"signature": signature, "ticket": "", "created": False}
-    project = ctx.settings.canary_bug_project
+    project = ctx.settings.maintenance_project
     labels = ["flow-bug", LABEL, signature.replace(":", "-")]
     try:
         description = _description(finding, run_id, report)

@@ -68,7 +68,7 @@ sudo /media/aiflow4-offline-v4.1.0-ubuntu-24.04-amd64/installer/aiflow4-offline 
 and Debian packages without downloads, loads the image, builds the release venv from local wheels, installs the
 pinned CLIs and configures the node. It enables and starts `aiflow4-node-agent`; the agent manages one
 `aiflow4-worker@<account>` service for every account assigned to the joined node. This does not sign any AI
-account in. TESTFLOW-76 owns that step.
+account in; account authorization is managed separately in Machines and AI.
 
 After installation, check Command Center for the node's online heartbeat and green tool preflight, and confirm
 the agent and assigned worker units with `systemctl status aiflow4-node-agent` and

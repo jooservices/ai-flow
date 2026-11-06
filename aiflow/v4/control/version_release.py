@@ -2,8 +2,7 @@
 
 Version membership and status are read from Jira for each scan and again when a worker claims or completes a
 release. Reviewer, QA, and QC evidence comes from the registry's independent verify runs, successful merge/QA
-outcomes, and explicit green CI results respectively. Projects opt in by version name; TESTWP has a narrow
-repo-and-version preset for the trial.
+outcomes, and explicit green CI results respectively. Projects opt in by version name in their configuration.
 """
 from __future__ import annotations
 
@@ -28,25 +27,8 @@ FAILURE_ACTIONS = ("jira-release-check-failed", "jira-release-publish-failed")
 MERGE_BACK_ACTIONS = ("github-merge-back", "jira-merge-back-task")
 JIRA_RETRY_S = 3600  # a publish error whose Jira follow-up could not be created waits this long before a retry
 
-TESTWP_DEFAULT = {
-    "enabled": True,
-    "versions": ["WordPress Core 0.5.0-beta", "WordPress Theme 0.5.0-beta"],
-    "source_branch": "develop",
-    "target_branch": "master",
-    "tag_prefixes": {
-        "WordPress Core 0.5.0-beta": "core-v",
-        "WordPress Theme 0.5.0-beta": "theme-v",
-    },
-}
-
-
 def config(project: Any) -> dict[str, Any]:
-    configured = getattr(project, "version_release", {}) or {}
-    if configured:
-        return configured
-    if project.key == "TESTWP" and project.repo.lower().rstrip("/") == "jooservices/test-aiflow-wp":
-        return TESTWP_DEFAULT
-    return {}
+    return getattr(project, "version_release", {}) or {}
 
 
 def enabled(project: Any) -> bool:

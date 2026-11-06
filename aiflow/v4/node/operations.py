@@ -143,6 +143,22 @@ def _server_installer_source(extract_dir: Path) -> Path:
     return candidates[0].parent.parent
 
 
+def _restore_previous_installer(backup_dir: Path, install_dir: Path, replace_error: OSError) -> None:
+    """Move the previous installer back after a failed replacement, or keep it beside the install directory."""
+    try:
+        os.replace(backup_dir, install_dir)
+    except OSError as restore_error:
+        # Outside the staging folder, so the staging cleanup cannot delete the only copy of the previous installer.
+        kept_dir = install_dir.with_name(f"{install_dir.name}.previous")
+        failure = (f"server-installer replacement failed ({type(replace_error).__name__}) and restoring "
+                   f"the previous installer failed ({type(restore_error).__name__})")
+        try:
+            os.replace(backup_dir, kept_dir)
+        except OSError as keep_error:
+            raise OperationError(f"{failure}; the previous installer could not be preserved") from keep_error
+        raise OperationError(f"{failure}; the previous installer is kept at {kept_dir}") from restore_error
+
+
 def _replace_server_installer(install_dir: Path, source_dir: Path, staging: Path) -> None:
     staged_dir = staging / "install"
     os.replace(source_dir, staged_dir)
@@ -155,9 +171,9 @@ def _replace_server_installer(install_dir: Path, source_dir: Path, staging: Path
         os.replace(install_dir, backup_dir)
     try:
         os.replace(staged_dir, install_dir)
-    except OSError:
+    except OSError as replace_error:
         if backup_dir.exists():
-            os.replace(backup_dir, install_dir)
+            _restore_previous_installer(backup_dir, install_dir, replace_error)
         raise
 
 

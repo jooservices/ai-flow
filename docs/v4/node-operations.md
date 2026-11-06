@@ -97,7 +97,9 @@ the CLI at the fixed path. No per-node manual clone is required. The generated p
 the full declared list through the server-installer's distro-aware package manager, including on Debian/Ubuntu and
 RHEL-family hosts.
 
-An unavailable or invalid pinned installer archive fails the operation. Other artifact downloads use fixed vendor
+An unavailable or invalid pinned installer archive fails the operation. When replacing the installer fails and the
+rollback fails too, the previous installer is kept next to the install directory with the suffix `.previous`, and
+the error names it. Other artifact downloads use fixed vendor
 URLs, locked versions (or the vendor's latest stable release when no supporting-tool pin is present), and a
 checksum before writing to `/usr/local/bin`. Arbitrary commands and arbitrary artifact URLs are never accepted
 from the API or control repo.

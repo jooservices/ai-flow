@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +29,8 @@ from . import gate_step
 from .gitops import Git
 from .run_steps import (REPO_ROOT as REPO_ROOT, RunProgress, RunReporter, adapter_for_run, api_node,
                         build_prompt as _build_prompt, classify_question, commit_message, environment_notes,
-                        environment_status, fetch_ci_log, machine_block as machine_block, make_run_spec, note,
-                        pr_title, project_env, project_environment, run_result_metadata,
+                        environment_status, fetch_ci_log, machine_block as machine_block, make_run_spec,
+                        merge_response, note, pr_title, project_env, project_environment, run_result_metadata,
                         related_block as related_block,
                         run_reporter, run_with_inbox, runtime_for_run, start_run, stop_heartbeat,
                         set_run_progress, with_knowledge_context as with_knowledge_context, worktree_path)
@@ -41,6 +41,13 @@ SUMMARY = re.compile(r"^SUMMARY:\s*(.+)$", re.M)
 # a real conflict marker starts a line ("<<<<<<< HEAD"); the same characters inside code or docs are not one
 CONFLICT_MARKER = re.compile(r"^(<{7}|>{7})( |$)|^={7}$", re.M)
 TESTS = re.compile(r"^TESTS:\s*(.+)$", re.M)
+# a promise to report or answer later: a future verb plus a reporting verb, qualified by when/once/after/later
+PROMISE_TO_REPORT = re.compile(
+    r"\b(?:i'?ll|we'?ll|will|shall|going to)\s+(?:report|let you know|get back to you|follow up|tell you)\b"
+    r"[^.\n]*\b(?:when|once|after|later)\b",
+    re.IGNORECASE,
+)
+SILENT_TWICE_REASON = "the run went silent twice"
 PROVIDER_NAME = {"claude": "Claude", "codex": "Codex", "grok": "Grok", "opencode": "OpenCode"}
 
 
@@ -271,6 +278,56 @@ def brief(run: DevRun) -> DevBrief:
                     RunProgress(run.heartbeat, run.started_at, "ai", include_last_event=True))
 
 
+def is_silent_response(response: RunResult) -> bool:
+    """True when an adapter run ended without a verdict due to idle timeout, empty output or an unfulfilled report promise."""
+    if response.verdict:
+        return False
+    if response.error_kind in ("idle", "silent"):
+        return True
+    if not response.error_kind:
+        text = (response.final_text or "").strip()
+        if not text:
+            return True
+        summary_match = SUMMARY.search(response.final_text or "")
+        if not summary_match and PROMISE_TO_REPORT.search(text):
+            return True
+    return False
+
+
+def silent_resume_prompt(original: str, previous: str) -> str:
+    """Prompt given to an AI whose previous turn ended silently without reporting a result."""
+    prior = (previous or "(the previous turn returned no final text)")[-12000:]
+    return (
+        "Continue the same AI Flow run and report your result. The same worktree and its existing edits are present. "
+        "Your previous turn went silent without reporting a finished result (a turn must not end with a promise to report later). "
+        "Do not leave commands running in the background. Wait for all commands and tests to finish in the foreground, "
+        "and finish your reply with SUMMARY, TESTS, AC-MAP, SELF-REVIEW, and RESULT: DONE (or RESULT: BLOCKED).\n\n"
+        f"Original run instructions:\n{original}\n\nPrevious turn output:\n{prior}"
+    )
+
+
+def run_dev_turns(adapter: Any, spec: RunSpec, heartbeat: Any, on_progress: Any = None) -> RunResult:
+    """Run the developer turn, resuming once if the AI goes silent without reporting a result."""
+    response = run_with_inbox(adapter, spec, heartbeat, on_progress)
+    if not is_silent_response(response) or heartbeat.lost.is_set():
+        return response
+    remaining = int(spec.timeout_s - float(getattr(response, "duration_s", 0.0) or 0.0))
+    if remaining <= 0:
+        return response
+    resumed_spec = replace(spec,
+                           prompt=silent_resume_prompt(spec.prompt, response.final_text),
+                           timeout_s=remaining,
+                           log_append=True)
+    resumed_response = run_with_inbox(adapter, resumed_spec, heartbeat, on_progress)
+    aggregate = merge_response(response, resumed_response)
+    if is_silent_response(resumed_response):
+        aggregate.error_kind = "silent"
+        aggregate.verdict = ""
+        aggregate.verdict_reason = SILENT_TWICE_REASON
+        aggregate.error_message = SILENT_TWICE_REASON
+    return aggregate
+
+
 def run_ai(run: DevRun, prepared: DevBrief) -> None:
     """Run the provider inside the configured runtime, starting WordPress first when requested."""
     with prepared.runtime as containers:
@@ -282,7 +339,7 @@ def run_ai(run: DevRun, prepared: DevBrief) -> None:
                 result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
                 next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
                 node=api_node(run.api)))
-        run.response = run_with_inbox(prepared.adapter, prepared.spec, run.heartbeat, prepared.on_progress)
+        run.response = run_dev_turns(prepared.adapter, prepared.spec, run.heartbeat, prepared.on_progress)
 
 
 def collect(run: DevRun) -> dict | None:
@@ -331,6 +388,8 @@ def collect_summary(run: DevRun) -> None:
     run.summary = (summary_match.group(1).strip() if summary_match else
                    ((response.final_text or "").strip()[-600:] or response.error_message))
     run.tests = tests_match.group(1).strip() if tests_match else ""
+    if response.error_kind == "silent":
+        run.summary = response.verdict_reason or response.error_message or SILENT_TWICE_REASON
     run.result["summary"] = run.summary
     run.handed = handover.parse(response.final_text or "", c.ticket.get("description") or "")
     run.result.setdefault("details", {}).update(run.handed)
@@ -498,6 +557,8 @@ def publish(run: DevRun) -> dict:
                                          if failure_verdict else "no changes")
         if clean_no_changes:
             return publish_no_changes(run)
+        if response.error_kind == "silent":
+            reason = response.verdict_reason or SILENT_TWICE_REASON
         return publish_failure(run, reason)
     problems = commit_rules.message_violations(commit_message(run.claim, run.summary))
     problems += commit_rules.violations(pr_title(run.claim.ticket), pr_title=True)
@@ -576,7 +637,10 @@ def publish_failure(run: DevRun, reason: str) -> dict:
     run.result["outcome"] = work_limits.run_outcome_for_error(reason)
     if reason == "timeout":
         run.result["error_kind"] = "timeout"
-    run.result["summary"] = f"{reason}: {run.summary}"[:1000]
+    elif is_silent_response(run.response):
+        run.result["error_kind"] = "silent"
+    run.result["summary"] = (reason if run.summary.startswith(reason)
+                             else f"{reason}: {run.summary}")[:1000]
     run.reporter.comment(body=note(
         run.claim, "no usable change", what="The run ended without a change AI Flow can push",
         why=reason, result=(run.summary[:600] if run.summary else "no output"),

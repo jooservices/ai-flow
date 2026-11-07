@@ -77,6 +77,26 @@ def timeouts(db, days: int = 30, project_keys: list[str] | tuple[str, ...] | Non
                         for row in ticket_rows]}
 
 
+def silent_runs(db, days: int = 30, project_keys: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+    """Silent-run counts by UTC day and ticket, plus the developer-run silent share."""
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 90:
+        raise ValueError("days must be between 1 and 90")
+    daily_rows, ticket_rows = developer_runs.silent_run_analytics(db, days, project_keys)
+    runs = sum(int(row["developer_runs"]) for row in daily_rows)
+    silent_count = sum(int(row["silent_runs"]) for row in daily_rows)
+    return {"days": days, "developer_runs": runs, "silent_runs": silent_count,
+            "silent_share_pct": round(100 * silent_count / runs, 2) if runs else 0.0,
+            "target_share_pct": 2.0,
+            "daily": [{"day": row["day"].isoformat(), "developer_runs": int(row["developer_runs"]),
+                       "silent_runs": int(row["silent_runs"]),
+                       "silent_share_pct": round(100 * int(row["silent_runs"]) / int(row["developer_runs"]), 2)
+                       if row["developer_runs"] else 0.0} for row in daily_rows],
+            "tickets": [{"ticket": row["ticket"], "project": row["project"],
+                         "developer_runs": int(row["developer_runs"]), "silent_runs": int(row["silent_runs"]),
+                         "latest_silent": row["latest_silent"].isoformat() if row["latest_silent"] else None}
+                        for row in ticket_rows]}
+
+
 USAGE_DIMENSIONS = {"account": "account_id", "ai": "provider", "machine": "node", "project": "project",
                     "ticket": "ticket_key"}
 

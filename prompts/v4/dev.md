@@ -65,6 +65,8 @@ Ticket description:
 {description}
 ---
 Test order and time budget:
+- Start long commands (including test suites) in the foreground with the run's own time slice; never leave them running in the background.
+- Never end a turn with a promise to report later. Wait for every command to finish and report only the finished result.
 - Run the configured checks that cover the changed code first, before the full suite.
 - Run the full configured suite exactly once at the end of implementation.
 - Reserve the final {test_time_slice}-minute test time slice for that one full-suite attempt, within the run's hard limit.

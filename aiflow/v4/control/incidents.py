@@ -69,7 +69,7 @@ def flow_bug_candidates(ctx) -> list[dict]:
     tracked_signatures = {row["signature"] for row in ctx.db.all("SELECT signature FROM flow_bug_tracker")}
     runs = ctx.db.all(
         "SELECT r.id, r.ticket_key, r.project, r.step, r.error_kind, r.outcome, r.summary, r.node, r.started_at,"
-        " coalesce(n.release_version, '') AS release_version FROM runs r LEFT JOIN nodes n ON n.name=r.node"
+        " r.tokens_in, r.tokens_out, coalesce(n.release_version, '') AS release_version FROM runs r LEFT JOIN nodes n ON n.name=r.node"
         " WHERE r.project=%s AND r.status<>'running' AND r.outcome IN ('failed','timeout')"
         " AND coalesce(r.ended_at,r.started_at) >= now() - interval '30 minutes' ORDER BY r.started_at",
         (project,),
@@ -85,9 +85,13 @@ def flow_bug_candidates(ctx) -> list[dict]:
             "signature": signature, "pattern": sample, "error_kind": run["error_kind"] or "unknown",
             "runs": {}, "incident_ids": set(),
         })
+        tokens_in = int(run.get("tokens_in") or 0)
+        tokens_out = int(run.get("tokens_out") or 0)
+        tokens = tokens_in + tokens_out
         item["runs"][str(run["id"])] = {
             "id": str(run["id"]), "ticket": run["ticket_key"], "step": run["step"], "node": run["node"],
             "release": run["release_version"] or "unknown",
+            "tokens_in": tokens_in, "tokens_out": tokens_out, "tokens": tokens,
         }
         if incident_id is not None:
             item["incident_ids"].add(incident_id)
@@ -102,7 +106,7 @@ def flow_bug_candidates(ctx) -> list[dict]:
     ):
         run = ctx.db.one(
             "SELECT r.id, r.ticket_key, r.project, r.step, r.error_kind, r.outcome, r.summary, r.node, r.started_at,"
-            " coalesce(n.release_version, '') AS release_version FROM runs r LEFT JOIN nodes n ON n.name=r.node"
+            " r.tokens_in, r.tokens_out, coalesce(n.release_version, '') AS release_version FROM runs r LEFT JOIN nodes n ON n.name=r.node"
             " WHERE r.project=%s AND r.ticket_key=%s AND r.status<>'running'"
             " AND r.outcome IN ('failed','timeout') AND r.started_at > %s - interval '1 day' AND r.started_at <= %s"
             " ORDER BY r.started_at DESC LIMIT 1",
@@ -119,6 +123,7 @@ def flow_bug_candidates(ctx) -> list[dict]:
         if not creation_eligible and candidate["signature"] not in tracked_signatures:
             continue
         candidate["runs"] = sorted(candidate_runs, key=lambda run: run["id"])
+        candidate["tokens_used"] = sum(int(r.get("tokens") or 0) for r in candidate["runs"])
         candidate["creation_eligible"] = creation_eligible
         candidate["tickets"] = tickets
         candidate["steps"] = sorted({run["step"] for run in candidate["runs"]})
@@ -133,6 +138,8 @@ def suggested_flow_fix(candidate: dict) -> str:
     """Point a flow-bug ticket at the worker or adapter most likely to own the failure."""
     text = candidate["pattern"].casefold()
     steps = candidate["steps"]
+    if any(word in text for word in ("silent", "idle")):
+        return "Review prompts/v4/dev.md, aiflow/v4/worker/dev.py and long command foreground execution."
     if any(word in text for word in ("codex", "sandbox", "spawn", "adapter", "provider")):
         return "Review aiflow/v4/adapters/ and the affected worker startup path."
     if any(word in text for word in ("git", "checkout", "worktree", "branch", "clone", "fetch")):

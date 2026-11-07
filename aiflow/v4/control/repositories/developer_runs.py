@@ -43,3 +43,35 @@ def timeout_analytics(db, days: int, project_keys: list[str] | tuple[str, ...] |
     """Load daily and per-ticket timeout totals within the caller's project scope."""
     params = (days - 1, project_keys is None, list(project_keys or ()))
     return (db.all(TIMEOUT_DAILY_SQL, params), db.all(TIMEOUT_TICKET_SQL, params))
+
+
+SILENT_DAILY_SQL = """
+SELECT (started_at AT TIME ZONE 'UTC')::date AS day,
+       count(*) AS developer_runs,
+       count(*) FILTER (WHERE outcome='silent' OR error_kind IN ('silent', 'idle')) AS silent_runs
+FROM runs
+WHERE step='dev' AND ended_at IS NOT NULL
+  AND started_at >= ((now() AT TIME ZONE 'UTC')::date - %s::int)::timestamp AT TIME ZONE 'UTC'
+  AND (%s OR project = ANY(%s))
+GROUP BY 1 ORDER BY 1 DESC
+"""
+
+SILENT_TICKET_SQL = """
+SELECT ticket_key AS ticket, project,
+       count(*) AS developer_runs,
+       count(*) FILTER (WHERE outcome='silent' OR error_kind IN ('silent', 'idle')) AS silent_runs,
+       max(started_at) FILTER (WHERE outcome='silent' OR error_kind IN ('silent', 'idle')) AS latest_silent
+FROM runs
+WHERE step='dev' AND ended_at IS NOT NULL
+  AND started_at >= ((now() AT TIME ZONE 'UTC')::date - %s::int)::timestamp AT TIME ZONE 'UTC'
+  AND (%s OR project = ANY(%s))
+GROUP BY ticket_key,project
+HAVING count(*) FILTER (WHERE outcome='silent' OR error_kind IN ('silent', 'idle')) > 0
+ORDER BY silent_runs DESC, latest_silent DESC, ticket
+"""
+
+
+def silent_run_analytics(db, days: int, project_keys: list[str] | tuple[str, ...] | None):
+    """Load daily and per-ticket silent-run totals within the caller's project scope."""
+    params = (days - 1, project_keys is None, list(project_keys or ()))
+    return (db.all(SILENT_DAILY_SQL, params), db.all(SILENT_TICKET_SQL, params))

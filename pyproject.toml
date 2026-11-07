@@ -5,7 +5,7 @@ description = "Jira-driven multi-AI delivery flow. aiflow/ is the current flow (
 requires-python = ">=3.12"
 # Dependencies are for aiflow.v4 only; the current flow keeps running on the standard library.
 dependencies = [
-    "fastapi>=0.115",
+    "fastapi>=0.162.0",
     "uvicorn>=0.32",
     "pydantic>=2.9",
     "psycopg[binary,pool]>=3.2",

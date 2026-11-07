@@ -5,6 +5,7 @@ var S = {
   dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
   dashboardQuota: { rows: null, error: '', loading: false, loadedAt: 0, user: '' },
   dashboardDisagreements: { rows: null, error: '', loading: false, loadedAt: 0 },
+  dashboardReviewRounds: { data: null, error: '', loading: false, loadedAt: 0 },
   dashboardTab: 'work', workStatusFilter: 'all',
   themePreference: { user: '', loadedUser: '', chain: Promise.resolve() },
   layouts: { person: '', pages: {}, busy: false, mode: '', drag: null, chain: Promise.resolve() },

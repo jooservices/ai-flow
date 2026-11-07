@@ -36,6 +36,7 @@ def apply_plan(jira: Any, parent_key: str, project: str, plan: Any) -> dict[str,
     for index in range(len(keys) - 1):
         if created[index + 1]:
             jira.link_issues(keys[index], keys[index + 1], "Blocks")
+    jira.remove_label(parent_key, "needs-split")
     jira.remove_label(parent_key, "aiflow-ready")
     jira.add_label(parent_key, PARENT_LABEL)
     return {"parent": parent_key, "children": keys}

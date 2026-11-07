@@ -16,6 +16,7 @@ OWNER = {"Authorization": "Bearer owner-secret"}
 ROUTES = (
     "/healthz", "/v1/analytics/conflicts", "/v1/analytics/daily", "/v1/analytics/usage", "/v1/analytics/usage/daily",
     "/v1/capacity", "/v1/console/session", "/v1/dashboard/disagreements", "/v1/dashboard/quota",
+    "/v1/dashboard/review-rounds",
     "/v1/dashboard/timeouts", "/v1/dashboard/waiting", "/v1/deploy/state", "/v1/environment/missing",
     "/v1/memory/search", "/v1/memory/study-cases", "/v1/projects", "/v1/provider-routing",
     "/v1/provider-routing/decisions", "/v1/reviews", "/v1/role-health", "/v1/scale-proof", "/v1/setup/status",

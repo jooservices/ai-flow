@@ -7,6 +7,7 @@ from typing import Any
 
 from ... import (claim_project, environment as environment_reports, escalations, knowledge, tooling)
 from ....core import handover
+from ....core import review_findings
 from .claim_steps import Claim
 
 __all__ = ["claim_project", "environment_reports", "escalations", "knowledge", "tooling"]
@@ -42,13 +43,19 @@ def dev_extras(work: Claim) -> dict[str, Any]:
 
 
 def verify_extras(work: Claim) -> dict[str, Any]:
-    """Return the pull request identity and developer summary for verification."""
+    """Return the pull request, prior finding history, and return count for verification."""
     dev = work.prior_dev
     if not dev:
         return {}
+    reviews = work.ctx.db.all(
+        "SELECT account_id,outcome,details FROM runs WHERE ticket_key=%s AND step='verify'"
+        " AND status<>'running' ORDER BY started_at,id", (work.ticket["key"],))
     return {"pr": {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
                     "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],
-                    "dev_summary": (dev["summary"] or "") + handover.render(dev.get("details"))}}
+                    "dev_summary": (dev["summary"] or "") + handover.render(dev.get("details")),
+                    "review_history": review_findings.history_from_runs(reviews),
+                    "review_round": review_findings.review_rounds_completed(reviews) + 1,
+                    "rework_returns": sum(row.get("outcome") == "rework" for row in reviews)}}
 
 
 def triage_extras(work: Claim) -> dict[str, Any]:

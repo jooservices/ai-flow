@@ -104,6 +104,25 @@ function disagreementsPanel() {
   });
   return h + '</tbody></table></div></section>';
 }
+function loadDashboardReviewRounds(force) {
+  var state = S.dashboardReviewRounds;
+  if (state.loading || (S.consoleUser && !consoleCan('view.dashboard'))) return;
+  if (!force && state.data !== null && Date.now() - state.loadedAt < ANALYTICS_MS) return;
+  state.loading = true;
+  fetch('/v1/dashboard/review-rounds', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) { state.data = data; state.error = ''; })
+    .catch(function (e) { state.error = String(e.message || e); if (state.data === null) state.data = {}; })
+    .then(function () {
+      state.loading = false; state.loadedAt = Date.now();
+      if (S.view === 'cc' && S.data) renderDashboard();
+    });
+}
+function pollDashboardReviewRounds() {
+  if (S.view === 'cc') loadDashboardReviewRounds();
+  setTimeout(pollDashboardReviewRounds, 15000);
+}
 function loadDashboardQuota(force) {
   if (!S.consoleUser || !consoleCan('view.dashboard') || consoleCan('view.machines_ai')) return;
   var quota = S.dashboardQuota, user = S.consoleUser.user || '';

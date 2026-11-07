@@ -1,8 +1,8 @@
 """The developer's proof at hand-over (prompts/v4/dev.md).
 
 The developer ends its reply with an AC-MAP (which file implements each acceptance criterion and which test proves it)
-and a SELF-REVIEW line (what its own review of the change found and fixed). The reviewer reads both first and checks
-each entry, so an incomplete map is visible at once and the review does not have to rebuild the picture from the diff.
+and a SELF-REVIEW line (what its own review of the change found and fixed). On rework, FINDING ANSWERS records the
+change or evidence-based no-change reason for each finding ID. The reviewer checks each hand-over entry against the code.
 """
 from __future__ import annotations
 
@@ -11,11 +11,13 @@ from typing import Any
 
 AC_MAP = re.compile(r"^AC-MAP:[ \t]*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
 SELF_REVIEW = re.compile(r"^SELF-REVIEW:[ \t]*(.+)$", re.M)
+FINDING_ANSWERS = re.compile(r"^FINDING ANSWERS:[ \t]*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
 AC_ID = re.compile(r"\bAC(\d+)\b")
 AC_LABEL = re.compile(r"^[ \t]*[-*][ \t]*AC(\d+)\b", re.M)
 AC_SECTION = re.compile(r"^Acceptance criteria:[ \t]*\n((?:(?!^[A-Za-z][^\n:]*:).*(?:\n|$))*)", re.M)
 MAX_MAP = 3000
 MAX_REVIEW = 800
+MAX_FINDING_ANSWERS = 2000
 
 
 def criteria_of(description: str) -> list[str]:
@@ -32,9 +34,12 @@ def parse(final_text: str, description: str) -> dict[str, Any]:
     ac_map = found.group(1).strip()[:MAX_MAP] if found else ""
     review = SELF_REVIEW.search(text)
     self_review = review.group(1).strip()[:MAX_REVIEW] if review else ""
+    answers = FINDING_ANSWERS.search(text)
     mapped = {f"AC{n}" for n in AC_LABEL.findall(ac_map)}
     missing = [ac for ac in criteria_of(description) if ac not in mapped]
     out: dict[str, Any] = {"ac_map": ac_map, "self_review": self_review, "ac_missing": missing}
+    if answers:
+        out["finding_answers"] = answers.group(1).strip()[:MAX_FINDING_ANSWERS]
     return {key: value for key, value in out.items() if value}
 
 
@@ -58,6 +63,9 @@ def render(details: dict[str, Any] | None) -> str:
         lines.append("<developer-ac-map>\n" + details["ac_map"] + "\n</developer-ac-map>")
     if details.get("self_review"):
         lines.append("<developer-self-review>\n" + details["self_review"] + "\n</developer-self-review>")
+    if details.get("finding_answers"):
+        lines.append("<developer-finding-answers>\n" + details["finding_answers"]
+                     + "\n</developer-finding-answers>")
     if details.get("ac_missing"):
         lines.append("The AC-MAP does not mention: " + ", ".join(details["ac_missing"]) + ". Check them first.")
     elif not details.get("ac_map"):

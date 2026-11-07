@@ -57,6 +57,7 @@ ISSUE_TYPE_SECTIONS = {
 ISSUE_TYPE_BY_CASEFOLD = {name.casefold(): name for name in ISSUE_TYPE_SECTIONS}
 LABELS = (
     "aiflow-ready", "aiflow-hold", "rework", "require-human", "tier-senior", "ai-<provider>",
+    "needs-split",
     "area-<core|theme|plugin|platform|flow>", "regression", "uat-bug", "blocked-external", "needs-design",
     "breaking-change", "perf", "a11y", "seo", "security",
 )
@@ -215,8 +216,8 @@ def _split_instructions(needs_split: bool) -> str:
 
 
 def _ticket_needs_split(ticket: dict) -> bool:
-    """True when capacity.estimate high minutes exceed the project target. Does not write Jira."""
-    return bool(decide_split(ticket, [])["needs_split"])
+    """True when marked for planning or when capacity.estimate exceeds the project target."""
+    return "needs-split" in (ticket.get("labels") or []) or bool(decide_split(ticket, [])["needs_split"])
 
 
 def _split_result(result: dict, kind: str, payload: Any) -> dict:

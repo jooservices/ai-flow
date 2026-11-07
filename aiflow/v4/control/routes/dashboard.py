@@ -5,10 +5,20 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from .. import quota as quota_reporting
-from .. import merge_flow, route_deps
+from .. import quota as quota_reporting, merge_flow, route_deps
+from ..features.review_rounds import repository as review_round_repository, service as review_rounds
 
 router = APIRouter()
+
+
+@router.get("/v1/dashboard/review-rounds")
+def dashboard_review_rounds(request: Request) -> dict:
+    """Return merged-ticket review rounds and finding counts within the caller's Dashboard scope."""
+    ctx = route_deps.context(request)
+    user = (route_deps.console_user_for(request, "view.dashboard") if ctx.settings.console_login
+            else route_deps.optional_console_user(ctx, request))
+    projects = list(user.project_keys) if user and user.project_keys is not None else None
+    return review_rounds.review_round_metrics(review_round_repository.ReviewRoundsRepository(ctx.db), projects)
 
 
 @router.get("/v1/dashboard/waiting")

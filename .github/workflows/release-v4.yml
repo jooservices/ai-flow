@@ -34,13 +34,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # The v4 tests call the playwright CLI on PATH, so it is installed globally at an exact version.
-      - name: Install playwright CLI
-        run: npm install --global playwright@1.64.1  # zizmor: ignore[adhoc-packages]
       - name: Install
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
           playwright install chromium --with-deps
       - name: Run v4 tests
         env:
@@ -85,13 +83,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # The v4 tests call the playwright CLI on PATH, so it is installed globally at an exact version.
-      - name: Install playwright CLI
-        run: npm install --global playwright@1.64.1  # zizmor: ignore[adhoc-packages]
       - name: Install
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
           playwright install chromium --with-deps
       - name: Two newest published releases for clean install, upgrade and rollback
         id: releases
@@ -272,14 +268,12 @@ jobs:
             "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json" dist/SHA256SUMS \
             2>&1 | tee "$RUNNER_TEMP/aiflow-candidate-logs/candidate-clean-install.log"
 
-      # The v4 tests call the playwright CLI on PATH, so it is installed globally at an exact version.
-      - name: Install playwright CLI for the release install smoke
-        run: npm install --global playwright@1.64.1  # zizmor: ignore[adhoc-packages]
 
       - name: Install browser tools for the release install smoke
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
           playwright install chromium --with-deps
 
       # The documented clean install above is the acceptance gate. This focused smoke additionally exercises the

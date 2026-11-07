@@ -298,13 +298,11 @@ jobs:
           key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: uv-${{ runner.os }}-
 
-      # The v4 tests call the playwright CLI on PATH, so it is installed globally at an exact version.
-      - name: Install playwright CLI
-        run: npm install --global playwright@1.64.1  # zizmor: ignore[adhoc-packages]
       - name: Install
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
           playwright install chromium --with-deps
 
       - name: Browser journeys (real Redis and PostgreSQL)
@@ -421,15 +419,12 @@ jobs:
             echo "no install, deploy, control or node change: the fast acceptance test is skipped"
           fi
 
-      # The v4 tests call the playwright CLI on PATH, so it is installed globally at an exact version.
-      - name: Install playwright CLI
-        if: steps.touched.outputs.run == 'true'
-        run: npm install --global playwright@1.64.1  # zizmor: ignore[adhoc-packages]
       - name: Install
         if: steps.touched.outputs.run == 'true'
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
           playwright install chromium --with-deps
 
       - name: Acceptance test (fast)
@@ -485,13 +480,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # The v4 tests call the playwright CLI on PATH, so it is installed globally at an exact version.
-      - name: Install playwright CLI
-        run: npm install --global playwright@1.64.1  # zizmor: ignore[adhoc-packages]
       - name: Install
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
           playwright install chromium --with-deps
 
       - name: Two newest published releases for the systemd install, upgrade and rollback

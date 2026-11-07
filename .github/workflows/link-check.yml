@@ -1,0 +1,44 @@
+name: Link Check
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'deploy/v4/README.md'
+      - 'README.md'
+      - '**/*.md'
+      - '.github/workflows/link-check.yml'
+      - '.github/lychee.toml'
+  push:
+    branches: [develop]
+    paths:
+      - 'docs/**'
+      - 'deploy/v4/README.md'
+      - 'README.md'
+      - '**/*.md'
+      - '.github/workflows/link-check.yml'
+      - '.github/lychee.toml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    name: Check documentation links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run lychee link check
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --config .github/lychee.toml --exclude-all-private README.md docs/ deploy/v4/README.md

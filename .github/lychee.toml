@@ -1,0 +1,17 @@
+# Configuration for lychee link checker
+# https://github.com/lycheeverse/lychee
+
+# Exclude all private, link-local, and loopback IPs/hosts
+exclude_all_private = true
+
+# Exclude mail addresses
+include_mail = false
+
+# Exclude known false positives or pending legacy links
+exclude = [
+  'https://github\.com/jooservices/ai-flow/blob/master/\.github/SECURITY\.md',
+  'docs/guide/reference/api\.md',
+  'docs/guide/topics/scale-proof\.md',
+  'docs/guide/topics/load-aware-scheduling\.md',
+  'docs/screens/machines\.md',
+]

@@ -309,6 +309,16 @@ function quotaResetText(account) {
   if (account.cooldown_until) return when(account.cooldown_until);
   return 'Not reported';
 }
+function masterCyclesBlock(cycles) {
+  if (!cycles) return '';
+  var h = '<div class="panel-h"><h3 style="margin:4px 0">Master cycles · last ' + esc(cycles.days.length) + ' UTC days</h3><span class="hint">Target: below ' + esc(cycles.target_no_action_percent) + '% of AI calls with no action</span></div>';
+  h += '<div class="tablebox"><table><thead><tr><th>Day</th><th>Cycles</th><th>AI calls</th><th>Cycles with an action</th><th>AI calls with no action</th></tr></thead><tbody>';
+  cycles.days.forEach(function (row) {
+    var noAction = row.no_action_percent === null ? '-' : esc(row.no_action_percent) + '%';
+    h += '<tr><td class="mono">' + esc(row.day) + '</td><td>' + esc(row.cycles) + '</td><td>' + esc(row.ai_calls) + '</td><td>' + esc(row.actions) + '</td><td>' + noAction + '</td></tr>';
+  });
+  return h + '</tbody></table></div>';
+}
 function masterAutonomyPanel() {
   if (!consoleReader()) return '<section class="panel"><div class="panel-h"><h2>Master autonomy</h2></div><div class="muted">Sign in to view the autonomy report and daily budget.</div></section>';
   if (!S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
@@ -321,6 +331,8 @@ function masterAutonomyPanel() {
   if (consoleCan('console.write')) h += '<label for="master-budget">Minutes <input id="master-budget" data-master-budget type="number" min="0" max="1440" step="1" value="' + esc(budget.daily_budget_minutes) + '" style="width:110px;min-height:36px;border:1px solid var(--line);border-radius:8px;padding:5px 8px;background:var(--surface-2)"></label> <button class="btn sm primary" data-act="master-budget-save"' + (S.autonomy.saving ? ' disabled' : '') + '>Save</button>';
   else h += esc(budget.daily_budget_minutes) + ' minutes';
   h += '</div></div></div>';
+  if (consoleCan('console.write')) h += '<div class="grid-2"><div class="review-fact"><div class="label">Master review</div><div class="value"><button class="btn sm" data-act="master-review-request"' + (S.autonomy.saving ? ' disabled' : '') + '>Review now</button></div></div></div>';
+  h += masterCyclesBlock(data.cycles);
   h += '<div class="panel-h"><h3 style="margin:4px 0">Weekly autonomy · week of ' + esc(report.week_start) + '</h3></div>';
   h += '<div class="tablebox"><table><thead><tr><th>Week</th><th>Finished without a person</th><th>Person needed</th><th>Repeated failures</th></tr></thead><tbody>';
   (report.trend || []).forEach(function (row) { h += '<tr><td class="mono">' + esc(row.week_start) + '</td><td>' + esc(row.finished_without_person) + '</td><td>' + esc(row.needed_person) + '</td><td>' + esc(row.repeated_failures) + '</td></tr>'; });

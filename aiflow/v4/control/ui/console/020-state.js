@@ -186,6 +186,13 @@ function saveMasterBudget() {
     .catch(function (err) { S.autonomy.error = String(err.message || err); })
     .then(function () { S.autonomy.saving = false; loadMasterAutonomy(true); });
 }
+function requestMasterReview() {
+  S.autonomy.saving = true; S.autonomy.error = ''; renderDashboard();
+  fetch('/v1/master/review-requests', { method: 'POST' }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).catch(function (err) { S.autonomy.error = String(err.message || err); })
+    .then(function () { S.autonomy.saving = false; loadMasterAutonomy(true); });
+}
 
 function escCall(method, url, body, onSuccess) {
   S.esc.saving = true; S.esc.error = ''; renderDashboard();

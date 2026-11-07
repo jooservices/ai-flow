@@ -214,6 +214,8 @@ def test_command_center_has_master_budget_and_weekly_report_controls():
     assert "function masterAutonomyPanel()" in html
     assert "data-master-budget" in html and "master-budget-save" in html
     assert "/v1/master/autonomy/budget" in html and "Weekly autonomy" in html
+    assert "master-review-request" in html and "/v1/master/review-requests" in html
+    assert "Master cycles" in html and "Target: below" in html
 
 
 def test_master_snapshot_contains_incidents_owner_queue_all_project_clocks_offline_and_quota(client, ctx):

@@ -176,6 +176,7 @@
     "POST /v1/master/actions",
     "POST /v1/master/flow-bugs",
     "POST /v1/master/plan-outcome",
+    "POST /v1/master/review-requests",
     "POST /v1/nodes/join",
     "POST /v1/nodes/join-tokens",
     "POST /v1/nodes/join-tokens/inspect",

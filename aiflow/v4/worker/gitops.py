@@ -192,6 +192,47 @@ class Git:
         out = self.run("diff", "--name-only", "--diff-filter=U", cwd=path, check=False)
         return [x for x in out.splitlines() if x.strip()]
 
+    def unmerged_stages(self, path: Path, name: str) -> dict[int, str]:
+        """Stage number to blob sha for an unmerged path (1=base, 2=ours, 3=theirs)."""
+        stages: dict[int, str] = {}
+        for line in self.run("ls-files", "-u", "--", name, cwd=path, check=False).splitlines():
+            meta, _, file_name = line.partition("\t")
+            if file_name != name:
+                continue
+            parts = meta.split()
+            if len(parts) >= 3 and parts[2].isdigit():
+                stages[int(parts[2])] = parts[1]
+        return stages
+
+    def resolve_trivial_conflicts(self, path: Path) -> list[str]:
+        """Keep conflicted paths that need a person; resolve identical both-sides blobs automatically."""
+        conflicts = [x for x in self.run("diff", "--name-only", "--diff-filter=U", cwd=path,
+                                         check=False).splitlines() if x.strip()]
+        remaining: list[str] = []
+        for name in conflicts:
+            stages = self.unmerged_stages(path, name)
+            if stages.get(2) and stages.get(2) == stages.get(3):
+                sha = stages[2]
+                self.run("checkout-index", "-f", "--stage=2", "--", name, cwd=path, check=False)
+                self.run("update-index", "--force-remove", "--", name, cwd=path, check=False)
+                self.run("update-index", "--add", "--cacheinfo", f"100644,{sha},{name}", cwd=path, check=False)
+            else:
+                remaining.append(name)
+        return remaining
+
+    def merge_base_resolving(self, path: Path, base: str, identity: tuple[str, str],
+                             commit: bool = True) -> list[str]:
+        """Merge origin/<base>, resolve identical-sided conflicts, return any real conflicts left."""
+        conflicts = self.merge_base_in(path, base, identity, commit=commit)
+        if not conflicts:
+            return []
+        remaining = self.resolve_trivial_conflicts(path)
+        if remaining:
+            return remaining
+        if commit:
+            self.run("commit", "--no-edit", "-q", cwd=path, check=False, identity=identity)
+        return []
+
     def behind(self, path: Path, base: str, ref: str = "HEAD") -> int:
         """Commits of origin/<base> that `ref` does not have (0: up to date). Works in a worktree or a mirror."""
         out = self.run("rev-list", "--count", f"{ref}..origin/{base}", cwd=path, check=False).strip()

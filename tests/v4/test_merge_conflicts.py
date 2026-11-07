@@ -285,6 +285,12 @@ class FakeGit:
     def merge_base_in(self, _path, base, _identity, commit=False):
         return [] if self.updated else list(self.conflicts)
 
+    def merge_base_resolving(self, path, base, identity, commit=False):
+        return self.merge_base_in(path, base, identity, commit=commit)
+
+    def resolve_trivial_conflicts(self, _path):
+        return list(self.conflicts)
+
     def abort_merge(self, _path):
         pass
 

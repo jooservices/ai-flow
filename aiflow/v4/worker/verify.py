@@ -172,7 +172,7 @@ def prepare_verify(state: VerifyRun) -> VerifyWorkspace | dict:
         raise RuntimeError(f"branch {pr['branch']} is gone")
     wt = worktree_path(state.srv_root, project["key"], pr["branch"], "--verify")
     head = state.git.detached(mirror, wt, f"origin/{pr['branch']}")
-    conflicts = state.git.merge_base_in(wt, project["base"], c.identity, commit=False)
+    conflicts = state.git.merge_base_resolving(wt, project["base"], c.identity, commit=False)
     auto_updated = False
     if not conflicts and state.git.behind(wt, project["base"]):
         state.git.abort_merge(wt)
@@ -181,7 +181,7 @@ def prepare_verify(state: VerifyRun) -> VerifyWorkspace | dict:
         if auto_updated:
             head = pr["head_sha"]
             state.result["head_sha"] = head
-        conflicts = state.git.merge_base_in(wt, project["base"], c.identity, commit=False)
+        conflicts = state.git.merge_base_resolving(wt, project["base"], c.identity, commit=False)
     set_run_progress(state.heartbeat, "verify", head=head[:10])
     workspace = VerifyWorkspace(mirror, wt, head, auto_updated)
     if conflicts:

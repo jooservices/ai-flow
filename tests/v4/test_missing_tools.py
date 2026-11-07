@@ -134,6 +134,12 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_te
         def merge_base_in(self, *_a):
             return []
 
+        def merge_base_resolving(self, *_a, **_k):
+            return []
+
+        def behind(self, *_a, **_k):
+            return 0
+
         def push(self, _path, branch, token):
             git_calls.append(("push", branch, token))
 
@@ -143,6 +149,9 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_te
 
         def changed(self, _path):
             return []
+
+        def commit_all(self, _path, _message, _identity):
+            return "commit-sha"
 
     class Adapter:
         argv = lambda self, _spec: []
@@ -155,6 +164,8 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_te
 
     monkeypatch.setattr(dev, "Git", Git)
     monkeypatch.setattr(dev, "get_adapter", lambda _p: Adapter())
+    monkeypatch.setattr(dev.mechanical, "run_fast_checks", lambda _run: "")
+    monkeypatch.setattr(dev.mechanical, "refresh_base", lambda _run: None)
     api = _API(raise_result, existing_pr)
     api.git_calls = git_calls
     return dev.run_dev(api, _claimed(), str(tmp_path), "https://control", 3600, []), api

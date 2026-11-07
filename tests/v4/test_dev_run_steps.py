@@ -77,6 +77,17 @@ class RecordingGit:
         self.events.append("git:commit_all")
         return "a" * 40
 
+    def merge_base_resolving(self, *_args, **_kwargs):
+        self.events.append("git:merge_base_resolving")
+        return []
+
+    def behind(self, *_args, **_kwargs):
+        return 0
+
+    def run(self, *args, **_kwargs):
+        self.events.append("git:run:" + " ".join(args[:2]))
+        return "a" * 40
+
     def push(self, _wt, _branch, _token):
         self.events.append("git:push")
 
@@ -110,6 +121,7 @@ def run_case(monkeypatch, tmp_path, result, changed):
     monkeypatch.setattr(dev, "Git", lambda root, run_as=None: RecordingGit(root, events, changed))
     monkeypatch.setattr(dev, "Heartbeat", lambda api, claim, every: RecordingHeartbeat(api, claim, every, events))
     monkeypatch.setattr(dev, "get_adapter", lambda _provider: RecordingAdapter(events, result))
+    monkeypatch.setattr(dev.mechanical, "run_fast_checks", lambda _run: "")
     return dev.run_dev(api, claim, str(tmp_path), "https://control.example.test", 30, []), events
 
 
@@ -118,6 +130,8 @@ def run_case(monkeypatch, tmp_path, result, changed):
     [
         (RunResult(final_text="SUMMARY: Implemented it\nTESTS: pytest -q", duration_s=1),
          ["src/change.py"], "done", ["git:changed", "git:commit_all", "api:POST /v1/github/token",
+                                     "git:mirror", "git:merge_base_resolving",
+                                     "git:run:rev-parse HEAD", "api:POST /v1/github/token",
                                      "git:push", "api:POST /v1/github/pr",
                                      "api:POST /v1/jira/JAIF-312/comment",
                                      "api:POST /v1/jira/JAIF-312/transition", "heartbeat:stop"]),
@@ -163,6 +177,9 @@ def test_verify_uses_the_shared_fenced_setup_and_reporting(monkeypatch, tmp_path
             return "abc123456789"
 
         def merge_base_in(self, *_args, **_kwargs):
+            return []
+
+        def merge_base_resolving(self, *_args, **_kwargs):
             return []
 
         def behind(self, *_args):

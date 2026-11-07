@@ -58,6 +58,12 @@ def _run_timeout(monkeypatch, tmp_path, *, dirty=False, branch_commits=0, existi
         def merge_base_in(self, *_a):
             return []
 
+        def merge_base_resolving(self, *_a, **_k):
+            return []
+
+        def behind(self, *_a, **_k):
+            return 0
+
         def push(self, _path, branch, token):
             git_calls.append(("push", branch, token))
 

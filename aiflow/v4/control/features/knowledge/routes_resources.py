@@ -71,7 +71,7 @@ def _submit_resource_change(ctx, kind: str, resource_id: str, title: str, conten
         sha = github.commit_file(repo_name, base, path, payload, f"{kind}: {action} {resource_id}")
     except HTTPException:
         raise
-    except Exception as e:  # GitHub errors vary between App and transport implementations.
+    except Exception as e:  # noqa: BLE001 - GitHub errors vary between the App and transport implementations
         log.warning("control repo write failed for %s/%s", kind, resource_id)
         raise HTTPException(502, "control repo could not save the resource") from e
     row = knowledge.save_current(ctx.db, kind=kind, resource_id=resource_id, title=title, content=content,

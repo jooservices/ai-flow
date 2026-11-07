@@ -19,7 +19,7 @@ ALL_VIEWS = [
 ]
 LAYOUT_VIEWS = ["cc", "delivery", "knowledge", "machines", "review", "users"]
 EXPECTED_EVENTS = [
-    "extension", "extension", "extension", "merge-base", "page:HEAD", "page:BASE", "no-index",
+    "extension", "extension", "extension", "extension", "merge-base", "page:HEAD", "page:BASE", "no-index",
     "console-views", "asset-list",
 ]
 CASES = [
@@ -176,7 +176,7 @@ def _expected_events(case: dict) -> list[str]:
     if case.get("extension") == 2:
         return ["extension"]
     if case.get("merge_status"):
-        return EXPECTED_EVENTS[:4]
+        return EXPECTED_EVENTS[:5]
     if case.get("diff_status") == 2:
         return EXPECTED_EVENTS[:-2]
     return EXPECTED_EVENTS

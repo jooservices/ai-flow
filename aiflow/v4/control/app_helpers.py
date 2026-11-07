@@ -479,8 +479,13 @@ def install(app, ctx, deps) -> SimpleNamespace:
     def create_flow_bug(run: dict, candidate: dict) -> dict | None:
         """Open a Bug in the maintenance project for a detected pattern, record it, and move it to Intake."""
         project = ctx.settings.maintenance_project
-        run_lines = [f"- {item['id']} · {item['ticket']} · {item['step']} · node {item['node']} · release {item['release']}"
-                     for item in candidate["runs"]]
+        run_lines = [
+            f"- {item['id']} · {item['ticket']} · {item['step']} · node {item['node']} · release {item['release']}"
+            + (f" · tokens: {item['tokens']:,}" if item.get("tokens") else "")
+            for item in candidate["runs"]
+        ]
+        tokens_used = candidate.get("tokens_used") or sum(int(r.get("tokens") or 0) for r in candidate["runs"])
+        tokens_line = f"Tokens used: {tokens_used:,}\n" if tokens_used else ""
         reason = ("at least three matching failed runs across at least two tickets in 30 minutes"
                   if len(candidate["runs"]) >= 3 and len(candidate["tickets"]) >= 2 else
                   "a ticket_stuck incident for this error pattern remained open over 30 minutes")
@@ -489,6 +494,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
                        f"Pattern: {candidate['pattern']}\n"
                        f"Error kind: {candidate['error_kind']}\n"
                        f"Detection: {reason}.\n"
+                       f"{tokens_line}"
                        f"Affected tickets: {', '.join(candidate['tickets'])}\n"
                        f"Steps: {', '.join(candidate['steps'])}\n"
                        f"Nodes: {', '.join(candidate['nodes'])}\n"
@@ -559,12 +565,15 @@ def install(app, ctx, deps) -> SimpleNamespace:
                     if new_runs:
                         repeat_count = int(tracker["repeat_count"]) + len(new_runs)
                         total = len(known) + len(new_runs)
+                        new_tokens = sum(int(r.get("tokens") or 0) for r in new_runs)
+                        tokens_part = f"\nTokens used: {new_tokens:,}" if new_tokens else ""
                         body = ("AI Flow · master · repeated flow error\n"
                                 f"Pattern: {candidate['pattern']}\n"
                                 f"Repeat count: {repeat_count} additional failed runs since this Bug was opened "
                                 f"({total} matching runs recorded).\n"
                                 f"Affected tickets: {', '.join(candidate['tickets'])}\n"
-                                "New run IDs: " + ", ".join(r["id"] for r in new_runs))
+                                "New run IDs: " + ", ".join(r["id"] for r in new_runs)
+                                + tokens_part)
                         comment_id = ctx.jira.comment(ticket_key, body)
                         all_ids = sorted(known | {r["id"] for r in new_runs})
                         ctx.db.run("UPDATE flow_bug_tracker SET run_ids=%s, repeat_count=%s, updated_at=now()"

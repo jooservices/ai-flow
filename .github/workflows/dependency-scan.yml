@@ -1,0 +1,79 @@
+name: Dependency scan
+
+on:
+  pull_request:
+    paths:
+      - uv.lock
+      - pyproject.toml
+  schedule:
+    - cron: "23 4 * * 1"  # the OSV scan of the whole repository, every Monday
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Block a change that adds a high or critical vulnerability or a denied license
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          deny-licenses: AGPL-3.0, GPL-2.0, GPL-3.0
+
+  osv-scan:
+    name: OSV scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # OSV-Scanner exits non-zero when it finds anything, so the gate below decides; a scan that writes no report fails there.
+      - name: Scan every lockfile against the OSV database
+        id: scan
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        continue-on-error: true
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          scan-args: |-
+            --format=json
+            --output=osv-results.json
+            -r
+            ./
+
+      - name: Upload the OSV-Scanner report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: osv-scanner-report
+          path: osv-results.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # A finding counts as blocking when its CVSS score is 7.0 or more, or when it has no score at all.
+      - name: Fail on a high or critical finding (or a finding without a score)
+        env:
+          RESULTS: osv-results.json
+        run: |
+          set -euo pipefail
+          if [ ! -s "$RESULTS" ]; then
+            echo "::error::OSV-Scanner wrote no report, so the scan did not complete."
+            exit 1
+          fi
+          blocking=$(jq '[.results[]?.packages[]?.groups[]?
+            | (.max_severity // "" | if . == "" then 10 else tonumber end)
+            | select(. >= 7)] | length' "$RESULTS")
+          echo "Blocking findings: $blocking"
+          test "$blocking" -eq 0

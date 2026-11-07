@@ -1,9 +1,11 @@
 /* Silent developer run counts on the Dashboard Work tab. */
 S.dashboardSilentRuns = S.dashboardSilentRuns || { data: null, error: '', loading: false, loadedAt: 0 };
+var silentRunsRefreshTimer = 0;
 
 function loadDashboardSilentRuns(force) {
   var state = S.dashboardSilentRuns;
   if (state.loading || (!force && state.loadedAt && Date.now() - state.loadedAt < ANALYTICS_MS)) return;
+  clearTimeout(silentRunsRefreshTimer);
   state.loading = true;
   fetch('/v1/dashboard/silent-runs?days=30', { cache: 'no-store' }).then(function (r) {
     if (!r.ok) throw new Error('Request failed (' + r.status + ')');
@@ -16,7 +18,7 @@ function loadDashboardSilentRuns(force) {
     if (S.view === 'cc' && S.data) renderDashboard();
   }).then(function () {
     state.loading = false;
-    setTimeout(function () { loadDashboardSilentRuns(true); }, ANALYTICS_MS);
+    silentRunsRefreshTimer = setTimeout(function () { loadDashboardSilentRuns(true); }, ANALYTICS_MS);
   });
 }
 

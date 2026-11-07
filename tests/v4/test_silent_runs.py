@@ -101,11 +101,54 @@ def test_silent_response_detector_identifies_idle_and_unfulfilled_promises():
     assert is_silent_response(RunResult(error_kind="idle")) is True
     assert is_silent_response(RunResult(final_text="", error_kind="")) is True
     assert is_silent_response(RunResult(final_text="I will report when the tests finish.")) is True
-    assert is_silent_response(RunResult(final_text="I'll update once the build completes.")) is True
+    assert is_silent_response(RunResult(final_text="I'll report once the build completes.")) is True
+    assert is_silent_response(RunResult(final_text="I'll report when the tests finish")) is True
+    assert is_silent_response(RunResult(final_text="I will update the README")) is False
     assert is_silent_response(RunResult(final_text="SUMMARY: Done\nRESULT: DONE", verdict="DONE")) is False
     assert is_silent_response(RunResult(final_text="SUMMARY: Missing tool\nRESULT: BLOCKED", verdict="BLOCKED")) is False
     assert is_silent_response(RunResult(error_kind="quota")) is False
     assert is_silent_response(RunResult(error_kind="timeout")) is False
+
+
+def test_failed_verdict_whose_reason_mentions_silent_is_not_counted_as_silent(monkeypatch, tmp_path):
+    class MockGit:
+        def __init__(self, _root, run_as=None) -> None:
+            pass
+
+        def mirror(self, *_args) -> str:
+            return "mirror"
+
+        def foreign_worktree(self, *_args) -> None:
+            return None
+
+        def worktree(self, _mirror, _wt, _branch, base) -> str:
+            return f"origin/{base}"
+
+        def changed(self, _wt) -> list[str]:
+            return ["file.py"]
+
+    class MockAPI:
+        node_name = "test-node"
+
+        def call(self, method: str, path: str, body: Any = None, params: Any = None) -> dict[str, Any]:
+            if path == "/v1/github/token":
+                return {"token": "git-token"}
+            return {"ok": True}
+
+    adapter = MultiTurnAdapter([
+        RunResult(final_text="SUMMARY: Cache not cleared\nRESULT: FAIL", verdict="FAIL",
+                  verdict_reason="the silent cache was never invalidated", tokens_in=1000, duration_s=5),
+    ])
+
+    monkeypatch.setattr(dev, "project_env", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(dev, "Git", MockGit)
+    monkeypatch.setattr(dev, "Heartbeat", lambda _api, _claim, _every: FakeHeartbeat())
+    monkeypatch.setattr(dev, "get_adapter", lambda _provider: adapter)
+
+    result = dev.run_dev(MockAPI(), sample_claimed(), str(tmp_path), "https://control.example.test", 30, [])
+
+    assert len(adapter.specs) == 1
+    assert result.get("error_kind") != "silent"
 
 
 def test_silent_run_is_resumed_once_with_continuation_instruction():
@@ -181,7 +224,7 @@ def test_dev_worker_publishes_failure_with_clear_reason_when_run_goes_silent_twi
 
     adapter = MultiTurnAdapter([
         RunResult(final_text="I will report later.", tokens_in=1000, duration_s=5),
-        RunResult(final_text="Still running in background, will report.", tokens_in=1500, duration_s=8),
+        RunResult(final_text="Still running in background, will report when it finishes.", tokens_in=1500, duration_s=8),
     ])
 
     monkeypatch.setattr(dev, "project_env", lambda *_args, **_kwargs: {})

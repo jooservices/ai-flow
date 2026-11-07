@@ -41,9 +41,10 @@ SUMMARY = re.compile(r"^SUMMARY:\s*(.+)$", re.M)
 # a real conflict marker starts a line ("<<<<<<< HEAD"); the same characters inside code or docs are not one
 CONFLICT_MARKER = re.compile(r"^(<{7}|>{7})( |$)|^={7}$", re.M)
 TESTS = re.compile(r"^TESTS:\s*(.+)$", re.M)
+# a promise to report or answer later: a future verb plus a reporting verb, qualified by when/once/after/later
 PROMISE_TO_REPORT = re.compile(
-    r"\b(?:i'?ll|will|going to|shall)\s+(?:report|update|let you know)\b|"
-    r"\breport (?:when|once|after)\b",
+    r"\b(?:i'?ll|we'?ll|will|shall|going to)\s+(?:report|let you know|get back to you|follow up|tell you)\b"
+    r"[^.\n]*\b(?:when|once|after|later)\b",
     re.IGNORECASE,
 )
 SILENT_TWICE_REASON = "the run went silent twice"
@@ -636,7 +637,7 @@ def publish_failure(run: DevRun, reason: str) -> dict:
     run.result["outcome"] = work_limits.run_outcome_for_error(reason)
     if reason == "timeout":
         run.result["error_kind"] = "timeout"
-    elif "silent" in reason:
+    elif is_silent_response(run.response):
         run.result["error_kind"] = "silent"
     run.result["summary"] = (reason if run.summary.startswith(reason)
                              else f"{reason}: {run.summary}")[:1000]

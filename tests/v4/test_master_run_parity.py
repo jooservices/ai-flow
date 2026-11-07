@@ -93,10 +93,11 @@ CASES = {
     "git_missing": define(git_error="missing"),
     "success_empty_plan": define(snapshot=incident_snapshot(), responses=[ok()], run_as=RUN_AS, chown="ok",
                                  time_step=10.5),
-    "review_needs_owner": define(snapshot=snap(needs_owner=[{"key": "T-1"}]), responses=[ok()]),
-    "review_offline_nodes": define(snapshot=snap(offline_nodes=["n1"]), responses=[ok()]),
-    "review_quota_accounts": define(snapshot=snap(quota_accounts=[{"account": "a"}]), responses=[ok()]),
-    "review_quota_incidents": define(snapshot=snap(quota_incidents=[{"kind": "quota"}]), responses=[ok()]),
+    "idle_needs_owner": define(snapshot=snap(needs_owner=[{"key": "T-1"}])),
+    "idle_offline_nodes": define(snapshot=snap(offline_nodes=["n1"])),
+    "idle_quota_accounts": define(snapshot=snap(quota_accounts=[{"account": "a"}])),
+    "idle_quota_incidents": define(snapshot=snap(quota_incidents=[{"kind": "quota"}])),
+    "review_dashboard_request": define(snapshot=snap(review_requested=True), responses=[ok()]),
     "review_flow_bug_reports": define(flow_bugs={"reports": [{"signature": "s"}]}, responses=[ok()]),
     "review_hard_clock": define(snapshot=snap(running_clocks=[{"passed": ["warn", "hard"]}]), responses=[ok()]),
     "review_hard_substring": define(snapshot=snap(running_clocks=[{"passed": "hard-limit"}]), responses=[ok()]),
@@ -600,7 +601,7 @@ def test_finish_idle_master_truncates_duration_toward_zero(monkeypatch):
     monkeypatch.setattr(worker_master, "time", SimpleNamespace(time=lambda: 100.5))
     worker_master.finish_idle_master(result, 90.0)
     assert result["outcome"] == "done"
-    assert result["summary"] == "no incidents, owner decisions, failures or overdue runs need review"
+    assert result["summary"] == "No action needed this cycle."
     assert result["details"] == {"no_watch": True, "model_time_s": 0, "duration_s": 10, "log": ""}
     negative = {}
     monkeypatch.setattr(worker_master, "time", SimpleNamespace(time=lambda: 88.5))

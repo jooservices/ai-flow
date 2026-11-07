@@ -68,6 +68,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderGitHubIntegrations": ("integrations",),
     "renderLive": None,
     "renderDashboard": ("cc",),
+    "requestMasterReview": ("cc",),
+    "masterCyclesBlock": ("cc",),
     "flowDoctorPanel": ("cc",),
     "scaleProofPanel": ("cc",),
     "dashboardProjectCounts": ("cc",),
@@ -311,6 +313,7 @@ SCREEN_VIEW_PATTERNS = (
     (re.compile(r"\bact\s*===\s*[\"'](?:project-(?:environment|repository|services)|environment-scan)[\w-]*[\"']"),
      ("projects",)),
     (re.compile(r"\bact\s*===\s*[\"']capacity-refresh[\"']"), ("cc",)),
+    (re.compile(r"\bact\s*===\s*[\"']master-review-request[\"']"), ("cc",)),
     (re.compile(r"\bact\s*===\s*[\"']node-load-save[\"']"), ("machines",)),
 )
 

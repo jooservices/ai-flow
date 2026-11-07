@@ -131,6 +131,7 @@
 {"method":"POST","path":"/v1/master/flow-bugs","auth":"bearer-header+node-token","response":"dict"}
 {"method":"POST","path":"/v1/master/plan-outcome","auth":"bearer-header+node-token","response":"dict"}
 {"method":"GET","path":"/v1/master/report","auth":"console-session","response":"dict"}
+{"method":"POST","path":"/v1/master/review-requests","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/memory/search","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/memory/study-cases","auth":"console-session","response":"dict"}
 {"method":"POST","path":"/v1/nodes/join","auth":"public","response":"dict"}

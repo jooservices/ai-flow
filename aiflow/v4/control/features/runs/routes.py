@@ -14,7 +14,7 @@ from ... import environment as environment_reports
 from ...db import J
 from ...features.work.constants import utcnow
 from ...features.work.listeners import run_finished
-from . import autonomy, plan_outcome
+from . import autonomy, master_cycles, plan_outcome
 from .events import MasterActionCompleted, MasterDailyBudgetUpdated
 from ...platform.events.wiring import publish_for
 from .master_actions import (MasterActionState, decide, deny_policy_decision, escalate, master_action_event,
@@ -199,6 +199,14 @@ def _install_run_routes(app, ctx, deps, log) -> SimpleNamespace:
     return SimpleNamespace(run_heartbeat=run_heartbeat, run_result=run_result, run_release=run_release)
 
 
+def _install_review_request_route(app, ctx, console_user) -> None:
+    @app.post("/v1/master/review-requests")
+    def master_review_request(request: Request) -> dict:
+        console_user(request, "console.write", target="master", action="review-request")
+        master_cycles.request_review(ctx)
+        return {"requested": True}
+
+
 def _install_master_routes(app, ctx, deps, log) -> SimpleNamespace:
     audit = deps.audit
     console_user = deps.console_user
@@ -207,10 +215,12 @@ def _install_master_routes(app, ctx, deps, log) -> SimpleNamespace:
     master_snapshot = deps.master_snapshot
     node_auth = deps.node_auth
     process_flow_bugs = deps.process_flow_bugs
+    _install_review_request_route(app, ctx, console_user)
+
     @app.get("/v1/master/context")
     def master_context(run_id: str, fence: int, node: str = Depends(node_auth)) -> dict:
         master_run(run_id, fence, node, "context")
-        return master_snapshot()
+        return master_cycles.snapshot_with_review_request(ctx, master_snapshot)
 
     @app.post("/v1/master/flow-bugs")
     def master_flow_bugs(body: MasterFlowBugsBody, node: str = Depends(node_auth)) -> dict:
@@ -228,7 +238,8 @@ def _install_master_routes(app, ctx, deps, log) -> SimpleNamespace:
     @app.get("/v1/master/autonomy")
     def master_autonomy(request: Request) -> dict:
         user = console_user(request, "console.read")
-        return {"budget": master_budget_state(), "report": autonomy_report(scope=user.project_keys)}
+        return {"budget": master_budget_state(), "report": autonomy_report(scope=user.project_keys),
+                "cycles": master_cycles.cycle_report(ctx)}
 
     @app.put("/v1/master/autonomy/budget")
     def master_budget_update(body: MasterBudgetBody, request: Request) -> dict:

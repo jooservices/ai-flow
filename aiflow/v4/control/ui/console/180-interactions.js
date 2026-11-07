@@ -104,6 +104,7 @@ document.addEventListener('click', function (e) {
     savePrefs(); renderDHead(); var starButton = $('.star-button'); if (starButton) starButton.focus();
   }
   else if (act === 'master-budget-save') saveMasterBudget();
+  else if (act === 'master-review-request') requestMasterReview();
   else if (act === "esc-answer") answerDecision(el.getAttribute("data-id"), el.getAttribute("data-choice"));
   else if (act === "esc-retire") retireDecision(el.getAttribute("data-id"));
   else if (act === "esc-add") addDecision();

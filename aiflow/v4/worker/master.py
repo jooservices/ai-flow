@@ -46,12 +46,18 @@ def parse_plan(text: str) -> dict[str, Any] | None:
     return {"summary": plan["summary"][:1000], "actions": actions}
 
 
-def needs_model_review(snapshot: dict[str, Any]) -> bool:
-    """Skip paid model calls when the control plane has no item that needs a decision."""
-    if any(snapshot.get(key) for key in ("open_incidents", "needs_owner", "offline_nodes", "quota_accounts",
-                                         "quota_incidents", "flow_bug_reports")):
-        return True
-    return any("hard" in (clock.get("passed") or []) for clock in snapshot.get("running_clocks", []))
+def review_triggers(snapshot: dict[str, Any]) -> list[str]:
+    """Name each rule that found an item for the model to decide. An empty list means no model call (JAIF-349)."""
+    triggers = []
+    if snapshot.get("open_incidents"):
+        triggers.append("open-incident")
+    if any("hard" in (clock.get("passed") or []) for clock in snapshot.get("running_clocks", [])):
+        triggers.append("hard-limit")
+    if snapshot.get("flow_bug_reports"):
+        triggers.append("repeated-failure")
+    if snapshot.get("review_requested"):
+        triggers.append("dashboard-request")
+    return triggers
 
 
 # Action bodies may carry only these fields. run_id and fence are added from the claim.
@@ -97,7 +103,7 @@ def master_review_progress(snapshot: dict) -> dict:
 
 def finish_idle_master(result: dict, started: float) -> dict:
     """Record an idle cycle that did not call the model."""
-    result.update(outcome="done", summary="no incidents, owner decisions, failures or overdue runs need review",
+    result.update(outcome="done", summary="No action needed this cycle.",
                   details={"no_watch": True, "model_time_s": 0, "duration_s": int(time.time() - started), "log": ""})
     return result
 
@@ -260,7 +266,7 @@ def run_master_cycle(api: ControlClient, claimed: Claimed, heartbeat: Heartbeat,
     """Review one snapshot and return the cycle result. Lease loss and conflicts propagate."""
     snapshot = load_master_snapshot(api, claimed)
     heartbeat.progress = master_review_progress(snapshot)
-    if not needs_model_review(snapshot):
+    if not review_triggers(snapshot):
         return finish_idle_master(result, started)
     timeout_s = master_model_timeout(snapshot)
     spec = build_master_run_spec(claimed, snapshot, work, srv_root, control_url, logs, timeout_s)

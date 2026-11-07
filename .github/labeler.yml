@@ -1,0 +1,52 @@
+# Pull Request Labeler configuration for actions/labeler v7
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'docs/**'
+          - '**/*.md'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'tests/**'
+
+control:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'aiflow/v4/control/**'
+
+worker:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'aiflow/v4/worker/**'
+
+adapters:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'aiflow/v4/adapters/**'
+
+node:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'aiflow/v4/node/**'
+
+core:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'aiflow/v4/core/**'
+
+deploy:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'deploy/**'
+
+prompts:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'prompts/**'

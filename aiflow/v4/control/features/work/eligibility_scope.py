@@ -30,6 +30,7 @@ class Scope:
     held: set[str] = field(default_factory=set)
     role_modes: dict[str, str] = field(default_factory=dict)
     quota_at_risk: bool = False
+    verify_retry_guard: bool = True
     scoped_key: str = ""
     scoped_tickets_key: str = ""
     scoped_ticket: tuple[str, ...] = ()

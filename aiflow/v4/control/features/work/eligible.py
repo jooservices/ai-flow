@@ -31,7 +31,7 @@ __all__ = [
 
 def eligible(ctx, deps, account_id: str, node: str, *, routing: bool = True, capacity_routing: bool = True,
              ticket_key: str | None = None, lease_checked: bool = False,
-             step_filter: str | None = None) -> list[dict]:
+             step_filter: str | None = None, verify_retry_guard: bool = True) -> list[dict]:
     """Tickets this account may take now; claims can scope revalidation to their requested ticket and step."""
     repo = ctx.repo()
     acc = repo.account(account_id)
@@ -50,6 +50,7 @@ def eligible(ctx, deps, account_id: str, node: str, *, routing: bool = True, cap
     scope = Scope(ctx=ctx, deps=deps, repo=repo, account=acc, node=node, node_row=node_row,
                   projects=projects, roles=roles, ticket_key=ticket_key, account_id=account_id,
                   missing_container_runtime=missing_container_runtime, quota_at_risk=quota_at_risk,
+                  verify_retry_guard=verify_retry_guard,
                   backoff_sql=BACKOFF_SQL, intake_backoff_sql=INTAKE_BACKOFF_SQL, now=utcnow,
                   ticket_priority=PRIORITY, gap_checker=toolchain_gaps, runtime_tool=CONTAINER_RUNTIME_TOOL)
     # A role switched off for this account (docs/v4/role-health.md) takes one unresolved probation ticket.

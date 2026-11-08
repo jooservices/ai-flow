@@ -165,7 +165,7 @@ def deliver_escalation(ctx, state: MasterActionState, record: EscalationRecord,
                             ctx=ctx, alert_kind="ticket_needs_person", project=policy_project or "AI Flow",
                             ticket=state.ticket, needed=record.reason, channels=attempt_channels, queued_ok=True)
                 if attempt_channels else [])
-    except Exception as exc:  # Persist pending channels and retry them on a later master cycle.
+    except Exception as exc:  # noqa: BLE001 - persist pending channels and retry them on a later master cycle
         log.warning("master escalation notification failed: %s", type(exc).__name__)
         sent = []
     sent = sorted(set(sent).intersection(attempt_channels))

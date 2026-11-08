@@ -151,7 +151,7 @@ def _get_embedder():
             raise RuntimeError("local memory embedding model load is in cooldown") from None
         try:
             embedder = _create_embedder(model_name, cache_dir)
-        except Exception:
+        except Exception:  # noqa: BLE001 - loader errors vary by backend; each one starts the cooldown
             _EMBEDDER_FAILURE_KEY = key
             _EMBEDDER_RETRY_AT = time.monotonic() + EMBEDDER_RETRY_SECONDS
             raise

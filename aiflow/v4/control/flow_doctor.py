@@ -192,7 +192,7 @@ def _fix_impossible_dependencies(ctx) -> None:
         try:
             read_links = getattr(ctx.jira, "get_issue_links", None) or ctx.jira.issue_links
             links = read_links(ticket["key"])
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - Jira auth, token refresh and HTTP errors vary; skip this ticket
             log.warning("doctor could not read Jira links for %s (%s)", ticket["key"], type(exc).__name__)
             continue
         removed = []

@@ -1,0 +1,1 @@
+- [Unified test command for every layer](../../../docs/v4/test-command.md): one script runs fast (lint, types, guards, unit), integration, smoke and e2e layers

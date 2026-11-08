@@ -39,6 +39,7 @@ LINUX_ONLY_PROC = ("test_containers.py::test_broker_builds_and_runs_through_root
                    "test_containers.py::test_pinned_descendant_stays_inside",
                    "test_containers.py::test_acl_cleanup_uses_the_pinned_worktree")
 LOCAL_SKIP_WITHOUT_PLAYWRIGHT = ("test_log_viewer_browser.py::", "test_console_browser.py::")
+LAYER_MARKERS = {"unit", "integration", "smoke", "e2e"}
 
 
 def pytest_collection_modifyitems(config, items):
@@ -47,6 +48,7 @@ def pytest_collection_modifyitems(config, items):
         if (not os.environ.get("CI") and shutil.which("playwright") is None
                 and short.startswith(LOCAL_SKIP_WITHOUT_PLAYWRIGHT)):
             item.add_marker(pytest.mark.skip(reason="needs the playwright CLI (CI always runs it)"))
+            item.add_marker(pytest.mark.e2e)
             continue
         missing = [tool for tool, names in LINUX_ONLY_TOOLS.items()
                    if shutil.which(tool) is None and any(item.nodeid.split("tests/v4/")[-1].startswith(n) for n in names)]
@@ -55,6 +57,17 @@ def pytest_collection_modifyitems(config, items):
         elif not Path("/proc/self/fd").exists() and any(
                 item.nodeid.split("tests/v4/")[-1].startswith(n) for n in LINUX_ONLY_PROC):
             item.add_marker(pytest.mark.skip(reason="needs Linux /proc"))
+
+        existing = {m.name for m in item.iter_markers() if m.name in LAYER_MARKERS}
+        if not existing:
+            if short.startswith(LOCAL_SKIP_WITHOUT_PLAYWRIGHT) or "browser" in short or "acceptance" in short:
+                item.add_marker(pytest.mark.e2e)
+            elif "smoke" in short:
+                item.add_marker(pytest.mark.smoke)
+            elif any(name in getattr(item, "fixturenames", ()) for name in ("db", "test_database_url", "leases", "admin")):
+                item.add_marker(pytest.mark.integration)
+            else:
+                item.add_marker(pytest.mark.unit)
 
 
 REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "")
@@ -70,6 +83,10 @@ def runtime_operation_key_in_test_workspace(tmp_path, monkeypatch):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "raw_csrf: do not add the CSRF header to console requests (tests of the protection)")
+    config.addinivalue_line("markers", "unit: fast unit tests without external services")
+    config.addinivalue_line("markers", "integration: database and service integration tests")
+    config.addinivalue_line("markers", "smoke: quick confidence tests")
+    config.addinivalue_line("markers", "e2e: end-to-end browser and acceptance tests")
     # The CI unit-test job does not provision a production secret key. Give its isolated process test-only key material
     # so app contexts can initialize; security tests explicitly remove or replace it when exercising fail-closed paths.
     os.environ["AIFLOW4_SECRET_KEY"] = secretbox.generate_key()

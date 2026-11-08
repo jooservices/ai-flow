@@ -5,9 +5,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
 
 jobs:
   v4-tests:
@@ -35,8 +33,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Install
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
           npm install --global playwright@1.64.1
@@ -83,8 +82,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Install
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
           npm install --global playwright@1.64.1
@@ -144,6 +144,11 @@ jobs:
     name: Package, sign and publish v4 release
     needs: [v4-tests, acceptance]
     if: github.repository == 'jooservices/ai-flow'
+    # Publishing needs write access to the release, the container registry and the OIDC token for keyless signing.
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 120
     services:
@@ -165,6 +170,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install cosign
         uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
@@ -262,8 +268,9 @@ jobs:
             "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json" dist/SHA256SUMS \
             2>&1 | tee "$RUNNER_TEMP/aiflow-candidate-logs/candidate-clean-install.log"
 
+
       - name: Install browser tools for the release install smoke
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
           npm install --global playwright@1.64.1

@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -109,9 +109,9 @@ class VerifyReview:
     verdict: str
     findings: str
     post_merge: list[dict]
-    review_findings: list[dict]
-    new_findings: int
-    review_round: int
+    review_findings: list[dict] = field(default_factory=list)
+    new_findings: int = 0
+    review_round: int = 1
 
 
 @dataclass
@@ -286,6 +286,7 @@ def collect_verification(state: VerifyRun, workspace: VerifyWorkspace,
     if review.verdict == "FAIL":
         return rework_verify(state, review.findings or review.text.strip()[-1500:], "verify failed")
     if review.verdict != "PASS":
+        state.result.setdefault("details", {})["no_verdict"] = True
         state.result.update(outcome="failed", summary=f"no verdict ({review.response.error_kind or 'missing VERDICT line'}): "
                                                      f"{(review.response.error_message or review.text.strip())[-400:]}")
         return state.result

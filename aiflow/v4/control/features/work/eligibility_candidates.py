@@ -3,39 +3,134 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from ... import environment as environment_reports, hotfiles, tooling, worker_candidates
+from fastapi import HTTPException
+
+from ... import environment as environment_reports, hotfiles, load_policy, role_health, rollout, tooling, worker_candidates
+from ...repositories.runs import VerifyTicketHistory, verify_retry_backoff, verify_ticket_history
 from .eligibility_scope import Scope
 from .repository import WorkRepository
+
+VERIFY_NO_VERDICT_RETRY_WAIT = timedelta(minutes=15)
 
 
 def verify_candidates(scope: Scope) -> list[dict]:
     """Collect verification tickets whose completed development run belongs to another account."""
     if "verify" not in scope.roles:
         return []
-    verify_cooling = {row["ticket_key"] for row in scope.backoff_rows("verify")}
+    verify_cooling = verify_retry_backoff(scope.ctx.db, scope.ticket_key)
+    tickets = scope.ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
+                               " AND NOT ('aiflow-hold' = ANY(labels))" + scope.scoped_key,
+                               (scope.projects, *scope.scoped_ticket))
+    history = verify_ticket_history(scope.ctx.db, [ticket["key"] for ticket in tickets])
     out = []
-    for ticket in scope.ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
-                                   " AND NOT ('aiflow-hold' = ANY(labels))" + scope.scoped_key,
-                                   (scope.projects, *scope.scoped_ticket)):
-        if not _verify_candidate_ready(scope, ticket, verify_cooling):
+    peer_eligibility_cache: dict[tuple[str, str], set[str]] = {}
+    for ticket in tickets:
+        ticket_history = history.get(ticket["key"], VerifyTicketHistory())
+        candidate = _verify_candidate(scope, ticket, verify_cooling, ticket_history, peer_eligibility_cache)
+        if not candidate:
             continue
-        first = first_review_account(scope, ticket["key"])
-        if first and first != scope.account.id and preferred_review_available(scope, first, ticket):
-            continue
-        out.append({**ticket, "step": "verify", "probation": scope.probation("verify")})
+        if scope.verify_retry_guard and not _verify_retry_fallback_due(scope, ticket_history):
+            # Keep the first reviewer when eligible; peer probes skip this preference to avoid mutual eligibility.
+            first = first_review_account(scope, ticket["key"])
+            if first and first != scope.account.id and preferred_review_available(scope, first, ticket):
+                continue
+        out.append(candidate)
     return out
 
 
-def _verify_candidate_ready(scope: Scope, ticket: dict, verify_cooling: set[str]) -> bool:
-    """Require a green latest dev run before applying the existing verify eligibility checks."""
+def _verify_dev(scope: Scope, ticket: dict, verify_cooling: set[str]) -> dict | None:
+    """The latest development run of a ticket this account may verify: a green local gate, runtime, lease, author,
+    provider-label and role checks; None when it may not."""
     if scope.needs_missing_container_runtime(ticket, "verify"):
-        return False
+        return None
     if ticket["key"] in scope.held or ticket["key"] in verify_cooling:
-        return False
+        return None
     dev = WorkRepository(scope.ctx.db).latest_dev_run(ticket["key"])
     if not _green_dev_submission(dev) or dev["account_id"] == scope.account.id:
+        return None
+    if scope.explicit_only_blocks(ticket) or not scope.allowed("verify", ticket):
+        return None
+    return dev
+
+
+def _verify_candidate_ready(scope: Scope, ticket: dict, verify_cooling: set[str]) -> bool:
+    """Apply the existing runtime, lease, author, provider-label and role checks for a verify candidate."""
+    return _verify_dev(scope, ticket, verify_cooling) is not None
+
+
+def _verify_candidate(scope: Scope, ticket: dict, cooling: set[str],
+                      history: VerifyTicketHistory,
+                      peer_eligibility_cache: dict[tuple[str, str], set[str]] | None = None) -> dict | None:
+    dev = _verify_dev(scope, ticket, cooling)
+    if dev is None:
+        return None
+    if scope.verify_retry_guard and _verify_retry_blocked(
+            scope, ticket, dev["account_id"], history, peer_eligibility_cache):
+        return None
+    return {**ticket, "step": "verify", "probation": scope.probation("verify")}
+
+
+def _verify_retry_fallback_due(scope: Scope, history: VerifyTicketHistory) -> bool:
+    """Allow a prior no-verdict verifier back after peers had time to claim the retry."""
+    attempts = history.by_account.get(scope.account.id, [])
+    ended_at = history.last_no_verdict_ended_at
+    return bool(any(attempts) and ended_at and scope.now() - ended_at >= VERIFY_NO_VERDICT_RETRY_WAIT)
+
+
+def _verify_retry_blocked(scope: Scope, ticket: dict, dev_account: str, history: VerifyTicketHistory,
+                          peer_eligibility_cache: dict[tuple[str, str], set[str]] | None = None) -> bool:
+    attempts = history.by_account.get(scope.account.id, [])
+    if len(attempts) >= 2 and attempts[0] and attempts[1]:
+        return True
+    if not any(attempts):
         return False
-    return not (scope.explicit_only_blocks(ticket) or not scope.allowed("verify", ticket))
+    if _verify_retry_fallback_due(scope, history):
+        return False
+    return _untried_verify_peer(scope, ticket, dev_account, history, peer_eligibility_cache)
+
+
+def _untried_verify_peer(scope: Scope, ticket: dict, dev_account: str,
+                         history: VerifyTicketHistory,
+                         peer_eligibility_cache: dict[tuple[str, str], set[str]] | None = None) -> bool:
+    peer_eligibility_cache = peer_eligibility_cache if peer_eligibility_cache is not None else {}
+    for account in scope.ctx.repo().accounts:
+        if not _verify_retry_peer_account(account, scope.account.id, dev_account, history):
+            continue
+        for node in dict.fromkeys(account.machines):
+            if ticket["key"] in _peer_verify_tickets(scope, account.id, node, peer_eligibility_cache):
+                return True
+    return False
+
+
+def _peer_verify_tickets(scope: Scope, account_id: str, node: str,
+                         cache: dict[tuple[str, str], set[str]]) -> set[str]:
+    """Load a peer machine's verify offers once per poll, then reuse them for each ticket probe."""
+    key = account_id, node
+    if key in cache:
+        return cache[key]
+    if not load_policy.claim_limits(scope.ctx, node)["allowed"]:
+        cache[key] = set()
+        return cache[key]
+    if not rollout.node_compatible(scope.ctx, node, scope.deps.releases())["compatible"]:
+        cache[key] = set()
+        return cache[key]
+    options = {"routing": False, "capacity_routing": False, "step_filter": "verify",
+               "verify_retry_guard": False}
+    if scope.ticket_key is not None:
+        options["ticket_key"] = scope.ticket_key
+    try:
+        offers = scope.deps.eligible(account_id, node, **options)
+    except HTTPException:
+        offers = []
+    cache[key] = {item["key"] for item in offers if item.get("step") == "verify"}
+    return cache[key]
+
+
+def _verify_retry_peer_account(account, account_id: str, dev_account: str,
+                               history: VerifyTicketHistory) -> bool:
+    return (account.id not in {account_id, dev_account} and not account.paused
+            and "verify" in role_health.account_roles(account)
+            and not any(history.by_account.get(account.id, [])))
 
 
 def _green_dev_submission(dev: dict | None) -> bool:

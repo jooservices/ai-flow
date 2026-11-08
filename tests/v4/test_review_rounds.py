@@ -146,14 +146,15 @@ def _verify_scope(current_account, preferred_ready):
 
     scope = SimpleNamespace(
         roles={"verify"}, backoff_rows=lambda _step: [], held=set(),
-        ctx=SimpleNamespace(db=SimpleNamespace(all=lambda *_args: [ticket], one=one)),
+        ctx=SimpleNamespace(db=SimpleNamespace(
+            all=lambda sql, *_args: [ticket] if "FROM tickets" in sql else [], one=one)),
         deps=SimpleNamespace(
             last_dev=lambda *_args, **_kwargs: {"account_id": "developer", "pr_url": "https://github.test/pr/1"},
             eligible=lambda *_args, **_kwargs: ([{"key": ticket["key"], "step": "verify"}]
                                                if preferred_ready else [])),
         account=SimpleNamespace(id=current_account),
         repo=SimpleNamespace(account=lambda _key: account),
-        scoped_key="", scoped_ticket=(), projects=["TESTWP"],
+        scoped_key="", scoped_ticket=(), projects=["TESTWP"], ticket_key=None, verify_retry_guard=True,
         needs_missing_container_runtime=lambda *_args: False,
         explicit_only_blocks=lambda _ticket: False, allowed=lambda *_args: True,
         probation=lambda _step: False,
@@ -165,6 +166,17 @@ def test_verification_prefers_first_reviewer_only_while_that_account_is_eligible
     assert verify_candidates(_verify_scope("reviewer-two", True)) == []
     assert [row["key"] for row in verify_candidates(_verify_scope("reviewer-two", False))] == ["TESTWP-1"]
     assert [row["key"] for row in verify_candidates(_verify_scope("reviewer-one", True))] == ["TESTWP-1"]
+
+
+def test_peer_probe_skips_first_reviewer_preference():
+    scope = _verify_scope("reviewer-two", True)
+    scope.verify_retry_guard = False
+    calls = []
+    scope.deps.eligible = lambda *args, **kwargs: calls.append((args, kwargs)) or [
+        {"key": "TESTWP-1", "step": "verify"}]
+
+    assert [row["key"] for row in verify_candidates(scope)] == ["TESTWP-1"]
+    assert calls == []
 
 
 def test_verify_candidate_ready_keeps_the_existing_runtime_and_author_gates():

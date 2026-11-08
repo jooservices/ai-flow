@@ -45,7 +45,7 @@ def install_console_user_create_routes(app, ctx, deps, validate_project_keys) ->
                                                                  project_keys=project_keys))
         except HTTPException:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - insert or publish can fail many ways; each is logged as the same 500
             log.exception("console user could not be added")
             raise HTTPException(500, "person could not be added") from exc
         audit_user(request, user.subject, "person_added", email, {"roles": list(roles), "project_keys": project_keys})

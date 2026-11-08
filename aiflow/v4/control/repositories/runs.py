@@ -1,6 +1,9 @@
 """Run queries and persistence for work claims."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from datetime import datetime
+
 from ..db import J
 
 
@@ -26,6 +29,41 @@ WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval 
 ORDER BY ticket_key, started_at DESC
 """
 
+VERIFY_RETRY_BACKOFF_SQL = """
+WITH recent AS (
+  SELECT ticket_key, outcome, ended_at,
+         coalesce(details->>'no_verdict' = 'true', false) AS no_verdict,
+         row_number() OVER (PARTITION BY ticket_key ORDER BY started_at DESC) AS n
+  FROM runs WHERE step = 'verify' AND status <> 'running' AND started_at > now() - interval '1 day'
+    AND (%(ticket_key)s::text IS NULL OR ticket_key = %(ticket_key)s::text)
+    AND started_at > coalesce((SELECT h.resolved_at FROM ticket_handoffs h
+                               WHERE h.ticket_key = runs.ticket_key AND h.state = 'resolved'), '-infinity'::timestamptz)
+), streak AS (
+  SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
+  FROM recent l
+  WHERE l.outcome IN ('failed', 'timeout', 'lost', 'no_changes') AND NOT l.no_verdict
+    AND NOT EXISTS (SELECT 1 FROM recent g WHERE g.ticket_key = l.ticket_key AND g.n < l.n
+                    AND (g.no_verdict OR g.outcome NOT IN ('failed', 'timeout', 'lost', 'no_changes')))
+  GROUP BY l.ticket_key
+)
+SELECT ticket_key, fails FROM streak
+WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
+"""
+
+VERIFY_TICKET_HISTORY_SQL = """
+SELECT ticket_key, account_id, coalesce(details->>'no_verdict' = 'true', false) AS no_verdict, ended_at
+FROM runs WHERE ticket_key = ANY(%s) AND step = 'verify' AND status <> 'running'
+ORDER BY started_at DESC
+"""
+
+
+@dataclass
+class VerifyTicketHistory:
+    """Completed verifier results and the latest no-verdict end time for one ticket."""
+
+    by_account: dict[str, list[bool]] = field(default_factory=dict)
+    last_no_verdict_ended_at: datetime | None = None
+
 
 def running_by_project(db) -> dict[str, int]:
     return {str(row["project"]): int(row["count"]) for row in db.all(
@@ -38,6 +76,27 @@ def backoff_tickets(db, step: str) -> set[str]:
 
 def intake_backoff(db, step: str) -> list[dict]:
     return db.all(INTAKE_BACKOFF_SQL, {"step": step})
+
+
+def verify_retry_backoff(db, ticket_key: str | None = None) -> set[str]:
+    """Verify failures cooling down after ordinary errors; no-verdict runs bypass this delay."""
+    return {str(row["ticket_key"]) for row in db.all(VERIFY_RETRY_BACKOFF_SQL, {"ticket_key": ticket_key})}
+
+
+def verify_ticket_history(db, ticket_keys: list[str]) -> dict[str, VerifyTicketHistory]:
+    """Newest-first no-verdict markers and latest no-verdict end time per ticket and account."""
+    history: dict[str, VerifyTicketHistory] = {}
+    if not ticket_keys:
+        return history
+    for row in db.all(VERIFY_TICKET_HISTORY_SQL, (ticket_keys,)):
+        ticket = history.setdefault(row["ticket_key"], VerifyTicketHistory())
+        no_verdict = bool(row["no_verdict"])
+        ticket.by_account.setdefault(row["account_id"], []).append(no_verdict)
+        ended_at = row.get("ended_at")
+        if no_verdict and ended_at and (ticket.last_no_verdict_ended_at is None
+                                        or ended_at > ticket.last_no_verdict_ended_at):
+            ticket.last_no_verdict_ended_at = ended_at
+    return history
 
 
 def save_claim_details(db, run_id: str, details: dict) -> None:

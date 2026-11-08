@@ -99,6 +99,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Validated parked requirements](../../docs/v4/parked-requirements.md): validate missing-tool reports, install supported tools from heartbeat requests, show parked-ticket status, and name idle and stalled-wait causes
 - [Events routes](../../docs/v4/route-module-events.md): the events routes are served from their own router module
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright, Chromium, Firefox and WebKit, and report an unavailable browser by name
+- [Browser E2E steps, suites and scenarios](../../docs/v4/browser-e2e-layers.md): compose scripted browser journeys from reusable one-action steps, ordered suites and ordered scenarios
 - [Policy routes](../../docs/v4/route-module-policy.md): the policy routes are served from their own router module
 - [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, browser binaries go into the shared `playwright-browser` folder, and each browser is launched as the AI user
 - [Pull request comments](../../docs/v4/pr-comments.md): one verification comment edited in place, one bot identity, quiet CodeRabbit configuration

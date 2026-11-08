@@ -32,6 +32,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Master AI rescue](../../docs/v4/master-rescue.md): Claude takes a long Blocked or over-time ticket once, with its own budget; owner-only work and an unavailable Claude go to the owner, a failed rescue returns to development
 - [Master review triggers](../../docs/v4/master-review-triggers.md): a master cycle calls the AI only when a rule finds an item to decide; the Dashboard shows cycles, AI calls, actions and the no-action target
 - [Shared worker fairness](../../docs/v4/shared-worker-fairness.md): round-robin ready tickets across projects while preserving rework preference and each project's priority and age order
+- [Affected test selection](../../docs/v4/affected-tests.md): map reviewed v4 changes to focused tests with smoke checks and a full-suite fallback
 - [Work eligibility pipeline](../../docs/v4/work-eligibility.md): named account, node, project and role rules feed step collectors and the existing ordering and routing stages
 - [Container command policy structure](../../docs/v4/policy-structure.md): named checks for the safe build, run and compose command forms
 - [Work claim stages](../../docs/v4/work-claim.md): ordered named steps for eligibility, lease and hot-file acquisition, run registration and response building

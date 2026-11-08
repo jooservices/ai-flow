@@ -10,7 +10,8 @@ the Dashboard shows how far behind the running build is.
 
 1. **Keep the canary under test.** When `CANARY.json` already names a candidate, a newer merge is recorded as
    pending and the observation continues. The flow finishes that canary, then starts the newest build
-   (`keep_canary_target` in `aiflow/v4/control/canary.py`).
+   (`keep_canary_target` in `aiflow/v4/control/canary.py`). Starting a canary records its own merge timestamp too,
+   so promotion measures merge-to-live even if no later merge arrived during observation.
 2. **Read thresholds from settings.** Minimum time, minimum completed runs and maximum time default to
    5 minutes, 3 runs and 15 minutes. Owners edit them on the Settings screen (`/v1/canary/settings`). The
    auto-deployer loads those values from `/v1/deploy/state` (`control_canary.settings`) and passes
@@ -23,8 +24,9 @@ the Dashboard shows how far behind the running build is.
    canary keeps waiting until thresholds are met.
 5. **Show lag on the Dashboard.** The Dashboard panel “Control plane canary” shows the running build, the
    build in canary, how many merged changes are not live yet, the age of the oldest of them, and recent
-   merge-to-live times (`control_canary` on `/v1/state`). The auto-deployer notes pending builds while a
-   canary is under way and records merge-to-live when a promotion succeeds.
+   merge-to-live times (`control_canary` on `/v1/state`). When a promoted build contains pending ancestor builds,
+   the auto-deployer records those as live at the same time, so the pending count reflects changes that are
+   actually absent from the running control plane.
 
 ## Routes
 

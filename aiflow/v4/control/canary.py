@@ -288,10 +288,11 @@ def set_settings(db, minimum_age_s: int, minimum_runs: int, maximum_age_s: int, 
     return get_settings(db)
 
 
-def thresholds_from_settings(db) -> Thresholds:
+def thresholds_from_settings(db, failure_ratio: str | float | Decimal = "2",
+                             minimum_infra_failures: int = 3) -> Thresholds:
     settings = get_settings(db)
     return Thresholds.from_values(settings["minimum_age_s"], settings["minimum_runs"],
-                                  settings["maximum_age_s"], "2", 3)
+                                  settings["maximum_age_s"], failure_ratio, minimum_infra_failures)
 
 
 def note_pending_build(db, build: str, merged_at: datetime) -> None:
@@ -299,6 +300,8 @@ def note_pending_build(db, build: str, merged_at: datetime) -> None:
     build = (build or "").strip()
     if not build:
         return
+    if merged_at.tzinfo is None or merged_at.utcoffset() is None:
+        raise ValueError("merge timestamp must include a UTC offset")
     canary_repo.upsert_pending_build(db, build, merged_at)
 
 
@@ -315,6 +318,22 @@ def mark_build_live(db, build: str, live_at: datetime | None = None) -> dict[str
         return {"build": build, "seconds": seconds, "recorded": True}
     canary_repo.delete_pending_build(db, build)
     return {"build": build, "seconds": None, "recorded": False}
+
+
+def mark_build_and_ancestors_live(db, build: str, covered_builds: Iterable[str] = (),
+                                  live_at: datetime | None = None) -> dict[str, Any]:
+    """Mark a promoted build and any pending builds it contains as live at the same time."""
+    when = live_at or datetime.now(timezone.utc)
+    promoted = mark_build_live(db, build, when)
+    covered = []
+    seen = {promoted["build"]}
+    for candidate in covered_builds:
+        ancestor = (candidate or "").strip()
+        if not ancestor or ancestor in seen:
+            continue
+        seen.add(ancestor)
+        covered.append(mark_build_live(db, ancestor, when))
+    return {**promoted, "covered_builds": covered}
 
 
 def work_available_on_node(db, node: str, started_at: datetime) -> bool:

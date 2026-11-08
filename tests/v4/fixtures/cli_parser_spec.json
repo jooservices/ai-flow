@@ -721,6 +721,19 @@
        "type_name": null,
        "help": null,
        "metavar": null
+      },
+      {
+       "option_strings": [
+        "--covered-build"
+       ],
+       "dest": "covered_build",
+       "default": [],
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": null,
+       "help": "pending build contained in the promoted build; may be repeated",
+       "metavar": null
       }
      ],
      "subcommands": {}

@@ -242,6 +242,8 @@ def add_canary_commands(sub: argparse._SubParsersAction) -> None:
     pn.add_argument("--merged-at", required=True)
     pl = canary_sub.add_parser("mark-live")
     pl.add_argument("--build", required=True)
+    pl.add_argument("--covered-build", action="append", default=[],
+                    help="pending build contained in the promoted build; may be repeated")
     canary_sub.add_parser("retry-tickets")
 
 
@@ -475,7 +477,7 @@ def run_ba_chat(a: argparse.Namespace, s: Settings) -> int:
 
 def run_canary(a: argparse.Namespace, s: Settings) -> None:
     from datetime import datetime, timezone
-    from .control.canary import (Thresholds, decide, mark_build_live, measure_registry,
+    from .control.canary import (Thresholds, decide, measure_registry,
                                  node_is_healthy, note_pending_build, record_promotion,
                                  record_rollback, retry_pending_flow_bugs, thresholds_from_settings,
                                  work_available_on_node)
@@ -487,7 +489,7 @@ def run_canary(a: argparse.Namespace, s: Settings) -> None:
             installed = db.one("SELECT release_version FROM nodes WHERE name=%s", (a.node,))
             measurements = measure_registry(db, a.node, started, a.previous)
             if a.from_settings:
-                thresholds = thresholds_from_settings(db)
+                thresholds = thresholds_from_settings(db, a.failure_ratio, a.minimum_infra_failures)
             else:
                 thresholds = Thresholds.from_values(a.minimum_age_s, a.minimum_runs, a.maximum_age_s,
                                                     a.failure_ratio, a.minimum_infra_failures)
@@ -500,17 +502,23 @@ def run_canary(a: argparse.Namespace, s: Settings) -> None:
         finally:
             db.close()
         return
+    if a.canary_action == "note-pending":
+        merged_at = datetime.fromisoformat(a.merged_at)
+        if merged_at.tzinfo is None or merged_at.utcoffset() is None:
+            raise SystemExit("--merged-at must include a UTC offset")
     ctx = build_ctx(s)
     try:
         if a.canary_action == "retry-tickets":
             print(json.dumps(retry_pending_flow_bugs(ctx), separators=(",", ":")))
             return
         if a.canary_action == "note-pending":
-            note_pending_build(ctx.db, a.build, datetime.fromisoformat(a.merged_at))
+            note_pending_build(ctx.db, a.build, merged_at)
             print(json.dumps({"noted": a.build}, separators=(",", ":")))
             return
         if a.canary_action == "mark-live":
-            print(json.dumps(mark_build_live(ctx.db, a.build), separators=(",", ":")))
+            from .control.canary import mark_build_and_ancestors_live
+            print(json.dumps(mark_build_and_ancestors_live(ctx.db, a.build, a.covered_build),
+                             separators=(",", ":")))
             return
         measurements = json.loads(a.measurements)
         if a.canary_action == "record-rollback":

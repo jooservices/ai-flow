@@ -4,6 +4,7 @@ import re
 import uuid
 from types import SimpleNamespace
 from .bodies import ConfirmBody, ManagedAccountCreateBody, ManagedAccountSignInStatusBody, ManagedAccountUpdateBody
+from . import repository as sign_in_repository, service as sign_in_service
 from .events import AiAccountAdded, AiAccountManagementChanged, AiAccountRemoved, AiAccountSignInCompleted, AiAccountSignInRestarted
 from urllib.parse import urlsplit
 from fastapi import Depends, HTTPException, Request
@@ -183,15 +184,10 @@ def _register_account_sign_in_details(app, ctx, deps, support=None):
     @app.get("/v1/accounts/{account_id}/sign-in")
     def account_sign_in_details(account_id: str, request: Request) -> dict:
         console_user(request, {"nodes.manage"})
-        row = ctx.db.one("SELECT node,provider,sign_in_status,sign_in_url,sign_in_code,sign_in_error,"
-                         "sign_in_expires_at FROM managed_ai_accounts"
-                         " WHERE id=%s AND removed_at IS NULL AND sign_in_status<>'idle'", (account_id,))
-        if not row:
-            raise HTTPException(404, "no active sign-in link for this account")
-        return {"account": account_id, "node": row["node"], "provider": row["provider"],
-                "status": row["sign_in_status"], "sign_in_url": row["sign_in_url"],
-                "code": row["sign_in_code"], "error": row["sign_in_error"],
-                "expires_at": row["sign_in_expires_at"].isoformat() if row["sign_in_expires_at"] else None}
+        try:
+            return sign_in_service.sign_in_details(ctx.db, account_id)
+        except sign_in_service.SignInRefused as refused:
+            raise HTTPException(refused.status, refused.detail) from refused
     return account_sign_in_details
 
 def _register_report_account_sign_in_status(app, ctx, deps, support=None):
@@ -199,22 +195,15 @@ def _register_report_account_sign_in_status(app, ctx, deps, support=None):
     @app.post("/v1/accounts/{account_id}/sign-in/status")
     def report_account_sign_in_status(account_id: str, body: ManagedAccountSignInStatusBody,
                                       node: str = Depends(node_auth)) -> dict:
-        row = ctx.db.one("SELECT node,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
-                         " WHERE id=%s AND removed_at IS NULL", (account_id,))
-        if not row or row["node"] != node:
-            raise HTTPException(404, "account sign-in request is not assigned to this machine")
-        if row["sign_in_request_id"] != body.request_id:
-            raise HTTPException(409, "sign-in request has been replaced")
+        try:
+            sign_in_service.check_status_report(ctx.db, account_id, node, body.request_id, body.status,
+                                                body.sign_in_url)
+        except sign_in_service.SignInRefused as refused:
+            raise HTTPException(refused.status, refused.detail) from refused
         _validate_sign_in_status(body)
         with ctx.db.pool.connection() as connection:
-            updated = connection.execute(
-                "UPDATE managed_ai_accounts SET sign_in_status=%s,"
-                "sign_in_url=CASE WHEN %s<>'' THEN %s ELSE sign_in_url END,"
-                "sign_in_code=CASE WHEN %s<>'' THEN %s ELSE sign_in_code END,"
-                "sign_in_error=%s,updated_at=now() WHERE id=%s AND node=%s AND sign_in_request_id=%s"
-                " AND removed_at IS NULL RETURNING id",
-                (body.status, body.sign_in_url, body.sign_in_url, body.code, body.code,
-                 body.error[:300], account_id, node, body.request_id)).fetchone()
+            updated = sign_in_repository.apply_sign_in_status(
+                connection, account_id, node, body.request_id, body.status, body.sign_in_url, body.code, body.error)
             if not updated:
                 raise HTTPException(409, "sign-in request has been replaced")
             if body.status == "completed":

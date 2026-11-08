@@ -190,10 +190,10 @@ def test_flow_bug_creation_repeat_and_intake_move_publish_matching_audits(client
     summary = "Git refused checkout of branch TESTFLOW-4781: pathspec did not match"
     first_ids = [
         failed_flow_run(ctx, "TESTFLOW-4781", summary, step="triage"),
-        failed_flow_run(ctx, "TESTFLOW-4781", summary, step="verify"),
+        failed_flow_run(ctx, "TESTFLOW-4781", summary, step="triage"),
         failed_flow_run(ctx, "TESTFLOW-4781", summary, step="triage"),
         failed_flow_run(ctx, "TESTFLOW-4782", "Git refused checkout of branch TESTFLOW-4782: pathspec did not match",
-                        step="verify"),
+                        step="triage"),
     ]
     invalid = client.post("/v1/master/flow-bugs", json={}, headers=cc)
     assert invalid.status_code == 422
@@ -209,7 +209,7 @@ def test_flow_bug_creation_repeat_and_intake_move_publish_matching_audits(client
     created_payload = created["payload"]
     assert created_payload == {"run_id": master["run_id"], "fence": master["fence"], "ticket": ticket,
                               "actor": "claude-01",
-                              "reason": "at least three matching failed runs across at least two tickets in 30 minutes",
+                              "reason": "4 matching failures in the rolling six-hour window",
                               "signature": report["signature"], "run_ids": sorted(first_ids),
                               "tickets": ["TESTFLOW-4781", "TESTFLOW-4782"], "labels": ["flow-bug"]}
     assert_event_and_audit(ctx.db, "flow_bug.issue_created", aggregate_id=master["run_id"],

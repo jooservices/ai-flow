@@ -82,6 +82,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "loadDashboardReviewRounds": ("cc",),
     "pollDashboardReviewRounds": ("cc",),
     "reviewRoundsPanel": ("cc",),
+    "loadDashboardFlowFailures": ("cc",),
+    "flowFailuresPanel": ("cc",),
     "capacityPanel": ("cc",),
     "drawerTicket": ("cc",),
     "loadCapacity": ("cc",),
@@ -327,7 +329,7 @@ SCREEN_LINE_VIEWS += (
     (re.compile(r"JOIN_FIELDS"), "cc"),
     # The Projects environment editor can remain interactive when its save/scan toast is visible.
     (re.compile(r"^\s*\.toasts\{"), "projects"),
-    (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|capacity: \{ data:"), "cc"),
+    (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|dashboardFlowFailures|capacity: \{ data:"), "cc"),
     (re.compile(r"^\s*\.(?:dashboard-tabs|dashboard-tab|dash-section|dash-section-title|dashboard-layout-headings|dash-kpis|dash-kpi|"
                 r"dash-grid|dash-flow|flow-step|dash-tools|sort-btn|dash-table|roadmap-list|roadmap-row|provider-legend|"
                 r"provider-swatch|provider-(?:claude|codex|grok|opencode)|provider-chart|usage-share|quota-ai-list|"

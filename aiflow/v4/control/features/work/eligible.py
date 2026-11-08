@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from ... import (environment as environment_reports, flow_doctor, hotfiles, role_health, rollout, shared_accounts,
+from ... import (environment as environment_reports, flow_doctor, hotfiles, incidents, role_health, rollout, shared_accounts,
                  system_check, tooling, work_steps, worker_candidates)
 from ... import dev_history
 from ....core.services import service_gaps
@@ -67,26 +67,49 @@ def eligible(ctx, deps, account_id: str, node: str, *, routing: bool = True, cap
     return finalize(scope, out, routing=routing, capacity_routing=capacity_routing)
 
 
+def _exclude_flow_breakers(ctx, out: list[dict]) -> list[dict]:
+    blocked = incidents.flow_breaker_exclusions(ctx, out)
+    return [ticket for ticket in out if (ticket["key"], ticket["step"]) not in blocked]
+
+
+def _exclude_flow_doctor(scope: Scope, out: list[dict]) -> list[dict]:
+    candidates = [ticket for ticket in out if ticket.get("type") != "Epic"]
+    return flow_doctor.exclude_failed_routes(scope.ctx, scope.account_id, scope.node, candidates)
+
+
+def _route_headroom(scope: Scope, out: list[dict], routing: bool) -> list[dict]:
+    if routing and scope.ticket_key is None and out:
+        return scope.ctx.provider_eligibility.filter_headroom(scope.account, out)
+    return out
+
+
+def _exclude_quota_peer_candidates(scope: Scope, out: list[dict], routing: bool) -> list[dict]:
+    if not routing or not scope.quota_at_risk or not out:
+        return out
+    ctx, deps = scope.ctx, scope.deps
+    available_elsewhere: set[tuple[str, str]] = set()
+    for peer in deps.quota_peer_accounts(scope.account_id, scope.roles):
+        for peer_node in peer["nodes"]:
+            if not rollout.node_compatible(ctx, peer_node, deps.releases())["compatible"]:
+                continue
+            available_elsewhere.update(
+                (ticket["key"], ticket["step"])
+                for ticket in deps.eligible(peer["id"], peer_node, routing=False, capacity_routing=True,
+                                            ticket_key=scope.ticket_key))
+    return [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
+
+
+def _route_capacity(scope: Scope, out: list[dict], capacity_routing: bool) -> list[dict]:
+    if capacity_routing and out:
+        return scope.deps.route_capacity(scope.account_id, scope.node, out, ticket_key=scope.ticket_key)
+    return out
+
+
 def finalize(scope: Scope, out: list[dict], *, routing: bool, capacity_routing: bool) -> list[dict]:
     """Apply the Flow doctor exclusion, workflow ordering, provider quota and capacity routing."""
-    ctx, deps = scope.ctx, scope.deps
-    out = flow_doctor.exclude_failed_routes(
-        ctx, scope.account_id, scope.node, [ticket for ticket in out if ticket.get("type") != "Epic"])
-    # Keep normal workflow order stable, but put a generated flow bug first whenever it is eligible.
+    out = _exclude_flow_breakers(scope.ctx, out)
+    out = _exclude_flow_doctor(scope, out)
     out.sort(key=lambda ticket: "flow-bug" not in (ticket.get("labels") or []))
-    if routing and scope.ticket_key is None and out:
-        out = ctx.provider_eligibility.filter_headroom(scope.account, out)
-    if routing and scope.quota_at_risk and out:
-        available_elsewhere: set[tuple[str, str]] = set()
-        for peer in deps.quota_peer_accounts(scope.account_id, scope.roles):
-            for peer_node in peer["nodes"]:
-                if not rollout.node_compatible(ctx, peer_node, deps.releases())["compatible"]:
-                    continue
-                available_elsewhere.update(
-                    (ticket["key"], ticket["step"])
-                    for ticket in deps.eligible(peer["id"], peer_node, routing=False,
-                                                capacity_routing=True, ticket_key=scope.ticket_key))
-        out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
-    if capacity_routing and out:
-        out = deps.route_capacity(scope.account_id, scope.node, out, ticket_key=scope.ticket_key)
-    return out
+    out = _route_headroom(scope, out, routing)
+    out = _exclude_quota_peer_candidates(scope, out, routing)
+    return _route_capacity(scope, out, capacity_routing)

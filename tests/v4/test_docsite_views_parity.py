@@ -58,7 +58,7 @@ CASES = [
     {"name": "closing brace in mapped hunk", "hunks": [("<APPENDED_BRACE>", 2)], "append_style": True,
      "expected": ["cc", "projects"]},
     {"name": "unmapped renderer refusal", "hunks": [("function unknownRenderer(", 1)], "append_renderer": True,
-     "expected": "ValueError: console UI change could not be mapped to a screen at line(s) 5741; add the renderer to SCREEN_RENDERER_VIEWS or keep screen content inside its view section"},
+     "expected": "ValueError: console UI change could not be mapped to a screen at line(s) 5773; add the renderer to SCREEN_RENDERER_VIEWS or keep screen content inside its view section"},
     {"name": "extension command refusal", "hunks": [], "extension": 2,
      "expected": "CalledProcessError: Command '['git', 'diff', '--quiet', 'origin/develop...HEAD', '--', 'aiflow/v4/control/ui/system-check.js']' returned non-zero exit status 2."},
     {"name": "diff command refusal", "hunks": [], "diff_status": 2,

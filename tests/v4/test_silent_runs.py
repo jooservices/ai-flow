@@ -243,7 +243,7 @@ def test_dev_worker_publishes_failure_with_clear_reason_when_run_goes_silent_twi
 
 def test_silent_run_counts_once_toward_signature_detector_and_shows_tokens(ctx):
     maintenance_project = ctx.settings.maintenance_project
-    # The detector only looks at the last 30 minutes, so these runs must be recent whatever the time of day.
+    # The detector uses a rolling six-hour window, so these runs are recent whatever the time of day.
     recent = minutes_ago(15)
     run_id1 = add_run_row(ctx.db, ticket=f"{maintenance_project}-1", outcome="failed", error_kind="silent",
                           summary="the run went silent twice", tokens_in=40000, tokens_out=5000, project=maintenance_project,
@@ -274,12 +274,16 @@ def test_silent_run_counts_once_toward_signature_detector_and_shows_tokens(ctx):
 
     class MockJira:
         def create_issue(self, project: str, summary: str, description: str, issuetype: str = "Bug",
-                         labels: list[str] | None = None) -> str:
-            created_issues.append({"project": project, "summary": summary, "description": description})
+                         labels: list[str] | None = None, priority: str = "") -> str:
+            created_issues.append({"project": project, "summary": summary, "description": description,
+                                   "priority": priority})
             return f"{project}-999"
 
         def status(self, _key: str) -> str:
             return "Intake"
+
+        def transition_to(self, _key: str, target: str) -> str:
+            return target
 
     ctx.jira = MockJira()
     helpers = app_helpers.install(FastAPI(), ctx, SimpleNamespace(late=SimpleNamespace()))
@@ -288,8 +292,9 @@ def test_silent_run_counts_once_toward_signature_detector_and_shows_tokens(ctx):
     assert reports[0]["action"] == "created"
     assert len(created_issues) == 1
     issue_desc = created_issues[0]["description"]
-    assert "Tokens used: 135,000" in issue_desc
-    assert f"tokens: 45,000" in issue_desc
+    assert "Tokens wasted: 135,000" in issue_desc
+    assert "45,000 tokens" in issue_desc
+    assert created_issues[0]["priority"] == "Highest"
 
 
 def test_analytics_silent_runs_calculates_daily_tickets_and_two_percent_target(db):

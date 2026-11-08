@@ -37,3 +37,5 @@ a test in `tests/v4/test_ai_authorize_link_expiry.py`.
 - Pasting a code back into the provider CLI (Claude Code) and an API key for Grok are not implemented.
 - Finish sign-in is still an owner click; the device flow does not complete on its own.
 - An expired link still leaves the node's CLI waiting until the provider or the next sign-in ends it.
+
+A provider link is valid for 15 minutes from the moment the node first reports it. Reading an expired link (or a link stored before expiry existed) answers 410; a node's repeated `waiting` report of the same expired link answers 409, while a different link starts a new 15-minute window. The policy lives in the fleet `service`, the SQL in the fleet `repository`.

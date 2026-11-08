@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from conftest import join_node
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
-from aiflow.v4.control.features.fleet import routes_accounts
+from aiflow.v4.control.features.fleet import service as sign_in_service
 
 SECRET = "test-console-session-secret-at-least-32-bytes"
 LINK = "https://auth.openai.com/codex/device"
@@ -55,15 +55,14 @@ def test_repeating_the_same_link_does_not_extend_its_window(client, ctx):
     assert _expires_at(ctx, account_id) == first
 
 
-def test_expired_link_is_refused_on_read_and_on_a_new_waiting_report(client, ctx):
+def test_expired_link_is_refused_on_read_and_on_a_repeated_waiting_report(client, ctx):
     account_id, node_auth, request_id = _account_with_waiting_link(client, ctx, "node-link-expired")
     ctx.db.run("UPDATE managed_ai_accounts SET sign_in_expires_at=now()-interval '1 minute' WHERE id=%s",
                (account_id,))
 
     details = client.get(f"/v1/accounts/{account_id}/sign-in")
     reported = client.post(f"/v1/accounts/{account_id}/sign-in/status", headers=node_auth, json={
-        "request_id": request_id, "status": "waiting", "sign_in_url": "https://auth.openai.com/codex/other",
-        "code": "WXYZ-1234"})
+        "request_id": request_id, "status": "waiting", "sign_in_url": LINK, "code": "ABCD-EFGH"})
     failed = client.post(f"/v1/accounts/{account_id}/sign-in/status", headers=node_auth, json={
         "request_id": request_id, "status": "failed", "error": "provider link expired"})
 
@@ -71,6 +70,22 @@ def test_expired_link_is_refused_on_read_and_on_a_new_waiting_report(client, ctx
     assert reported.status_code == 409 and "expired" in reported.json()["detail"]
     assert failed.status_code == 200
     assert ctx.db.one("SELECT sign_in_url FROM managed_ai_accounts WHERE id=%s", (account_id,))["sign_in_url"] == LINK
+
+
+def test_a_new_link_after_expiry_starts_a_new_window_and_a_legacy_link_gets_one(client, ctx):
+    account_id, node_auth, request_id = _account_with_waiting_link(client, ctx, "node-link-fresh")
+    ctx.db.run("UPDATE managed_ai_accounts SET sign_in_expires_at=now()-interval '1 minute' WHERE id=%s", (account_id,))
+    fresh = client.post(f"/v1/accounts/{account_id}/sign-in/status", headers=node_auth, json={
+        "request_id": request_id, "status": "waiting", "sign_in_url": "https://auth.openai.com/codex/other",
+        "code": "WXYZ-1234"})
+    assert fresh.status_code == 200 and _expires_at(ctx, account_id) > datetime.now(UTC) + timedelta(minutes=14)
+
+    ctx.db.run("UPDATE managed_ai_accounts SET sign_in_expires_at=NULL WHERE id=%s", (account_id,))
+    assert client.get(f"/v1/accounts/{account_id}/sign-in").status_code == 410
+    legacy = client.post(f"/v1/accounts/{account_id}/sign-in/status", headers=node_auth, json={
+        "request_id": request_id, "status": "waiting", "sign_in_url": "https://auth.openai.com/codex/other",
+        "code": "WXYZ-1234"})
+    assert legacy.status_code == 200 and _expires_at(ctx, account_id) is not None
 
 
 def test_replaced_request_id_is_refused_after_a_fresh_sign_in(client, ctx):
@@ -83,9 +98,10 @@ def test_replaced_request_id_is_refused_after_a_fresh_sign_in(client, ctx):
     assert stale.status_code == 409 and "replaced" in stale.json()["detail"]
 
 
-def test_link_expiry_check_treats_missing_and_future_expiry_as_live():
+def test_link_expiry_policy_treats_future_expiry_as_live_and_a_missing_one_as_expired():
     now = datetime.now(UTC)
 
-    assert routes_accounts._sign_in_link_expired(None) is False
-    assert routes_accounts._sign_in_link_expired(now + timedelta(minutes=5)) is False
-    assert routes_accounts._sign_in_link_expired(now - timedelta(seconds=1)) is True
+    assert sign_in_service.link_expired(None, "") is False  # no link yet
+    assert sign_in_service.link_expired(now + timedelta(minutes=5), LINK) is False
+    assert sign_in_service.link_expired(now - timedelta(seconds=1), LINK) is True
+    assert sign_in_service.link_expired(None, LINK) is True  # stored before expiry existed

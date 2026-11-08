@@ -8,7 +8,7 @@ ASSUMPTIONS_BLOCK = re.compile(
     re.M | re.I,
 )
 EXPLICIT_WHY = re.compile(r"[;—–,]?\s*\b(?:why|reason):\s*", re.I)
-LOOSE_WHY = re.compile(r"\s*[;—–]\s*")
+LOOSE_WHY = re.compile(r"\s+[—–]\s+|;\s+")  # a dash splits only when spaces surround it: "10–20" stays whole
 CONTRADICTED_LINE = re.compile(
     r"^[ \t]*[-*][ \t]*(?:\d+\.[ \t]*)?(?:F\d+:[ \t]*)?assumption:[ \t]*(.+?)[ \t]+contradicts\b", re.I | re.M)
 
@@ -61,6 +61,6 @@ def invalid_assumption_items(items: object) -> list[str]:
     """Reasons an assumptions payload cannot be stored; an empty list means every item is valid."""
     if not isinstance(items, list):
         return ["assumptions must be a list"]
-    return [f"assumption {index + 1} needs a non-empty text" for index, item in enumerate(items)
+    return [f"assumption {index + 1} needs a non-empty text and a text reason" for index, item in enumerate(items)
             if not isinstance(item, dict) or not isinstance(item.get("assumption"), str)
-            or not item["assumption"].strip()]
+            or not item["assumption"].strip() or not isinstance(item.get("why", ""), str)]

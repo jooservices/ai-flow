@@ -28,8 +28,9 @@ def test_verifier_findings_name_the_contradicted_assumptions_and_nothing_else():
 
 def test_invalid_assumption_items_are_reported_before_a_run_is_completed():
     assert core.invalid_assumption_items([{"assumption": "ok"}]) == []
-    assert core.invalid_assumption_items([{"assumption": "ok"}, {"why": "no text"}, "x"]) == [
-        "assumption 2 needs a non-empty text", "assumption 3 needs a non-empty text"]
+    assert core.invalid_assumption_items([{"assumption": "ok"}, {"why": "no text"}, "x", {"assumption": "a", "why": 5}]) == [
+        "assumption 2 needs a non-empty text and a text reason", "assumption 3 needs a non-empty text and a text reason",
+        "assumption 4 needs a non-empty text and a text reason"]
     assert core.invalid_assumption_items("nope") == ["assumptions must be a list"]
 
 
@@ -88,7 +89,7 @@ def test_a_business_limit_stays_with_the_owner_and_a_technical_one_does_not():
 
 
 def test_technical_answers_are_counted_per_ticket_so_intake_can_stop_looping(ctx):
-    for index in range(2):
+    for _ in range(2):
         ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,status,outcome,account_id,node,fence) "
                    "VALUES (%s,'TESTWP-7','TESTWP','intake','finished','technical_choice_answered','a','n',1)",
                    (str(uuid.uuid4()),))
@@ -115,14 +116,23 @@ def test_a_default_retention_question_is_a_business_decision():
     assert is_technical("Which default value should the helper use for the retry count?")
 
 
-def test_intake_stops_answering_after_two_technical_answers_and_fails_the_run_instead_of_asking_the_owner():
+def test_intake_stops_answering_after_two_technical_answers_and_fails_the_run_instead_of_asking_the_owner(monkeypatch):
     from types import SimpleNamespace
 
     from aiflow.v4.worker import intake
+
+    monkeypatch.setattr(intake, "note", lambda *_a, **_k: "note")
+    monkeypatch.setattr(intake, "api_node", lambda _api: "node")
 
     res = SimpleNamespace(final_text="INTAKE: QUESTIONS\nQUESTIONS:\n- Should the helper module be split into two classes?\n")
     comments = []
     ticket = {"key": "TESTWP-11", "type": "Task", "intake_wording_refusals": 0, "intake_technical_answers": 2}
     claim = SimpleNamespace(ticket=ticket, project={"environment": []})
     result = intake._handle_intake_answer(SimpleNamespace(), claim, {}, res, False, 0.0, lambda *a, **k: comments.append(k))
-    assert result["outcome"] == "failed" and result["error_kind"] == "intake_technical_loop" and comments == []
+    assert result["outcome"] == "failed" and result["error_kind"] == "intake_technical_loop"
+    assert comments[0] == {"add_labels": ["aiflow-hold"]} and comments[1] == {"body": "note"}
+
+
+def test_a_range_with_an_en_dash_stays_in_the_assumption_text():
+    text = "Assumptions:\n- allow 10–20 retries – keeps load low\n"
+    assert core.parse_assumptions(text) == [{"assumption": "allow 10–20 retries", "why": "keeps load low"}]

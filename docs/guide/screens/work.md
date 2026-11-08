@@ -20,6 +20,7 @@ New pages need no change to the proxy rule: only `/o2` and `/gatus` are kept awa
 ## Common tasks
 
 - Open an epic to see only its tickets.
+- Opening the Needs owner step of the Dashboard flow lists only the tickets that wait for a business decision or an irreversible action; the count and the list agree.
 - A ticket that failed three runs in a row has a `ticket_stuck` incident: see its [runbook](../runbooks/ticket_stuck.md).
 
 A running ticket's clock shows the same limits as the Delivery screen (default 15, 30 and 45 minutes, configurable per project).

@@ -339,8 +339,13 @@ def _handle_intake_answer(api: ControlClient, c: Claimed, result: dict, res, nee
         if is_technical(text):
             if int(c.ticket.get("intake_technical_answers", 0) or 0) < MAX_TECHNICAL_ANSWERS:
                 return technical_choice_questions(c, jira, result, text, t0, api_node(api))
-            # The AI keeps asking what the flow already answered: the owner is not asked. The run fails, so the
-            # repeated-failure handling (ticket_stuck incident) takes the ticket to the flow's own recovery.
+            # The AI keeps asking what the flow already answered: the owner is not asked. The ticket is held and the run fails.
+            jira("fields", add_labels=["aiflow-hold"])  # intake skips held tickets, so the loop cannot repeat
+            jira("comment", body=note(
+                c, "intake held after repeated technical questions",
+                what="Intake asked technical questions again after the flow answered twice",
+                why="Question asked: " + text[:500], result="The ticket is held (label aiflow-hold); the owner is not asked",
+                next_="A flow fix or a clearer ticket is needed; remove aiflow-hold to retry", t0=t0, node=api_node(api)))
             result.update(outcome="failed", error_kind="intake_technical_loop",
                           summary="intake kept asking technical questions after two answers: " + text[:500])
             return result

@@ -9,9 +9,9 @@ function assumptionsPanel() {
   var contradicted = Number(data.total_contradicted || 0);
   var active = total - contradicted;
   h += '<div class="facts">' +
-    '<div class="fact"><span class="fl">Assumptions made</span><span class="fv mono">' + total + '</span></div>' +
-    '<div class="fact"><span class="fl">Held</span><span class="fv mono">' + active + '</span></div>' +
-    '<div class="fact"><span class="fl">Contradicted</span><span class="fv mono' + (contradicted ? ' warn' : '') + '">' + contradicted + '</span></div>' +
+    '<div class="fact"><span class="fl">Assumptions made (last 14 UTC days)</span><span class="fv mono">' + total + '</span></div>' +
+    '<div class="fact"><span class="fl">Held (last 14 UTC days)</span><span class="fv mono">' + active + '</span></div>' +
+    '<div class="fact"><span class="fl">Contradicted (last 14 UTC days)</span><span class="fv mono' + (contradicted ? ' warn' : '') + '">' + contradicted + '</span></div>' +
     '</div>';
   var days = data.days || [];
   if (days.length) {
@@ -23,7 +23,7 @@ function assumptionsPanel() {
   }
   var recent = data.recent || [];
   if (recent.length) {
-    h += '<div class="dsec"><h4>Recent assumptions</h4><ul class="feed">';
+    h += '<div class="dsec"><h4>Recent assumptions (any date)</h4><ul class="feed">';
     recent.slice(0, 8).forEach(function (row) {
       var badge = row.contradicted ? '<span class="pill" data-tone="crit">Contradicted</span>' : '<span class="pill" data-tone="ok">Active</span>';
       h += '<li><span class="f-time">' + esc(String(row.created_at || '').slice(0, 10)) + '</span>' +

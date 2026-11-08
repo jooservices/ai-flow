@@ -211,10 +211,12 @@ function renderDashboard() {
   var doneTrend = days.map(function (day) { return done.filter(function (t) { return t.done_at && String(t.done_at).slice(0, 10) === day; }).length; });
   var waitingTrend = days.map(function () { return 0; }), inFlightTrend = days.map(function () { return 0; }), byWaitingDay = {};
   days.forEach(function (day, index) { byWaitingDay[day] = index; });
+  var businessKeys = {};
+  tickets.forEach(function (t) { if (t.is_business_needs_owner) businessKeys[t.key] = true; });
   (d.events || []).forEach(function (event) {
     var date = String(event.ts || '').slice(0, 10), index = byWaitingDay[date];
     if (index == null || ['ticket.status', 'jira.transition'].indexOf(event.type) < 0) return;
-    if (event.outcome === 'Needs owner' || event.outcome === 'Human review') waitingTrend[index] += 1;
+    if (event.outcome === 'Human review' || (event.outcome === 'Needs owner' && businessKeys[event.ticket])) waitingTrend[index] += 1;
     if (inFlightStatuses.indexOf(event.outcome) >= 0) inFlightTrend[index] += 1;
   });
   var doneThisWeek = doneTrend.reduce(function (sum, count) { return sum + count; }, 0);

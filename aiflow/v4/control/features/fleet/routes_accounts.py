@@ -2,12 +2,21 @@
 """
 import re
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from .bodies import ConfirmBody, ManagedAccountCreateBody, ManagedAccountSignInStatusBody, ManagedAccountUpdateBody
 from .events import AiAccountAdded, AiAccountManagementChanged, AiAccountRemoved, AiAccountSignInCompleted, AiAccountSignInRestarted
 from urllib.parse import urlsplit
 from fastapi import Depends, HTTPException, Request
 from ... import licensing, load_policy_api, quota_refresh
+
+
+SIGN_IN_LINK_LIFETIME = timedelta(minutes=15)
+
+
+def _sign_in_link_expired(expires_at) -> bool:
+    """A provider link is single-use for its window: once its expiry passes, only a fresh sign-in can replace it."""
+    return expires_at is not None and expires_at <= datetime.now(UTC)
 
 
 def _account_update_sessions(body, account) -> int:
@@ -188,6 +197,8 @@ def _register_account_sign_in_details(app, ctx, deps, support=None):
                          " WHERE id=%s AND removed_at IS NULL AND sign_in_status<>'idle'", (account_id,))
         if not row:
             raise HTTPException(404, "no active sign-in link for this account")
+        if _sign_in_link_expired(row["sign_in_expires_at"]):
+            raise HTTPException(410, "provider sign-in link has expired; start a new sign-in")
         return {"account": account_id, "node": row["node"], "provider": row["provider"],
                 "status": row["sign_in_status"], "sign_in_url": row["sign_in_url"],
                 "code": row["sign_in_code"], "error": row["sign_in_error"],
@@ -199,21 +210,25 @@ def _register_report_account_sign_in_status(app, ctx, deps, support=None):
     @app.post("/v1/accounts/{account_id}/sign-in/status")
     def report_account_sign_in_status(account_id: str, body: ManagedAccountSignInStatusBody,
                                       node: str = Depends(node_auth)) -> dict:
-        row = ctx.db.one("SELECT node,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
+        row = ctx.db.one("SELECT node,sign_in_request_id,sign_in_status,sign_in_expires_at FROM managed_ai_accounts"
                          " WHERE id=%s AND removed_at IS NULL", (account_id,))
         if not row or row["node"] != node:
             raise HTTPException(404, "account sign-in request is not assigned to this machine")
         if row["sign_in_request_id"] != body.request_id:
             raise HTTPException(409, "sign-in request has been replaced")
+        if body.status == "waiting" and _sign_in_link_expired(row["sign_in_expires_at"]):
+            raise HTTPException(409, "provider sign-in link has expired; start a new sign-in")
         _validate_sign_in_status(body)
         with ctx.db.pool.connection() as connection:
             updated = connection.execute(
                 "UPDATE managed_ai_accounts SET sign_in_status=%s,"
                 "sign_in_url=CASE WHEN %s<>'' THEN %s ELSE sign_in_url END,"
                 "sign_in_code=CASE WHEN %s<>'' THEN %s ELSE sign_in_code END,"
+                "sign_in_expires_at=CASE WHEN %s<>'' AND %s<>sign_in_url THEN now()+%s ELSE sign_in_expires_at END,"
                 "sign_in_error=%s,updated_at=now() WHERE id=%s AND node=%s AND sign_in_request_id=%s"
                 " AND removed_at IS NULL RETURNING id",
                 (body.status, body.sign_in_url, body.sign_in_url, body.code, body.code,
+                 body.sign_in_url, body.sign_in_url, SIGN_IN_LINK_LIFETIME,
                  body.error[:300], account_id, node, body.request_id)).fetchone()
             if not updated:
                 raise HTTPException(409, "sign-in request has been replaced")

@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+from aiflow.v4.core.local_gate import GateResult, StepResult
 from aiflow.v4.core.controlrepo import Project, epic_for_ticket
 from aiflow.v4.control import version_release
 from aiflow.v4.worker import dev, verify
@@ -240,6 +241,8 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
     api = _API({"/v1/github/token": {"token": "github-token"},
                 "/v1/github/pr": lambda body: (calls["prs"].append(body) or {"url": "https://github.com/jooservices/wordpress-core/pull/4", "number": 4})})
     monkeypatch.setattr(dev, "Git", Git)
+    monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs:
+                        GateResult([StepResult("check-1", "passed")]))
     monkeypatch.setattr(dev, "project_env", lambda _key, *_a, **_k: {"WP_CORE_VERSION": "6.8.3"})
 
     _fake_container_runtime(monkeypatch, calls, dev, "http://127.0.0.1:40123", "private-to-run")
@@ -251,6 +254,7 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
     result = dev.run_dev(api, _claim(project), str(tmp_path), "https://control", 3600, [])
 
     assert result["outcome"] == "done"
+    assert result["details"]["local_gate"]["status"] == "green"
     assert calls["mirrors"] == [("jooservices/wordpress-core", "github-token")]
     assert calls["worktrees"][0][3] == "main"
     assert calls["prs"][0]["repo"] == "jooservices/wordpress-core"

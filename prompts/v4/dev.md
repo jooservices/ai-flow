@@ -18,7 +18,9 @@ so the aim is a change a careful reviewer finds nothing in the first time.
    out of the ledger; a criterion you did not list is one you will not build.
 2. Build and test. For each ledger line, write the code and the tests that prove it. Cover the success path, the
    failing input, the empty or missing value and the boundary (zero, one, maximum, duplicate, wrong type), and the
-   permission case when the code is reachable by a user.
+   permission case when the code is reachable by a user. Run every configured project check in this worktree and
+   hand over only after they pass; AI Flow records the rerun and sends the task back without review if any check is
+   missing, red or incomplete.
 3. Self-review against the diff, as a hostile reviewer, before you finish. Read `git diff` and answer each:
    - Completeness: does each ledger line have code and a test that fails without the code?
    - Access and security: who may call this, is the input validated, can it leak data, is a secret logged?

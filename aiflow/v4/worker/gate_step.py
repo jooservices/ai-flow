@@ -1,10 +1,4 @@
-"""The developer run's use of the local gate: the same checks as CI before anything is pushed (JAIF-365).
-
-A project opts in with ``local_gate`` in its control-repo file: ``ai-flow`` (the built-in steps of
-``core/local_gate.py``) or a list of commands. AI Flow commits locally, runs the gate on that commit and pushes only
-when no step failed; a step that did not finish (time slice) or lacks a service is stated in the pull request so CI
-completes it.
-"""
+"""Run and record the checks that must pass before a developer run can be submitted for review."""
 from __future__ import annotations
 
 import os
@@ -26,7 +20,11 @@ def plan(project: dict) -> list[Step]:
     setting = project.get("local_gate")
     if isinstance(setting, (list, tuple)):
         return [Step(f"check-{i}", tuple(shlex.split(str(cmd))), "", CUSTOM_TIMEOUT_S) for i, cmd in enumerate(setting, 1)]
-    return local_gate.steps(project.get("base") or "develop")
+    if setting == "ai-flow":
+        return local_gate.steps(project.get("base") or "develop")
+    checks = project.get("checks") or []
+    return [Step(f"check-{i}", tuple(shlex.split(str(cmd))), "", CUSTOM_TIMEOUT_S)
+            for i, cmd in enumerate(checks, 1)]
 
 
 def prompt_check(project: dict) -> str:
@@ -65,7 +63,17 @@ def keep_failed_work(git, wt: Path, base: Path) -> str:
 
 def failure_text(result: GateResult) -> str:
     step = result.failed
-    return f"step {step.name} failed:\n{step.tail}" if step else ""
+    if step:
+        return f"step {step.name} failed:\n{step.tail}"
+    if result.incomplete:
+        return "checks did not finish: " + ", ".join(f"{item.name} ({item.status})" for item in result.incomplete)
+    return ""
+
+
+def result_record(result: GateResult) -> dict:
+    """Return the short, stable run-record fields used by verification dispatch and later metrics."""
+    status = "green" if result.exit_code == 0 else "red" if result.failed else "incomplete"
+    return {"status": status, "steps": [{"name": item.name, "status": item.status} for item in result.steps]}
 
 
 def pr_note(result: GateResult) -> str:

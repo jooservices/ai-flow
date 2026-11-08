@@ -369,7 +369,8 @@ def test_switching_a_role_off_keeps_the_other_roles_alerts_and_notes_it(client, 
     cc = cc_headers(client, ctx)
     add_ticket(ctx.db, "TESTWP-50")
     add_ticket(ctx.db, "TESTWP-51", status="In Verify", labels=())
-    run(ctx.db, account="codex-01", step="dev", outcome="done", ago=5, ticket="TESTWP-51")
+    run(ctx.db, account="codex-01", step="dev", outcome="done", ago=5, ticket="TESTWP-51",
+        details={"local_gate": {"status": "green", "steps": []}})
     ctx.db.run("UPDATE runs SET pr_url='https://github.com/x/y/pull/1' WHERE ticket_key='TESTWP-51'")
     steps = {(t["key"], t["step"]) for t in client.get("/v1/work/candidates", params={"account": "claude-01"},
                                                          headers=cc).json()["tickets"]}

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from conftest import add_ticket, join_node
 from aiflow.v4.control import tooling
+from aiflow.v4.core.local_gate import GateResult, StepResult
 from aiflow.v4.core.toolchains import (CATALOG_TOOLS, known_requirements, parse_command_not_found_requirements,
                                        parse_missing_requirements)
 from aiflow.v4.node import agent, operations, probes
@@ -155,6 +156,8 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_te
 
     monkeypatch.setattr(dev, "Git", Git)
     monkeypatch.setattr(dev, "get_adapter", lambda _p: Adapter())
+    monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs:
+                        GateResult([StepResult("check-1", "passed")]))
     api = _API(raise_result, existing_pr)
     api.git_calls = git_calls
     return dev.run_dev(api, _claimed(), str(tmp_path), "https://control", 3600, []), api

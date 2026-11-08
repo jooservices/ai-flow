@@ -363,6 +363,8 @@ def collect(run: DevRun) -> dict | None:
         return outcome
     run.changed = run.git.changed(run.worktree)
     run.result.setdefault("details", {})["changed_files"] = run.changed[:100]
+    if response.error_kind == "timeout":
+        run.result.setdefault("details", {}).setdefault("local_gate", {"status": "incomplete", "steps": []})
     if response.error_kind == "timeout" and timeout_handover.try_handover(
             run.api, run.claim, run.git, run.worktree, run.branch, run.repo, run.summary, run.handed,
             run.result, run.started_at, run.reporter.jira, run.branch_commit_count, run.tests):
@@ -584,6 +586,9 @@ def publish_no_changes(run: DevRun) -> dict:
     existing_pr = found if found and found.get("found") else None
     if not existing_pr and not run.branch_commit_count:
         return publish_no_work(run)
+    gate_note = run_local_gate(run)
+    if isinstance(gate_note, dict):
+        return gate_note
     return publish_existing_work(run, existing_pr)
 
 
@@ -689,18 +694,22 @@ def publish_changes(run: DevRun) -> dict:
 
 
 def run_local_gate(run: DevRun) -> str | dict:
-    if not gate_step.enabled(run.project):
-        return ""
     set_run_progress(run.heartbeat, "gate")
+    plan = gate_step.plan(run.project)
+    if not plan:
+        run.result.setdefault("details", {})["local_gate"] = {"status": "missing", "steps": []}
+        return report_gate_failure(run, "no local checks are configured for this project", "gate_failed")
     try:
         gate = gate_step.run(run.worktree, run.project, pr_title(run.claim.ticket), run.env, run.run_as)
-        reason = gate_step.failure_text(gate) if gate.failed else ""
+        run.result.setdefault("details", {})["local_gate"] = gate_step.result_record(gate)
+        reason = gate_step.failure_text(gate) if gate.exit_code else ""
         error_kind = "gate_failed"
     except Exception as exc:  # noqa: BLE001 - a gate that cannot run must not leave an unpushed commit behind
         gate, reason, error_kind = None, f"the gate could not run: {type(exc).__name__}: {exc}", "gate_error"
-    if gate is None or gate.failed:
+        run.result.setdefault("details", {})["local_gate"] = {"status": "error", "steps": []}
+    if gate is None or gate.exit_code:
         return report_gate_failure(run, reason, error_kind)
-    return gate_step.pr_note(gate)
+    return ""
 
 
 def report_gate_failure(run: DevRun, reason: str, error_kind: str) -> dict:

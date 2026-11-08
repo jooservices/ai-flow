@@ -65,7 +65,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 
 - [First-run setup](../../docs/v4/first-run-setup.md): create the public address and Administrator in the browser, connect providers, add a machine and AI accounts, configure the first project, and confirm a sample ticket in Intake
 - [Test services of a project](../../docs/v4/test-services.md): one `services` setting (the old `databases` is read as the same), unsupported names are rejected and surfaced in Projects, and the flow doctor declares a service a ticket is parked on
-- [Local gate](../../docs/v4/local-gate.md): the CI checks run locally before AI Flow commits and pushes, with a parity test against the workflow and git hooks that reject a bad commit message and gate every push
+- [Local gate](../../docs/v4/local-gate.md): every developer submission records its local check result, and only a finished green run reaches verification
 - [Parallel CI](../../docs/v4/parallel-ci.md): the v4 suite on parallel shards, the required `Test (v4)` check and the scale proof job.
 - [Epics and verification without a verdict](../../docs/v4/verify-no-verdict.md): an epic is never offered as work; the status, retry and Dashboard parts of JAIF-271 follow in slices
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree

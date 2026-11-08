@@ -103,6 +103,8 @@ def test_project_opt_in_prompt_line_and_custom_commands():
     assert gate_step.prompt_check({"local_gate": ["make test"]}) == ""
     custom = gate_step.plan({"local_gate": ["make test", "make lint"]})
     assert [s.argv for s in custom] == [("make", "test"), ("make", "lint")]
+    project_checks = gate_step.plan({"checks": ["uv run pytest -q"]})
+    assert [s.argv for s in project_checks] == [("uv", "run", "pytest", "-q")]
     assert [s.name for s in gate_step.plan({"local_gate": "ai-flow"})] == [s.name for s in gate.steps("develop")]
 
 

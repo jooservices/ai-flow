@@ -334,7 +334,9 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
     pr = client.post("/v1/github/pr", json={"run_id": dev["run_id"], "fence": dev["fence"], "repo": "new-app",
                                             "head": "NEWAPP-1-x", "base": "develop", "title": "NEWAPP-1: x"}, headers=cc).json()
     client.post(f"/v1/runs/{dev['run_id']}/result", json={"fence": dev["fence"], "outcome": "done", "pr_url": pr["url"],
-                                                          "branch": "NEWAPP-1-x", "summary": "built"}, headers=cc)
+                                                          "branch": "NEWAPP-1-x", "summary": "built",
+                                                          "details": {"local_gate": {"status": "green", "steps": []}}},
+                headers=cc)
     move(dev, cc, "NEWAPP-1", "In Progress")  # development starts, then hands over to verification
     move(dev, cc, "NEWAPP-1", "In Verify")
     client.post(f"/v1/runs/{dev['run_id']}/release", json={"fence": dev["fence"]}, headers=cc)
@@ -361,7 +363,9 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
     pr2 = client.post("/v1/github/pr", json={"run_id": dev2["run_id"], "fence": dev2["fence"], "repo": "new-app",
                                              "head": "NEWAPP-2-x", "base": "develop", "title": "NEWAPP-2: x"}, headers=cc).json()
     client.post(f"/v1/runs/{dev2['run_id']}/result", json={"fence": dev2["fence"], "outcome": "done", "pr_url": pr2["url"],
-                                                           "branch": "NEWAPP-2-x", "summary": "built"}, headers=cc)
+                                                               "branch": "NEWAPP-2-x", "summary": "built",
+                                                               "details": {"local_gate": {"status": "green", "steps": []}}},
+                    headers=cc)
     assert ctx.db.one("SELECT status FROM tickets WHERE key='NEWAPP-2'")["status"] == "To Do"  # not moved behind Jira's back
     move(dev2, cc, "NEWAPP-2", "In Progress")
     move(dev2, cc, "NEWAPP-2", "In Verify")

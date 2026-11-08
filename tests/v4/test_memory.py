@@ -308,9 +308,11 @@ def test_verify_claim_carries_related_hits(client, ctx, monkeypatch):
     memory.index(db)
     add_ticket(db, "TESTWP-41", status="In Verify")
     db.run("UPDATE tickets SET summary='Newsletter signup validation' WHERE key='TESTWP-41'")
-    db.run("INSERT INTO runs (id, ticket_key, project, step, account_id, node, fence, status, outcome, pr_url, branch)"
+    from aiflow.v4.control.db import J
+    db.run("INSERT INTO runs (id, ticket_key, project, step, account_id, node, fence, status, outcome, pr_url, branch, details)"
            " VALUES (%s,'TESTWP-41','TESTWP','dev','codex-01','node1',1,'finished','done',"
-           "'https://github.com/jooservices/test-aiflow-wp/pull/7','TESTWP-41-x')", (str(uuid.uuid4()),))
+           "'https://github.com/jooservices/test-aiflow-wp/pull/7','TESTWP-41-x',%s)",
+           (str(uuid.uuid4()), J({"local_gate": {"status": "green", "steps": []}})))
     cc = join(client, "cc")
     r = client.post("/v1/work/claim", json={"ticket": "TESTWP-41", "account": "claude-01", "step": "verify"}, headers=cc).json()
     assert r["claimed"] and r["pr"]["number"] == 7

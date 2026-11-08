@@ -28,6 +28,11 @@ class WorkRepository:
             " AND details->>'verdict' IN ('PASS','FAIL') ORDER BY started_at,id LIMIT 1", (ticket,))
         return str((row or {}).get("account_id") or "")
 
+    def latest_dev_run(self, ticket: str) -> dict | None:
+        """Return the newest dev submission, including an active or failed run that must block stale review work."""
+        return self.db.one("SELECT status,outcome,account_id,pr_url,details FROM runs WHERE ticket_key=%s"
+                           " AND step='dev' ORDER BY started_at DESC,id DESC LIMIT 1", (ticket,))
+
     def set_run_details(self, run_id: str, details: dict) -> None:
         self.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(details), run_id))
 

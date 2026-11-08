@@ -361,10 +361,11 @@ def test_doctor_routes_a_failed_verification_away_from_its_machine(client, ctx, 
     account_state(ctx, "claude-01", "idle")
     account_state(ctx, "codex-01", "idle")
     old = datetime.now(timezone.utc) - timedelta(minutes=5)
-    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,pr_url,"
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,pr_url,details,"
                "started_at,heartbeat_at,ended_at) VALUES (%s,'TESTWP-2681','TESTWP','dev','opencode-01','opencode',"
-               "'cc',1,'finished','done','https://github.com/jooservices/test-aiflow-wp/pull/2681',%s,%s,%s)",
-               (str(uuid.uuid4()), old - timedelta(minutes=1), old - timedelta(minutes=1), old - timedelta(minutes=1)))
+               "'cc',1,'finished','done','https://github.com/jooservices/test-aiflow-wp/pull/2681',%s,%s,%s,%s)",
+               (str(uuid.uuid4()), J({"local_gate": {"status": "green", "steps": []}}),
+                old - timedelta(minutes=1), old - timedelta(minutes=1), old - timedelta(minutes=1)))
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,error_kind,"
                "started_at,heartbeat_at,ended_at) VALUES (%s,'TESTWP-2681','TESTWP','verify','claude-01','claude','cc',"
                "1,'failed','failed',%s,%s,%s,%s)", (str(uuid.uuid4()), error_kind, old, old, old))

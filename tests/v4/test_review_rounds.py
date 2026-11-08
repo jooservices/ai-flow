@@ -138,11 +138,15 @@ def test_preferred_reviewer_availability_uses_normal_ticket_eligibility():
 def _verify_scope(current_account, preferred_ready):
     ticket = {"key": "TESTWP-1", "project": "TESTWP", "labels": [], "jira_created": None}
     account = SimpleNamespace(machines=["node-a"])
+    dev = {"status": "finished", "outcome": "done", "account_id": "developer",
+           "pr_url": "https://github.test/pr/1", "details": {"local_gate": {"status": "green"}}}
+
+    def one(query, *_args):
+        return dev if "step='dev'" in query else {"account_id": "reviewer-one"}
+
     scope = SimpleNamespace(
         roles={"verify"}, backoff_rows=lambda _step: [], held=set(),
-        ctx=SimpleNamespace(db=SimpleNamespace(
-            all=lambda *_args: [ticket],
-            one=lambda *_args: {"account_id": "reviewer-one"})),
+        ctx=SimpleNamespace(db=SimpleNamespace(all=lambda *_args: [ticket], one=one)),
         deps=SimpleNamespace(
             last_dev=lambda *_args, **_kwargs: {"account_id": "developer", "pr_url": "https://github.test/pr/1"},
             eligible=lambda *_args, **_kwargs: ([{"key": ticket["key"], "step": "verify"}]

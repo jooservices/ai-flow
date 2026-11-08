@@ -16,7 +16,8 @@ a person. When rework is triggered due to a contradiction, only the assumptions 
 (`- assumption: <text> contradicts <rule>: <why>`) are marked as contradicted. Recording is idempotent: an assumption with the
 same text on the same ticket is stored once, and a run result with an invalid assumption item is refused (HTTP 422) so the
 worker can correct it. The dashboard panel only shows the projects of the signed-in user and counts whole UTC days.
-An intake question that is technical is answered by the flow at most twice per ticket; after that it reaches the owner path.
+An intake question that is technical is answered by the flow at most twice per ticket; after that the intake run fails
+(`intake_technical_loop`), so the repeated-failure handling takes the ticket to the flow's own recovery and the owner is not asked.
 
 Both intake and development read the parent epic rules alongside the child ticket, ensuring rules defined once on an
 epic automatically apply to all child tickets under it.

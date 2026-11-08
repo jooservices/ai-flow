@@ -94,3 +94,35 @@ def test_technical_answers_are_counted_per_ticket_so_intake_can_stop_looping(ctx
                    (str(uuid.uuid4()),))
     assert WorkRepository(ctx.db).intake_technical_answers("TESTWP-7") == 2
     assert WorkRepository(ctx.db).intake_technical_answers("TESTWP-8") == 0
+
+
+def test_formatted_findings_and_case_differences_still_match_the_stored_assumption(ctx):
+    findings = "- 2. F7: assumption: Cache Per Request contradicts the stateless rule: it keeps state"
+    assert core.contradicted_assumption_texts(findings) == ["Cache Per Request"]
+    repo.record_assumptions(ctx.db, "TESTWP-9", "TESTWP", "r1", "intake", [{"assumption": "cache per request", "why": ""}])
+    assert repo.contradict_assumptions(ctx.db, "TESTWP-9", "r2", "rule", ["  Cache Per Request "]) == 1
+
+
+def test_the_database_refuses_a_duplicate_assumption_even_without_the_existence_check(ctx):
+    repo.record_assumptions(ctx.db, "TESTWP-10", "TESTWP", "r1", "intake", [{"assumption": "same", "why": ""}])
+    inserted = ctx.db.run("INSERT INTO assumptions (ticket_key, project, assumption) VALUES ('TESTWP-10','TESTWP','same')"
+                          " ON CONFLICT DO NOTHING")
+    assert not inserted and len(repo.assumptions_for_ticket(ctx.db, "TESTWP-10")) == 1
+
+
+def test_a_default_retention_question_is_a_business_decision():
+    assert not is_technical("What should the default data retention period be?")
+    assert is_technical("Which default value should the helper use for the retry count?")
+
+
+def test_intake_stops_answering_after_two_technical_answers_and_fails_the_run_instead_of_asking_the_owner():
+    from types import SimpleNamespace
+
+    from aiflow.v4.worker import intake
+
+    res = SimpleNamespace(final_text="INTAKE: QUESTIONS\nQUESTIONS:\n- Should the helper module be split into two classes?\n")
+    comments = []
+    ticket = {"key": "TESTWP-11", "type": "Task", "intake_wording_refusals": 0, "intake_technical_answers": 2}
+    claim = SimpleNamespace(ticket=ticket, project={"environment": []})
+    result = intake._handle_intake_answer(SimpleNamespace(), claim, {}, res, False, 0.0, lambda *a, **k: comments.append(k))
+    assert result["outcome"] == "failed" and result["error_kind"] == "intake_technical_loop" and comments == []

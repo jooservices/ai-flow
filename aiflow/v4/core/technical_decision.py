@@ -17,6 +17,7 @@ TECHNICAL_RE = re.compile(
 OWNER_RE = re.compile(
     r"\b(?:price|pricing|payment|billing|invoice|refund|cost|budget|money|secret|credential|password|token|api key|"
     r"security|vulnerab\w*|licen[cs]\w*|gdpr|privacy|personal data|legal|customer|contract|production|prod|"
+    r"retention|upload|quota|subscription|plan tier|"
     r"conflicts? with (?:AC\s?\d+|the (?:ticket|requirement|acceptance|spec))|requirement conflict|business)\b", re.I)
 
 

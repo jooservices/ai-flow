@@ -20,3 +20,7 @@ CREATE INDEX IF NOT EXISTS assumptions_created_day
 
 CREATE INDEX IF NOT EXISTS assumptions_ticket_key
     ON assumptions (ticket_key);
+
+-- One row per ticket and assumption text; concurrent recorders (description write and run result) cannot duplicate it.
+CREATE UNIQUE INDEX IF NOT EXISTS assumptions_ticket_text
+    ON assumptions (ticket_key, md5(assumption));

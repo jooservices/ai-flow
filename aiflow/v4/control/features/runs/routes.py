@@ -149,9 +149,12 @@ def _record_assumptions_from_run(ctx, run, run_id, body, log) -> None:
     contradicted = (body.details or {}).get("contradicted_assumptions")
     if run["step"] == "verify" and body.outcome in ("rework", "split_plan") and isinstance(contradicted, list):
         try:
-            assumptions_repo.contradict_assumptions(
+            marked = assumptions_repo.contradict_assumptions(
                 ctx.db, run["ticket_key"], run_id, str((body.details or {}).get("findings") or body.summary or ""),
                 [str(text) for text in contradicted])
+            if marked < len(set(str(text).strip().lower() for text in contradicted)):
+                log.warning("verification named %d contradicted assumptions of %s, %d matched a stored assumption",
+                            len(contradicted), run["ticket_key"], marked)
         except Exception as exc:  # noqa: BLE001 - contradiction tracking must not fail the run
             log.warning("contradict assumptions for %s failed: %s", run["ticket_key"], type(exc).__name__)
 

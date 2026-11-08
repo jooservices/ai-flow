@@ -23,11 +23,10 @@ def record_assumptions(
             continue
         row = db.one(
             "INSERT INTO assumptions (ticket_key, project, run_id, step, assumption, why, source) "
-            "SELECT %s, %s, %s, %s, %s, %s, %s "
-            "WHERE NOT EXISTS (SELECT 1 FROM assumptions WHERE ticket_key = %s AND assumption = %s) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (ticket_key, md5(assumption)) DO NOTHING "
             "RETURNING id, ticket_key, project, run_id, step, assumption, why, source, created_at, contradicted",
-            (ticket_key, project, run_id or "", step or "intake", assumption, why, source or "flow",
-             ticket_key, assumption),
+            (ticket_key, project, run_id or "", step or "intake", assumption, why, source or "flow"),
         )
         if row:
             recorded.append(row)
@@ -47,9 +46,10 @@ def contradict_assumptions(
     rows = db.all(
         "UPDATE assumptions "
         "SET contradicted = true, contradicted_at = now(), contradicted_by_run_id = %s, contradiction_reason = %s "
-        "WHERE ticket_key = %s AND NOT contradicted AND assumption = ANY(%s) "
+        "WHERE ticket_key = %s AND NOT contradicted AND lower(btrim(assumption)) = ANY(%s) "
         "RETURNING id",
-        (run_id or "", reason[:1000] if reason else "contradicted by verification", ticket_key, assumptions),
+        (run_id or "", reason[:1000] if reason else "contradicted by verification", ticket_key,
+         [text.strip().lower() for text in assumptions]),
     )
     return len(rows)
 

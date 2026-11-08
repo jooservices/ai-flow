@@ -9,7 +9,8 @@ ASSUMPTIONS_BLOCK = re.compile(
 )
 EXPLICIT_WHY = re.compile(r"[;—–,]?\s*\b(?:why|reason):\s*", re.I)
 LOOSE_WHY = re.compile(r"\s*[;—–]\s*")
-CONTRADICTED_LINE = re.compile(r"^[ \t]*[-*][ \t]*assumption:[ \t]*(.+?)[ \t]+contradicts\b", re.I | re.M)
+CONTRADICTED_LINE = re.compile(
+    r"^[ \t]*[-*][ \t]*(?:\d+\.[ \t]*)?(?:F\d+:[ \t]*)?assumption:[ \t]*(.+?)[ \t]+contradicts\b", re.I | re.M)
 
 
 def parse_assumptions(text: str) -> list[dict[str, str]]:

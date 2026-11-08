@@ -1,0 +1,1 @@
+- [Gemini Code Assist review](../../../docs/v4/gemini-review.md): a second AI reviewer checks pull requests that change the v4 code against the v4 style guide (old-flow-only changes are not reviewed against it); its `.gemini/config.yaml` keeps only medium and higher comments, at most ten per pull request

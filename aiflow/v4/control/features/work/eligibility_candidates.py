@@ -27,15 +27,23 @@ def verify_candidates(scope: Scope) -> list[dict]:
 
 
 def _verify_candidate_ready(scope: Scope, ticket: dict, verify_cooling: set[str]) -> bool:
-    """Apply the existing runtime, lease, author, provider-label and role checks for a verify candidate."""
+    """Require a green latest dev run before applying the existing verify eligibility checks."""
     if scope.needs_missing_container_runtime(ticket, "verify"):
         return False
     if ticket["key"] in scope.held or ticket["key"] in verify_cooling:
         return False
-    dev = scope.deps.last_dev(ticket["key"], done=True)
-    if not dev or not dev["pr_url"] or dev["account_id"] == scope.account.id:
+    dev = WorkRepository(scope.ctx.db).latest_dev_run(ticket["key"])
+    if not _green_dev_submission(dev) or dev["account_id"] == scope.account.id:
         return False
     return not (scope.explicit_only_blocks(ticket) or not scope.allowed("verify", ticket))
+
+
+def _green_dev_submission(dev: dict | None) -> bool:
+    """Accept only a finished successful dev run with a recorded green local gate and pull request."""
+    details = (dev or {}).get("details") or {}
+    local_gate = details.get("local_gate") if isinstance(details, dict) else None
+    return bool(dev and dev.get("status") == "finished" and dev.get("outcome") == "done"
+                and dev.get("pr_url") and isinstance(local_gate, dict) and local_gate.get("status") == "green")
 
 
 def first_review_account(scope: Scope, ticket_key: str) -> str:

@@ -360,7 +360,9 @@ def test_github_update_endpoint_updates_a_verify_branch(client, ctx):
     pr = client.post("/v1/github/pr", json={"run_id": r["run_id"], "fence": r["fence"], "repo": "test-aiflow-wp",
                                             "head": "TESTWP-20-x", "base": "develop", "title": "TESTWP-20: x"}, headers=cc).json()
     client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "done", "pr_url": pr["url"],
-                                                        "branch": "TESTWP-20-x", "summary": "built"}, headers=cc)
+                                                        "branch": "TESTWP-20-x", "summary": "built",
+                                                        "details": {"local_gate": {"status": "green", "steps": []}}},
+                headers=cc)
     client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
     ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-20'")
     v = client.post("/v1/work/claim", json={"ticket": "TESTWP-20", "account": "codex-01", "step": "verify"},
@@ -536,7 +538,8 @@ def test_ready_to_merge_and_verify_merges_share_the_repository_queue(client, ctx
         add_ticket(ctx.db, key, status=status)
         ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,pr_url,details)"
                    " VALUES (%s,%s,'TESTWP','dev','claude-01','claude','node1',1,'finished','done',%s,%s)",
-                   (str(uuid.uuid4()), key, f"https://github.com/jooservices/test-aiflow-wp/pull/{number}", J({})))
+                   (str(uuid.uuid4()), key, f"https://github.com/jooservices/test-aiflow-wp/pull/{number}",
+                    J({"local_gate": {"status": "green", "steps": []}})))
         ctx.jira.status_of[key] = status
         ctx.github.pr_data[number] = {"number": number, "state": "open", "merged": False,
                                       "mergeable_state": "clean", "head": {"sha": sha}}

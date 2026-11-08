@@ -792,7 +792,9 @@ def test_verify_goes_to_another_account_and_merges(client, ctx):
     pr = client.post("/v1/github/pr", json={"run_id": r["run_id"], "fence": r["fence"], "repo": "test-aiflow-wp",
                                             "head": "TESTWP-20-x", "base": "develop", "title": "TESTWP-20: x"}, headers=cc).json()
     client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "done", "pr_url": pr["url"],
-                                                        "branch": "TESTWP-20-x", "summary": "built it"}, headers=cc)
+                                                        "branch": "TESTWP-20-x", "summary": "built it",
+                                                        "details": {"local_gate": {"status": "green", "steps": []}}},
+                headers=cc)
     client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
     ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-20'")
     # the developer's own account is not offered the verification; another account is
@@ -835,7 +837,8 @@ def test_triage_candidates_follow_verify_and_exclude_last_dev_and_escalated(clie
 
     add_run("TESTWP-63", "dev", "claude-01", "blocked", "Can we change the API response shape?")
     add_run("TESTWP-63", "verify", "codex-01", "rework", "verify failed", details={"findings": "- add a nonce"})
-    add_run("TESTWP-65", "dev", "claude-01", "done", "Implemented it", "https://github.com/x/y/pull/9")
+    add_run("TESTWP-65", "dev", "claude-01", "done", "Implemented it", "https://github.com/x/y/pull/9",
+            details={"local_gate": {"status": "green", "steps": []}})
     add_run("TESTWP-65", "verify", "claude-01", "rework", "verify failed", details={"findings": "- add a nonce"})
     ctx.jira.recent_comment_data["TESTWP-63"] = [
         {"created": "2026-10-20T12:00:00Z", "author": "Owner", "body": "Keep the response backwards compatible."}
@@ -961,7 +964,9 @@ def test_rework_findings_reach_the_next_dev_run(client, ctx):
     add_ticket(ctx.db, "TESTWP-21")
     r = client.post("/v1/work/claim", json={"ticket": "TESTWP-21", "account": "claude-01"}, headers=cc).json()
     client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "done", "branch": "TESTWP-21-y",
-                                                        "pr_url": "https://github.com/jooservices/test-aiflow-wp/pull/7"}, headers=cc)
+                                                        "pr_url": "https://github.com/jooservices/test-aiflow-wp/pull/7",
+                                                        "details": {"local_gate": {"status": "green", "steps": []}}},
+                headers=cc)
     client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
     ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-21'")
     v = client.post("/v1/work/claim", json={"ticket": "TESTWP-21", "account": "codex-01", "step": "verify"}, headers=n1).json()
@@ -978,8 +983,10 @@ def test_rework_findings_reach_the_next_dev_run(client, ctx):
     e = client.post("/v1/work/claim", json={"ticket": "TESTWP-21", "account": "claude-01"}, headers=cc).json()
     assert e["claimed"] and e["findings"] == "- core/x.php: missing nonce check" and e["branch"] == "TESTWP-21-y"
     # the owner sends it back to review after a run without changes: the delivered PR is reviewed
-    client.post(f"/v1/runs/{e['run_id']}/result", json={"fence": e["fence"], "outcome": "failed",
-                                                        "summary": "no changes: already done"}, headers=cc)
+    client.post(f"/v1/runs/{e['run_id']}/result", json={"fence": e["fence"], "outcome": "done",
+                                                        "summary": "no changes: already done",
+                                                        "details": {"local_gate": {"status": "green", "steps": []}}},
+                headers=cc)
     client.post(f"/v1/runs/{e['run_id']}/release", json={"fence": e["fence"]}, headers=cc)
     ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-21'")
     cands = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1).json()["tickets"]
@@ -1332,7 +1339,9 @@ def test_failing_verify_backs_off(client, ctx):
     add_ticket(ctx.db, "TESTWP-41")
     r = client.post("/v1/work/claim", json={"ticket": "TESTWP-41", "account": "claude-01"}, headers=cc).json()
     client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "done", "branch": "TESTWP-41-z",
-                                                        "pr_url": "https://github.com/jooservices/test-aiflow-wp/pull/9"}, headers=cc)
+                                                        "pr_url": "https://github.com/jooservices/test-aiflow-wp/pull/9",
+                                                        "details": {"local_gate": {"status": "green", "steps": []}}},
+                headers=cc)
     client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
     ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-41'")
     v = client.post("/v1/work/claim", json={"ticket": "TESTWP-41", "account": "codex-01", "step": "verify"}, headers=n1).json()

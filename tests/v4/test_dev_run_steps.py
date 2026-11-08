@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from aiflow.v4.adapters import RunResult
+from aiflow.v4.core.local_gate import GateResult, StepResult
 from aiflow.v4.worker import dev, verify
 
 
@@ -98,7 +99,7 @@ class RecordingAdapter:
 def run_case(monkeypatch, tmp_path, result, changed):
     events = []
     api = RecordingAPI(events)
-    project = {"key": "JAIF", "repo": "org/repo", "base": "develop", "checks": [],
+    project = {"key": "JAIF", "repo": "org/repo", "base": "develop", "checks": [], "local_gate": ["pytest"],
                "environment": [], "work_minutes": {"hard": 600}}
     ticket = {"key": "JAIF-312", "project": "JAIF", "summary": "Split dev run",
               "description": "", "labels": []}
@@ -110,6 +111,8 @@ def run_case(monkeypatch, tmp_path, result, changed):
     monkeypatch.setattr(dev, "Git", lambda root, run_as=None: RecordingGit(root, events, changed))
     monkeypatch.setattr(dev, "Heartbeat", lambda api, claim, every: RecordingHeartbeat(api, claim, every, events))
     monkeypatch.setattr(dev, "get_adapter", lambda _provider: RecordingAdapter(events, result))
+    monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs: (
+        events.append("gate:run") or GateResult([StepResult("check-1", "passed")])))
     return dev.run_dev(api, claim, str(tmp_path), "https://control.example.test", 30, []), events
 
 
@@ -124,7 +127,7 @@ def test_summary_helpers_extract_worker_summary_and_test_progress():
     ("result", "changed", "expected_outcome", "tail"),
     [
         (RunResult(final_text="SUMMARY: Implemented it\nTESTS: pytest -q", duration_s=1),
-         ["src/change.py"], "done", ["git:changed", "git:commit_all", "api:POST /v1/github/token",
+         ["src/change.py"], "done", ["git:changed", "git:commit_all", "gate:run", "api:POST /v1/github/token",
                                      "git:push", "api:POST /v1/github/pr",
                                      "api:POST /v1/jira/JAIF-312/comment",
                                      "api:POST /v1/jira/JAIF-312/transition", "heartbeat:stop"]),

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from aiflow.v4.core import local_gate as gate
+from aiflow.v4.core import pipeline_checks
 from aiflow.v4.core.local_gate import Context, Step
 from aiflow.v4.worker import gate_step
 
@@ -27,7 +28,7 @@ def test_every_gated_ci_command_is_a_gate_step():
     """CI changes a check: the gate must change with it, or this test fails."""
     in_gate = {gate.normalize(s.argv, "develop") for s in gate.steps("develop") if s.argv}
     # The v4 suite is sharded in CI (tests/v4/test_test_shards.py proves the shards cover every file); the gate runs it whole.
-    ci = normalized_ci(("test", "giant-files", "docs", "quality", "v4-scale"))
+    ci = normalized_ci(("test", "giant-files", "docs", "quality", "architecture", "v4-scale"))
     assert ci <= in_gate, f"CI runs commands the gate does not: {sorted(ci - in_gate)}"
 
 

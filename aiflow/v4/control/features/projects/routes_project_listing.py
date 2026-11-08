@@ -4,6 +4,7 @@ Route decorators stay with their handlers to preserve the published route contra
 """
 from types import SimpleNamespace
 from . import routes as compat
+from ....core import pipeline_checks
 
 
 def _install_managed_projects_route(app, ctx, deps, runtime, support):
@@ -18,15 +19,18 @@ def _install_managed_projects_route(app, ctx, deps, runtime, support):
         counts = {row["project"]: int(row["count"]) for row in
                   ctx.db.all("SELECT project,count(*) AS count FROM tickets GROUP BY project")}
         probes = compat.tooling.probe_report(ctx)
-        projects = [{"key": project.key, "repo": project.repo,
-                              "repositories": project.configured_repositories,
-                              "status": "paused" if project.paused else "active",
-                              "priority": project.priority, "ticket_count": counts.get(project.key, 0),
-                              "base": project.base, "stack": project.stack,
-                              "node_readiness": readiness_by_project.get(project.key, []),
-                              "services": project.required_services,
-                              "checks": probes.get(project.key, {})}
-                    for project in sorted(repo.projects.values(), key=lambda item: item.key)]
+        projects = []
+        for project in sorted(repo.projects.values(), key=lambda item: item.key):
+            local_checks, pipeline_only = pipeline_checks.project_catalog(project.local_gate)
+            projects.append({"key": project.key, "repo": project.repo,
+                             "repositories": project.configured_repositories,
+                             "status": "paused" if project.paused else "active",
+                             "priority": project.priority, "ticket_count": counts.get(project.key, 0),
+                             "base": project.base, "stack": project.stack,
+                             "node_readiness": readiness_by_project.get(project.key, []),
+                             "services": project.required_services,
+                             "checks": probes.get(project.key, {}), "check_commands": list(project.checks),
+                             "pipeline_checks": local_checks, "pipeline_only": pipeline_only})
         if user and user.project_keys is not None:
             projects = [project for project in projects if project["key"] in user.project_keys]
         invalid_projects = [{"file": f"{name}.yaml", "reason": reason}

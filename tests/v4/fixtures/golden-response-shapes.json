@@ -459,6 +459,9 @@
    "projects": [
     {
      "base": "str",
+     "check_commands": [
+      "str"
+     ],
      "checks": {
       "cannot_run": "int",
       "has_checks": "bool",
@@ -482,6 +485,8 @@
        "name": "str"
       }
      ],
+     "pipeline_checks": [],
+     "pipeline_only": [],
      "priority": "int",
      "repo": "str",
      "repositories": [

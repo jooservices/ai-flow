@@ -175,8 +175,26 @@ function loadDashboardQuota(force) {
   });
 }
 function pollDashboardWaiting() {
-  if (S.consoleSessionLoaded && (S.view === 'cc' || S.view === 'work' || S.view === 'delivery')) loadDashboardWaiting();
+  if (S.consoleSessionLoaded && (S.view === 'cc' || S.view === 'work' || S.view === 'delivery')) {
+    loadDashboardWaiting();
+    if (S.view === 'cc') loadDashboardPipelineFailures();
+  }
   setTimeout(pollDashboardWaiting, 15000);
+}
+function loadDashboardPipelineFailures(force) {
+  var state = S.pipelineFailures;
+  if (state.loading || (S.consoleUser && !consoleCan('view.dashboard'))) return;
+  if (!force && state.data && Date.now() - state.loadedAt < ANALYTICS_MS) return;
+  state.loading = true;
+  fetch('/v1/dashboard/pipeline-failures?days=' + ANALYTICS_DAYS, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) { state.data = data; state.error = ''; })
+    .catch(function (e) { state.error = String(e.message || e); })
+    .then(function () {
+      state.loading = false; state.loadedAt = Date.now();
+      if (S.view === 'cc' && S.data) renderDashboard();
+    });
 }
 function loadReviews() {
   fetch('/v1/reviews' + (S.reviewProject ? '?project=' + encodeURIComponent(S.reviewProject) : ''), { cache: 'no-store' }).then(function (r) {

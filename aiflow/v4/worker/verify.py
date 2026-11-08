@@ -20,6 +20,9 @@ from typing import Any
 
 from ..adapters import RunSpec, get_adapter
 from ..core import review_findings
+from ..core.environment import redact
+from ..core import pipeline_checks
+from . import gate_step
 from .client import Conflict, ControlClient
 from .dev import Claimed, Heartbeat, LeaseLost
 from .gitops import Git
@@ -298,6 +301,9 @@ def collect_verification(state: VerifyRun, workspace: VerifyWorkspace,
         findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
                     "Map each deferred criterion to a configured check, or verify it before merge.")
         return rework_verify(state, findings, "deferred criterion has no configured check")
+    gate_result = run_verify_gate(state, workspace)
+    if isinstance(gate_result, dict):
+        return gate_result
     return collect_ci(state, workspace, review)
 
 
@@ -308,6 +314,27 @@ def unmapped_deferred(criteria: list[dict], configured_checks: set[str]) -> list
 
 def deferred_ids(criteria: list[dict]) -> str:
     return ", ".join(str(criterion.get("id") or "deferred criterion") for criterion in criteria[:8])
+
+
+def run_verify_gate(state: VerifyRun, workspace: VerifyWorkspace) -> dict | None:
+    """Run the configured local pipeline gate on the verified PR worktree before checking GitHub CI."""
+    project = state.claim.project
+    if not gate_step.enabled(project):
+        return None
+    try:
+        env = project_environment(project["key"], project, "verify", project_env)
+        result = gate_step.run(workspace.worktree, project, pr_title(state.claim.ticket), env, state.run_as)
+    except Exception as error:  # noqa: BLE001 - a configured local gate failure must return the PR for rework
+        log.exception("verification local gate could not run")
+        return rework_verify(state, f"- local pipeline gate could not run ({type(error).__name__})", "local gate failed")
+    state.result.setdefault("details", {})["local_gate"] = [
+        {"name": item.name, "status": item.status, "tail": redact(item.tail)[:2000]}
+        for item in result.steps]
+    if result.failed:
+        findings = f"- local check {result.failed.name} failed:\n{redact(result.failed.tail)[:2000]}"
+        checks = str(state.result["details"].get("checks") or "")
+        return rework_verify(state, findings, "local check failed", checks)
+    return None
 
 
 def rework_verify(state: VerifyRun, findings: str, why: str, checks: str = "") -> dict:
@@ -322,6 +349,12 @@ def collect_ci(state: VerifyRun, workspace: VerifyWorkspace, review: VerifyRevie
         item["state"] in ("success", "neutral") for item in ci))
     if failed:
         findings = "\n".join(f"- CI {item['name']}: failed ({item['url']})" for item in failed[:10])
+        gaps = pipeline_checks.failure_gaps([item["name"] for item in failed],
+                                            state.claim.project.get("local_gate"),
+                                            state.claim.project.get("checks") or [])
+        state.result["details"]["check_gaps"] = gaps
+        if gaps:
+            findings += "\n" + "\n".join(f"- Check gap: AI did not run {gap['job']}: {gap['reason']}" for gap in gaps)
         return rework_verify(state, findings, "CI failed", review.checks)
     checks = review.checks
     if ci:

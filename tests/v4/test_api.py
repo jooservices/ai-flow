@@ -1171,7 +1171,7 @@ def test_team_lead_epic_requirement_coverage_progress_and_exports(client, ctx):
         ("TESTWP-704", "Done", "Acceptance criteria:\n- AC1: Validate input", "TESTWP-700"),
     ]
     for key, status, description, parent in children:
-        add_ticket(ctx.db, key, status=status, labels=())
+        add_ticket(ctx.db, key, status=status, labels=(), business=key == "TESTWP-703")
         ctx.db.run("UPDATE tickets SET type='Story', parent_key=%s, description=%s, jira_created=%s, jira_updated=%s,"
                    " done_at=%s WHERE key=%s", (parent, description, created, done, done if status == "Done" else None, key))
     ctx.db.run("UPDATE tickets SET summary=%s WHERE key='TESTWP-702'", ('=HYPERLINK("https://example.invalid")',))

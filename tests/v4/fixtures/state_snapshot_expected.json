@@ -1144,6 +1144,7 @@
      "done_at": null,
      "epic": "PRJ-9",
      "repository": "example/project",
+     "is_business_needs_owner": false,
      "already_done": {
       "pr_url": "https://example/pr/9",
       "run_id": "run-done"
@@ -1208,6 +1209,7 @@
      "done_at": null,
      "epic": "",
      "repository": "example/project",
+     "is_business_needs_owner": false,
      "already_done": null,
      "run": null,
      "last_run": null,
@@ -1251,6 +1253,7 @@
      "done_at": "2025-01-10T12:00:00+00:00",
      "epic": "",
      "repository": "example/project",
+     "is_business_needs_owner": false,
      "already_done": null,
      "run": null,
      "last_run": null,

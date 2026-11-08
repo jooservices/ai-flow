@@ -234,8 +234,8 @@ def test_capture_run_result_followups_records_capture_and_duration(monkeypatch):
     monkeypatch.setattr(routes, "utcnow", lambda: now)
     monkeypatch.setattr(routes, "knowledge", SimpleNamespace(capture_run=lambda *args: captures.append(args)))
     ctx = SimpleNamespace(db=object(), settings=SimpleNamespace(jira_site="https://jira.example.test"), jira=None)
-    dur = routes._capture_run_result_followups(ctx, {"started_at": STARTED}, "run-1",
-                                               SimpleNamespace(outcome="done", fence=4), False, lambda *_: None, None)
+    dur = routes._capture_run_result_followups(ctx, {"started_at": STARTED, "step": "dev"}, "run-1",
+                                               SimpleNamespace(outcome="done", fence=4, details={}), False, lambda *_: None, None)
     assert dur == 0 and len(captures) == 1
 
 

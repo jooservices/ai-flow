@@ -10,6 +10,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, HTTPException, Query, Request  # noqa: F401 - kept as module globals for the route
 
 from . import review_metrics
+from .repositories.owner_decisions import business_decision_ticket_keys
 
 
 @dataclass
@@ -76,7 +77,9 @@ def _load_human_review_tickets(ctx: Any, selected_keys: list[str]) -> tuple[list
     tickets = ctx.db.all(
         "SELECT key, project, type, summary, description, labels, parent_key, status, blocked_by"
         " FROM tickets WHERE key=ANY(%s) ORDER BY project,key", (selected_keys,))
-    needs_owner_keys = [str(ticket["key"]) for ticket in tickets if ticket["status"] == "Needs owner"]
+    business_keys = business_decision_ticket_keys(ctx.db)
+    needs_owner_keys = [str(ticket["key"]) for ticket in tickets
+                        if ticket["status"] == "Needs owner" and ticket["key"] in business_keys]
     blocker_keys = sorted({str(key) for ticket in tickets for key in ticket.get("blocked_by") or []})
     blocker_statuses = {row["key"]: row["status"] for row in ctx.db.all(
         "SELECT key,status FROM tickets WHERE key=ANY(%s)", (blocker_keys,))} if blocker_keys else {}
@@ -377,10 +380,14 @@ class ReviewQueueAPI:
         blocker_keys = sorted({str(key) for ticket in candidates for key in ticket.get("blocked_by") or []})
         blocker_statuses = {row["key"]: row["status"] for row in self.ctx.db.all(
             "SELECT key,status FROM tickets WHERE key=ANY(%s)", (blocker_keys,))} if blocker_keys else {}
+        business_keys = business_decision_ticket_keys(self.ctx.db)
         keys = []
         for ticket in candidates:
-            if ticket["status"] in ("Human review", "Needs owner"):
+            if ticket["status"] == "Human review":
                 keys.append(ticket["key"])
+            elif ticket["status"] == "Needs owner":
+                if ticket["key"] in business_keys:
+                    keys.append(ticket["key"])
             elif any(str(blocker) not in blocker_statuses or
                      blocker_statuses[str(blocker)] not in ("Done", "Closed")
                      for blocker in (ticket.get("blocked_by") or [])):

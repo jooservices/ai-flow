@@ -11,6 +11,7 @@ Outcomes:
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import time
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters import RunSpec, get_adapter
-from ..core import review_findings
+from ..core import assumptions, review_findings
 from ..core.environment import redact
 from ..core import pipeline_checks
 from . import gate_step
@@ -69,9 +70,16 @@ def build_prompt(c: Claimed, pr: dict, env: dict[str, str] | None = None) -> str
     if c.project.get("containers"):
         checks += "\n   - Docker commands go through the run's rootless, worktree-confined runtime"
     t = c.ticket
+    parent_epic = t.get("parent_epic") or {}
+    parent_epic_block = (
+        f"\nParent epic {parent_epic['key']}: \"{parent_epic.get('summary', '')}\"\n"
+        f"---\n{parent_epic.get('description', '')}\n---\n"
+        if parent_epic and parent_epic.get("key") else ""
+    )
     history = review_findings.format_review_history(pr.get("review_history") or [])
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"],
                       pr_number=pr["number"], branch=pr["branch"], checks=checks,
+                      parent_epic=parent_epic_block,
                       dev_summary=pr.get("dev_summary") or "(none)", description=t["description"] or "(no description)",
                       review_history=history,
                       related=related_block(c.related),
@@ -338,6 +346,9 @@ def run_verify_gate(state: VerifyRun, workspace: VerifyWorkspace) -> dict | None
 
 
 def rework_verify(state: VerifyRun, findings: str, why: str, checks: str = "") -> dict:
+    contradicted = assumptions.contradicted_assumption_texts(findings)
+    if contradicted:
+        state.result.setdefault("details", {})["contradicted_assumptions"] = contradicted
     return _rework(state.claim, state.api, state.reporter.jira, PRCommenter(state.api, state.claim, state.pr),
                    state.result, findings, why, checks, state.started_at)
 
@@ -417,19 +428,16 @@ def report_merged(state: VerifyRun, merged: dict, checks: str, head: str) -> dic
         why="Every acceptance criterion is met and the checks pass", result=f"Checks: {checks}",
         next_="Ticket Done; tickets blocked by it can start", t0=state.started_at, node=api_node(state.api)))
     state.reporter.transition(to="Done")
-    try:
+    with contextlib.suppress(Exception):
         state.reporter.fields(remove_labels=["rework"])
-    except Exception:  # noqa: BLE001
-        pass
     state.result.update(outcome="merged", head_sha=merged.get("sha", head))
     return state.result
 
 
 def scrub_verify_worktree(state: VerifyRun) -> None:
-    try:  # leave the verify worktree clean for the next run (merge in progress, files the checks wrote)
+    # leave the verify worktree clean for the next run (merge in progress, files the checks wrote)
+    with contextlib.suppress(Exception):
         state.git.scrub(worktree_path(state.srv_root, state.claim.project["key"], state.pr["branch"], "--verify"))
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def bring_up_to_date(api: ControlClient, c: Claimed, git: Git, mirror, wt: Path, pr: dict, base: str, token: str,

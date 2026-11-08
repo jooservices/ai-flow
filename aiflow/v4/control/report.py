@@ -11,6 +11,8 @@ from datetime import datetime
 from statistics import median
 from typing import Any
 
+from .repositories.owner_decisions import business_decision_ticket_keys
+
 
 class ReportNotFound(LookupError):
     """The requested epic is not in the requested project."""
@@ -297,7 +299,7 @@ def build_ticket_summary(tickets: list[dict], completed: list[dict]) -> dict[str
     return {
         "total": len(tickets), "done": len(completed),
         "in_progress": sum(ticket["status"] in {"In Progress", "In Verify", "Human review"} for ticket in tickets),
-        "needs_owner": sum(ticket["status"] == "Needs owner" for ticket in tickets),
+        "needs_owner": sum(ticket["status"] == "Needs owner" and ticket.get("is_business_needs_owner", True) for ticket in tickets),
         "done_by_type": dict(sorted(Counter(ticket["type"] for ticket in completed).items())),
     }
 
@@ -434,6 +436,9 @@ def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str
     if epic_key:
         require_epic(by_key, project_key, epic_key)
     tickets = tickets_in_scope(all_tickets, epic_key, by_key)
+    business_keys = business_decision_ticket_keys(ctx.db)
+    for ticket in tickets:
+        ticket["is_business_needs_owner"] = ticket["key"] in business_keys
     if not tickets:
         return empty_report(project_key, epic_key, suggestion, tickets)
     return filled_report(ctx, project_key, epic_key, by_key, suggestion, tickets)

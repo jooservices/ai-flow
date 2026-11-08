@@ -50,6 +50,7 @@ verifications lost to conflicts, the time spent on them and the trend. It is des
 [Fewer merge conflicts](merge-conflicts.md), which also covers the Delivery Analytics panel.
 
 The Dashboard block `review-rounds` shows the average completed review rounds against target and findings for each round.
+The Dashboard block `assumptions` ("AI assumptions", full width by default) shows the choices the AI made instead of asking the owner, per UTC day, and how many were later contradicted.
 The Dashboard block `flow-failures` ("Repeated failures", full width by default) lists recurring failure signatures
 and links each tracked signature to its root-cause bug; see [Repeated failure root causes](flow-failure-roots.md).
 The Dashboard block `pipeline-failures` ("First pipeline run failures", full width by default) shows first observed CI

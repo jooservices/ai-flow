@@ -8,9 +8,29 @@ from fastapi import APIRouter, Query, Request
 from .. import analytics as run_analytics
 from .. import incidents, merge_flow, quota as quota_reporting, route_deps
 from ..features.review_rounds import repository as review_round_repository, service as review_rounds
+from ..repositories import assumptions as assumptions_repo
 from ..repositories import dashboard as dashboard_repository
 
 router = APIRouter()
+
+
+@router.get("/v1/dashboard/assumptions")
+def dashboard_assumptions(request: Request, days: int = Query(14, ge=1, le=90)) -> dict:
+    """Return assumptions made per day and how many of them were later contradicted."""
+    ctx = route_deps.context(request)
+    user = (route_deps.console_user_for(request, "view.dashboard") if ctx.settings.console_login
+            else route_deps.optional_console_user(ctx, request))
+    projects = list(user.project_keys) if user and user.project_keys is not None else None
+    daily = assumptions_repo.assumptions_daily(ctx.db, days=days, projects=projects)
+    recent = assumptions_repo.recent_assumptions(ctx.db, limit=20, projects=projects)
+    total = sum(d["total"] for d in daily)
+    contradicted = sum(d["contradicted"] for d in daily)
+    return {
+        "days": daily,
+        "total_assumptions": total,
+        "total_contradicted": contradicted,
+        "recent": recent,
+    }
 
 
 @router.get("/v1/dashboard/review-rounds")

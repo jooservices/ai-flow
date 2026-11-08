@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from conftest import add_ticket, join_node
+from conftest import add_business_decision, add_ticket, join_node
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control import notify as notify_module
 from aiflow.v4.control.db import J
@@ -337,9 +337,10 @@ def test_reviewer_ask_ai_moves_item_to_triage_and_exposes_question_thread(client
     assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (key,))["status"] == "Needs owner"
     assert any(key == ticket and "preserve retries" in body for ticket, body in ctx.jira.comments)
     assert any(number == 42 and "preserve retries" in body for number, body in ctx.github.comments)
-    item = next(t for t in client.get("/v1/reviews").json()["tickets"] if t["key"] == key)
-    assert item["kind"] == "question_from_ai"
-    assert item["thread"][0]["kind"] == "question" and "preserve retries" in item["thread"][0]["text"]
+    queue = client.get("/v1/reviews").json()
+    assert key not in {t["key"] for t in queue["tickets"]}  # waiting for the AI, not for a business decision
+    asked = next(t for t in queue["threads"] if t["key"] == key)["thread"]
+    assert asked[0]["kind"] == "question" and "preserve retries" in asked[0]["text"]
     assert ctx.db.one("SELECT action,accepted FROM write_audit WHERE ticket=%s AND target='human-review'",
                       (key,)) == {"action": "ask-ai", "accepted": True}
     node = join_node(client, "cc").json()
@@ -415,8 +416,10 @@ def test_reviewer_skip_gate_merges_and_removes_the_gate_label(client, ctx):
 def test_review_queue_offers_actions_by_waiting_item_kind(client, ctx):
     add_review_ticket(ctx, "TESTWP-96")
     add_ticket(ctx.db, "TESTWP-97", status="Needs owner", labels=("owner-escalated",))
+    add_business_decision(ctx.db, "TESTWP-97")
     add_review_run(ctx, "TESTWP-97")
     add_ticket(ctx.db, "TESTWP-98", status="Needs owner")
+    add_business_decision(ctx.db, "TESTWP-98")
     add_review_run(ctx, "TESTWP-98", step="dev", pr_url="", outcome="blocked", summary="Which cache? ")
     add_ticket(ctx.db, "TESTWP-99", status="To Do")
     add_ticket(ctx.db, "TESTWP-100", status="In Progress", blocked_by=("TESTWP-99",))

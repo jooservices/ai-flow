@@ -11,8 +11,9 @@ import re
 TECHNICAL_RE = re.compile(
     r"\b(?:test|tests|unit test|fixture|mock|refactor\w*|module|class|function|helper|structure|naming|library|"
     r"dependency|package|schema|migration|index|query|split|separate (?:change|ticket|pull request|pr|commit)|"
-    r"order(?:ing)? of|follow-up|lint|format\w*|type hint|retry|cache|batch size|default value|abstraction|"
-    r"interface|duplicate|rename)\b", re.I)
+    r"order(?:ing)? of|follow-up|lint|format\w*|type hint|retry|cache|batch size|default\w*|abstraction|"
+    r"interface|duplicate|rename|scope|metric\w*|complexity|file-length|tool\w*|all files or only|"
+    r"which (?:metric|tool|files?|approach))\b", re.I)
 OWNER_RE = re.compile(
     r"\b(?:price|pricing|payment|billing|invoice|refund|cost|budget|money|secret|credential|password|token|api key|"
     r"security|vulnerab\w*|licen[cs]\w*|gdpr|privacy|personal data|legal|customer|contract|production|prod|"

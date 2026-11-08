@@ -32,6 +32,7 @@
     "GET /v1/console/preferences",
     "GET /v1/console/session",
     "GET /v1/console/users",
+    "GET /v1/dashboard/assumptions",
     "GET /v1/dashboard/disagreements",
     "GET /v1/dashboard/flow-failures",
     "GET /v1/dashboard/pipeline-failures",

@@ -136,6 +136,11 @@ class FakeDatabase:
             tag = "thread_runs"
         elif "SELECT key,project,summary,status FROM tickets" in sql:
             tag = "missing_tickets"
+        elif "FROM owner_decisions" in sql:
+            tag = "business_decisions"
+            # the business-decision lookup is not part of the recorded pre-refactor trace
+            return self.rows.get(tag, [{"ticket_key": row["key"]} for row in self.rows.get("tickets", [])
+                                       if row.get("status") == "Needs owner"])
         else:
             raise AssertionError("unclassified review query")
         self.events.append(["db", tag, normalize(params)])

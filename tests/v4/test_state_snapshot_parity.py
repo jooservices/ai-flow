@@ -75,6 +75,8 @@ def _account_query_label(query):
 
 
 def _system_query_label(query):
+    if "FROM owner_decisions" in query:
+        return "business_decisions"
     if "machine_host_load_limits" in query:
         return "host_load"
     if "FROM nodes WHERE" in query:
@@ -388,6 +390,7 @@ def test_snapshot_matches_pre_refactor_literal(case, monkeypatch):
     ]
     if case["tables"].get("tickets") and any(row["status"] == "In Verify" for row in case["tables"]["tickets"]):
         expected_calls.append("already_done")
+    expected_calls.append("business_decisions")
     expected_calls.extend(["totals", "incidents_open", "incidents_recent", "events", "lifecycle",
                            "canary_pending", "canary_merge_live", "canary_settings"])
     assert ctx.db.calls == expected_calls

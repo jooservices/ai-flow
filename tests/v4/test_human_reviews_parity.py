@@ -29,6 +29,7 @@ QUERY_TAGS = (
     ("SELECT ts,type,ticket,project,outcome,reason,data FROM events", "metrics_events"),
     ("SELECT ticket_key,project,step,account_id,outcome", "metrics_runs"),
     ("SELECT ts,ticket,action,target,accepted,result,payload FROM write_audit", "metrics_audits"),
+    ("FROM owner_decisions", "business_decisions"),
     ("SELECT key, project, type, summary, description", "tickets"),
     ("WHERE key=%s", "epics"),
     ("SELECT DISTINCT ON (ticket_key) ticket_key,pr_url", "dev_runs"),
@@ -66,6 +67,9 @@ class Database:
         tag = next((name for marker, name in QUERY_TAGS if marker in query), None)
         if tag is None:
             raise AssertionError(f"Uncharacterized human review query: {query}")
+        if tag == "business_decisions":  # not part of the recorded pre-refactor trace
+            return self.plan.get(tag, [{"ticket_key": row["key"]} for row in self.plan.get("tickets", [])
+                                       if row.get("status") == "Needs owner"])
         self.calls.append(tag)
         call_params = ["<datetime>" if isinstance(param, datetime) else param for param in params]
         self.trace.append(["db", tag, call_params])

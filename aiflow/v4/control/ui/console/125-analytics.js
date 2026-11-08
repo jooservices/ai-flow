@@ -47,6 +47,30 @@ function conflictLossBlock() {
   });
   return h + svg + '</svg><p class="hint">' + esc(c.definition) + '</p></div>';
 }
+function pipelineFailuresPanel() {
+  var state = S.pipelineFailures, data = state.data;
+  var h = '<section class="panel" data-block="pipeline-failures" id="p-pipeline-failures"><div class="panel-h"><h2>First pipeline run failures</h2><span class="hint">Per UTC day · target below 15%</span></div>';
+  if (state.error) return h + '<div class="empty">Pipeline failures unavailable: ' + esc(state.error) + '</div></section>';
+  if (!data) return h + '<div class="muted">Loading…</div></section>';
+  var tone = data.failure_share_pct < data.target_share_pct ? 'ok' : 'warn';
+  h += '<div class="legend"><span>First runs: <b class="mono">' + data.first_runs + '</b></span>';
+  h += '<span>Failed: <b class="mono">' + data.first_failures + ' · ' + data.failure_share_pct + '%</b></span>';
+  h += '<span>' + pill(tone, 'Target < ' + data.target_share_pct + '%') + '</span></div>';
+  var rows = [];
+  (data.daily || []).forEach(function (day) {
+    (day.pull_requests || []).forEach(function (pr) { rows.push({ day: day.day, pr: pr }); });
+  });
+  if (!rows.length) return h + '<div class="empty">No first pipeline runs failed in this period.</div></section>';
+  h += '<div class="tablebox"><table><thead><tr><th>Day</th><th>Pull request</th><th>Failed job</th><th>Check gap</th></tr></thead><tbody>';
+  rows.forEach(function (row) {
+    var pr = row.pr;
+    h += '<tr><td class="mono">' + esc(row.day) + '</td><td><a href="' + esc(safeHref(pr.url)) + '" target="_blank" rel="noopener">' + esc(pr.ticket) + '</a></td>';
+    h += '<td>' + (pr.failed_jobs || []).map(esc).join(', ') + '</td><td>';
+    h += (pr.check_gaps || []).map(function (gap) { return esc(gap.job + ': ' + gap.reason); }).join('<br>') || 'No check gap';
+    h += '</td></tr>';
+  });
+  return h + '</tbody></table></div></section>';
+}
 function analyticsPanel() {
   var rows = S.analytics.filter(function (r) { return r.project === S.project; });
   var h = '<section class="panel" data-block="analytics" id="d-analytics" aria-labelledby="h-an"><div class="panel-h"><h2 id="h-an">Analytics</h2><span class="hint">Last ' + ANALYTICS_DAYS + ' days (UTC) per account; refreshed every minute</span><span class="spacer"></span><div class="legend"><span><i class="an-ok"></i>Done or merged</span><span><i class="an-rework"></i>Rework</span><span><i class="an-failed"></i>Failed</span><span><i class="an-other"></i>Other</span></div></div>';

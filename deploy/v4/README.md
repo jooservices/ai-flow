@@ -9,6 +9,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 - [Atomic code and configuration deploy](../../docs/v4/atomic-deploy.md): fetch, check and activate both repositories together for each configured machine
 - [Unified test command for every layer](../../docs/v4/test-command.md): one script runs fast (lint, types, guards, unit), integration, smoke and e2e layers
+- [Pipeline checks and first-run failures](../../docs/v4/pipeline-checks.md): CI jobs map to local project checks or a stated pipeline-only reason, and the Dashboard reports first-run failures
 - [Watchdog loop structure](../../docs/v4/watchdog-loop.md): each watchdog check is its own module and the loop calls the checks in order
 - [Node heartbeat providers](../../docs/v4/node-heartbeat-providers.md): named field providers collect and validate heartbeat values; the control schema declares accepted fields
 - [Server wording check](../../docs/v4/server-wording-check.md): refuse instructions to use a particular system, quote the sentence and stop retrying after two refusals

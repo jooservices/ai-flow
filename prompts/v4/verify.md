@@ -20,7 +20,8 @@ Do this:
    fix, or the developer's reason for no change is correct. Otherwise mark it `NOT FIXED`. Keep its ID and wording
    unchanged when it remains unresolved. Then inspect the whole change for new blocking defects and mark each one
    `NEW`. Report every blocking finding together.
-3. Run the project's checks and the tests of this change:
+3. Run every project check listed above, even when it does not appear related to the changed paths. Wait for each
+   command to finish and record its result, along with the tests of this change:
 {checks}
    A check that cannot run here (Docker, network) is not a failure; say so. A check that runs and fails is.
 4. Look for real defects: broken behaviour, security issues (secrets, unescaped output, missing nonce or

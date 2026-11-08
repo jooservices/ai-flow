@@ -84,6 +84,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "reviewRoundsPanel": ("cc",),
     "loadDashboardFlowFailures": ("cc",),
     "flowFailuresPanel": ("cc",),
+    "pipelineFailuresPanel": ("cc",),
     "capacityPanel": ("cc",),
     "drawerTicket": ("cc",),
     "loadCapacity": ("cc",),
@@ -97,6 +98,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "incidentHandoffBody": ("cc", "machines"),
     "resolveHandoff": ("cc", "machines"),
     "loadDashboardWaiting": ("cc", "work", "delivery"),
+    "loadDashboardPipelineFailures": ("cc",),
     "loadDashboardQuota": ("cc",),
     "pollDashboardWaiting": ("cc", "work", "delivery"),
     "setDashboardTab": ("cc",),
@@ -149,6 +151,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderSupport": ("support",),
     "buildSupportBundle": ("support",),
     "renderProjects": ("projects",),
+    "projectChecksCell": ("projects",),
     "renderRuntimeSettings": ("settings",),
     "loadRuntimeSettings": ("settings",),
     "pollRuntimeSettingChange": ("settings",),
@@ -265,7 +268,7 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"runtimeSettings|data-runtime|runtime-setting"), "settings"),
     (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
-    (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|repositoryEditor|"
+    (re.compile(r"Project commands, locally enforced CI jobs|data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|repositoryEditor|"
                 r"envEditor|envMissing|envScan|data-env-(?:field|run)|envItems|envItem|envField|containers:\s*false|"
                 r"config\[fieldName\]|fieldName === 'containers'"), "projects"),
     (re.compile(r"^\s*(?:S\.)?systemCheck(?:Error|Busy)?\s*(?::|=)|system-check(?:-run)?|"
@@ -337,7 +340,7 @@ SCREEN_LINE_VIEWS += (
     (re.compile(r"JOIN_FIELDS"), "cc"),
     # The Projects environment editor can remain interactive when its save/scan toast is visible.
     (re.compile(r"^\s*\.toasts\{"), "projects"),
-    (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|dashboardFlowFailures|capacity: \{ data:"), "cc"),
+    (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|dashboardFlowFailures|pipelineFailures|capacity: \{ data:"), "cc"),
     (re.compile(r"^\s*\.(?:dashboard-tabs|dashboard-tab|dash-section|dash-section-title|dashboard-layout-headings|dash-kpis|dash-kpi|"
                 r"dash-grid|dash-flow|flow-step|dash-tools|sort-btn|dash-table|roadmap-list|roadmap-row|provider-legend|"
                 r"provider-swatch|provider-(?:claude|codex|grok|opencode)|provider-chart|usage-share|quota-ai-list|"
@@ -362,6 +365,7 @@ SCREEN_LOCAL_LINE_VIEWS = (
 # A new panel inserted into the shared Command Center renderer can be specific to one screen.
 SCREEN_RENDERER_LINE_VIEWS = (
     (re.compile(r"scaleProofPanel\(d\.scale_proof(?:,.*)?\)"), ("cc",)),
+    (re.compile(r"if \(S\.consoleSessionLoaded && S\.view === 'cc'\) loadDashboardPipelineFailures\(\);"), ("cc",)),
     (re.compile(r"var READY_TEXT = window\.AIFlowReadyText"), ("cc", "business")),
 )
 

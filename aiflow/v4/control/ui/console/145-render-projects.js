@@ -1,12 +1,24 @@
-/* Result of the project's check commands run once on a clean checkout of each machine (docs/v4/missing-tools.md). */
-function projectChecksCell(c) {
-  if (!c || !c.has_checks) return '<span class="muted">no checks</span>';
+/* Project commands, locally enforced CI jobs, and the jobs that need a pipeline-only environment. */
+function projectChecksCell(c, commands, pipelineChecks, pipelineOnly) {
+  var entries = [];
+  (commands || []).forEach(function (command) { entries.push('Project check: ' + command); });
+  (pipelineChecks || []).forEach(function (item) {
+    entries.push(item.name + ' · local checks: ' + item.steps.join(', '));
+  });
+  (pipelineOnly || []).forEach(function (item) { entries.push(item.name + ' · pipeline only: ' + item.reason); });
+  var h = '';
+  if (entries.length) {
+    h += '<details><summary>' + entries.length + ' checks · ' + (pipelineOnly || []).length + ' pipeline only</summary><ul>';
+    entries.forEach(function (entry) { h += '<li class="small" style="white-space:normal">' + esc(entry) + '</li>'; });
+    h += '</ul></details>';
+  } else h += '<span class="muted">no checks</span>';
+  if (!c || !c.has_checks) return h;
   var current = (c.machines || []).filter(function (m) { return m.current; });
-  if (!current.length) return pill('info', 'not checked yet');
+  if (!current.length) return h + pill('info', 'not checked yet');
   var blocked = [];
   current.forEach(function (m) { (m.cannot_run || []).forEach(function (x) { blocked.push({ node: m.node, x: x }); }); });
-  if (!blocked.length) return pill('ok', 'all can run · ' + current.length + ' machine' + (current.length > 1 ? 's' : ''));
-  var h = pill('crit', blocked.length + ' cannot run');
+  if (!blocked.length) return h + pill('ok', 'all can run · ' + current.length + ' machine' + (current.length > 1 ? 's' : ''));
+  h += pill('crit', blocked.length + ' cannot run');
   blocked.forEach(function (b) { h += '<div class="small" style="color:var(--crit)"><span class="mono">' + esc(b.x.command) + '</span> on ' + esc(b.node) + ': ' + esc(b.x.detail || ('missing ' + (b.x.tool || 'tool'))) + '</div>'; });
   return h;
 }
@@ -43,7 +55,7 @@ function renderProjects() {
     h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Checks</th><th>Test services</th><th>Actions</th></tr></thead><tbody>';
     rows.forEach(function (p) {
       h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
-      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td class="project-check-state">' + projectChecksCell(p.checks) + '</td><td>' + projectServicesCell(p) + '</td><td><div class="project-actions">';
+      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td class="project-check-state">' + projectChecksCell(p.checks, p.check_commands, p.pipeline_checks, p.pipeline_only) + '</td><td>' + projectServicesCell(p) + '</td><td><div class="project-actions">';
       if (consoleCan('projects.manage')) {
         h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
         h += '<button class="btn sm" data-act="project-environment" data-key="' + esc(p.key) + '">Environment</button>';

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .repositories import developer_runs
+from .repositories import developer_runs, pipeline_failures
 
 FAILED = ("failed", "blocked", "timeout", "lost")
 DAILY_SQL = """
@@ -40,7 +40,6 @@ GROUP BY 1, 2
 ORDER BY 1 DESC, 2
 """
 
-
 def daily(db, days: int = 14, project: str = "") -> list[dict[str, Any]]:
     """One row per (day, project, account) that had runs in the last `days` UTC days, today included."""
     rows = db.all(DAILY_SQL, {"failed": list(FAILED), "back": days - 1, "project": project})
@@ -55,6 +54,34 @@ def daily_usage(db, days: int = 14, project_keys: list[str] | tuple[str, ...] | 
              "tokens_in": int(row["tokens_in"]), "tokens_out": int(row["tokens_out"]),
              "tokens": int(row["tokens_in"] + row["tokens_out"]),
              "cost_usd": round(float(row["cost_usd"]), 6)} for row in rows]
+
+
+def first_pipeline_failures(db, days: int = 30,
+                            project_keys: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+    """Summarize first observed verify CI results per pull request by UTC day."""
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 90:
+        raise ValueError("days must be between 1 and 90")
+    rows = pipeline_failures.first_pipeline_failures(db, days, project_keys)
+    daily_rows: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        day = row["day"].isoformat()
+        daily = daily_rows.setdefault(day, {"day": day, "first_runs": 0, "first_failures": 0,
+                                             "pull_requests": []})
+        daily["first_runs"] += 1
+        failed_jobs = list(row.get("failed_jobs") or [])
+        if failed_jobs:
+            daily["first_failures"] += 1
+            daily["pull_requests"].append({"ticket": row["ticket"], "project": row["project"],
+                                           "url": row["pr_url"], "failed_jobs": failed_jobs,
+                                           "check_gaps": list(row.get("check_gaps") or [])})
+    daily = list(daily_rows.values())
+    for item in daily:
+        item["failure_share_pct"] = round(100 * item["first_failures"] / item["first_runs"], 2)
+    first_runs = sum(item["first_runs"] for item in daily)
+    failures = sum(item["first_failures"] for item in daily)
+    return {"days": days, "first_runs": first_runs, "first_failures": failures,
+            "failure_share_pct": round(100 * failures / first_runs, 2) if first_runs else 0.0,
+            "target_share_pct": 15.0, "daily": daily}
 
 
 def timeouts(db, days: int = 30, project_keys: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:

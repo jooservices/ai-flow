@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
+from .. import analytics as run_analytics
 from .. import incidents, merge_flow, quota as quota_reporting, route_deps
 from ..features.review_rounds import repository as review_round_repository, service as review_rounds
 from ..repositories import dashboard as dashboard_repository
@@ -73,6 +74,16 @@ def dashboard_disagreements(request: Request) -> dict:
     scope = list(user.project_keys) if user and user.project_keys is not None else None
     rows = merge_flow.disagreements(ctx.db, scope)
     return {"after_s": merge_flow.DISAGREEMENT_AFTER_S, "tickets": rows}
+
+
+@router.get("/v1/dashboard/pipeline-failures")
+def dashboard_pipeline_failures(request: Request, days: int = Query(30, ge=1, le=90)) -> dict:
+    """First observed verify CI results per pull request, scoped to the caller's visible projects."""
+    ctx = route_deps.context(request)
+    user = (route_deps.console_user_for(request, "view.dashboard") if ctx.settings.console_login
+            else route_deps.optional_console_user(ctx, request))
+    project_keys = list(user.project_keys) if user and user.project_keys is not None else None
+    return run_analytics.first_pipeline_failures(ctx.db, days, project_keys)
 
 
 @router.get("/v1/dashboard/quota")

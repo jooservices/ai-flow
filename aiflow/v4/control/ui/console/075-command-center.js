@@ -257,7 +257,7 @@ function renderDashboard() {
   h += '</section><section class="panel" data-block="waiting"><div class="panel-h"><h2>Waiting for you</h2><span class="hint">Human review or owner decision</span></div><div class="att">';
   if (!waiting.length) h += '<div class="empty">Nothing is waiting on a person.</div>';
   waiting.slice(0, 12).forEach(function (t) { h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(t.key) + '"><span class="pill" data-tone="' + (t.status === 'Needs owner' ? 'warn' : 'info') + '">' + esc(t.status) + '</span><span class="t"><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '<span class="d">' + esc(t.project) + '</span></span><span class="muted">Open</span></button>'; });
-  h += '</div></section>' + reviewRoundsPanel() + disagreementsPanel() + escalationsPanel() + '</section>';
+  h += '</div></section>' + reviewRoundsPanel() + disagreementsPanel() + pipelineFailuresPanel() + escalationsPanel() + '</section>';
   var tokenTotal = (S.dashboardUsage || []).reduce(function (n, row) { return n + Number(row.tokens || 0); }, 0);
   var costTotal = (S.dashboardUsage || []).reduce(function (n, row) { return n + Number(row.cost_usd || 0); }, 0);
   var providers = Object.keys(PROVIDER).filter(function (key) { return (S.dashboardUsage || []).some(function (row) { return row.key === key; }) || d.accounts.some(function (a) { return a.provider === key; }); });

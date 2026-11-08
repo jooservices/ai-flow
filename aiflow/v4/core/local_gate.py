@@ -2,9 +2,9 @@
 
     python3 -m aiflow.v4.core.local_gate run --path <worktree> --base develop [--title "<pull request title>"]
 
-The steps are the commands of the CI jobs ``Test (Unit)``, ``Giant files``, ``Duplicate blocks``, ``Broad exceptions``,
-``SQL boundary``, ``Documentation``, ``Code quality`` and ``Test (v4)`` plus the header rules of the commit and the pull request title.
-The local-gate test compares them with ``.github/workflows/ci.yml`` so the gate cannot drift away from CI.
+The steps are the runnable checks of the CI jobs, plus the header rules of the commit and the pull request title. Jobs that
+need infrastructure outside a worker's run environment have a pipeline-only reason in ``core/pipeline_checks.py``. The
+pipeline-check test compares the catalog with ``.github/workflows/ci.yml`` so an added job cannot be omitted.
 
 Exit code 0: every step passed. 1: a step failed. 2: nothing failed, but a step did not finish (time slice) or needs a
 service or variable that is not provided, so CI has to complete it.
@@ -119,10 +119,12 @@ def steps(base: str) -> list[Step]:
         Step("headers", check=check_headers, needs_commit=True),
         Step("quality", ("uv", "run", "--frozen", "python", "-m", "aiflow.v4.core.quality_checks", "check", "--base", ref),
              "quality", 300, needs_commit=True),
+        Step("architecture", ("uv", "run", "--frozen", "pytest", "tests/v4/test_architecture.py", "-p",
+                               "no:warnings"), "architecture", 600),
         Step("scale-proof", ("uv", "run", "--frozen", "pytest", "tests/v4/test_scale_proof.py", "-p", "no:warnings"),
-             "v4", 900, TEST_SERVICES, retries=1),
+             "v4-scale", 900, TEST_SERVICES, retries=1),
         Step("v4", ("uv", "run", "--frozen", "pytest", "tests/v4", "--ignore=tests/v4/test_scale_proof.py",
-                    "-p", "no:warnings"), "v4", 2400, TEST_SERVICES),
+                    "-p", "no:warnings"), "v4-shard", 2400, TEST_SERVICES),
     ]
 
 

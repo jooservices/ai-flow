@@ -200,6 +200,7 @@ document.addEventListener('click', function (e) {
   else if (act === 'open-node') openDrawer('node', el.getAttribute('data-id'), el);
   else if (act === 'open-acc') openDrawer('acc', el.getAttribute('data-id'), el);
   else if (act === 'open-inc') openDrawer('inc', el.getAttribute('data-id'), el);
+  else if (act === 'resolve-handoff') resolveHandoff(el.getAttribute('data-id'));
   else if (act === 'open-ticket') openDrawer('ticket', el.getAttribute('data-key'), el);
   else if (act === 'open-report') openProjectReport(el);
   else if (act === 'close-project') closeProject(el.getAttribute('data-p'), el);

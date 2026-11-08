@@ -31,6 +31,17 @@ class WorkRepository:
     def set_run_details(self, run_id: str, details: dict) -> None:
         self.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(details), run_id))
 
+    def blocked_handoff_tickets(self, ticket_keys: list[str]) -> set[str]:
+        if not ticket_keys:
+            return set()
+        rows = self.db.all("SELECT ticket_key FROM ticket_handoffs WHERE state='blocked'"
+                           " AND ticket_key=ANY(%s)", (ticket_keys,))
+        return {row["ticket_key"] for row in rows}
+
+    def handoff_blocked(self, ticket_key: str) -> bool:
+        return bool(self.db.one("SELECT 1 AS blocked FROM ticket_handoffs WHERE ticket_key=%s"
+                                " AND state='blocked'", (ticket_key,)))
+
     def intake_wording_refusals(self, ticket: str) -> int:
         row = self.db.one("SELECT count(*) AS refusals FROM runs WHERE ticket_key=%s AND step='intake' "
                           "AND details->>'server_wording_refusal'='true'", (ticket,)) or {}

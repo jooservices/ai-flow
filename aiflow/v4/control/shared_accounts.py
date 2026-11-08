@@ -28,6 +28,7 @@ from .capacity import reported_run_tokens, reservation_tokens, unresolved_run_re
 from ..core.controlrepo import Account, ControlRepo
 from .application_context import ApplicationContext
 from .db import J
+from .repositories import claim_guards
 from . import shared_accounts_routes as account_route_work
 from .features.fleet.events import (SharedAccountCreated, SharedAccountMachineEnabled, SharedAccountMachineRemoved,
                                     SharedAccountRemoved, SharedAccountSessionLimitSet, SharedAccountSignInRetried)
@@ -298,6 +299,86 @@ def _quota_reservation_short(conn, acc: Account, quota_reservation_tokens: int) 
     return False
 
 
+def _lock_claim_capacity(conn, ticket_key: str, hostname: str, acc: Account) -> bool:
+    claim_guards.lock_ticket_handoff(conn, ticket_key)
+    if claim_guards.handoff_blocks_claim(conn, ticket_key):
+        return False
+    if hostname:
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("host-load:" + hostname,))
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
+    for machine in sorted(set(acc.machines)):
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                     (f"aiflow4-machine-sessions:{machine}",))
+    return True
+
+
+def _claim_within_runtime_limits(conn, node: str, hostname: str, max_node_runs: int | None,
+                                 max_host_runs: int | None) -> bool:
+    if max_node_runs is not None:
+        current = conn.execute("SELECT count(*) AS n FROM runs WHERE node=%s AND status='running'",
+                               (node,)).fetchone()
+        if int(current["n"] or 0) >= max_node_runs:
+            return False
+    if hostname and max_host_runs is not None:
+        current_host = conn.execute(
+            "SELECT count(*) AS n FROM runs r JOIN nodes n ON n.name=r.node"
+            " WHERE r.status='running' AND lower(n.metrics->>'hostname')=%s", (hostname,)).fetchone()
+        if int(current_host["n"] or 0) >= max_host_runs:
+            return False
+    return True
+
+
+def _assigned_claim_account(conn, acc: Account, node: str) -> tuple[Account, set[str]] | None:
+    stored = conn.execute("SELECT session_limit FROM shared_accounts WHERE id=%s", (acc.id,)).fetchone()
+    if stored:
+        acc = replace(acc, session_limit=int(stored["session_limit"]))
+    machine_account = conn.execute("SELECT node,removed_at FROM managed_ai_accounts WHERE id=%s",
+                                   (acc.id,)).fetchone()
+    if machine_account:
+        assigned = machine_account["removed_at"] is None and machine_account["node"] == node
+    else:
+        configured = node == acc.node and not conn.execute(
+            "SELECT 1 FROM account_machine_exclusions WHERE account_id=%s AND node=%s", (acc.id, node)).fetchone()
+        enabled = conn.execute("SELECT 1 FROM account_machines WHERE account_id=%s AND node=%s",
+                               (acc.id, node)).fetchone()
+        assigned = bool(configured or enabled)
+    if not assigned:
+        return None
+    pending = {row["node"] for row in conn.execute(
+        "SELECT node FROM account_machines WHERE account_id=%s AND status='pending'", (acc.id,))}
+    return None if node in pending else (acc, pending)
+
+
+def _shared_account_has_capacity(conn, acc: Account, node: str, machines: list[str], pending: set[str]) -> bool:
+    counts = {row["node"]: int(row["n"]) for row in conn.execute(
+        "SELECT node,count(*) AS n FROM runs WHERE account_id=%s AND status='running' GROUP BY node", (acc.id,))}
+    if not acc.session_limit:
+        return True
+    capacities = machine_capacities(conn, [machine for machine in machines if machine not in pending], acc.id)
+    if capacities.get(node, {}).get("free", 0) <= 0 or sum(counts.values()) >= acc.sessions:
+        return False
+    eligible = {machine: values["account"] for machine, values in capacities.items() if values["free"] > 0}
+    share = capacity_shares(acc.sessions, eligible).get(node, 0)
+    return counts.get(node, 0) < share
+
+
+def _quota_allows_claim(conn, acc: Account, reservation: int | None) -> tuple[bool, int | None]:
+    if reservation and reservation > 0:
+        if _quota_reservation_short(conn, acc, reservation):
+            return False, reservation
+    else:
+        reservation = None
+    return True, reservation
+
+
+def _insert_claimed_run(conn, values: tuple, run_details: dict | None, reservation: int | None) -> None:
+    details = dict(run_details or {})
+    if reservation:
+        details["quota_reservation"] = {"tokens": int(reservation)}
+    conn.execute("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence,"
+                 " token_hash,details) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (*values, J(details)))
+
+
 def claim_run(db, acc: Account, values: tuple, *, max_node_runs: int | None = None,
               hostname: str = "", max_host_runs: int | None = None,
               run_details: dict | None = None, quota_reservation_tokens: int | None = None) -> bool:
@@ -307,73 +388,21 @@ def claim_run(db, acc: Account, values: tuple, *, max_node_runs: int | None = No
         return False
     with db.pool.connection() as conn:
         with conn.transaction():
-            if hostname:
-                # Serialize claims by host so workers on separate machines share the same load budget.
-                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("host-load:" + hostname,))
-            conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
+            if not _lock_claim_capacity(conn, str(values[1]), hostname, acc):
+                return False
             machines = sorted(set(acc.machines))
-            # All claims take machine locks in the same order. Shared claims also use the locked counts to enforce
-            # their capacity-weighted share, including work claimed concurrently by a different account.
-            for machine in machines:
-                conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                             (f"aiflow4-machine-sessions:{machine}",))
-            if max_node_runs is not None:
-                current = conn.execute("SELECT count(*) AS n FROM runs WHERE node=%s AND status='running'",
-                                       (node,)).fetchone()
-                if int(current["n"] or 0) >= max_node_runs:
-                    return False
-            if hostname and max_host_runs is not None:
-                current_host = conn.execute(
-                    "SELECT count(*) AS n FROM runs r JOIN nodes n ON n.name=r.node"
-                    " WHERE r.status='running' AND lower(n.metrics->>'hostname')=%s", (hostname,)).fetchone()
-                if int(current_host["n"] or 0) >= max_host_runs:
-                    return False
-            # the limit is read under the lock, so a concurrent change is never missed
-            stored = conn.execute("SELECT session_limit FROM shared_accounts WHERE id=%s", (acc.id,)).fetchone()
-            if stored:
-                acc = replace(acc, session_limit=int(stored["session_limit"]))
-            machine_account = conn.execute("SELECT node,removed_at FROM managed_ai_accounts WHERE id=%s",
-                                            (acc.id,)).fetchone()
-            if machine_account:
-                assigned = machine_account["removed_at"] is None and machine_account["node"] == node
-            else:
-                configured_assignment = node == acc.node and not conn.execute(
-                    "SELECT 1 FROM account_machine_exclusions WHERE account_id=%s AND node=%s",
-                    (acc.id, node)).fetchone()
-                enabled_assignment = conn.execute(
-                    "SELECT 1 FROM account_machines WHERE account_id=%s AND node=%s", (acc.id, node)).fetchone()
-                assigned = bool(configured_assignment or enabled_assignment)
-            if not assigned:
+            if not _claim_within_runtime_limits(conn, node, hostname, max_node_runs, max_host_runs):
                 return False
-            pending = {row["node"] for row in conn.execute(
-                "SELECT node FROM account_machines WHERE account_id=%s AND status='pending'", (acc.id,))}
-            if node in pending:
+            assigned = _assigned_claim_account(conn, acc, node)
+            if assigned is None:
                 return False
-            counts = {row["node"]: int(row["n"]) for row in conn.execute(
-                "SELECT node,count(*) AS n FROM runs WHERE account_id=%s AND status='running' GROUP BY node",
-                (acc.id,))}
-            if acc.session_limit:
-                capacities = machine_capacities(conn, [m for m in machines if m not in pending], acc.id)
-                if capacities.get(node, {}).get("free", 0) <= 0:
-                    return False
-                if sum(counts.values()) >= acc.sessions:
-                    return False
-                eligible_capacities = {machine: values["account"] for machine, values in capacities.items()
-                                       if values["free"] > 0}
-                share = capacity_shares(acc.sessions, eligible_capacities).get(node, 0)
-                if counts.get(node, 0) >= share:
-                    return False
-            if quota_reservation_tokens and quota_reservation_tokens > 0:
-                if _quota_reservation_short(conn, acc, quota_reservation_tokens):
-                    return False
-            else:
-                quota_reservation_tokens = None
-            details = dict(run_details or {})
-            if quota_reservation_tokens:
-                details["quota_reservation"] = {"tokens": int(quota_reservation_tokens)}
-            conn.execute("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence,"
-                         " token_hash,details) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                         (*values, J(details)))
+            acc, pending = assigned
+            if not _shared_account_has_capacity(conn, acc, node, machines, pending):
+                return False
+            allowed, reservation = _quota_allows_claim(conn, acc, quota_reservation_tokens)
+            if not allowed:
+                return False
+            _insert_claimed_run(conn, values, run_details, reservation)
     return True
 
 

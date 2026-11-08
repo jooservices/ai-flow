@@ -113,6 +113,13 @@ def run_case(monkeypatch, tmp_path, result, changed):
     return dev.run_dev(api, claim, str(tmp_path), "https://control.example.test", 30, []), events
 
 
+def test_summary_helpers_extract_worker_summary_and_test_progress():
+    response = SimpleNamespace(final_text="SUMMARY: Implemented the change\nTESTS: pytest -q passed",
+                              error_message="provider stopped")
+    assert dev._summary_text(response) == "Implemented the change"
+    assert dev._test_progress_text(response) == "pytest -q passed"
+
+
 @pytest.mark.parametrize(
     ("result", "changed", "expected_outcome", "tail"),
     [

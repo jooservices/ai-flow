@@ -21,6 +21,8 @@ def register_listeners(ctx, registry: Registry) -> None:
                         run_id=item.run_id, fence=item.fence, account=item.account, provider=item.provider,
                         model=item.model or None, node=item.node, duration_ms=item.duration_ms, outcome=item.outcome,
                         reason=item.reason, **extra)
+        from ... import incidents
+        incidents.record_run_outcome(ctx, item)
 
 
 def run_finished(ctx, **fields) -> None:

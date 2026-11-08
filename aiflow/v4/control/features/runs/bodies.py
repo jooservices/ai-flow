@@ -63,9 +63,9 @@ class ResultBody(BaseModel):
     outcome: str
     error_kind: str = ""
     reset_at: datetime | None = None
-    tokens_in: int = 0
-    tokens_out: int = 0
-    cost_usd: float = 0.0
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cost_usd: float | None = None
     branch: str = Field(default="", max_length=240)
     pr_url: str = ""
     head_sha: str = ""

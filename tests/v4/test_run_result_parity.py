@@ -199,7 +199,9 @@ def test_prepare_run_result_removes_control_owned_and_raw_log_fields():
                                                          "support_log_text": "log", "support_log_truncated": True,
                                                          "kept": 1})
     details, run_log, outcome, error = routes._prepare_run_result(None, {"step": "dev"}, body, "node-a", False)
-    assert (details, run_log, outcome, error) == ({"kept": 1}, "log", "done", "")
+    unreported = {"tokens_in": False, "tokens_out": False, "cost_usd": False}  # the body reported no usage
+    assert (details, run_log, outcome, error) == (
+        {"kept": 1, "diagnostic_usage_reported": unreported}, "log", "done", "")
 
 
 def test_finish_run_result_preserves_update_decisions(monkeypatch):

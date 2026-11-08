@@ -172,9 +172,57 @@ function drawerAcc(id) {
   b += '<div class="dsec"><h4>Config directory</h4><div class="codeline"><code>/srv/aiflow/accounts/' + esc(a.id) + '</code></div></div>';
   return drawerShell('account · ' + esc(PROVIDER[a.provider] || a.provider), esc(a.id), pill(accTone(a), accLabel(a)), b);
 }
+function diagnosticValue(value) { return value == null || value === 'unavailable' ? 'Unavailable' : String(value); }
+function diagnosticRunCard(run) {
+  var node = run.node_heartbeat || {}, tests = typeof run.test_progress === 'string' ? run.test_progress : JSON.stringify(run.test_progress);
+  var usage = typeof run.tokens === 'number' ? tok(run.tokens) : diagnosticValue(run.tokens);
+  var cost = typeof run.cost_usd === 'number' ? '$' + run.cost_usd.toFixed(4) : diagnosticValue(run.cost_usd);
+  var h = '<section class="panel" style="margin-top:10px"><div class="panel-h"><h4>' + esc(run.step) + ' · ' + esc(run.run_id) + '</h4><span class="hint">' + esc(run.outcome) + '</span></div><div class="facts">';
+  h += fact('Started / ended', esc(when(run.started_at)) + ' / ' + esc(when(run.ended_at)));
+  h += fact('Duration', typeof run.duration_ms === 'number' ? mmss(run.duration_ms / 1000) : diagnosticValue(run.duration_ms));
+  h += fact('Node', '<span class="mono">' + esc(run.node) + '</span>') + fact('Account', esc(run.account));
+  h += fact('Provider / model', esc(run.provider) + ' / ' + esc(run.model)) + fact('Error kind', esc(run.error_kind));
+  h += fact('Run reason', esc(run.reason));
+  h += fact('Progress phase / last event', esc(run.progress_phase) + ' / ' + esc(run.last_progress_event));
+  h += fact('Tests / command progress', '<span style="white-space:pre-wrap">' + esc(tests) + '</span>');
+  h += fact('Tokens / cost', usage + ' · ' + cost);
+  h += fact('Node CPU', typeof node.cpu_pct === 'number' ? node.cpu_pct.toFixed(1) + '%' : diagnosticValue(node.cpu_pct));
+  h += fact('Node load', esc(diagnosticValue(node.load1)) + ' / ' + esc(diagnosticValue(node.cpus)) + ' CPUs');
+  h += fact('CPU load per CPU', esc(diagnosticValue(node.cpu_load_per_cpu)));
+  h += fact('Memory', esc(diagnosticValue(node.memory_used_pct)) + '% · ' + esc(diagnosticValue(node.memory_used_bytes)) +
+    ' / ' + esc(diagnosticValue(node.memory_total_bytes)) + ' bytes');
+  h += fact('Heartbeat before outcome', esc(diagnosticValue(node.heartbeat_at)));
+  h += '</div><div class="dsec"><a class="btn sm" href="' + esc(safeHref(run.run_log_url)) + '" target="_blank" rel="noopener">Open retained run log ' + ICON.ext + '</a>';
+  if (run.summary && run.summary !== 'unavailable') h += '<p class="small">' + esc(run.summary) + '</p>';
+  return h + '</div></section>';
+}
+function incidentHandoffBody(i, payload) {
+  var notification = payload.notification || {}, cause = payload.cause || {}, runs = payload.runs || [];
+  var h = '<div class="facts">' + fact('Handoff', esc(payload.handoff_state || 'blocked')) +
+    fact('Streak', esc(payload.streak_count) + ' consecutive unsuccessful runs') +
+    fact('Elapsed', typeof payload.elapsed_ms === 'number' ? mmss(payload.elapsed_ms / 1000) : 'Unavailable') +
+    fact('Notification', esc(notification.state || 'unavailable')) +
+    fact('Routed channels', esc((notification.channels || []).join(', ') || 'None')) + '</div>';
+  if (notification.configuration_gap) h += '<div class="offnote">' + esc(notification.configuration_gap) + '</div>';
+  h += '<div class="dsec"><h4>Evidence</h4><ul class="checklist">' + (cause.evidence || []).map(function (line) {
+    return '<li><span class="ico-ok">' + ICON.ok + '</span><span>' + esc(line) + '</span></li>';
+  }).join('') + '</ul></div>';
+  h += '<div class="dsec"><h4>Unknowns</h4>' + ((cause.unknowns || []).length ? '<ul class="checklist">' + cause.unknowns.map(function (line) {
+    return '<li><span class="ico-pend">' + ICON.pend + '</span><span>' + esc(line) + '</span></li>';
+  }).join('') + '</ul>' : '<div class="small">No missing measurements were reported.</div>') + '</div>';
+  h += '<div class="dsec"><h4>Last three diagnostics</h4>' + runs.map(diagnosticRunCard).join('') + '</div>';
+  if (payload.resolution) h += '<div class="dsec"><h4>Coordinator resolution</h4><div class="small">' + esc(payload.resolution.actor) + '</div><p>' + esc(payload.resolution.text) + '</p></div>';
+  else if (!i.closed_at && consoleCan('console.write')) {
+    h += '<div class="dsec"><h4>Resolve and requeue</h4><label for="handoff-resolution-' + esc(i.id) + '">Resolution and cause</label>';
+    h += '<textarea class="in" id="handoff-resolution-' + esc(i.id) + '" rows="4" minlength="10" maxlength="1000" placeholder="Describe the cause and resolution before requeueing."></textarea>';
+    h += '<button class="btn primary" style="margin-top:8px" data-act="resolve-handoff" data-id="' + esc(i.id) + '">Resolve and requeue to To Do</button>';
+  }
+  return h;
+}
 function drawerInc(id) {
   var i = incBy(id); if (!i) return drawerShell('incident', '#' + esc(id), '', '<div class="empty">Closed and no longer listed.</div>');
-  var b = '<div style="font-size:13.5px;white-space:pre-wrap">' + esc(i.detail) + '</div><div class="facts">' + fact('Kind', esc(KIND[i.kind] || i.kind)) + fact('Subject', '<span class="mono">' + esc(i.subject) + '</span>') + fact('Opened', when(i.opened_at)) + fact('Closed', i.closed_at ? when(i.closed_at) : 'open') + '</div>';
+  var handoff = incidentHandoff(i), b = handoff ? incidentHandoffBody(i, handoff) : '<div style="font-size:13.5px;white-space:pre-wrap">' + esc(i.detail) + '</div>';
+  b += '<div class="facts">' + fact('Kind', esc(KIND[i.kind] || i.kind)) + fact('Subject', '<span class="mono">' + esc(i.subject) + '</span>') + fact('Opened', when(i.opened_at)) + fact('Closed', i.closed_at ? when(i.closed_at) : 'open') + '</div>';
   b += '<div class="dsec"><h4>What happens</h4><div style="font-size:13px">' + ({
     node_down: 'Runs on the node keep their lease for 90 s; then the watchdog marks them lost and moves their tickets back to To Do with a comment. The incident closes on the next heartbeat.',
     account_quota: 'The account takes no ticket until it passes its next check; its tickets go to the other accounts.',
@@ -187,10 +235,25 @@ function drawerInc(id) {
     node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
     node_services: 'A test service (PostgreSQL or Redis) that a project declares is missing or unhealthy on this node, so the node takes no work for that project. The node agent recreates missing or stopped services; the incident closes when a later heartbeat reports them healthy.',
     service_undeclared: 'Tickets of a project are parked on a test service (PostgreSQL or Redis) that the project does not declare. The flow doctor declares it itself; this alert appears only when it could not. Add the service to Test services of the project on the Projects screen.',
-    ticket_stuck: 'Dev runs of this ticket keep failing. Retries wait longer each time (up to 30 minutes). Read the last run in the ticket drawer, fix the cause or put the ticket on hold.',
+    ticket_stuck: handoff ? 'Automatic claims stay blocked after three consecutive unsuccessful developer or verification runs. Review the evidence and unknowns, then resolve and requeue this ticket here.' : 'Repeated unsuccessful runs have triggered a warning. Open the incident details for the recorded evidence.',
     run_hard_limit: 'The run passed the hard limit; the worker stops it and the ticket goes back to To Do.'
   }[i.kind] || 'Handled by the watchdog.') + '</div></div>';
   return drawerShell('incident #' + esc(i.id), esc(i.title), pill(i.closed_at ? 'ok' : i.severity === 'critical' ? 'crit' : 'warn', i.closed_at ? 'Resolved' : i.severity), b);
+}
+function resolveHandoff(id) {
+  var input = $('#handoff-resolution-' + id), resolution = input ? input.value.trim() : '';
+  if (resolution.length < 10) { toast('Resolution required', 'Describe the cause and resolution in at least 10 characters.', 'warn'); return; }
+  fetch('/v1/incidents/' + encodeURIComponent(id) + '/resolve-and-requeue', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ resolution: resolution })
+  }).then(function (response) {
+    return response.json().then(function (data) {
+      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'HTTP ' + response.status);
+      return data;
+    });
+  }).then(function (data) {
+    toast('Ticket requeued', data.ticket + ' is back in To Do. The coordinator handoff is resolved.', 'ok');
+    poll();
+  }).catch(function (error) { toast('Could not requeue ticket', String(error.message || error), 'crit'); });
 }
 function drawerReport() {
   var r = S.drawer, label = r.epic ? esc(r.epic) : esc(r.id);

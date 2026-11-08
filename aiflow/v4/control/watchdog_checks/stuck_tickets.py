@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ..application_context import ApplicationContext
-from ..incidents import close_incident, open_incident
+from ..incidents import blocked_handoff_tickets, close_incident, open_incident
 from ..repositories.watchdog import LATEST_RUN_SUMMARY, OPEN_STUCK_INCIDENTS, STUCK_STREAK_SELECT
 
 
@@ -20,8 +20,11 @@ def stuck_tickets(ctx: ApplicationContext) -> None:
             open_incident(ctx, "ticket_stuck", key, "warning", f"{key} failed {fails} runs in a row",
                           f"Last error ({last['account_id'] if last else '?'}): {(last['summary'] if last else '')[:300]}."
                           " Retries wait up to 30 minutes; fix the cause or put the ticket on hold.")
+    blocked = blocked_handoff_tickets(ctx)
     for i in ctx.db.all(OPEN_STUCK_INCIDENTS):
         if i["subject"].startswith("tool_wait:"):
             continue  # tooling.check_stalled_waits owns the two-hour missing-requirement warning lifecycle
+        if i["subject"] in blocked:
+            continue
         if stuck.get(i["subject"], 0) < 3:
             close_incident(ctx, "ticket_stuck", i["subject"], "a run produced work again")

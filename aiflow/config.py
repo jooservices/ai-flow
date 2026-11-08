@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import socket
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,10 +17,57 @@ WORKSPACES_ROOT = Path(os.environ.get("AIFLOW_ROOT", PROJECT_DIR.parents[2])).re
 
 
 CONFIG_DIR = Path(os.environ.get("AIFLOW_CONFIG_DIR", WORKSPACES_ROOT / "JOOservices" / "config")).resolve()
+CONFIG_VERSION = re.compile(r"^#\s*aiflow-version:\s*(v?\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?)\s*$")
+RELEASE_VERSION = re.compile(r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?:(?P<pre>a|b|rc)(?P<serial>\d+))?$")
 
 
 class ConfigError(Exception):
     """A worker cannot start because its configuration is wrong (shown to the owner, no traceback)."""
+
+
+def _release_key(version: str) -> tuple[int, int, int, int, int]:
+    match = RELEASE_VERSION.fullmatch(version)
+    if not match:
+        raise ConfigError(f"Invalid AI Flow version `{version}`.")
+    prerelease = {"a": 0, "b": 1, "rc": 2, None: 3}[match.group("pre")]
+    return (int(match.group("major")), int(match.group("minor")), int(match.group("patch")), prerelease,
+            int(match.group("serial") or 0))
+
+
+def check_configuration_version(config_dir: Path, code_dir: Path) -> None:
+    """Reject a configuration bundle whose TOML files require code newer than `code_dir`."""
+    try:
+        code_version = tomllib.loads((code_dir / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+        code_key = _release_key(code_version)
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as error:
+        raise ConfigError(f"Cannot read the AI Flow version from {code_dir / 'pyproject.toml'}.") from error
+    paths = sorted([*config_dir.glob("*.toml"), *(config_dir / "aiflow").glob("*.toml")])
+    if not paths:
+        raise ConfigError(f"No TOML configuration files in {config_dir}.")
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as error:
+            raise ConfigError(f"Cannot read configuration file {path}.") from error
+        marker = next((match for line in lines if (match := CONFIG_VERSION.fullmatch(line))), None)
+        if marker is None:
+            raise ConfigError(f"{path}: add `# aiflow-version: <version>` before deploying this configuration.")
+        if _release_key(marker.group(1)) > code_key:
+            raise ConfigError(f"{path}: configuration version {marker.group(1)} is newer than code version {code_version}.")
+
+
+def deployment_targets(config_dir: Path) -> tuple[str, ...]:
+    """Return configured machine names, which deployment uses as SSH aliases."""
+    path = config_dir / "aiflow.toml"
+    try:
+        machines = tomllib.loads(path.read_text(encoding="utf-8")).get("machines", {})
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ConfigError(f"Cannot read deployment targets from {path}.") from error
+    if not isinstance(machines, dict) or not machines:
+        raise ConfigError(f"No deployment targets are configured in {path} [machines].")
+    if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", target) for target in machines):
+        raise ConfigError(f"{path} [machines]: every target name must be a valid SSH alias.")
+    return tuple(sorted(machines))
 
 
 def read_env_file(path: Path) -> dict[str, str]:

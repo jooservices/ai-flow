@@ -1,0 +1,551 @@
+#!/usr/bin/env python3
+"""Deploy fetched code and configuration to every machine in aiflow.toml."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import uuid
+from pathlib import Path
+
+
+VERSION_MISMATCH = re.compile(
+    r"(?P<path>.+): configuration version (?P<config>\S+) is newer than code version (?P<code>\S+)\."
+)
+RELEASE_VERSION = re.compile(r"v?\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?")
+SERVICE_UNITS = ("aiflow-control.service", "aiflow-health.timer")
+ENABLED_STATES = {"enabled", "enabled-runtime", "linked", "linked-runtime", "alias"}
+
+
+class ConfigurationVersionMismatch(Exception):
+    """A version error whose user-facing fields came from the validator."""
+
+    def __init__(self, path: str, config_version: str, code_version: str):
+        self.path = path
+        self.config_version = config_version
+        self.code_version = code_version
+        super().__init__("configuration version is newer than candidate code")
+
+    def as_json(self) -> dict[str, str]:
+        return {"kind": "configuration-version", "file": self.path,
+                "configuration_version": self.config_version, "code_version": self.code_version}
+
+
+def _config_api(code_dir: Path):
+    sys.path.insert(0, str(code_dir))
+    from aiflow.config import CONFIG_DIR, ConfigError, check_configuration_version, deployment_targets
+    return CONFIG_DIR, ConfigError, check_configuration_version, deployment_targets
+
+
+def _git(repository: Path, *arguments: str, check: bool = True) -> str:
+    result = subprocess.run(["git", "-C", str(repository), *arguments], capture_output=True, text=True)
+    if check and result.returncode:
+        raise RuntimeError("git operation failed")
+    return result.stdout.strip()
+
+
+def _deployment_branch(repository: Path) -> str:
+    branch = _git(repository, "rev-parse", "--abbrev-ref", "@{upstream}", check=False)
+    if not branch:
+        current = _git(repository, "branch", "--show-current")
+        branch = f"origin/{current}" if current else ""
+    if not branch:
+        raise RuntimeError("repository has no configured deployment branch")
+    return branch
+
+
+def _resolve_candidate(repository: Path) -> str:
+    branch = _deployment_branch(repository)
+    _git(repository, "fetch", "--prune", "origin")
+    return _git(repository, "rev-parse", f"{branch}^{{commit}}")
+
+
+def _is_ancestor(repository: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(["git", "-C", str(repository), "merge-base", "--is-ancestor", ancestor, descendant],
+                            capture_output=True, text=True)
+    if result.returncode == 1:
+        return False
+    if result.returncode:
+        raise RuntimeError("git ancestry check failed")
+    return True
+
+
+def _prepare_repo(repository: Path, worktree: Path, candidate: str | None = None) -> tuple[str, str]:
+    if _git(repository, "status", "--porcelain"):
+        raise RuntimeError("repository has uncommitted changes")
+    previous = _git(repository, "rev-parse", "HEAD")
+    branch = _deployment_branch(repository)
+    _git(repository, "fetch", "--prune", "origin")
+    selected = candidate or _git(repository, "rev-parse", f"{branch}^{{commit}}")
+    selected = _git(repository, "rev-parse", f"{selected}^{{commit}}")
+    if not _is_ancestor(repository, previous, selected):
+        raise RuntimeError("checkout is ahead of or diverged from the deployment candidate")
+    _git(repository, "worktree", "add", "--detach", str(worktree), selected)
+    return previous, selected
+
+
+def _activate_repo(repository: Path, previous: str, candidate: str) -> None:
+    current = _git(repository, "rev-parse", "HEAD")
+    if current != previous or _git(repository, "status", "--porcelain"):
+        raise RuntimeError("checkout changed after staging; refusing activation")
+    if previous != candidate:
+        _git(repository, "merge", "--ff-only", candidate)
+
+
+def _run(command: list[str], *, env: dict[str, str] | None = None) -> None:
+    result = subprocess.run(command, capture_output=True, text=True, env=env)
+    if result.returncode:
+        raise RuntimeError("deployment check or service operation failed")
+
+
+def _workspace_root(code_dir: Path) -> Path:
+    configured = os.environ.get("AIFLOW_ROOT")
+    if configured:
+        return Path(configured).resolve()
+    resolved = code_dir.resolve()
+    return resolved.parents[2] if len(resolved.parents) > 2 else resolved.parent
+
+
+def _check_candidate(code_tree: Path, config_tree: Path, live_root: Path) -> None:
+    _, config_error, check_version, _ = _config_api(code_tree)
+    try:
+        check_version(config_tree, code_tree)
+    except config_error as error:
+        mismatch = VERSION_MISMATCH.fullmatch(str(error))
+        if mismatch:
+            raise ConfigurationVersionMismatch(mismatch.group("path"), mismatch.group("config"),
+                                               mismatch.group("code")) from error
+        raise
+    environment = dict(os.environ)
+    environment["AIFLOW_ROOT"] = str(live_root)
+    environment["AIFLOW_CONFIG_DIR"] = str(config_tree)
+    _run([str(code_tree / "bin" / "aiflow-work"), "check"], env=environment)
+
+
+def _set_manager_config(config_dir: Path) -> None:
+    _run(["systemctl", "--user", "set-environment", f"AIFLOW_CONFIG_DIR={config_dir}"])
+
+
+def _restart_services(code_dir: Path, config_dir: Path, live_root: Path) -> None:
+    operating_system = platform.system()
+    if operating_system == "Linux":
+        _set_manager_config(config_dir)
+        environment = dict(os.environ)
+        environment["AIFLOW_ROOT"] = str(live_root)
+        environment["AIFLOW_CONFIG_DIR"] = str(config_dir)
+        _run([str(code_dir / "bin" / "install-wsl-service"), "--control"], env=environment)
+        _run(["systemctl", "--user", "restart", "aiflow-control.service"], env=environment)
+    elif operating_system != "Darwin":
+        raise RuntimeError("deployment target must run Linux or macOS")
+
+
+def _restart_workers(code_dir: Path, config_dir: Path, live_root: Path) -> None:
+    environment = dict(os.environ)
+    environment["AIFLOW_ROOT"] = str(live_root)
+    environment["AIFLOW_CONFIG_DIR"] = str(config_dir)
+    _run([str(code_dir / "bin" / "aiflow-work"), "restart"], env=environment)
+
+
+def _lock_path(target: str) -> Path:
+    key = hashlib.sha256(target.encode("utf-8")).hexdigest()
+    return Path(tempfile.gettempdir()) / f"aiflow-deploy-lock-{key}"
+
+
+def _acquire_lock(target: str, deployment_id: str) -> Path:
+    lock = _lock_path(target)
+    try:
+        lock.mkdir(mode=0o700)
+    except FileExistsError as error:
+        raise RuntimeError("another deployment is staged for this target") from error
+    try:
+        (lock / "owner").write_text(deployment_id, encoding="utf-8")
+    except OSError:
+        shutil.rmtree(lock, ignore_errors=True)
+        raise RuntimeError("cannot write deployment lock")
+    return lock
+
+
+def _release_lock(target: str, deployment_id: str) -> None:
+    lock = _lock_path(target)
+    owner = lock / "owner"
+    try:
+        if owner.read_text(encoding="utf-8") == deployment_id:
+            shutil.rmtree(lock)
+    except FileNotFoundError:
+        return
+
+
+def _write_record(stage: Path, record: dict) -> None:
+    temporary = stage / "state.json.tmp"
+    temporary.write_text(json.dumps(record), encoding="utf-8")
+    temporary.replace(stage / "state.json")
+
+
+def _copy_unit_entry(source: Path, destination: Path) -> None:
+    if source.is_symlink():
+        destination.symlink_to(os.readlink(source))
+    elif source.is_dir():
+        shutil.copytree(source, destination, symlinks=True)
+    elif source.is_file():
+        shutil.copy2(source, destination)
+
+
+def _systemctl_output(*arguments: str) -> str:
+    result = subprocess.run(["systemctl", "--user", *arguments], capture_output=True, text=True)
+    output = result.stdout.strip()
+    accepted = {
+        "is-active": {"active", "activating", "reloading", "inactive", "deactivating", "failed"},
+        "is-enabled": {"enabled", "enabled-runtime", "linked", "linked-runtime", "alias", "disabled",
+                       "masked", "static", "indirect", "generated", "transient", "not-found"},
+    }
+    if arguments[0] in accepted:
+        if output in accepted[arguments[0]]:
+            return output
+        raise RuntimeError("cannot capture the current service state")
+    if result.returncode:
+        raise RuntimeError("cannot capture the current service state")
+    return output
+
+
+def _capture_service_state(stage: Path) -> dict:
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    backup = stage / "units-before"
+    backup.mkdir()
+    if unit_dir.is_dir():
+        for entry in unit_dir.glob("aiflow-*"):
+            _copy_unit_entry(entry, backup / entry.name)
+    units = {}
+    for unit in SERVICE_UNITS:
+        active = _systemctl_output("is-active", unit)
+        enabled = _systemctl_output("is-enabled", unit)
+        units[unit] = {"active": active, "enabled": enabled, "has_file": (backup / unit).exists()}
+    environment = _systemctl_output("show-environment")
+    manager_config = next((line.partition("=")[2] for line in environment.splitlines()
+                           if line.startswith("AIFLOW_CONFIG_DIR=")), None)
+    return {"unit_backup": str(backup), "unit_dir": str(unit_dir), "units": units,
+            "manager_config_dir": manager_config}
+
+
+def _restore_service_state(snapshot: dict) -> None:
+    unit_dir, backup = Path(snapshot["unit_dir"]), Path(snapshot["unit_backup"])
+    errors = []
+
+    def run(command: list[str]) -> None:
+        try:
+            _run(command)
+        except Exception:
+            errors.append("a service state command failed")
+
+    for unit in SERVICE_UNITS:
+        run(["systemctl", "--user", "stop", unit])
+    if unit_dir.exists():
+        for entry in unit_dir.glob("aiflow-*"):
+            try:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+            except OSError:
+                errors.append("could not restore previous service unit files")
+    try:
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        for entry in backup.glob("aiflow-*"):
+            _copy_unit_entry(entry, unit_dir / entry.name)
+    except OSError:
+        errors.append("could not restore previous service unit files")
+    run(["systemctl", "--user", "daemon-reload"])
+    manager_config = snapshot["manager_config_dir"]
+    if manager_config is None:
+        run(["systemctl", "--user", "unset-environment", "AIFLOW_CONFIG_DIR"])
+    else:
+        run(["systemctl", "--user", "set-environment", f"AIFLOW_CONFIG_DIR={manager_config}"])
+    for unit, state in snapshot["units"].items():
+        if not state["has_file"]:
+            continue
+        enabled = state["enabled"]
+        if enabled in ENABLED_STATES:
+            run(["systemctl", "--user", "enable", unit])
+        elif enabled == "masked":
+            run(["systemctl", "--user", "mask", unit])
+        elif enabled in {"disabled", "not-found"}:
+            run(["systemctl", "--user", "disable", unit])
+        if state["active"] in {"active", "activating", "reloading"}:
+            run(["systemctl", "--user", "start", unit])
+        else:
+            run(["systemctl", "--user", "stop", unit])
+    if errors:
+        raise RuntimeError("; ".join(sorted(set(errors))))
+
+
+def _stage_target(code_dir: Path, config_dir: Path, deployment_id: str, target: str,
+                  code_candidate: str, live_root: Path) -> list[str]:
+    lock = _acquire_lock(target, deployment_id)
+    stage = Path(tempfile.gettempdir()) / f"aiflow-deploy-{deployment_id}"
+    created = False
+    try:
+        stage.mkdir(mode=0o700)
+        created = True
+        code_tree, config_tree = stage / "code", stage / "config"
+        code_before, code_after = _prepare_repo(code_dir, code_tree, code_candidate)
+        config_before, config_after = _prepare_repo(config_dir, config_tree)
+        _check_candidate(code_tree, config_tree, live_root)
+        _, _, _, targets_for = _config_api(code_tree)
+        inventory = list(targets_for(config_tree))
+        record = {"target": target, "lock": str(lock), "code": str(code_dir), "config": str(config_dir),
+                  "code_before": code_before, "code_after": code_after,
+                  "config_before": config_before, "config_after": config_after,
+                  "live_root": str(live_root), "inventory": inventory, "service_state": None}
+        _write_record(stage, record)
+        return inventory
+    except Exception:
+        if created:
+            _git(config_dir, "worktree", "remove", "--force", str(stage / "config"), check=False)
+            _git(code_dir, "worktree", "remove", "--force", str(stage / "code"), check=False)
+            shutil.rmtree(stage, ignore_errors=True)
+        _release_lock(target, deployment_id)
+        raise
+
+
+def _remove_stage(stage: Path, record: dict) -> None:
+    _git(Path(record["config"]), "worktree", "remove", "--force", str(stage / "config"), check=False)
+    _git(Path(record["code"]), "worktree", "remove", "--force", str(stage / "code"), check=False)
+    shutil.rmtree(stage, ignore_errors=True)
+
+
+def _rollback_repository(repository: Path, previous: str, candidate: str) -> None:
+    current = _git(repository, "rev-parse", "HEAD")
+    if current == previous:
+        if _git(repository, "status", "--porcelain"):
+            raise RuntimeError(f"cannot roll back {repository}: checkout changed after staging; changes were left intact")
+        return
+    if current != candidate or _git(repository, "status", "--porcelain"):
+        raise RuntimeError(f"cannot roll back {repository}: checkout changed after staging; changes were left intact")
+    _git(repository, "reset", "--hard", previous)
+
+
+def _rollback_target(record: dict) -> list[str]:
+    errors = []
+    for name, previous, candidate in (("config", record["config_before"], record["config_after"]),
+                                      ("code", record["code_before"], record["code_after"])):
+        try:
+            _rollback_repository(Path(record[name]), previous, candidate)
+        except Exception as error:
+            errors.append(str(error))
+    if record.get("service_state"):
+        try:
+            _restore_service_state(record["service_state"])
+        except Exception:
+            errors.append("could not restore previous service state and unit files")
+    return errors
+
+
+def _finish_target(deployment_id: str, action: str, target: str) -> None:
+    stage = Path(tempfile.gettempdir()) / f"aiflow-deploy-{deployment_id}"
+    state_path = stage / "state.json"
+    if not state_path.is_file():
+        if action == "abort":
+            _release_lock(target, deployment_id)
+            return
+        raise RuntimeError("deployment stage is missing")
+    record = json.loads(state_path.read_text(encoding="utf-8"))
+    if record["target"] != target:
+        raise RuntimeError("deployment stage belongs to another target")
+    if action == "apply":
+        code_dir, config_dir = Path(record["code"]), Path(record["config"])
+        _activate_repo(code_dir, record["code_before"], record["code_after"])
+        _activate_repo(config_dir, record["config_before"], record["config_after"])
+        if platform.system() == "Linux":
+            record["service_state"] = _capture_service_state(stage)
+            _write_record(stage, record)
+        _restart_services(code_dir, config_dir, Path(record["live_root"]))
+        return
+    if action == "abort":
+        errors = _rollback_target(record)
+        _remove_stage(stage, record)
+        _release_lock(target, deployment_id)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        return
+    if action == "finalize":
+        _remove_stage(stage, record)
+        _release_lock(target, deployment_id)
+        return
+    raise RuntimeError("unknown deployment operation")
+
+
+def _remote_main(arguments: list[str]) -> int:
+    mode, deployment_id, code_path, config_path, code_candidate, target = arguments
+    home = Path.home()
+    code_dir = Path(code_path or os.environ.get("AIFLOW_DEPLOY_CODE_DIR", home / "Workspaces" / "JOOservices" / "projects" / "ai-flow"))
+    config_dir = Path(config_path or os.environ.get("AIFLOW_CONFIG_DIR", home / "Workspaces" / "JOOservices" / "config"))
+    live_root = _workspace_root(code_dir)
+    try:
+        if mode == "stage":
+            inventory = _stage_target(Path(code_dir), Path(config_dir), deployment_id, target,
+                                      code_candidate, live_root)
+            print(json.dumps({"inventory": inventory}))
+        elif mode in {"apply", "abort", "finalize"}:
+            _finish_target(deployment_id, mode, target)
+        elif mode == "restart-workers":
+            _restart_workers(code_dir, config_dir, live_root)
+        else:
+            raise RuntimeError("unknown deployment operation")
+        return 0
+    except ConfigurationVersionMismatch as error:
+        print(json.dumps(error.as_json()), file=sys.stderr)
+        return 1
+    except Exception as error:
+        print(f"deployment failed: {error}", file=sys.stderr)
+        return 1
+
+
+def _ssh(target: str, script: bytes, mode: str, deployment_id: str, code_candidate: str) -> subprocess.CompletedProcess:
+    remote_code = os.environ.get("AIFLOW_DEPLOY_REMOTE_CODE_DIR", "")
+    remote_config = os.environ.get("AIFLOW_DEPLOY_REMOTE_CONFIG_DIR", "")
+    remote_command = shlex.join(["python3", "-", "--remote", mode, deployment_id,
+                                 remote_code, remote_config, code_candidate, target])
+    return subprocess.run(["ssh", target, remote_command], input=script, capture_output=True)
+
+
+def _output_text(value: bytes | str | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return (value or "").strip()
+
+
+def _preflight_detail(stderr: bytes | str | None) -> str:
+    try:
+        payload = json.loads(_output_text(stderr))
+    except (json.JSONDecodeError, TypeError):
+        return "preflight failed"
+    if (not isinstance(payload, dict) or payload.get("kind") != "configuration-version"
+            or not isinstance(payload.get("file"), str)
+            or not RELEASE_VERSION.fullmatch(str(payload.get("configuration_version", "")))
+            or not RELEASE_VERSION.fullmatch(str(payload.get("code_version", "")))):
+        return "preflight failed"
+    filename = json.dumps(payload["file"], ensure_ascii=True)
+    return (f"preflight failed: configuration file {filename} requires code version "
+            f"{payload['configuration_version']} (candidate code is {payload['code_version']})")
+
+
+def _stage_inventory(stdout: bytes | str | None) -> list[str]:
+    try:
+        payload = json.loads(_output_text(stdout))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    inventory = payload.get("inventory") if isinstance(payload, dict) else None
+    if not isinstance(inventory, list):
+        return []
+    return sorted({name for name in inventory if isinstance(name, str)
+                   and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name)})
+
+
+def _stage_all(targets: tuple[str, ...], script: bytes, deployment_id: str,
+               code_candidate: str) -> tuple[dict[str, str], set[str], tuple[str, ...]]:
+    failed: dict[str, str] = {}
+    staged = set()
+    pending = list(sorted(set(targets)))
+    attempted = set()
+    while pending:
+        target = pending.pop(0)
+        if target in attempted:
+            continue
+        attempted.add(target)
+        result = _ssh(target, script, "stage", deployment_id, code_candidate)
+        if result.returncode:
+            failed[target] = _preflight_detail(result.stderr)
+            continue
+        staged.add(target)
+        for candidate_target in _stage_inventory(result.stdout):
+            if candidate_target not in attempted and candidate_target not in pending:
+                pending.append(candidate_target)
+        pending.sort()
+    return failed, staged, tuple(sorted(attempted))
+
+
+def _report_preflight_failure(targets: tuple[str, ...], failed: dict[str, str], script: bytes,
+                              deployment_id: str, code_candidate: str) -> bool:
+    if not failed:
+        return False
+    for target in targets:
+        _ssh(target, script, "abort", deployment_id, code_candidate)
+    for target in targets:
+        status = failed.get(target, "skipped (another target failed its check)")
+        print(f"{target}: {status}")
+    return True
+
+
+def _abort_fleet(targets: tuple[str, ...], script: bytes, deployment_id: str,
+                 code_candidate: str) -> dict[str, tuple[int, str]]:
+    results = {}
+    for target in targets:
+        result = _ssh(target, script, "abort", deployment_id, code_candidate)
+        error = _output_text(result.stderr)
+        detail = ("checkout changes were left intact during rollback"
+                  if "changes were left intact" in error else "rollback could not fully restore target state")
+        results[target] = (result.returncode, detail)
+    return results
+
+
+def _apply_all(targets: tuple[str, ...], script: bytes, deployment_id: str, code_candidate: str) -> int:
+    results = {}
+    for target in targets:
+        results[target] = _ssh(target, script, "apply", deployment_id, code_candidate).returncode
+        if results[target]:
+            rollback = _abort_fleet(targets, script, deployment_id, code_candidate)
+            for current in targets:
+                rollback_code, rollback_detail = rollback[current]
+                if rollback_code:
+                    status = f"rollback failed (exit {rollback_code}; {rollback_detail})"
+                elif results.get(current, 0):
+                    status = f"failed (activation exit {results[current]})"
+                else:
+                    status = "rolled back after fleet activation failure"
+                print(f"{current}: {status}")
+            return 1
+    result = _ssh(targets[0], script, "restart-workers", deployment_id, code_candidate)
+    if result.returncode:
+        rollback = _abort_fleet(targets, script, deployment_id, code_candidate)
+        for current in targets:
+            rollback_code, rollback_detail = rollback[current]
+            status = (f"rollback failed (exit {rollback_code}; {rollback_detail})" if rollback_code
+                      else f"rolled back after worker restart exit {result.returncode}")
+            print(f"{current}: {status}")
+        return 1
+    finalized = {target: _ssh(target, script, "finalize", deployment_id, code_candidate).returncode
+                 for target in targets}
+    for target in targets:
+        status = "deployed" if finalized[target] == 0 else f"deployed (cleanup failed, exit {finalized[target]})"
+        print(f"{target}: {status}")
+    return 1 if any(finalized.values()) else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["--remote"] and len(args) == 7:
+        return _remote_main(args[1:])
+    code_dir = Path(os.environ.get("AIFLOW_DEPLOY_CODE_DIR", Path(__file__).resolve().parents[1])).resolve()
+    default_config_dir, _, _, targets_for = _config_api(code_dir)
+    config_dir = Path(os.environ.get("AIFLOW_CONFIG_DIR", default_config_dir)).resolve()
+    try:
+        targets = targets_for(config_dir)
+        code_candidate = _resolve_candidate(code_dir)
+    except Exception as error:
+        print(f"deployment configuration error: {error}", file=sys.stderr)
+        return 2
+    deployment_id, script = uuid.uuid4().hex, Path(__file__).read_bytes()
+    failed, _, all_targets = _stage_all(targets, script, deployment_id, code_candidate)
+    if _report_preflight_failure(all_targets, failed, script, deployment_id, code_candidate):
+        return 1
+    return _apply_all(all_targets, script, deployment_id, code_candidate)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,4 +1,5 @@
 # AI review rounds
+**Console screens:** `cc`
 
 Verification records finding IDs, original wording, current status and first-seen round in each completed review run.
 The next reviewer receives that history in `prompts/v4/verify.md`, checks earlier findings first, then reports fixed,
@@ -17,3 +18,9 @@ ticket, active findings per review and new findings from round two onward.
 To add a review-history field, update `core/review_findings.py`, pass it through the verifier run details and cover
 both the parser and claim context. To add a metric, update the review-round model, repository, service, Dashboard route
 and console panel together; keep project scoping in the route.
+
+## Routes
+
+- `GET /v1/dashboard/review-rounds` Returns merged-ticket review-round and finding-count metrics within the caller's Dashboard project scope.
+- `POST /v1/work/claim` Claims an eligible ticket step for a worker and returns its work payload, including prior finding history for verification claims.
+- `POST /v1/runs/{run_id}/result` Records a worker's result and applies a validated split plan when an Intake result carries one.

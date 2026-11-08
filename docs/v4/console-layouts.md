@@ -47,6 +47,8 @@ The Dashboard block `conflict-loss` ("Lost to merge conflicts", full width by de
 verifications lost to conflicts, the time spent on them and the trend. It is described in
 [Fewer merge conflicts](merge-conflicts.md), which also covers the Delivery Analytics panel.
 
+The Dashboard block `review-rounds` shows the average completed review rounds against target and findings for each round.
+
 ## Role defaults
 
 Without a saved layout a person gets the default of their role. `ROLE_PROFILE` maps the current role names in

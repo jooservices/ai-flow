@@ -9,6 +9,8 @@ Before changing code on every developer run, read `docs/v4/architecture.md` and 
 check layer dependencies, registration points, function size and complexity. Include the architecture document in
 the run notes, together with any architecture checks that found a mismatch.
 {rework}
+For a rework, keep each finding ID stable while you work. In FINDING ANSWERS, answer every listed ID with the code
+change and test that address it, or explain why the existing code needs no change. Do not say only “fixed”.
 How to work, in this order. A change that goes back from review costs a full development run and a full review,
 so the aim is a change a careful reviewer finds nothing in the first time.
 1. Requirements ledger. Before writing code, list every acceptance criterion (AC1, AC2...), every rule, every
@@ -78,6 +80,11 @@ Test order and time budget:
 
 Finish your reply with these lines, exactly:
 SUMMARY: <two or three sentences: what changed and how it meets the acceptance criteria>
+For a rework, include per-ID answers in the summary hand-over under this heading before TESTS. Answer every finding ID
+from the list above exactly once; state what changed and where, or why no change is needed. Do not omit an ID or answer
+a fixed finding again.
+FINDING ANSWERS:
+- F1: <what changed or why no change is needed>
 TESTS: <which checks and tests you ran and their result>
 AC-MAP:
 - AC1: <file or function that implements it> | <test that proves it>

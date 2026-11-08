@@ -15,6 +15,11 @@ Do this:
    Code quality does not depend on any bot reviewer: fail the review when the change grows a central file instead of adding a module, duplicates logic, swallows an error or adds a ruff, function-size or layer finding (`python3 -m aiflow.v4.core.quality_checks check`).
    Use `docs/v4/architecture.md` as the architecture checklist: verify layer ownership and dependency direction,
    registration points, the named patterns, and the principle checks for the changed code.
+   Check the earlier review findings below before looking for new issues. For each earlier ID, inspect the changed
+   code and the developer's matching `FINDING ANSWERS` entry. Mark it `FIXED` only when the code and test prove the
+   fix, or the developer's reason for no change is correct. Otherwise mark it `NOT FIXED`. Keep its ID and wording
+   unchanged when it remains unresolved. Then inspect the whole change for new blocking defects and mark each one
+   `NEW`. Report every blocking finding together.
 3. Run the project's checks and the tests of this change:
 {checks}
    A check that cannot run here (Docker, network) is not a failure; say so. A check that runs and fails is.
@@ -33,6 +38,8 @@ Rules:
 The developer's summary, with the AC-MAP and SELF-REVIEW it handed over (check every AC-MAP entry against the code
 and the test it names; an entry that does not hold, or a criterion missing from the map, is a finding):
 {dev_summary}
+Earlier review findings and their latest states (check each before new findings):
+{review_history}
 {related}{environment}
 A criterion that can only be proven in the project's configured environment is checked by AI Flow after the ticket is
 merged, whether or not the ticket belongs to a Jira version. The post-merge worker runs the configured command mapped
@@ -45,12 +52,15 @@ Ticket description:
 ---
 
 Finish your reply with these lines, exactly:
+REVIEW FINDINGS:
+- <each earlier finding ID once, marked [FIXED] or [NOT FIXED]; repeat its wording after [NOT FIXED]>
+- NEW: <one line per new blocking finding>
 CHECKS: <which checks you ran and their result>
 VERDICT: PASS
 or
 VERDICT: FAIL
 FINDINGS:
-- <file or area>: <what is wrong and how to fix it>
+- <number>. <finding ID>: <earlier wording exactly, or new finding wording>
 - ...
 or, only when the review environment itself does not work (commands cannot start, the worktree is missing):
 VERDICT: BLOCKED

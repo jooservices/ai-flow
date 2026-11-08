@@ -165,8 +165,7 @@ def render_dashboard(state: dict, analytics: list[dict] | None = None,
                      weekly_report: dict | None = None, dashboard_tab: str = "work",
                      dashboard_waiting_keys: list[str] | None = None,
                      console_user: dict | None = None,
-                     dashboard_quotas: list[dict] | None = None,
-                     dashboard_review_rounds: dict | None = None) -> str:
+                     dashboard_quotas: list[dict] | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console Dashboard")
@@ -187,8 +186,6 @@ S.consoleUser = {json.dumps(console_user or console_session('owner'))};
 S.dashboardQuota.rows = {json.dumps(dashboard_quotas)};
 S.dashboardQuota.user = S.consoleUser.user || '';
 S.dashboardQuota.loadedAt = {"Date.now()" if dashboard_quotas is not None else "0"};
-S.dashboardReviewRounds.data = {json.dumps(dashboard_review_rounds)};
-S.dashboardReviewRounds.loadedAt = {"Date.now()" if dashboard_review_rounds is not None else "0"};
 S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
 S.esc.data = {json.dumps(ESCALATIONS)};
 renderDashboard();
@@ -1512,7 +1509,6 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
     assert "Share of usage · last 14 days" in ai_tab and "Quota by AI" in ai_tab
     assert '.provider-chart text{fill:var(--muted)' in console_template()
 
-
     # JAIF-255: escalations per week by class and project, the share without a person, the register and amendments
     for text in ("Escalations and owner decisions", "66.7% resolved without a person", "falling since last week",
                  "Top three causes", "Provision the tool.", "New business decision (person)", "JAIF",
@@ -1553,22 +1549,6 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
     assert "Tokens · today" in account_detail and "Cost · today" in account_detail
     assert "<td>120</td><td>$0.030</td>" in account_detail
     assert "<td>30</td><td>$0.010</td>" in account_detail
-
-
-def test_dashboard_shows_review_round_target_and_findings_by_round():
-    state = {"projects": [], "tickets": [], "nodes": [], "accounts": [], "active_runs": [],
-             "recent_runs": [], "incidents": [], "events": [], "totals": {}, "versions": {}}
-    metrics = {"target_rounds": 2, "merged_tickets": 1, "average_rounds": 2.0,
-               "tickets": [{"key": "ALPHA-1", "rounds": 2,
-                            "reviews": [{"round": 1, "findings": 2, "new_findings": 0},
-                                        {"round": 2, "findings": 2, "new_findings": 1}]}]}
-
-    rendered = render_dashboard(state, dashboard_review_rounds=metrics)
-
-    assert "AI review rounds" in rendered and "target average 2 rounds" in rendered
-    assert "Average rounds" in rendered and "2.00 / 2 target" in rendered
-    assert "ALPHA-1" in rendered and "New findings · rounds 2+" in rendered
-    assert "<td>2</td><td>2</td><td>1</td>" in rendered
 
 
 def test_dashboard_role_without_machines_access_sees_safe_quota_and_reset_summary():

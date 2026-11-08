@@ -1,0 +1,1 @@
+- [Canary reach](../../../docs/v4/canary-reach.md): a newer merge does not restart the canary; thresholds are settings; idle canaries are judged on health; the Dashboard shows merge lag

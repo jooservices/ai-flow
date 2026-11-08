@@ -20,6 +20,29 @@ function incidentPreview(i) {
   if ((payload.notification || {}).configuration_gap) note += ' · ' + payload.notification.configuration_gap;
   return note;
 }
+function controlCanaryPanel(canary) {
+  var pending = Number(canary.pending_merges || 0);
+  var age = canary.oldest_pending_age_s;
+  var live = (canary.merge_to_live || []).slice(0, 5);
+  var h = '<section class="panel" data-block="control-canary" aria-labelledby="dashboard-canary-title">' +
+    '<div class="panel-h"><h2 id="dashboard-canary-title">Control plane canary</h2>' +
+    '<span class="hint">Running build, canary under test, and merges not live yet</span>' +
+    '<span class="spacer"></span><button class="btn sm" data-act="view" data-view="settings">Canary settings</button></div>';
+  h += '<div class="chiprow" aria-label="Control canary status">';
+  h += '<div class="review-card"><span class="label">Running build</span><div class="mono">' +
+    esc(canary.running_build || '—') + '</div><div class="small">CURRENT on the control plane</div></div>';
+  h += '<div class="review-card"><span class="label">Build in canary</span><div class="mono">' +
+    esc(canary.canary_build || 'none') + '</div><div class="small">Candidate under observation</div></div>';
+  h += '<div class="review-card"><span class="label">Merged, not live</span><div class="mono">' +
+    pending + '</div><div class="small">' +
+    (age == null ? 'No backlog' : 'Oldest ' + ago(age)) + '</div></div></div>';
+  if (live.length) {
+    h += '<div class="small">Recent merge-to-live times: ' + live.map(function (row) {
+      return esc(row.build) + ' in ' + Math.round(Number(row.seconds || 0) / 60) + ' min';
+    }).join(' · ') + '</div>';
+  }
+  return h + '</section>';
+}
 function dashboardProjectCounts(projectKey) {
   var allTickets = D().tickets;
   var allRows = allTickets.filter(function (t) { return t.project === projectKey; });
@@ -228,6 +251,7 @@ function renderDashboard() {
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="waiting"><span class="label">Waiting for you</span><span class="kpi-main"><span class="value">' + (S.dashboardWaiting.keys === null && S.dashboardWaiting.loading ? '—' : waitingCount) + '</span>' + dashboardSpark(waitingTrend, 'var(--warn)') + '</span><span class="kpi-delta">' + (waitingCount ? 'Needs a person' : 'All clear') + '</span><span class="detail">Questions, decisions and reviews</span></button>';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="ai-usage"><span class="label">AI usage today</span><span class="kpi-main"><span class="value">' + tok(usage.tokensToday) + ' <small>tokens</small></span>' + dashboardSpark(days.map(function (day) { return usage.tokenDays[day] || 0; }), 'var(--provider-claude)') + '</span><span class="kpi-delta">' + (usage.costToday ? 'Approx. $' + usage.costToday.toFixed(4) : 'Approx. $0.0000') + '</span><span class="detail">Approximate cost today</span></button></div>';
   h += '<section class="panel" data-block="conflict-loss">' + conflictLossBlock() + '</section>';
+  h += controlCanaryPanel(d.control_canary || {});
   h += '<section class="panel" data-block="flow" aria-labelledby="dashboard-flow-title"><div class="panel-h"><h2 id="dashboard-flow-title">Flow at a glance</h2><span class="hint">Tickets across every project</span></div><div class="dash-flow">' + flow + '</div></section>';
   h += '<section class="panel" data-block="projects"><div class="panel-h"><h2>Projects</h2><span class="hint">' + projectRows.length + ' shown · choose a project to open its board</span></div>';
   h += '<div class="dash-tools"><label for="dash-project-search">Search projects</label><input class="in" id="dash-project-search" type="search" placeholder="Name or key" value="' + esc(S.dashboardQuery) + '"></div>';

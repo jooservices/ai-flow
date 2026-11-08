@@ -646,7 +646,7 @@ def test_autodeploy_rolls_back_a_canary_that_never_installs_within_the_timeout(t
     assert state is None
     assert (releases / "CANARY_REJECTED").read_text().strip() == "v4.3.0"
     assert "canary record-rollback --node canary --target v4.3.0 --previous v4.2.0 --commit abcdef0123456789" in calls
-    assert "was not installed on canary within 1800s" in calls
+    assert "was not installed on canary within 900s" in calls
     assert "alert [CRITICAL] AI Flow: canary v4.3.0 rolled back" in calls
     assert "deploy v4.3.0" not in calls
 
@@ -807,7 +807,7 @@ def test_develop_autodeploy_rolls_back_canary_only_when_fake_two_release_registr
     assert (releases / "CANARY_REJECTED").read_text().strip() == target
     expected_rollback = f"canary record-rollback --node canary --target {target} --previous {previous} --commit abcdef0123456789abcdef0123456789abcdef01"
     assert expected_rollback in calls
-    assert "--minimum-age-s 1200 --minimum-runs 5 --maximum-age-s 3600 --failure-ratio 2 --minimum-infra-failures 3" in calls
+    assert "--from-settings --failure-ratio 2 --minimum-infra-failures 3" in calls
     assert "develop-deploy  abcdef0123" not in calls
     assert [node["release"] for node in json.loads(state_file.read_text())["nodes"]] == [target, previous]
 
@@ -833,7 +833,7 @@ def test_develop_autodeploy_records_under_observed_promotion_at_maximum_age(tmp_
     assert current == "abcdef0123"
     assert canary is None
     assert "canary record-promotion --node canary --target abcdef0123" in calls
-    assert "--minimum-runs 5" in calls
+    assert "--minimum-runs 3" in calls
 
 
 

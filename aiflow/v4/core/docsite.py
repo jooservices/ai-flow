@@ -60,7 +60,8 @@ TOPIC_DOCS = {"scale-proof": "docs/v4/scale-proof.md",
 UI_EXTENSION_VIEWS = {"system-check.js": {"system-check", "projects"},
                       "load-policy.js": {"cc", "machines"},
                       "dashboard-timeouts.js": {"cc"},
-                      "dashboard-silent-runs.js": {"cc"}}
+                      "dashboard-silent-runs.js": {"cc"},
+                      "canary_settings.js": {"settings"}}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
@@ -71,6 +72,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderDashboard": ("cc",),
     "requestMasterReview": ("cc",),
     "masterCyclesBlock": ("cc",),
+    "controlCanaryPanel": ("cc",),
     "flowDoctorPanel": ("cc",),
     "scaleProofPanel": ("cc",),
     "dashboardProjectCounts": ("cc",),
@@ -263,6 +265,7 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"Scale proof \(/v1/state scale_proof\)|value against every budget"), "cc"),
     # The quota-refresh settings asset is loaded before the console router and only renders in Settings.
     (re.compile(r"quota-refresh-settings\.js"), "settings"),
+    (re.compile(r"canary_settings\.js"), "settings"),
     (re.compile(r"provider routing|routing:\s*\{|S\.routing|data-routing|routing-host|routing-(?:move|save|find|more)|"
                 r"/v1/provider-routing"), "machines"),
     (re.compile(r"runtimeSettings|data-runtime|runtime-setting"), "settings"),

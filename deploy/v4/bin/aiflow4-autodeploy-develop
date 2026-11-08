@@ -10,13 +10,32 @@ CANARY_FILE=$RELEASES/CANARY.json
 REJECTED_FILE=$RELEASES/CANARY_REJECTED
 FAILURES_FILE=$RELEASES/PROMOTION_FAILURES.json
 CUR=$(cat "$CURRENT_FILE" 2>/dev/null || true)
-CANARY_MIN_AGE_S=${AIFLOW4_CANARY_MIN_AGE_S:-1200}
-CANARY_MIN_RUNS=${AIFLOW4_CANARY_MIN_RUNS:-5}
-CANARY_MAX_AGE_S=${AIFLOW4_CANARY_MAX_AGE_S:-3600}
+CANARY_MIN_AGE_S=${AIFLOW4_CANARY_MIN_AGE_S:-300}
+CANARY_MIN_RUNS=${AIFLOW4_CANARY_MIN_RUNS:-3}
+CANARY_MAX_AGE_S=${AIFLOW4_CANARY_MAX_AGE_S:-900}
 CANARY_FAILURE_RATIO=${AIFLOW4_CANARY_FAILURE_RATIO:-2}
 CANARY_MIN_INFRA_FAILURES=${AIFLOW4_CANARY_MIN_INFRA_FAILURES:-3}
 CANARY_INSTALL_TIMEOUT_S=${AIFLOW4_CANARY_INSTALL_TIMEOUT_S:-$(( CANARY_MAX_AGE_S < 1800 ? CANARY_MAX_AGE_S : 1800 ))}
 AIFLOW4_CANARY_NODE=${AIFLOW4_CANARY_NODE:-}
+load_canary_settings() {
+  # Prefer the settings screen values carried on /v1/deploy/state; keep env values as a fallback.
+  local state age runs max
+  state=$(control_state 2>/dev/null) || return 0
+  IFS=$'\t' read -r age runs max < <(python3 -c 'import json,sys
+d=json.load(sys.stdin).get("control_canary",{}).get("settings") or {}
+print(d.get("minimum_age_s") or "", d.get("minimum_runs") if d.get("minimum_runs") is not None else "", d.get("maximum_age_s") or "", sep="\t")' <<<"$state") || return 0
+  [ -n "$age" ] && CANARY_MIN_AGE_S=$age
+  [ -n "$runs" ] && CANARY_MIN_RUNS=$runs
+  [ -n "$max" ] && CANARY_MAX_AGE_S=$max
+  CANARY_INSTALL_TIMEOUT_S=$(( CANARY_MAX_AGE_S < 1800 ? CANARY_MAX_AGE_S : 1800 ))
+}
+note_newer_while_canary() {
+  local active=$1 newest=$2 merged_at
+  [ -n "$newest" ] && [ "$newest" != "$active" ] || return 0
+  merged_at=$(git -C "$R" log -1 --format=%cI "$newest" 2>/dev/null || now_utc)
+  canary_cli note-pending --build "$newest" --merged-at "$merged_at" \
+    || echo "could not note pending develop build $newest" >&2
+}
 # the acceptance test points these at a mock control endpoint (docs/v4/clean-install-acceptance.md)
 CONTROL_URL=${AIFLOW4_CONTROL_URL:-http://127.0.0.1}
 CONTROL_ENV=${AIFLOW4_CONTROL_ENV:-${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets/control}/aiflow4.env}
@@ -100,6 +119,7 @@ reject_canary() {
 
 # Retry Jira work independently of opening a rollback incident; failed Jira writes survive removal of CANARY.json.
 canary_cli retry-tickets || echo "could not retry pending canary flow-bug tickets" >&2
+load_canary_settings
 
 if [ -f "$CANARY_FILE" ]; then
   IFS=$'\t' read -r TARGET NODE PREVIOUS STARTED_AT REQUESTED_AT < <(python3 - "$CANARY_FILE" <<'P'
@@ -116,6 +136,10 @@ P
   }
   [ "$STARTED_AT" != - ] || STARTED_AT=
   [ "$REQUESTED_AT" != - ] || REQUESTED_AT=
+  # A newer merge must not restart this canary; note it and finish the build under test first.
+  git -C "$R" fetch -q origin || true
+  NEWEST=$(git -C "$R" rev-parse --short=10 origin/develop 2>/dev/null || true)
+  note_newer_while_canary "$TARGET" "$NEWEST"
   if [ -z "${STARTED_AT:-}" ]; then
     NODE_RELEASE=$(control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); n=next((x for x in d["nodes"] if x["name"]==sys.argv[1]),None); print(n["release"] if n else "")' "$NODE" 2>/dev/null || true)
     if [ "$NODE_RELEASE" != "$TARGET" ]; then
@@ -141,29 +165,29 @@ P
   fi
 
   DECISION=$(canary_cli evaluate --node "$NODE" --target "$TARGET" --previous "$PREVIOUS" \
-    --started-at "$STARTED_AT" --minimum-age-s "$CANARY_MIN_AGE_S" --minimum-runs "$CANARY_MIN_RUNS" \
-    --maximum-age-s "$CANARY_MAX_AGE_S" --failure-ratio "$CANARY_FAILURE_RATIO" \
+    --started-at "$STARTED_AT" --from-settings --failure-ratio "$CANARY_FAILURE_RATIO" \
     --minimum-infra-failures "$CANARY_MIN_INFRA_FAILURES") || {
       echo "could not read develop canary run measurements; keeping $TARGET isolated on $NODE" >&2; exit 1;
     }
   ACTION=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["action"])' <<<"$DECISION")
+  CAUSE=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("cause") or "slow")' <<<"$DECISION")
   case "$ACTION" in
     wait)
-      echo "develop canary $TARGET on $NODE: $(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["reason"])' <<<"$DECISION")"
+      echo "develop canary $TARGET on $NODE ($CAUSE): $(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["reason"])' <<<"$DECISION")"
       exit 0
       ;;
     rollback)
-      reject_canary "failed its infrastructure rate threshold" "$DECISION"
+      reject_canary "failed its infrastructure rate threshold (cause: failures)" "$DECISION"
       exit 0
       ;;
     promote)
-      UNDER_OBSERVED=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print("yes" if "too few completed runs" in d["reason"] else "no")' <<<"$DECISION")
+      UNDER_OBSERVED=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print("yes" if d.get("cause")=="too_few_runs" or "too few" in d["reason"] or "lack of work" in d["reason"] else "no")' <<<"$DECISION")
       if [ "$UNDER_OBSERVED" = yes ]; then
         canary_cli record-promotion --node "$NODE" --target "$TARGET" --measurements "$DECISION" \
           --minimum-runs "$CANARY_MIN_RUNS" || echo "could not record under-observed develop canary note" >&2
       fi
       rm -f "$CANARY_FILE"
-      echo "develop canary $TARGET on $NODE is stable; promoting to the control plane and remaining nodes"
+      echo "develop canary $TARGET on $NODE is stable (cause: $CAUSE); promoting to the control plane and remaining nodes"
       DEPLOY_LOG=$RELEASES/deploy-attempt.log
       if ! ensure_host_layout; then
         DEPLOY_ERROR="host layout could not be prepared under ${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets}"
@@ -176,6 +200,7 @@ P
         sleep 20
         if curl -fsS "$CONTROL_URL/healthz" >/dev/null && control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
            && curl -fsS -o /dev/null "$CONTROL_URL/cc"; then
+          canary_cli mark-live --build "$TARGET" || echo "could not record merge-to-live for $TARGET" >&2
           echo "deployed develop $TARGET to the control plane; remaining nodes will update from CURRENT"
           promotion_py - "$FAILURES_FILE" <<'P'
 from pathlib import Path
@@ -184,7 +209,7 @@ from aiflow.v4.install.promotion import clear_failures
 clear_failures(Path(sys.argv[1]))
 P
           rm -f "$DEPLOY_LOG"
-          alert "[INFO] AI Flow: deployed develop $TARGET" "Canary on $NODE passed; develop release $TARGET is now desired by the fleet (previous $PREVIOUS)."
+          alert "[INFO] AI Flow: deployed develop $TARGET" "Canary on $NODE passed (cause: $CAUSE); develop release $TARGET is now desired by the fleet (previous $PREVIOUS)."
           exit 0
         fi
         DEPLOY_ERROR="deploy unhealthy: healthz, registry state or Command Center check failed after promoting $TARGET"

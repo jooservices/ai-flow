@@ -331,7 +331,8 @@ def _operational_section(db, repo, by_status):
 
 
 def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
-    from . import api as control_api, release_progress, release_readiness, rollout, scale_proof
+    from . import (api as control_api, canary, release_progress, release_readiness, rollout,
+                   scale_proof)
     db = ctx.db
     repo = ctx.repo()
     releases = control_api.RELEASES
@@ -360,6 +361,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "events": events, "sa": sa, "role_health": role_health.summary(ctx), "rollout": rollout.summary(db),
         "version_policy": {"control": ctx.settings.control_version or VERSION,
                            "max_minor_lag": ctx.settings.version_max_minor_lag},
+        "control_canary": canary.control_canary_status(db, releases),
         "totals": {"runs_24h": today["runs"], "cost_24h": float(today["cost"]), "tokens_in_24h": int(today["tin"]),
                    "tokens_out_24h": int(today["tout"]), "done_24h": today["done"], "failed_24h": today["failed"]},
     }

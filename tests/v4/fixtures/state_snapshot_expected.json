@@ -37,6 +37,26 @@
    "control": "4.1.0",
    "max_minor_lag": 2
   },
+  "control_canary": {
+   "running_build": "",
+   "canary_build": "",
+   "pending_merges": 0,
+   "oldest_pending_age_s": null,
+   "pending": [],
+   "merge_to_live": [],
+   "settings": {
+    "minimum_age_s": 300,
+    "minimum_runs": 3,
+    "maximum_age_s": 900,
+    "updated_by": "",
+    "updated_at": null,
+    "defaults": {
+     "minimum_age_s": 300,
+     "minimum_runs": 3,
+     "maximum_age_s": 900
+    }
+   }
+  },
   "totals": {
    "runs_24h": 0,
    "cost_24h": 0.0,

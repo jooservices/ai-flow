@@ -1,0 +1,12 @@
+# Secret scan of the pre-commit hook (JAIF-581): the default gitleaks rules, minus the fake credentials that the tests
+# use on purpose. Same files as deploy/v4/ci/trivy-secret.yaml, plus the test files that gitleaks flags. Add a file here
+# only after a reviewer has confirmed that every finding in it is fake.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "fake credentials used by tests"
+paths = [
+  '''^tests/(test_memory|test_master_rescue)\.py$''',
+  '''^tests/v4/(test_knowledge_learning|test_github_connect|test_security|test_support_bundle)\.py$''',
+]

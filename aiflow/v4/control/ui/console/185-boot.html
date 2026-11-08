@@ -14,7 +14,7 @@ if (S.view === 'integrations') {
   loadIntegrations();
 }
 if (S.view === 'notifications') loadNotifications();
-poll(); pollServices(); pollAnalytics(); pollConflicts(); pollDashboardUsage(); pollConsoleSession(); pollReviews(); pollDashboardWaiting();
+poll(); pollServices(); pollAnalytics(); pollConflicts(); pollDashboardUsage(); pollConsoleSession(); pollReviews(); pollDashboardWaiting(); pollDashboardReviewRounds();
 setInterval(tick, 1000);
 })();
 </script>

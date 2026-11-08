@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters import RunSpec, get_adapter
+from ..core import review_findings
 from .client import Conflict, ControlClient
 from .dev import Claimed, Heartbeat, LeaseLost
 from .gitops import Git
@@ -65,9 +66,11 @@ def build_prompt(c: Claimed, pr: dict, env: dict[str, str] | None = None) -> str
     if c.project.get("containers"):
         checks += "\n   - Docker commands go through the run's rootless, worktree-confined runtime"
     t = c.ticket
+    history = review_findings.format_review_history(pr.get("review_history") or [])
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"],
                       pr_number=pr["number"], branch=pr["branch"], checks=checks,
                       dev_summary=pr.get("dev_summary") or "(none)", description=t["description"] or "(no description)",
+                      review_history=history,
                       related=related_block(c.related),
                       environment=environment_notes(
                           c.project.get("environment"), "verify",
@@ -106,6 +109,9 @@ class VerifyReview:
     verdict: str
     findings: str
     post_merge: list[dict]
+    review_findings: list[dict]
+    new_findings: int
+    review_round: int
 
 
 @dataclass
@@ -225,8 +231,10 @@ def execute_verify(state: VerifyRun, workspace: VerifyWorkspace) -> VerifyReview
     state.result.update(run_result_metadata(response), head_sha=workspace.head)
     if state.heartbeat.lost.is_set():
         raise LeaseLost()
-    review = parse_verify_review(response)
+    review = parse_verify_review(response, pr.get("review_history") or [], int(pr.get("review_round") or 1))
     state.result["details"] = {"verdict": review.verdict, "checks": review.checks, "findings": review.findings,
+                               "review_findings": review.review_findings, "review_round": review.review_round,
+                               "new_findings": review.new_findings,
                                "exit_code": response.exit_code, "duration_s": int(response.duration_s),
                                "log": response.log_path, "qc_passed": False, "ci": [],
                                "auto_updated": workspace.auto_updated, "post_merge_criteria": review.post_merge}
@@ -259,12 +267,15 @@ def report_wordpress_ready(state: VerifyRun) -> None:
         node=api_node(state.api)))
 
 
-def parse_verify_review(response: Any) -> VerifyReview:
+def parse_verify_review(response: Any, previous: list[dict] | None = None,
+                        round_number: int = 1) -> VerifyReview:
     text = response.final_text or ""
     checks_match = CHECKS.search(text)
     verdict_match = VERDICT.search(text)
+    history, findings, new_findings = review_findings.update_review_findings(text, previous or [], round_number)
     return VerifyReview(response, text, checks_match.group(1).strip() if checks_match else "not reported",
-                        verdict_match.group(1) if verdict_match else "", findings_of(text), deferred_criteria(text))
+                        verdict_match.group(1) if verdict_match else "", findings, deferred_criteria(text),
+                        history, new_findings, max(1, round_number))
 
 
 def collect_verification(state: VerifyRun, workspace: VerifyWorkspace,
@@ -278,6 +289,8 @@ def collect_verification(state: VerifyRun, workspace: VerifyWorkspace,
         state.result.update(outcome="failed", summary=f"no verdict ({review.response.error_kind or 'missing VERDICT line'}): "
                                                      f"{(review.response.error_message or review.text.strip())[-400:]}")
         return state.result
+    if review.findings:
+        return rework_verify(state, review.findings, "verify failed")
     unmapped = unmapped_deferred(review.post_merge, configured_checks)
     if unmapped:
         ids = deferred_ids(unmapped)
@@ -405,16 +418,36 @@ def bring_up_to_date(api: ControlClient, c: Claimed, git: Git, mirror, wt: Path,
 
 
 def _rework(c, api, jira, pr_comment, result: dict, findings: str, why: str, checks: str = "", t0: float | None = None) -> dict:
+    if int((c.pr or {}).get("rework_returns") or 0) >= 2:
+        return _split_for_planning(c, api, jira, pr_comment, result, findings, why, checks, t0)
     body = f"AI Flow verify: FAIL ({why}).\n\nFindings:\n{findings}" + (f"\n\nChecks: {checks}" if checks else "")
     pr_comment(body)
     jira("comment", body=note(c, "sent back for rework", what=f"Verify did not pass ({why})", result="Findings:\n" + findings
                               + (f"\nChecks: {checks}" if checks else ""),
                               next_="Back to To Do with the rework label; the next dev run continues the branch with these findings",
                               t0=t0, node=api_node(api)))
-    jira("fields", add_labels=["rework"])
+    jira("fields", add_labels=["rework"], remove_labels=["aiflow-ready"])
     jira("transition", to="To Do")
     result.update(outcome="rework", summary=f"{why}: {findings}"[:1500])
     result.setdefault("details", {})["findings"] = findings
+    return result
+
+
+def _split_for_planning(c, api, jira, pr_comment, result: dict, findings: str, why: str,
+                        checks: str = "", t0: float | None = None) -> dict:
+    """Send the third would-be rework return to intake planning for a JAIF-335 split."""
+    body = f"AI Flow verify: split planning required after repeated returns ({why}).\n\nFindings:\n{findings}"
+    if checks:
+        body += f"\n\nChecks: {checks}"
+    pr_comment(body)
+    jira("comment", body=note(c, "sent to planning to split", what="Repeated review returns need a smaller ticket",
+                              why="The ticket has already been returned twice for changes", result="Findings:\n" + findings,
+                              next_="Ticket moved to Intake for the planning role to split it under JAIF-335",
+                              t0=t0, node=api_node(api)))
+    jira("fields", add_labels=["needs-split"], remove_labels=["rework", "aiflow-ready"])
+    jira("transition", to="Intake")
+    result.update(outcome="split_plan", summary=f"sent to planning after repeated returns: {findings}"[:1500])
+    result.setdefault("details", {}).update(findings=findings, planning_required="JAIF-335")
     return result
 
 

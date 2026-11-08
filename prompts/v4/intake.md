@@ -11,7 +11,7 @@ required, otherwise the rewrite is rejected):
 {template_outline}
 
 Labels on the ticket: {label_context}
-AI Flow recognizes these labels: `aiflow-ready`, `aiflow-hold`, `rework`, `require-human`, `tier-senior`,
+AI Flow recognizes these labels: `aiflow-ready`, `aiflow-hold`, `rework`, `require-human`, `needs-split`, `tier-senior`,
 `ai-<provider>`, `area-<core|theme|plugin|platform|flow>`, `regression`, `uat-bug`, `blocked-external`,
 `needs-design`, `breaking-change`, `perf`, `a11y`, `seo`, `security`. Keep all labels as metadata; do not remove,
 rename or invent labels, and preserve unknown free-form Jira labels. Labels can affect routing or review, but they

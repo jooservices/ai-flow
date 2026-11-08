@@ -37,6 +37,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Work route install structure](../../docs/v4/work-routes-install-structure.md): candidate and claim route groups remain in their existing registration order
 - [Version release claim structure](../../docs/v4/version_release_claim-structure.md): named policy, eligibility, gate, branch and persistence phases for the version release claim route
 - [Review metrics](../../docs/v4/review-metrics.md): weekly waits, finished tickets without human-review activity, waiting durations and review decisions
+- [AI review rounds](../../docs/v4/review-rounds.md): stable finding history and reviewer affinity, planning after repeated returns, and merged-ticket review metrics
 - [Human review queue structure](../../docs/v4/human_reviews-structure.md): named queue, ticket, action, preview and thread builders behind `GET /v1/reviews`
 - [Human review mount structure](../../docs/v4/human_review_mount-structure.md): named installers and response-building steps for `GET /v1/reviews`
 - [UI mount structure](../../docs/v4/ui_mount-structure.md): named parts that register console pages, scripts, help and the ticket and service routes in order

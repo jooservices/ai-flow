@@ -182,6 +182,10 @@ def _expected_events(case: dict) -> list[str]:
     return EXPECTED_EVENTS
 
 
+def _without_line_numbers(value):
+    return re.sub(r"line\(s\) \d+", "line(s) N", value) if isinstance(value, str) else value
+
+
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
 def test_changed_views_matches_pre_refactor_characterization(monkeypatch, case):
     source_lines, base_lines, diff = _case_inputs(case)
@@ -211,7 +215,9 @@ def test_changed_views_matches_pre_refactor_characterization(monkeypatch, case):
         actual = f"{type(exc).__name__}: {exc}"
     else:
         actual = sorted(result)
-    assert actual == case["expected"]
+    # The refusal names the line of the appended renderer, which is the length of the real console page: it moves with
+    # every UI change, so only the wording around the number is pinned.
+    assert _without_line_numbers(actual) == _without_line_numbers(case["expected"])
     assert events == _expected_events(case)
 
 

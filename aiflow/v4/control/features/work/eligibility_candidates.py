@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from ... import environment as environment_reports, hotfiles, tooling, worker_candidates
 from .eligibility_scope import Scope
+from .repository import WorkRepository
 
 
 def verify_candidates(scope: Scope) -> list[dict]:
@@ -16,21 +17,43 @@ def verify_candidates(scope: Scope) -> list[dict]:
     for ticket in scope.ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
                                    " AND NOT ('aiflow-hold' = ANY(labels))" + scope.scoped_key,
                                    (scope.projects, *scope.scoped_ticket)):
-        if scope.needs_missing_container_runtime(ticket, "verify"):
+        if not _verify_candidate_ready(scope, ticket, verify_cooling):
             continue
-        if ticket["key"] in scope.held or ticket["key"] in verify_cooling:
-            continue
-        dev = scope.deps.last_dev(ticket["key"], done=True)
-        if not dev or not dev["pr_url"]:
-            continue
-        if dev["account_id"] == scope.account.id:
-            continue
-        if scope.explicit_only_blocks(ticket):
-            continue
-        if not scope.allowed("verify", ticket):
+        first = first_review_account(scope, ticket["key"])
+        if first and first != scope.account.id and preferred_review_available(scope, first, ticket):
             continue
         out.append({**ticket, "step": "verify", "probation": scope.probation("verify")})
     return out
+
+
+def _verify_candidate_ready(scope: Scope, ticket: dict, verify_cooling: set[str]) -> bool:
+    """Apply the existing runtime, lease, author, provider-label and role checks for a verify candidate."""
+    if scope.needs_missing_container_runtime(ticket, "verify"):
+        return False
+    if ticket["key"] in scope.held or ticket["key"] in verify_cooling:
+        return False
+    dev = scope.deps.last_dev(ticket["key"], done=True)
+    if not dev or not dev["pr_url"] or dev["account_id"] == scope.account.id:
+        return False
+    return not (scope.explicit_only_blocks(ticket) or not scope.allowed("verify", ticket))
+
+
+def first_review_account(scope: Scope, ticket_key: str) -> str:
+    """Find the account from the earliest completed AI review of this ticket."""
+    return WorkRepository(scope.ctx.db).first_review_account(ticket_key)
+
+
+def preferred_review_available(scope: Scope, account_id: str, ticket: dict) -> bool:
+    """Check the preferred review account through the normal eligibility rules on its machines."""
+    account = scope.repo.account(account_id)
+    if not account:
+        return False
+    for node in account.machines:
+        candidates = scope.deps.eligible(account_id, node, routing=False, capacity_routing=False,
+                                         ticket_key=ticket["key"], step_filter="verify")
+        if any(item.get("key") == ticket["key"] and item.get("step") == "verify" for item in candidates):
+            return True
+    return False
 
 
 def post_merge_candidates(scope: Scope) -> list[dict]:
@@ -99,7 +122,8 @@ def intake_candidates(scope: Scope) -> list[dict]:
     waiting = _recent_intake_backoff(scope, "intake")
     out = []
     for ticket in scope.ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'"
-                                   " AND NOT ('aiflow-hold' = ANY(labels))" + scope.scoped_key
+                                   " AND NOT ('aiflow-hold' = ANY(labels))"
+                                   " AND NOT ('aiflow-split-parent' = ANY(labels))" + scope.scoped_key
                                    + " ORDER BY jira_created NULLS LAST, key",
                                    (scope.projects, *scope.scoped_ticket)):
         if scope.needs_missing_container_runtime(ticket, "intake"):

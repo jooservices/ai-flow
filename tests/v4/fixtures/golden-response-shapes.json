@@ -124,6 +124,15 @@
   },
   "status": 200
  },
+ "/v1/dashboard/review-rounds": {
+  "shape": {
+   "average_rounds": "null",
+   "merged_tickets": "int",
+   "target_rounds": "int",
+   "tickets": []
+  },
+  "status": 200
+ },
  "/v1/dashboard/timeouts": {
   "shape": {
    "daily": [],

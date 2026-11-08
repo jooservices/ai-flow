@@ -48,6 +48,7 @@ def test_apply_creates_stories_relates_and_blocks_chain():
     assert ("TESTWP-901", "TESTWP-40", "Relates") in jira.issue_links
     assert ("TESTWP-900", "TESTWP-901", "Blocks") in jira.issue_links
     assert ("TESTWP-901", "TESTWP-902", "Blocks") in jira.issue_links
+    assert ("remove", "TESTWP-40", "needs-split") in jira.labels
     assert ("remove", "TESTWP-40", "aiflow-ready") in jira.labels
     assert ("add", "TESTWP-40", PARENT_LABEL) in jira.labels
 

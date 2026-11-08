@@ -4,10 +4,11 @@ from __future__ import annotations
 from aiflow.v4.control import api
 from aiflow.v4.control.routes import dashboard
 
-PATHS = {("GET", "/v1/dashboard/waiting"), ("GET", "/v1/dashboard/disagreements"), ("GET", "/v1/dashboard/quota")}
+PATHS = {("GET", "/v1/dashboard/waiting"), ("GET", "/v1/dashboard/disagreements"),
+         ("GET", "/v1/dashboard/quota"), ("GET", "/v1/dashboard/review-rounds")}
 
 
-def test_the_module_defines_exactly_the_three_dashboard_routes():
+def test_the_module_defines_exactly_the_four_dashboard_routes():
     assert {(m, r.path) for r in dashboard.router.routes for m in r.methods if m != "HEAD"} == PATHS
 
 
@@ -26,7 +27,7 @@ def test_the_review_queue_is_reachable_for_routers_through_the_app_state(ctx):
     assert api.create_app(ctx).state.review_queue is not None
 
 
-def test_the_three_routes_answer(client):
+def test_the_routes_answer(client):
     for _, path in sorted(PATHS):
         response = client.get(path)
         assert response.status_code == 200, (path, response.text)

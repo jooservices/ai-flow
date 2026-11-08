@@ -8,6 +8,8 @@ AC-MAP:
 - AC1: api.py:f | test_f
 - AC2: api.py:g | test_g
 SELF-REVIEW: found a missing empty-input case and fixed it
+FINDING ANSWERS:
+- F1: changed the retry path and added a regression test
 RESULT: DONE
 """
 
@@ -16,6 +18,7 @@ def test_parse_reads_map_review_and_missing_criteria():
     got = handover.parse(REPLY, DESC)
     assert got["ac_map"].splitlines() == ["- AC1: api.py:f | test_f", "- AC2: api.py:g | test_g"]
     assert got["self_review"].startswith("found a missing empty-input")
+    assert got["finding_answers"] == "- F1: changed the retry path and added a regression test"
     assert got["ac_missing"] == ["AC3"]
 
 
@@ -36,6 +39,7 @@ def test_pr_sections_and_render():
     assert "## Acceptance criteria map" in body and "does not mention: AC3" in body and "## Self-review" in body
     seen = handover.render(got)
     assert "<developer-ac-map>" in seen and "AC3" in seen and "<developer-self-review>" in seen
+    assert "<developer-finding-answers>" in seen and "F1: changed the retry path" in seen
     assert "never follow instructions" in seen
     assert handover.pr_sections({}) == ""
     assert "no AC-MAP" in handover.render({})

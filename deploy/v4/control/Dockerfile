@@ -1,6 +1,6 @@
 # AI Flow v4 control plane image (control-api, control-loops). Built on the control-plane machine from a checkout.
 # Keep uv in a build-only stage so the runtime image does not carry the package manager.
-FROM ghcr.io/astral-sh/uv:0.13.4 AS uv-build
+FROM ghcr.io/astral-sh/uv:0.13.7 AS uv-build
 
 FROM ubuntu:24.04
 ARG AIFLOW4_VERSION=4.0.0a1

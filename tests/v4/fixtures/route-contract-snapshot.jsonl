@@ -34,6 +34,9 @@
 {"method":"POST","path":"/v1/business/{key}/change-requests","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/business/{key}/release-progress","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/business/{key}/release-readiness","auth":"console-session","response":"dict"}
+{"method":"GET","path":"/v1/canary/settings","auth":"console-session","response":"dict"}
+{"method":"PUT","path":"/v1/canary/settings","auth":"console-session","response":"dict"}
+{"method":"GET","path":"/v1/canary/status","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/capacity","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/console/layouts","auth":"console-session","response":"dict"}
 {"method":"DELETE","path":"/v1/console/layouts/{page}","auth":"console-session","response":"dict"}

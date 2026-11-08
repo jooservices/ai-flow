@@ -10,6 +10,8 @@ Delivery, and Users and roles.
 Dashboard keeps its Work and AI and machines headings, while every block shares one page-wide layout grid. A person
 can move a block across those sections, so an owner can put Tokens and cost and AI account quota before the work board.
 The other role defaults also put each role's priorities first in the shared order.
+The **Control plane canary** block on Dashboard (running build, canary under test, merges not live yet) is one of these
+blocks: it can be moved, resized or hidden like the others.
 
 ## Using it
 

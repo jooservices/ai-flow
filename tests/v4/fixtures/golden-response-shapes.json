@@ -225,6 +225,26 @@
     }
    ],
    "active_runs": [],
+   "control_canary": {
+    "canary_build": "str",
+    "merge_to_live": [],
+    "oldest_pending_age_s": "null",
+    "pending": [],
+    "pending_merges": "int",
+    "running_build": "str",
+    "settings": {
+     "defaults": {
+      "maximum_age_s": "int",
+      "minimum_age_s": "int",
+      "minimum_runs": "int"
+     },
+     "maximum_age_s": "int",
+     "minimum_age_s": "int",
+     "minimum_runs": "int",
+     "updated_at": "str",
+     "updated_by": "str"
+    }
+   },
    "control_repo": "str",
    "env": "str",
    "events": [],
@@ -710,6 +730,26 @@
     }
    ],
    "active_runs": [],
+   "control_canary": {
+    "canary_build": "str",
+    "merge_to_live": [],
+    "oldest_pending_age_s": "null",
+    "pending": [],
+    "pending_merges": "int",
+    "running_build": "str",
+    "settings": {
+     "defaults": {
+      "maximum_age_s": "int",
+      "minimum_age_s": "int",
+      "minimum_runs": "int"
+     },
+     "maximum_age_s": "int",
+     "minimum_age_s": "int",
+     "minimum_runs": "int",
+     "updated_at": "str",
+     "updated_by": "str"
+    }
+   },
    "control_repo": "str",
    "env": "str",
    "events": [],

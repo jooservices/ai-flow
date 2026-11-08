@@ -26,6 +26,8 @@ EXACT_API_PERMISSIONS = {
     "/v1/master/report": "view.machines_ai",
     "/v1/provider-routing": "view.machines_ai",
     "/v1/role-health/settings": "console.manage",
+    "/v1/canary/settings": "console.manage",
+    "/v1/canary/status": "view.dashboard",
     "/v1/master/autonomy/budget": "console.manage",
     "/v1/provider-routing/settings": "console.manage",
     "/v1/reviews": "view.human_review",

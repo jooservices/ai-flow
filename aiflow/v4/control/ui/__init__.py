@@ -148,6 +148,10 @@ def mount_panel_assets(app: FastAPI) -> None:
     def quota_refresh_settings_asset() -> FileResponse:
         return javascript_asset(HERE / "quota_refresh_settings.js")
 
+    @app.get("/console-assets/canary_settings.js", include_in_schema=False)
+    def canary_settings_asset() -> FileResponse:
+        return javascript_asset(HERE / "canary_settings.js")
+
 
 def console() -> HTMLResponse:
     """The console page, with the first licensing-notice script tag pointed at the combined feature script."""

@@ -66,6 +66,8 @@ def test_api_permission_maps_current_console_paths():
         "/v1/support-bundle": "node.operations.read",
         "/v1/master/report": "view.machines_ai",
         "/v1/role-health/settings": "console.manage",
+        "/v1/canary/settings": "console.manage",
+        "/v1/canary/status": "view.dashboard",
         "/v1/master/autonomy/budget": "console.manage",
         "/v1/provider-routing/decisions/1": "view.machines_ai",
         "/v1/provider-routing/settings": "console.manage",

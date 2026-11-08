@@ -539,7 +539,8 @@ def _autodeploy(tmp_path, current, image_present=True, build_present=True):
     return result, log.read_text(), (releases / "CURRENT").read_text().strip()
 
 
-def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, requested=None, healthy=True):
+def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, requested=None, healthy=True,
+                       canary_settings=None, pending_builds=(), install_timeout_override=None):
     """active: the canary installed the candidate at `now`; requested: the candidate was requested at that time
     and the canary node still reports the previous release."""
     root = tmp_path / "srv"
@@ -549,11 +550,17 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, reque
     log = tmp_path / "calls.log"
     log.write_text("")
     state = tmp_path / "state.json"
-    state.write_text(json.dumps({"nodes": [{"name": "canary", "status": "online",
-                                            "release": "v4.3.0" if active else "v4.2.0",
-                                            "accounts_assigned": 1},
-                                           {"name": "worker-2", "status": "online", "release": "v4.2.0",
-                                            "accounts_assigned": 1}]}))
+    state_data = {"nodes": [{"name": "canary", "status": "online",
+                             "release": "v4.3.0" if active else "v4.2.0",
+                             "accounts_assigned": 1},
+                            {"name": "worker-2", "status": "online", "release": "v4.2.0",
+                             "accounts_assigned": 1}]}
+    if canary_settings is not None or pending_builds:
+        state_data["control_canary"] = {
+            "settings": canary_settings or {},
+            "pending": [{"build": build} for build in pending_builds],
+        }
+    state.write_text(json.dumps(state_data))
     if active:
         started = now or datetime.now(timezone.utc) - timedelta(minutes=21)
         (releases / "CANARY.json").write_text(json.dumps({"target": "v4.3.0", "node": "canary",
@@ -571,7 +578,9 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, reque
     py = (f'if [ "$1" = - ] && [ "$#" = 3 ]; then echo "alert $2" >> {log}; cat >/dev/null; exit 0; fi\n'
           f'exec {sys.executable} "$@"\n')
     stubs = {
-        "git": 'case "$*" in *"tag --merged"*) echo v4.3.0 ;; *"rev-list"*) echo abcdef0123456789 ;; esac\n',
+        "git": 'case "$*" in *"merge-base --is-ancestor"*) [ "$5" = ancestor ] && exit 0 || exit 1 ;; '
+               '*"log -1 --format=%cI"*) echo 2026-01-02T03:04:05+00:00 ;; '
+               '*"tag --merged"*) echo v4.3.0 ;; *"rev-list"*) echo abcdef0123456789 ;; esac\n',
         "gh": "printf 'aiflow4-v4.3.0.tar.gz\\naiflow4-v4.3.0.tar.gz.sigstore.json\\nSHA256SUMS\\n'\n",
         "aiflow4-deploy": f'echo "deploy $*" >> {log}\n'
                           f'if [ "$1" = --stage-only ]; then exit 0; fi\n'
@@ -589,6 +598,8 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, reque
     secrets.mkdir(exist_ok=True)
     env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret",
            "AIFLOW4_SECRETS_DIR": str(secrets)}
+    if install_timeout_override is not None:
+        env["AIFLOW4_CANARY_INSTALL_TIMEOUT_S"] = str(install_timeout_override)
     result = subprocess.run(["bash", str(AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
     canary_file = releases / "CANARY.json"
     current = (releases / "CURRENT").read_text().strip()
@@ -623,7 +634,22 @@ def test_autodeploy_stages_candidate_for_one_node_before_changing_current(tmp_pa
     requested_at = datetime.fromisoformat(state.pop("requested_at"))
     assert state == {"target": "v4.3.0", "node": "canary", "previous": "v4.2.0", "started_at": ""}
     assert abs((datetime.now(timezone.utc) - requested_at).total_seconds()) < 60
+    assert "canary note-pending --build v4.3.0 --merged-at 2026-01-02T03:04:05+00:00" in calls
     assert "deploy v4.3.0" not in calls
+
+
+def test_autodeploy_preserves_install_timeout_override_after_settings_load(tmp_path):
+    requested = datetime.now(timezone.utc) - timedelta(seconds=90)
+    settings = {"minimum_age_s": 60, "minimum_runs": 1, "maximum_age_s": 60}
+
+    result, calls, current, state, releases = _canary_autodeploy(
+        tmp_path, requested=requested, canary_settings=settings, install_timeout_override=180)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "waiting for canary node canary to install v4.3.0" in result.stdout
+    assert "within 60s" not in result.stdout
+    assert state is not None
+    assert not (releases / "CANARY_REJECTED").exists()
 
 
 def test_autodeploy_keeps_waiting_while_the_canary_install_is_within_its_timeout(tmp_path):
@@ -646,7 +672,7 @@ def test_autodeploy_rolls_back_a_canary_that_never_installs_within_the_timeout(t
     assert state is None
     assert (releases / "CANARY_REJECTED").read_text().strip() == "v4.3.0"
     assert "canary record-rollback --node canary --target v4.3.0 --previous v4.2.0 --commit abcdef0123456789" in calls
-    assert "was not installed on canary within 1800s" in calls
+    assert "was not installed on canary within 900s" in calls
     assert "alert [CRITICAL] AI Flow: canary v4.3.0 rolled back" in calls
     assert "deploy v4.3.0" not in calls
 
@@ -705,7 +731,17 @@ def test_autodeploy_promotes_stable_canary_and_records_under_observed_timeout(tm
     assert state is None
 
 
-def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, ci="ok", api_port=None):
+def test_autodeploy_marks_pending_ancestors_live_with_the_promoted_build(tmp_path):
+    result, calls, current, state, _ = _canary_autodeploy(
+        tmp_path, active=True, pending_builds=("ancestor", "unrelated"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert current == "v4.3.0"
+    assert "canary mark-live --build v4.3.0 --covered-build ancestor" in calls
+
+
+def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, ci="ok", api_port=None,
+                        canary_settings=None, pending_builds=(), install_timeout_override=None, requested=None):
     """api_port: forward the /v1/deploy/ requests to a control API listening there; else answer them from fixtures."""
     root = tmp_path / "srv"
     releases = root / "control" / "releases"
@@ -717,16 +753,26 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
     log = tmp_path / "develop-calls.log"
     log.write_text("")
     state = tmp_path / "develop-state.json"
-    state.write_text(json.dumps({"nodes": [{"name": "canary", "status": "online",
-                                             "release": target if active else previous,
-                                             "accounts_assigned": 1},
-                                            {"name": "worker-2", "status": "online", "release": previous,
-                                             "accounts_assigned": 1}]}))
+    state_data = {"nodes": [{"name": "canary", "status": "online",
+                              "release": target if active else previous,
+                              "accounts_assigned": 1},
+                             {"name": "worker-2", "status": "online", "release": previous,
+                              "accounts_assigned": 1}]}
+    if canary_settings is not None or pending_builds:
+        state_data["control_canary"] = {
+            "settings": canary_settings or {},
+            "pending": [{"build": build} for build in pending_builds],
+        }
+    state.write_text(json.dumps(state_data))
     if active:
         started = datetime.now(timezone.utc) - timedelta(minutes=21)
         (releases / "CANARY.json").write_text(json.dumps({"target": target, "node": "canary",
                                                            "previous": previous, "started_at": started.isoformat(),
                                                            "requested_at": started.isoformat()}))
+    elif requested is not None:
+        (releases / "CANARY.json").write_text(json.dumps({"target": target, "node": "canary",
+                                                           "previous": previous, "started_at": "",
+                                                           "requested_at": requested.isoformat()}))
     if decision is None:
         decision = {"action": "promote", "reason": "minimum canary time and completed run count reached",
                     "canary": {"runs": 5, "infra_failures": 0, "failure_rate": 0.0},
@@ -744,8 +790,10 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
     py = (f'if [ "$1" = - ] && [ "$#" = 3 ]; then echo "alert $2" >> {log}; cat >/dev/null; exit 0; fi\n'
           f'exec {sys.executable} "$@"\n')
     stubs = {
-        "git": f'case "$*" in *"rev-parse origin/develop"*) echo {commit} ;; '
+        "git": 'case "$*" in *"merge-base --is-ancestor"*) [ "$5" = ancestor ] && exit 0 || exit 1 ;; '
+               f'*"rev-parse origin/develop"*) echo {commit} ;; '
                f'*"rev-parse --short=10"*) echo {target} ;; *"rev-parse {target}^{{commit}}"*) echo {commit} ;; '
+               '*"log -1 --format=%cI"*) echo 2026-01-02T03:04:05+00:00 ;; '
                '*"log -1 --format=%ct"*) echo 1700000000 ;; esac\n',
         "aiflow4-deploy-develop": f'echo "develop-deploy $*" >> {log}\n'
                                   f'if [ "$1" = --stage-only ]; then exit 0; fi\n'
@@ -761,6 +809,8 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
     secrets.mkdir(exist_ok=True)
     env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret",
            "AIFLOW4_SECRETS_DIR": str(secrets)}
+    if install_timeout_override is not None:
+        env["AIFLOW4_CANARY_INSTALL_TIMEOUT_S"] = str(install_timeout_override)
     if api_port is not None:
         env["AIFLOW4_CONTROL_URL"] = f"http://127.0.0.1:{api_port}"
     result = subprocess.run(["bash", str(DEVELOP_AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
@@ -776,8 +826,22 @@ def test_develop_autodeploy_stages_new_commit_on_one_canary_before_current_moves
     assert "develop-deploy --stage-only  abcdef0123456789abcdef0123456789abcdef01" in calls
     assert current == "0123456789"
     assert canary["target"] == "abcdef0123" and canary["node"] == "canary"
+    assert "canary note-pending --build abcdef0123 --merged-at 2026-01-02T03:04:05+00:00" in calls
     nodes = json.loads(state_file.read_text())["nodes"]
     assert [node["release"] for node in nodes] == ["0123456789", "0123456789"]
+
+
+def test_develop_autodeploy_preserves_install_timeout_override_after_settings_load(tmp_path):
+    requested = datetime.now(timezone.utc) - timedelta(seconds=90)
+    result, calls, current, canary, releases, state_file = _develop_autodeploy(
+        tmp_path, canary_settings={"minimum_age_s": 60, "minimum_runs": 1, "maximum_age_s": 60},
+        install_timeout_override=180, requested=requested)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "waiting for develop canary node canary to install" in result.stdout
+    assert "within 60s" not in result.stdout
+    assert canary is not None
+    assert not (releases / "CANARY_REJECTED").exists()
 
 
 def test_develop_autodeploy_rolls_back_canary_only_when_fake_two_release_registry_exceeds_threshold(tmp_path):
@@ -807,7 +871,7 @@ def test_develop_autodeploy_rolls_back_canary_only_when_fake_two_release_registr
     assert (releases / "CANARY_REJECTED").read_text().strip() == target
     expected_rollback = f"canary record-rollback --node canary --target {target} --previous {previous} --commit abcdef0123456789abcdef0123456789abcdef01"
     assert expected_rollback in calls
-    assert "--minimum-age-s 1200 --minimum-runs 5 --maximum-age-s 3600 --failure-ratio 2 --minimum-infra-failures 3" in calls
+    assert "--from-settings --failure-ratio 2 --minimum-infra-failures 3" in calls
     assert "develop-deploy  abcdef0123" not in calls
     assert [node["release"] for node in json.loads(state_file.read_text())["nodes"]] == [target, previous]
 
@@ -822,6 +886,15 @@ def test_develop_autodeploy_promotes_a_stable_canary_to_current_and_remaining_no
     assert "deployed develop abcdef0123 to the control plane" in result.stdout
 
 
+def test_develop_autodeploy_marks_pending_ancestors_live_with_the_promoted_build(tmp_path):
+    result, calls, current, canary, _, _ = _develop_autodeploy(
+        tmp_path, active=True, pending_builds=("ancestor", "unrelated"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert current == "abcdef0123"
+    assert "canary mark-live --build abcdef0123 --covered-build ancestor" in calls
+
+
 def test_develop_autodeploy_records_under_observed_promotion_at_maximum_age(tmp_path):
     metrics = {"canary": {"runs": 2, "infra_failures": 0, "failure_rate": 0.0},
                "baseline": {"runs": 10, "infra_failures": 0, "failure_rate": 0.0}}
@@ -833,7 +906,7 @@ def test_develop_autodeploy_records_under_observed_promotion_at_maximum_age(tmp_
     assert current == "abcdef0123"
     assert canary is None
     assert "canary record-promotion --node canary --target abcdef0123" in calls
-    assert "--minimum-runs 5" in calls
+    assert "--minimum-runs 3" in calls
 
 
 

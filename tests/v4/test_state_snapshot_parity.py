@@ -35,6 +35,9 @@ class SnapshotDB:
         return self.tables.get(label, [])
 
     def one(self, query, params=None):
+        if "FROM canary_settings" in query:
+            self.calls.append("canary_settings")
+            return self.tables.get("canary_settings")
         self.calls.append("totals")
         return self.tables.get("totals", {
             "runs": 0, "cost": 0, "tin": 0, "tout": 0, "done": 0, "failed": 0,
@@ -84,6 +87,12 @@ def _system_query_label(query):
         return "events"
     if "FROM project_lifecycle" in query:
         return "lifecycle"
+    if "FROM canary_pending" in query:
+        return "canary_pending"
+    if "FROM canary_merge_live" in query:
+        return "canary_merge_live"
+    if "FROM canary_settings" in query:
+        return "canary_settings"
     return None
 
 
@@ -379,7 +388,8 @@ def test_snapshot_matches_pre_refactor_literal(case, monkeypatch):
     ]
     if case["tables"].get("tickets") and any(row["status"] == "In Verify" for row in case["tables"]["tickets"]):
         expected_calls.append("already_done")
-    expected_calls.extend(["totals", "incidents_open", "incidents_recent", "events", "lifecycle"])
+    expected_calls.extend(["totals", "incidents_open", "incidents_recent", "events", "lifecycle",
+                           "canary_pending", "canary_merge_live", "canary_settings"])
     assert ctx.db.calls == expected_calls
     assert [call[0] for call in ctx.leases.calls] == ["cooling_many", "ttl_ms_many"]
 

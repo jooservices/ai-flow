@@ -332,6 +332,8 @@
       "evaluate",
       "record-rollback",
       "record-promotion",
+      "note-pending",
+      "mark-live",
       "retry-tickets"
      ],
      "required": true,
@@ -415,7 +417,7 @@
         "--minimum-age-s"
        ],
        "dest": "minimum_age_s",
-       "default": 1200,
+       "default": 300,
        "choices": null,
        "required": false,
        "nargs": null,
@@ -428,7 +430,7 @@
         "--minimum-runs"
        ],
        "dest": "minimum_runs",
-       "default": 5,
+       "default": 3,
        "choices": null,
        "required": false,
        "nargs": null,
@@ -441,7 +443,7 @@
         "--maximum-age-s"
        ],
        "dest": "maximum_age_s",
-       "default": 3600,
+       "default": 900,
        "choices": null,
        "required": false,
        "nargs": null,
@@ -473,6 +475,19 @@
        "nargs": null,
        "type_name": "int",
        "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--from-settings"
+       ],
+       "dest": "from_settings",
+       "default": false,
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "read minimum age, runs and maximum age from canary settings",
        "metavar": null
       }
      ],
@@ -622,12 +637,102 @@
         "--minimum-runs"
        ],
        "dest": "minimum_runs",
-       "default": 5,
+       "default": 3,
        "choices": null,
        "required": false,
        "nargs": null,
        "type_name": "int",
        "help": null,
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    },
+    "note-pending": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--build"
+       ],
+       "dest": "build",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--merged-at"
+       ],
+       "dest": "merged_at",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      }
+     ],
+     "subcommands": {}
+    },
+    "mark-live": {
+     "actions": [
+      {
+       "option_strings": [
+        "-h",
+        "--help"
+       ],
+       "dest": "help",
+       "default": "==SUPPRESS==",
+       "choices": null,
+       "required": false,
+       "nargs": 0,
+       "type_name": null,
+       "help": "show this help message and exit",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--build"
+       ],
+       "dest": "build",
+       "default": null,
+       "choices": null,
+       "required": true,
+       "nargs": null,
+       "type_name": null,
+       "help": null,
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--covered-build"
+       ],
+       "dest": "covered_build",
+       "default": [],
+       "choices": null,
+       "required": false,
+       "nargs": null,
+       "type_name": null,
+       "help": "pending build contained in the promoted build; may be repeated",
        "metavar": null
       }
      ],

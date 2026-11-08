@@ -142,7 +142,9 @@ function renderRuntimeSettings() {
   if (!consoleCan('console.manage')) { root.innerHTML = '<section class="panel"><p>Settings are available to owners and administrators.</p></section>'; return; }
   if (!state.project && projects.length) state.project = projects[0];
   var services = state.scope === 'project' ? (data.project_services || {})[state.project] || [] : data.secret_services || [];
-  var h = (window.AIFlowQuotaRefresh ? window.AIFlowQuotaRefresh.panel(state, esc, when, renderRuntimeSettings, projectResponseError) : '') + '<section class="panel"><div class="panel-h"><h2>Runtime settings</h2><button class="btn sm" data-act="runtime-settings-refresh"' + (state.busy ? ' disabled' : '') + '>Refresh</button></div>' +
+  var h = (window.AIFlowQuotaRefresh ? window.AIFlowQuotaRefresh.panel(state, esc, when, renderRuntimeSettings, projectResponseError) : '') +
+    (window.AIFlowCanarySettings ? window.AIFlowCanarySettings.panel(state, esc, when, renderRuntimeSettings, projectResponseError) : '') +
+    '<section class="panel"><div class="panel-h"><h2>Runtime settings</h2><button class="btn sm" data-act="runtime-settings-refresh"' + (state.busy ? ' disabled' : '') + '>Refresh</button></div>' +
     '<p class="hint">Values are never shown after entry. The control APIs restart one at a time; project workers drain active work before they restart.</p>' +
     '<div class="project-form"><label>Location<select class="in" data-runtime-scope>' +
     '<option value="secret"' + (state.scope === 'secret' ? ' selected' : '') + '>Control runtime secret or setting</option>' +

@@ -283,6 +283,25 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "started_at", "nodes"))),
     "version_policy": _state_object({"control": _STATE_STRING, "max_minor_lag": _STATE_INTEGER},
                                      ("control", "max_minor_lag")),
+    "control_canary": _state_object({
+        "running_build": _STATE_STRING, "canary_build": _STATE_STRING,
+        "pending_merges": _STATE_INTEGER,
+        "oldest_pending_age_s": _state_nullable(_STATE_INTEGER),
+        "pending": _state_array(_state_object({"build": _STATE_STRING,
+            "merged_at": _state_nullable(_STATE_DATETIME)}, ("build", "merged_at"))),
+        "merge_to_live": _state_array(_state_object({
+            "build": _STATE_STRING, "seconds": _STATE_INTEGER,
+            "merged_at": _state_nullable(_STATE_DATETIME), "live_at": _state_nullable(_STATE_DATETIME),
+        }, ("build", "seconds", "merged_at", "live_at"))),
+        "settings": _state_object({
+            "minimum_age_s": _STATE_INTEGER, "minimum_runs": _STATE_INTEGER, "maximum_age_s": _STATE_INTEGER,
+            "updated_by": _STATE_STRING, "updated_at": _state_nullable(_STATE_DATETIME),
+            "defaults": _state_object({"minimum_age_s": _STATE_INTEGER, "minimum_runs": _STATE_INTEGER,
+                                       "maximum_age_s": _STATE_INTEGER},
+                                      ("minimum_age_s", "minimum_runs", "maximum_age_s")),
+        }, ("minimum_age_s", "minimum_runs", "maximum_age_s", "updated_by", "updated_at", "defaults")),
+    }, ("running_build", "canary_build", "pending_merges", "oldest_pending_age_s", "pending",
+        "merge_to_live", "settings")),
     "totals": _state_object({"runs_24h": _STATE_INTEGER, "cost_24h": _STATE_NUMBER,
         "tokens_in_24h": _STATE_INTEGER, "tokens_out_24h": _STATE_INTEGER,
         "done_24h": _STATE_INTEGER, "failed_24h": _STATE_INTEGER},
@@ -290,4 +309,4 @@ STATE_RESPONSE_SCHEMA = _state_object({
 }, ("generated_at", "env", "control_repo", "versions", "version", "links", "flow_doctor",
     "operator_interventions", "tool_waits", "nodes", "accounts",
     "active_runs", "recent_runs", "projects", "tickets", "release_readiness", "release_progress", "incidents",
-    "incidents_recent", "events", "sa", "role_health", "rollout", "version_policy", "totals"))
+    "incidents_recent", "events", "sa", "role_health", "rollout", "version_policy", "control_canary", "totals"))

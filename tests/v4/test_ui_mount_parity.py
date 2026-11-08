@@ -70,6 +70,7 @@ ASSETS = (
     "/console-assets/run-inbox.js",
     "/console-assets/user-form-state.js",
     "/console-assets/quota-refresh-settings.js",
+    "/console-assets/canary_settings.js",
 )
 CONSOLE_PAGES = (
     "/dashboard", "/work", "/board", "/delivery", "/sa", "/business", "/review", "/stakeholder",
@@ -686,6 +687,7 @@ def test_mount_panel_assets_registers_panel_scripts_in_order():
         "/console-assets/run-inbox.js",
         "/console-assets/user-form-state.js",
         "/console-assets/quota-refresh-settings.js",
+        "/console-assets/canary_settings.js",
     ]
 
 

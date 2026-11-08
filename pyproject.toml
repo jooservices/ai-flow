@@ -14,7 +14,7 @@ dependencies = [
     "pyyaml>=6.0",
     "pyjwt[crypto]>=2.10",
     "jinja2>=3.1",
-    "opentelemetry-sdk>=1.28",
+    "opentelemetry-sdk>=1.45.2",
     "opentelemetry-exporter-otlp-proto-http>=1.28",
     "fastembed>=0.7.1",
 ]

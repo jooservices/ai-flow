@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""One test command for every layer: fast (lint, types, guards, unit), integration, smoke, e2e (JAIF-579).
+
+Usage:
+    scripts/test [OPTIONS] [LAYERS...] [PATHS...]
+
+Examples:
+    scripts/test
+    scripts/test fast
+    scripts/test integration
+    scripts/test smoke
+    scripts/test e2e
+    scripts/test fast integration
+    scripts/test fast tests/v4/test_commit_rules.py
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+LAYERS = ("fast", "integration", "smoke", "e2e")
+TAIL_LINES = 25
+
+
+def _extract_tail(output: str, limit: int = TAIL_LINES) -> str:
+    """Extract the last non-empty lines from a command output string."""
+    lines = [line for line in output.strip().splitlines() if line.strip()]
+    return "\n".join(lines[-limit:])
+
+
+def _run_process(argv: list[str], cwd: Path | None = None, timeout_seconds: int = 600) -> tuple[int, str]:
+    """Execute a command in a detached session without reading terminal input."""
+    sanitized_environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("GIT_") or key.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
+    }
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=sanitized_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            text=True,
+        )
+        stdout, _ = process.communicate(timeout=timeout_seconds)
+        return process.returncode, stdout
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, _ = process.communicate()
+        return 124, f"command timed out after {timeout_seconds} seconds:\n{stdout}"
+    except OSError as error:
+        return 127, f"failed to execute {argv[0]}: {error}"
+
+
+def _resolve_base_ref(repository_root: Path, preferred_base: str) -> str:
+    """Find an existing Git ref to compare against for guards and linting."""
+    candidates = [preferred_base, f"origin/{preferred_base}", "origin/develop", "develop", "HEAD"]
+    for candidate in candidates:
+        exit_code, _ = _run_process(["git", "rev-parse", "--verify", candidate], cwd=repository_root)
+        if exit_code == 0:
+            return candidate
+    return "HEAD"
+
+
+def _run_fast_substep(step_name: str, argv: list[str], repository_root: Path) -> tuple[bool, str]:
+    """Run one verification step of the fast layer and report whether it succeeded."""
+    exit_code, output = _run_process(argv, cwd=repository_root)
+    if exit_code != 0:
+        return False, f"[{step_name} failed]\n{_extract_tail(output)}"
+    return True, ""
+
+
+def run_fast_layer(repository_root: Path, base_ref: str, paths: list[str]) -> tuple[bool, str]:
+    """Run fast checks covering lint, types, guards and unit tests."""
+    compile_targets = paths if paths else ["aiflow/v4", "tests/v4"]
+    python_targets = [target for target in compile_targets if not target.endswith((".md", ".json", ".yaml", ".yml"))]
+    if python_targets:
+        passed, failure = _run_fast_substep("types", [sys.executable, "-m", "compileall", "-q", *python_targets],
+                                            repository_root)
+        if not passed:
+            return False, failure
+
+    if paths:
+        passed, failure = _run_fast_substep("lint", ["uv", "run", "--frozen", "ruff", "check", *paths],
+                                            repository_root)
+        if not passed:
+            return False, failure
+    else:
+        resolved_base = _resolve_base_ref(repository_root, base_ref)
+        passed, failure = _run_fast_substep("lint", ["uv", "run", "--frozen", "python", "-m",
+                                                     "aiflow.v4.core.quality_checks", "check", "--base", resolved_base],
+                                            repository_root)
+        if not passed:
+            return False, failure
+
+        for guard_name, module_name in (
+            ("giant-files", "aiflow.v4.core.giant_files"),
+            ("duplicate-blocks", "aiflow.v4.core.duplicate_blocks"),
+            ("sql-boundary", "aiflow.v4.core.sql_boundary"),
+        ):
+            passed, failure = _run_fast_substep(guard_name, [sys.executable, "-m", module_name, "--base",
+                                                             resolved_base], repository_root)
+            if not passed:
+                return False, failure
+
+        passed, failure = _run_fast_substep("broad-except", [sys.executable, "-m", "aiflow.v4.core.broad_except",
+                                                             "check", "--base", resolved_base, "--head", "HEAD"],
+                                            repository_root)
+        if not passed:
+            return False, failure
+
+    pytest_argv = ["uv", "run", "--frozen", "pytest", "-m", "unit", "-p", "no:warnings", "-q", *paths]
+    exit_code, output = _run_process(pytest_argv, cwd=repository_root)
+    if exit_code != 0:
+        return False, f"[unit tests failed]\n{_extract_tail(output)}"
+    return True, ""
+
+
+def run_integration_layer(repository_root: Path, paths: list[str]) -> tuple[bool, str]:
+    """Run database and external service integration tests."""
+    argv = ["uv", "run", "--frozen", "pytest", "-m", "integration", "-p", "no:warnings", "-q", *paths]
+    exit_code, output = _run_process(argv, cwd=repository_root)
+    if exit_code != 0:
+        return False, _extract_tail(output)
+    return True, ""
+
+
+def run_smoke_layer(repository_root: Path, paths: list[str]) -> tuple[bool, str]:
+    """Run smoke tests for rapid confidence verification."""
+    argv = ["uv", "run", "--frozen", "pytest", "-m", "smoke", "-p", "no:warnings", "-q", *paths]
+    exit_code, output = _run_process(argv, cwd=repository_root)
+    if exit_code != 0:
+        return False, _extract_tail(output)
+    return True, ""
+
+
+def run_e2e_layer(repository_root: Path, paths: list[str]) -> tuple[bool, str]:
+    """Run end-to-end browser journeys and acceptance workflows."""
+    argv = ["uv", "run", "--frozen", "pytest", "-m", "e2e", "-p", "no:warnings", "-q", *paths]
+    exit_code, output = _run_process(argv, cwd=repository_root)
+    if exit_code != 0:
+        return False, _extract_tail(output)
+    return True, ""
+
+
+def parse_arguments(arguments: list[str]) -> argparse.Namespace:
+    """Parse layer names, target paths and options from command line tokens."""
+    parser = argparse.ArgumentParser(
+        prog="scripts/test",
+        description="Run quality tests by layer (fast, integration, smoke, e2e) with concise pass/fail reporting.",
+    )
+    parser.add_argument("tokens", nargs="*", help="Layer names (fast, integration, smoke, e2e) and/or test file paths")
+    parser.add_argument("--base", default="origin/develop", help="Git base ref for guards and lint comparison")
+    parser.add_argument("-x", "--fail-fast", action="store_true", help="Stop execution after the first failing layer")
+    return parser.parse_args(arguments)
+
+
+def _separate_layers_and_paths(tokens: list[str]) -> tuple[list[str], list[str]]:
+    """Separate command tokens into known layer names and file paths."""
+    selected_layers: list[str] = []
+    selected_paths: list[str] = []
+    for token in tokens:
+        if token.lower() in LAYERS:
+            if token.lower() not in selected_layers:
+                selected_layers.append(token.lower())
+        else:
+            selected_paths.append(token)
+    return selected_layers or list(LAYERS), selected_paths
+
+
+def main(arguments: list[str] | None = None) -> int:
+    """Execute selected layers, report pass/fail per layer, and return exit code."""
+    parsed = parse_arguments(sys.argv[1:] if arguments is None else arguments)
+    layers_to_run, paths = _separate_layers_and_paths(parsed.tokens)
+    repository_root = Path(__file__).resolve().parents[1]
+
+    layer_handlers = {
+        "fast": lambda: run_fast_layer(repository_root, parsed.base, paths),
+        "integration": lambda: run_integration_layer(repository_root, paths),
+        "smoke": lambda: run_smoke_layer(repository_root, paths),
+        "e2e": lambda: run_e2e_layer(repository_root, paths),
+    }
+
+    layer_results: list[tuple[str, str, str]] = []
+    for layer in layers_to_run:
+        handler = layer_handlers[layer]
+        passed, detail = handler()
+        status = "PASS" if passed else "FAIL"
+        layer_results.append((layer, status, detail))
+        print(f"{layer}: {status}", flush=True)
+        if not passed and parsed.fail_fast:
+            break
+
+    failures = [(name, detail) for name, status, detail in layer_results if status == "FAIL" and detail]
+    if failures:
+        print("", flush=True)
+        for name, detail in failures:
+            print(f"--- {name} failure ---", flush=True)
+            print(detail, flush=True)
+        return 1
+
+    return 0 if all(status == "PASS" for _, status, _ in layer_results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

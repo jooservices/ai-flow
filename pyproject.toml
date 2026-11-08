@@ -38,6 +38,13 @@ packages = ["aiflow"]
 [tool.pytest.ini_options]
 testpaths = ["tests/v4"]
 addopts = "-q"
+markers = [
+    "raw_csrf: do not add the CSRF header to console requests (tests of the protection)",
+    "unit: fast unit tests without external services",
+    "integration: database and service integration tests",
+    "smoke: quick confidence tests",
+    "e2e: end-to-end browser and acceptance tests",
+]
 
 [tool.uv]
 # fastembed caps pillow below 13, but pillow 13 fixes published HIGH vulnerabilities (docs/v4/security.md). fastembed

@@ -47,7 +47,7 @@ def _install_save_project_environment_route(app, ctx, deps, runtime, support):
                                        f"projects: update the environment of {key} via AI Flow console")
         except compat.HTTPException:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - the GitHub App call fails in many ways (API, transport, config); all map to 502
             runtime.log.warning("project environment update failed (%s)", type(exc).__name__)
             compat._project_audit(runtime, "save_project_environment", key, user.subject, False, "control repo commit failed")
             raise compat.HTTPException(502, "could not save the environment to aiflow-control") from exc

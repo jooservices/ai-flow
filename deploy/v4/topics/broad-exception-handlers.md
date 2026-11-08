@@ -1,0 +1,1 @@
+- [Broad exception handlers](../../../docs/v4/broad-exception-handlers.md): The rule for a broad except, its baseline and the routes whose handlers were explained.

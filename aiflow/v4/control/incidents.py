@@ -1,8 +1,8 @@
 """Incidents and repeated flow-error detection.
 
 Incidents are opened once per (kind, subject) while the condition holds, closed when it clears, and people are
-alerted on open (critical and warning) and on resolve. The master cycle also uses the run history and long-lived
-ticket_stuck incidents to identify repeatable failures in the maintenance project that deserve a flow-bug ticket.
+alerted on open (critical and warning) and on resolve. The fenced master scan groups eligible failures from every
+project and step into root-cause signatures.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, locked_version, normalize_stacks, toolchain_gaps
 from . import knowledge
 from . import notify
+from .repositories import flow_bugs as flow_bug_repository
 
 
 _DYNAMIC_PREFIX = re.compile(
@@ -27,22 +28,11 @@ _EXCLUDED_FAILURE = re.compile(
 _TICKET_KEY = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b", re.IGNORECASE)
 _UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b", re.IGNORECASE)
 _HEX = re.compile(r"\b[0-9a-f]{8,}\b", re.IGNORECASE)
-_PATH = re.compile(r"(?:/[A-Za-z0-9_.-]+){2,}")
+_PATH = re.compile(r"(?:/[A-Za-z0-9_.-]+){2,}|(?:\.{0,2}/)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+")
 _NUMBER = re.compile(r"\b\d+\b")
 
 
-def flow_error_pattern(error_kind: str, summary: str) -> tuple[str, str] | None:
-    """Return a stable signature and readable sample for an eligible run failure.
-
-    Quota, offline-node, and missing-tool symptoms stay incidents. For other failures the signature combines the
-    adapter error kind with a normalized summary so the same checkout/provider failure groups across tickets.
-    """
-    raw = " ".join((summary or "").split())[:2000]
-    kind = (error_kind or "").strip().lower()
-    if not raw or kind in {"quota", "auth", "offline", "missing_tool", "missing-tool"}:
-        return None
-    if _EXCLUDED_FAILURE.search(f"{kind} {raw}"):
-        return None
+def _normalize_failure_sample(raw: str) -> tuple[str, str]:
     sample = raw
     for _ in range(3):
         stripped = _DYNAMIC_PREFIX.sub("", sample, count=1)
@@ -57,81 +47,105 @@ def flow_error_pattern(error_kind: str, summary: str) -> tuple[str, str] | None:
     normalized = _HEX.sub("<id>", normalized)
     normalized = _NUMBER.sub("#", normalized)
     normalized = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9<>#]+", " ", normalized)).strip()
+    return sample[:500], normalized
+
+
+def flow_error_pattern(error_kind: str, summary: str, step: str = "unknown",
+                       outcome: str = "failed") -> tuple[str, str] | None:
+    """Return a stable signature and readable sample for an eligible run failure.
+
+    Quota, offline-node, and missing-tool symptoms stay incidents. A signature binds outcome and error kind to the
+    normalized first summary line; affected steps are tracked as members of that root cause.
+    """
+    raw = " ".join(((summary or "").splitlines() or [""])[0].split())[:2000]
+    kind = (error_kind or "").strip().lower()
+    if not raw or kind in {"quota", "auth", "offline", "missing_tool", "missing-tool"}:
+        return None
+    if _EXCLUDED_FAILURE.search(f"{kind} {raw}"):
+        return None
+    sample, normalized = _normalize_failure_sample(raw)
     if len(normalized) < 8 or normalized in {"failed", "error", "provider error", "timeout"}:
         return None
-    digest = hashlib.sha256(f"{kind}\0{normalized}".encode()).hexdigest()[:20]
+    signature_parts = (outcome.strip().casefold() or "unknown", kind, normalized)
+    digest = hashlib.sha256("\0".join(signature_parts).encode()).hexdigest()[:20]
     return digest, sample[:500]
 
 
+def _candidate_run(run: dict) -> dict:
+    tokens_in = int(run.get("tokens_in") or 0)
+    tokens_out = int(run.get("tokens_out") or 0)
+    return {"id": str(run["id"]), "ticket": run["ticket_key"], "project": run["project"],
+            "step": run["step"], "outcome": run["outcome"], "error_kind": run["error_kind"] or "unknown",
+            "sample": run["sample"], "node": run["node"], "account": run["account_id"],
+            "provider": run["provider"] or "unknown", "release": run["release_version"] or "unknown",
+            "started_at": run["started_at"], "tokens_in": tokens_in, "tokens_out": tokens_out,
+            "tokens": tokens_in + tokens_out, "cost_usd": float(run.get("cost_usd") or 0)}
+
+
+def _candidate_stats(candidate: dict) -> dict:
+    runs = sorted(candidate["runs"].values(), key=lambda item: item["started_at"])
+    first, last = runs[0]["started_at"], runs[-1]["started_at"]
+    return {**candidate, "runs": runs, "window_count": len(runs),
+            "tickets": sorted({run["ticket"] for run in runs}),
+            "steps": sorted({run["step"] for run in runs}),
+            "providers": sorted({run["provider"] for run in runs}),
+            "accounts": sorted({run["account"] for run in runs}),
+            "provider_accounts": sorted({f"{run['provider']}/{run['account']}" for run in runs}),
+            "nodes": sorted({run["node"] for run in runs}),
+            "releases": sorted({run["release"] for run in runs}),
+            "sample_messages": [run["sample"] for run in runs[:3]],
+            "first_seen_at": first, "last_seen_at": last,
+            "tokens_used": sum(run["tokens"] for run in runs),
+            "cost_wasted": sum(run["cost_usd"] for run in runs),
+            "creation_eligible": len(runs) >= 3}
+
+
 def flow_bug_candidates(ctx) -> list[dict]:
-    """Find repeated failures in the maintenance project and eligible ticket_stuck incidents older than 30 minutes."""
-    project = ctx.settings.maintenance_project
-    tracked_signatures = {row["signature"] for row in ctx.db.all("SELECT signature FROM flow_bug_tracker")}
-    runs = ctx.db.all(
-        "SELECT r.id, r.ticket_key, r.project, r.step, r.error_kind, r.outcome, r.summary, r.node, r.started_at,"
-        " r.tokens_in, r.tokens_out, coalesce(n.release_version, '') AS release_version FROM runs r LEFT JOIN nodes n ON n.name=r.node"
-        " WHERE r.project=%s AND r.status<>'running' AND r.outcome IN ('failed','timeout')"
-        " AND coalesce(r.ended_at,r.started_at) >= now() - interval '30 minutes' ORDER BY r.started_at",
-        (project,),
-    )
+    """Find signatures from all failed and timed-out runs in the rolling six-hour window."""
+    tracked, runs, incidents = flow_bug_repository.candidate_data(ctx.db)
+    maintenance_project = str(ctx.settings.maintenance_project or "")
+    incident_opened = {}
+    for incident in incidents:
+        subject = str(incident["subject"])
+        prefix, separator, number = subject.partition("-")
+        if separator and prefix == maintenance_project and number.isdigit():
+            incident_opened[subject] = incident["opened_at"]
+    incident_run_ids = {
+        str(run["id"]) for run in runs
+        if run["project"] == maintenance_project
+        and run["ticket_key"] in incident_opened
+        and run["started_at"] <= incident_opened[run["ticket_key"]]
+    }
     candidates: dict[str, dict] = {}
-
-    def add_run(run: dict, incident_id: int | None = None) -> None:
-        pattern = flow_error_pattern(run["error_kind"], run["summary"])
-        if not pattern:
-            return
-        signature, sample = pattern
-        item = candidates.setdefault(signature, {
-            "signature": signature, "pattern": sample, "error_kind": run["error_kind"] or "unknown",
-            "runs": {}, "incident_ids": set(),
-        })
-        tokens_in = int(run.get("tokens_in") or 0)
-        tokens_out = int(run.get("tokens_out") or 0)
-        tokens = tokens_in + tokens_out
-        item["runs"][str(run["id"])] = {
-            "id": str(run["id"]), "ticket": run["ticket_key"], "step": run["step"], "node": run["node"],
-            "release": run["release_version"] or "unknown",
-            "tokens_in": tokens_in, "tokens_out": tokens_out, "tokens": tokens,
-        }
-        if incident_id is not None:
-            item["incident_ids"].add(incident_id)
-
     for run in runs:
-        add_run(run)
-
-    for incident in ctx.db.all(
-        "SELECT id, subject, opened_at FROM incidents WHERE kind='ticket_stuck' AND closed_at IS NULL"
-        " AND starts_with(subject, %s) AND opened_at <= now() - interval '30 minutes'",
-        (f"{project}-",),
-    ):
-        run = ctx.db.one(
-            "SELECT r.id, r.ticket_key, r.project, r.step, r.error_kind, r.outcome, r.summary, r.node, r.started_at,"
-            " r.tokens_in, r.tokens_out, coalesce(n.release_version, '') AS release_version FROM runs r LEFT JOIN nodes n ON n.name=r.node"
-            " WHERE r.project=%s AND r.ticket_key=%s AND r.status<>'running'"
-            " AND r.outcome IN ('failed','timeout') AND r.started_at > %s - interval '1 day' AND r.started_at <= %s"
-            " ORDER BY r.started_at DESC LIMIT 1",
-            (project, incident["subject"], incident["opened_at"], incident["opened_at"]))
-        if run:
-            add_run(run, incident["id"])
-
-    ready = []
-    for candidate in candidates.values():
-        candidate_runs = list(candidate["runs"].values())
-        tickets = sorted({run["ticket"] for run in candidate_runs})
-        is_repeated = len(candidate_runs) >= 3 and len(tickets) >= 2
-        creation_eligible = is_repeated or bool(candidate["incident_ids"])
-        if not creation_eligible and candidate["signature"] not in tracked_signatures:
+        pattern = flow_error_pattern(run["error_kind"], run["summary"], run["step"], run["outcome"])
+        if not pattern:
             continue
-        candidate["runs"] = sorted(candidate_runs, key=lambda run: run["id"])
-        candidate["tokens_used"] = sum(int(r.get("tokens") or 0) for r in candidate["runs"])
-        candidate["creation_eligible"] = creation_eligible
-        candidate["tickets"] = tickets
-        candidate["steps"] = sorted({run["step"] for run in candidate["runs"]})
-        candidate["nodes"] = sorted({run["node"] for run in candidate["runs"]})
-        candidate["releases"] = sorted({run["release"] for run in candidate["runs"]})
-        candidate["incident_ids"] = sorted(candidate["incident_ids"])
-        ready.append(candidate)
+        signature, sample = pattern
+        candidate = candidates.setdefault(signature, {"signature": signature, "pattern": sample,
+                                                       "error_kind": run["error_kind"] or "unknown",
+                                                       "step": run["step"], "outcome": run["outcome"], "runs": {}})
+        item = dict(run, sample=sample)
+        candidate["runs"][str(run["id"])] = _candidate_run(item)
+    ready = []
+    for signature, candidate in candidates.items():
+        if len(candidate["runs"]) >= 3 or signature in tracked:
+            ready.append(_candidate_stats(candidate))
+            continue
+        eligible_incident_runs = {run_id: run for run_id, run in candidate["runs"].items()
+                                  if run_id in incident_run_ids}
+        if eligible_incident_runs:
+            incident_candidate = {**candidate, "runs": eligible_incident_runs}
+            stats = _candidate_stats(incident_candidate)
+            stats["creation_eligible"] = True
+            ready.append(stats)
     return ready
+
+
+def flow_breaker_exclusions(ctx, candidates: list[dict]) -> set[tuple[str, str]]:
+    """Return ticket-step pairs held by open flow-bug circuit breakers."""
+    keys = sorted({str(item.get("key") or "") for item in candidates if item.get("key")})
+    return flow_bug_repository.breaker_exclusions(ctx.db, keys)
 
 
 def suggested_flow_fix(candidate: dict) -> str:

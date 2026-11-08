@@ -31,6 +31,7 @@
     "GET /v1/console/session",
     "GET /v1/console/users",
     "GET /v1/dashboard/disagreements",
+    "GET /v1/dashboard/flow-failures",
     "GET /v1/dashboard/quota",
     "GET /v1/dashboard/review-rounds",
     "GET /v1/dashboard/silent-runs",

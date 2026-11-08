@@ -5,8 +5,9 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from .. import quota as quota_reporting, merge_flow, route_deps
+from .. import incidents, merge_flow, quota as quota_reporting, route_deps
 from ..features.review_rounds import repository as review_round_repository, service as review_rounds
+from ..repositories import dashboard as dashboard_repository
 
 router = APIRouter()
 
@@ -19,6 +20,38 @@ def dashboard_review_rounds(request: Request) -> dict:
             else route_deps.optional_console_user(ctx, request))
     projects = list(user.project_keys) if user and user.project_keys is not None else None
     return review_rounds.review_round_metrics(review_round_repository.ReviewRoundsRepository(ctx.db), projects)
+
+
+def _accumulate_flow_failure(groups: dict[str, dict], run: dict, tracked: dict[str, dict]) -> bool:
+    pattern = incidents.flow_error_pattern(run["error_kind"], run["summary"], run["step"], run["outcome"])
+    if not pattern:
+        return False
+    signature, sample = pattern
+    item = groups.setdefault(signature, {"signature": signature, "count": 0, "tickets": set(),
+                                        "pattern": sample, "tokens": 0, "cost_usd": 0.0})
+    item["count"] += 1
+    item["tickets"].add(run["ticket_key"])
+    item["tokens"] += int(run["tokens_in"] or 0) + int(run["tokens_out"] or 0)
+    item["cost_usd"] += float(run["cost_usd"] or 0)
+    return signature in tracked
+
+
+def _flow_failure_row(item: dict, tracked: dict[str, dict]) -> dict:
+    item["tickets"] = sorted(item["tickets"])
+    tracker = tracked.get(item["signature"])
+    item["bug"] = ({"ticket": tracker["ticket_key"], "state": tracker["state"],
+                     "regressions": tracker["regression_count"]} if tracker else None)
+    return item
+
+
+def _flow_failure_groups(rows: list[dict], tracked: dict[str, dict], total_runs: int) -> dict:
+    groups: dict[str, dict] = {}
+    bugged_runs = sum(_accumulate_flow_failure(groups, run, tracked) for run in rows)
+    items = [_flow_failure_row(item, tracked) for item in groups.values()]
+    top = sorted((item for item in items if item["count"] >= 2),
+                 key=lambda item: (-item["count"], -item["tokens"], item["signature"]))[:10]
+    return {"window_hours": 24, "signatures": top, "runs_with_bug": bugged_runs,
+            "total_runs": total_runs, "bugged_run_share": bugged_runs / total_runs if total_runs else 0.0}
 
 
 @router.get("/v1/dashboard/waiting")
@@ -50,10 +83,8 @@ def dashboard_quota(request: Request) -> dict:
             else route_deps.optional_console_user(ctx, request))
     scope = set(user.project_keys) if user and user.project_keys is not None else None
     repo = ctx.repo()
-    nodes = {node["name"]: node for node in ctx.db.all(
-        "SELECT name,projects,dynamic FROM nodes WHERE removed_at IS NULL")}
-    account_rows = ctx.db.all("SELECT id,provider,CASE WHEN quota_source<>'' THEN quota ELSE '{}'::jsonb END AS quota,"
-                              "quota_source,quota_observed_at,quota_forecast FROM accounts ORDER BY node,provider,id")
+    node_rows, account_rows = dashboard_repository.quota_sources(ctx.db)
+    nodes = {node["name"]: node for node in node_rows}
     quota_by_account = {str(row["id"]): row.get("quota_forecast") or {} for row in account_rows}
     missing = [row for row in account_rows if not quota_by_account[str(row["id"])] and row.get("quota_source")]
     quota_by_account.update(quota_reporting.assessments(ctx.db, missing) if missing else {})
@@ -110,3 +141,22 @@ def dashboard_quota(request: Request) -> dict:
         rows.append({"provider": provider, "label": f"Account {provider_counts[provider]}",
                      "windows": account["windows"]})
     return {"rows": rows}
+
+
+@router.get("/v1/dashboard/flow-failures")
+def dashboard_flow_failures(request: Request) -> dict:
+    """Return the top repeating root-cause signatures within the caller's visible projects."""
+    ctx = route_deps.context(request)
+    user = (route_deps.console_user_for(request, "view.dashboard") if ctx.settings.console_login
+            else route_deps.optional_console_user(ctx, request))
+    scope = list(user.project_keys) if user and user.project_keys is not None else None
+    rows = dashboard_repository.flow_failure_runs(ctx.db, scope)
+    groups = {}
+    for run in rows:
+        pattern = incidents.flow_error_pattern(run["error_kind"], run["summary"], run["step"], run["outcome"])
+        if pattern:
+            groups[pattern[0]] = None
+    signatures = sorted(groups)
+    tracker_rows = dashboard_repository.flow_failure_trackers(ctx.db, signatures)
+    tracked = {row["signature"]: row for row in tracker_rows}
+    return _flow_failure_groups(rows, tracked, dashboard_repository.total_runs(ctx.db, scope))

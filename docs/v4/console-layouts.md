@@ -48,6 +48,8 @@ verifications lost to conflicts, the time spent on them and the trend. It is des
 [Fewer merge conflicts](merge-conflicts.md), which also covers the Delivery Analytics panel.
 
 The Dashboard block `review-rounds` shows the average completed review rounds against target and findings for each round.
+The Dashboard block `flow-failures` ("Repeated failures", full width by default) lists recurring failure signatures
+and links each tracked signature to its root-cause bug; see [Repeated failure root causes](flow-failure-roots.md).
 
 ## Role defaults
 

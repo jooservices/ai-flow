@@ -304,11 +304,13 @@ class FakeJira:
     initial_status = "Backlog"  # the status a new issue starts in
 
     def create_issue(self, project, summary, description, issuetype="Story", labels=None, parent="", fix_version="",
-                     version_field=""):
+                     version_field="", priority=""):
         self.created = getattr(self, "created", [])
         key = f"{project}-{900 + len(self.created)}"
         created = {"key": key, "project": project, "summary": summary, "description": description,
                    "issuetype": issuetype, "labels": list(labels or []), "parent": parent}
+        if priority:
+            created["priority"] = priority
         if fix_version:
             created["fix_version"] = fix_version
         if version_field:

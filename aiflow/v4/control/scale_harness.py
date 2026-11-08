@@ -60,8 +60,8 @@ COMMON_CALLS = (
 PICKER = "/v1/projects"
 CONSOLE_REQUESTS_PER_VIEW = 6
 PAGES: dict[str, tuple[str, ...]] = {
-    "/cc": ("/v1/dashboard/waiting", "/v1/dashboard/disagreements", "/v1/dashboard/quota", "/v1/capacity",
-            "/v1/escalations"),
+    "/cc": ("/v1/dashboard/waiting", "/v1/dashboard/disagreements", "/v1/dashboard/flow-failures",
+            "/v1/dashboard/quota", "/v1/capacity", "/v1/escalations"),
     "/work": ("/v1/dashboard/waiting", PICKER),
     "/delivery": ("/v1/dashboard/waiting", "/v1/analytics/daily?days=14", "/v1/analytics/conflicts?days=14", PICKER),
     "/sa": (),

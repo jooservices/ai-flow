@@ -8,9 +8,10 @@ import re
 import secrets
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
+import httpx
 from fastapi import Header, HTTPException, Request
 from ..core import work_limits
 from . import (knowledge, licensing, rollout, shared_accounts, version_release)
@@ -21,6 +22,7 @@ from . import merge_queue
 from . import merge_flow
 from . import quota as quota_reporting
 from .incidents import flow_bug_candidates, suggested_flow_fix
+from .repositories import flow_bugs as flow_bug_repository
 from . import route_deps
 from .db import J
 from .route_deps import h
@@ -31,6 +33,211 @@ from .features.github_fenced.events import (GitHubMergeCompleted, ReviewerAction
                                             ReviewerLabelsUpdated, ReviewerTicketTransitioned)
 from .features.runs.events import FlowBugCreated, FlowBugIntakeMoved, FlowBugRepeated
 from .platform.events.wiring import publish_for
+
+
+def _flow_bug_description(candidate: dict, occurrence_count: int, breaker_active: bool = False) -> str:
+    run_lines = [f"- {run['id']} · {run['ticket']} · {run['step']} · {run['provider']}/{run['account']}"
+                 f" · node {run['node']} · release {run['release']} · {run['tokens']:,} tokens"
+                 for run in candidate["runs"]]
+    samples = "\n".join(f"- {message}" for message in candidate["sample_messages"][:3])
+    breaker = ("\nCircuit breaker active: the repeating step is held for affected tickets until this bug closes."
+               if breaker_active else "")
+    return ("Automatically detected by the AI Flow master cycle.\n\n"
+            f"Fingerprint: {candidate['signature']}\nPattern: {candidate['pattern']}\n"
+            f"Error kind: {candidate['error_kind']}\nCount: {occurrence_count} matching failures in six hours.\n"
+            f"Affected tickets: {', '.join(candidate['tickets'])}\nSteps: {', '.join(candidate['steps'])}\n"
+            f"Providers: {', '.join(candidate['providers'])}\nAccounts: {', '.join(candidate['accounts'])}\n"
+            f"Provider accounts: {', '.join(candidate['provider_accounts'])}\n"
+            f"First seen: {candidate['first_seen_at'].isoformat()}\n"
+            f"Last seen: {candidate['last_seen_at'].isoformat()}\n"
+            f"Tokens wasted: {candidate['tokens_used']:,}\nCost wasted: ${candidate['cost_wasted']:.6f}\n"
+            f"Three sample messages:\n{samples}\nNodes: {', '.join(candidate['nodes'])}\n"
+            f"AI Flow releases: {', '.join(candidate['releases'])}\nRelated runs:\n" + "\n".join(run_lines)
+            + f"\n\nSuggested fix: {suggested_flow_fix(candidate)}{breaker}")
+
+
+def _flow_bug_repeat_comment(candidate: dict, new_runs: list[dict], occurrence_count: int, tokens_wasted: int,
+                            cost_wasted: float, regression_count: int, breaker_active: bool) -> str:
+    run_ids = ", ".join(run["id"] for run in new_runs)
+    regression = f"Regression count: {regression_count}.\n" if regression_count else ""
+    breaker = "Circuit breaker active for this step and its affected tickets.\n" if breaker_active else ""
+    return ("AI Flow · master · repeated flow error\n"
+            f"Pattern: {candidate['pattern']}\nCount: {occurrence_count} matching failures.\n"
+            f"Affected tickets: {', '.join(candidate['tickets'])}\nSteps: {', '.join(candidate['steps'])}\n"
+            f"Providers: {', '.join(candidate['providers'])}\nAccounts: {', '.join(candidate['accounts'])}\n"
+            f"Provider accounts: {', '.join(candidate['provider_accounts'])}\n"
+            f"First seen: {candidate['first_seen_at'].isoformat()} · last seen: {candidate['last_seen_at'].isoformat()}\n"
+            f"Tokens wasted: {tokens_wasted:,} · cost wasted: ${cost_wasted:.6f}\n"
+            f"New run IDs: {run_ids}\n{regression}{breaker}")
+
+
+def _flow_bug_totals(tracker: dict, new_runs: list[dict]) -> tuple[int, float]:
+    tokens = int(tracker.get("tokens_wasted") or 0) + sum(int(run.get("tokens") or 0) for run in new_runs)
+    cost = float(tracker.get("cost_wasted") or 0) + sum(float(run.get("cost_usd") or 0) for run in new_runs)
+    return tokens, cost
+
+
+def _flow_bug_metadata(candidate: dict, tracker: dict, new_runs: list[dict], breaker_active: bool,
+                       regression_count: int) -> dict:
+    old_first, old_last = tracker.get("first_seen_at"), tracker.get("last_seen_at")
+    tokens_wasted, cost_wasted = _flow_bug_totals(tracker, new_runs)
+    return {"run_ids": sorted(run["id"] for run in candidate["runs"]),
+            "repeat_count": int(tracker.get("repeat_count") or 0) + len(new_runs),
+            "occurrence_count": int(tracker.get("occurrence_count") or 0) + len(new_runs),
+            "first_seen_at": old_first or candidate["first_seen_at"],
+            "last_seen_at": max(old_last, candidate["last_seen_at"]) if old_last else candidate["last_seen_at"],
+            "tokens_wasted": tokens_wasted, "cost_wasted": cost_wasted,
+            "breaker_active": breaker_active,
+            "blocked_step": candidate["step"] if breaker_active else "",
+            "regression_count": regression_count}
+
+
+def _merge_flow_bug_values(previous: list[str] | None, current: list[str]) -> list[str]:
+    return sorted(set(previous or []) | set(current))
+
+
+def _flow_bug_is_closed(status: str) -> bool:
+    return status.casefold() in {"done", "closed", "resolved", "cancelled", "canceled"}
+
+
+def _save_flow_bug_status(ctx, tracker: dict, status: str) -> None:
+    closed = _flow_bug_is_closed(status)
+    was_closed = _flow_bug_is_closed(str(tracker.get("bug_status") or ""))
+    flow_bug_repository.set_status(ctx.db, tracker["signature"], status, closed=closed, was_closed=was_closed)
+    ctx.db.run("UPDATE tickets SET status=%s,synced_at=now() WHERE key=%s", (status, tracker["ticket_key"]))
+
+
+def _refresh_open_flow_bug_statuses(ctx, logger) -> dict[str, str]:
+    trackers = flow_bug_repository.open_trackers(ctx.db)
+    current: dict[str, str] = {}
+    for tracker in trackers:
+        try:
+            status = ctx.jira.status(tracker["ticket_key"])
+        except (httpx.HTTPError, RuntimeError) as exc:
+            logger.warning("could not check status of flow-bug %s: %s", tracker["ticket_key"], type(exc).__name__)
+            continue
+        _save_flow_bug_status(ctx, tracker, status)
+        current[tracker["signature"]] = status
+    return current
+
+
+def _reopen_flow_bug(ctx, run: dict, candidate: dict, tracker: dict, audit, logger) -> str | None:
+    target = "To Do"
+    try:
+        status = ctx.jira.transition_to(tracker["ticket_key"], target)
+        if status != target:
+            raise RuntimeError("flow-bug did not reopen")
+    except (httpx.HTTPError, RuntimeError) as exc:
+        audit("jira", "flow_bug_reopen", tracker["ticket_key"], str(run["id"]), run["fence"], run["account_id"],
+              False, "Regression transition failed", {"signature": candidate["signature"],
+                                                       "error": type(exc).__name__})
+        logger.warning("could not reopen flow-bug %s: %s", tracker["ticket_key"], type(exc).__name__)
+        return None
+    flow_bug_repository.reopened(ctx.db, candidate["signature"], status)
+    ctx.db.run("UPDATE tickets SET status=%s,synced_at=now() WHERE key=%s", (status, tracker["ticket_key"]))
+    audit("jira", "flow_bug_reopen", tracker["ticket_key"], str(run["id"]), run["fence"], run["account_id"],
+          True, status, {"signature": candidate["signature"]})
+    ctx.events.emit("flow_bug.regression", ticket=tracker["ticket_key"], project=ctx.settings.maintenance_project,
+                    run_id=str(run["id"]), fence=run["fence"], account=run["account_id"], node=run["node"],
+                    outcome="reopened", reason=candidate["pattern"],
+                    data={"signature": candidate["signature"]})
+    return status
+
+
+def _move_flow_bug_to_intake(ctx, run: dict, ticket_key: str, signature: str, audit, logger) -> str | None:
+    try:
+        status = ctx.jira.transition_to(ticket_key, "Intake")
+        if status != "Intake":
+            raise RuntimeError("flow-bug did not reach Intake")
+    except Exception as exc:  # Keep the tracker row so the next master cycle retries only the move.
+        audit("jira", "flow_bug_intake", ticket_key, str(run["id"]), run["fence"], run["account_id"], False,
+              "Intake transition failed", {"signature": signature, "error": type(exc).__name__})
+        logger.warning("could not move flow-bug %s to Intake: %s", ticket_key, type(exc).__name__)
+        return None
+    flow_bug_repository.intake_moved(ctx.db, signature)
+    ctx.db.run("UPDATE tickets SET status='Intake',synced_at=now() WHERE key=%s", (ticket_key,))
+    publish_for(ctx, FlowBugIntakeMoved(run_id=str(run["id"]), fence=run["fence"], ticket=ticket_key,
+                                        actor=run["account_id"], signature=signature))
+    return "Intake"
+
+
+def _move_open_flow_bug_to_intake(ctx, run: dict, candidate: dict, tracker: dict, status: str,
+                                  audit, logger) -> list[dict]:
+    if _flow_bug_is_closed(status) or tracker["in_intake"]:
+        return []
+    if status == "Intake":
+        flow_bug_repository.intake_moved(ctx.db, candidate["signature"])
+        return []
+    moved = _move_flow_bug_to_intake(ctx, run, tracker["ticket_key"], candidate["signature"], audit, logger)
+    if not moved:
+        return []
+    return [{"action": "moved_to_intake", "ticket": tracker["ticket_key"], "signature": candidate["signature"]}]
+
+
+def _flow_bug_regression(ctx, run: dict, candidate: dict, tracker: dict, status: str,
+                         audit, logger) -> tuple[str, int, bool, bool]:
+    regression_count = int(tracker.get("regression_count") or 0)
+    watch_until = tracker.get("watch_until")
+    active = (_flow_bug_is_closed(status) and watch_until is not None
+              and watch_until > datetime.now(timezone.utc))
+    if not active:
+        return status, regression_count, False, False
+    reopened = _reopen_flow_bug(ctx, run, candidate, tracker, audit, logger)
+    if not reopened:
+        return status, regression_count, False, True
+    return reopened, regression_count + 1, True, False
+
+
+def _record_flow_bug_repeat(ctx, run: dict, candidate: dict, tracker: dict, new_runs: list[dict],
+                            status: str, regression_count: int, regression: bool) -> dict:
+    breaker_active = not _flow_bug_is_closed(status) and (tracker["breaker_active"] or candidate["window_count"] >= 10)
+    metadata = _flow_bug_metadata(candidate, tracker, new_runs, breaker_active, regression_count)
+    comment_candidate = {**candidate, "first_seen_at": metadata["first_seen_at"],
+                         "last_seen_at": metadata["last_seen_at"]}
+    members = flow_bug_repository.member_values(ctx.db, candidate["signature"])
+    comment_candidate["tickets"] = _merge_flow_bug_values(members["ticket"], candidate["tickets"])
+    comment_candidate["steps"] = _merge_flow_bug_values(members["step"], candidate["steps"])
+    comment_candidate["providers"] = _merge_flow_bug_values(members["provider"], candidate["providers"])
+    comment_candidate["accounts"] = _merge_flow_bug_values(members["account"], candidate["accounts"])
+    body = _flow_bug_repeat_comment(comment_candidate, new_runs, metadata["occurrence_count"],
+                                    metadata["tokens_wasted"], metadata["cost_wasted"], regression_count,
+                                    breaker_active)
+    comment_id = ctx.jira.comment(tracker["ticket_key"], body)
+    _write_flow_bug_metadata(ctx, candidate["signature"], metadata,
+                             {**candidate, "new_runs": new_runs}, status)
+    publish_for(ctx, FlowBugRepeated(run_id=str(run["id"]), fence=run["fence"], ticket=tracker["ticket_key"],
+                                     actor=run["account_id"], comment_id=comment_id, signature=candidate["signature"],
+                                     repeat_count=metadata["repeat_count"],
+                                     new_run_ids=[item["id"] for item in new_runs]))
+    ctx.events.emit("flow_bug.repeated", ticket=tracker["ticket_key"], project=ctx.settings.maintenance_project,
+                    run_id=str(run["id"]), fence=run["fence"], account=run["account_id"], node=run["node"],
+                    outcome="commented", reason=candidate["pattern"],
+                    data={"repeat_count": metadata["repeat_count"], "occurrence_count": metadata["occurrence_count"],
+                          "regression_count": regression_count, "new_run_ids": [item["id"] for item in new_runs]})
+    action = "regression_reopened" if regression else "repeated"
+    return {"action": action, "ticket": tracker["ticket_key"], "repeat_count": metadata["repeat_count"],
+            "count": metadata["occurrence_count"], "regression_count": regression_count,
+            "breaker_active": breaker_active, "new_run_ids": [item["id"] for item in new_runs]}
+
+
+def _process_tracked_flow_bug(ctx, run: dict, candidate: dict, tracker: dict, status: str,
+                              audit, logger) -> list[dict]:
+    reports = _move_open_flow_bug_to_intake(ctx, run, candidate, tracker, status, audit, logger)
+    known = set(tracker.get("run_ids") or [])
+    new_runs = [item for item in candidate["runs"] if item["id"] not in known]
+    if not new_runs:
+        return reports
+    status, regression_count, regression, failed = _flow_bug_regression(
+        ctx, run, candidate, tracker, status, audit, logger)
+    if failed:
+        return reports
+    reports.append(_record_flow_bug_repeat(ctx, run, candidate, tracker, new_runs, status,
+                                           regression_count, regression))
+    return reports
+
+
+def _write_flow_bug_metadata(ctx, signature: str, metadata: dict, candidate: dict, status: str) -> None:
+    flow_bug_repository.save_repeat(ctx.db, signature, metadata, candidate, status)
 
 
 def _api():
@@ -477,147 +684,70 @@ def install(app, ctx, deps) -> SimpleNamespace:
                 "autonomy": master_budget_state()}
 
     def create_flow_bug(run: dict, candidate: dict) -> dict | None:
-        """Open a Bug in the maintenance project for a detected pattern, record it, and move it to Intake."""
+        """Open the single Highest priority root-cause Bug for a qualifying signature."""
         project = ctx.settings.maintenance_project
-        run_lines = [
-            f"- {item['id']} · {item['ticket']} · {item['step']} · node {item['node']} · release {item['release']}"
-            + (f" · tokens: {item['tokens']:,}" if item.get("tokens") else "")
-            for item in candidate["runs"]
-        ]
-        tokens_used = candidate.get("tokens_used") or sum(int(r.get("tokens") or 0) for r in candidate["runs"])
-        tokens_line = f"Tokens used: {tokens_used:,}\n" if tokens_used else ""
-        reason = ("at least three matching failed runs across at least two tickets in 30 minutes"
-                  if len(candidate["runs"]) >= 3 and len(candidate["tickets"]) >= 2 else
-                  "a ticket_stuck incident for this error pattern remained open over 30 minutes")
-        description = ("Automatically detected by the AI Flow master cycle.\n\n"
-                       f"Fingerprint: {candidate['signature']}\n"
-                       f"Pattern: {candidate['pattern']}\n"
-                       f"Error kind: {candidate['error_kind']}\n"
-                       f"Detection: {reason}.\n"
-                       f"{tokens_line}"
-                       f"Affected tickets: {', '.join(candidate['tickets'])}\n"
-                       f"Steps: {', '.join(candidate['steps'])}\n"
-                       f"Nodes: {', '.join(candidate['nodes'])}\n"
-                       f"AI Flow releases: {', '.join(candidate['releases'])}\n"
-                       "Related runs:\n" + "\n".join(run_lines) + "\n\n"
-                       f"Suggested fix: {suggested_flow_fix(candidate)}")
+        breaker_active = candidate["window_count"] >= 10
+        reason = f"{candidate['window_count']} matching failures in the rolling six-hour window"
+        description = _flow_bug_description(candidate, candidate["window_count"], breaker_active)
         summary = f"[Flow bug] {candidate['pattern'].splitlines()[0]}"[:240]
         try:
             ticket_key = ctx.jira.create_issue(project, summary, description, issuetype="Bug",
-                                               labels=["flow-bug"])
+                                               labels=["flow-bug"], priority="Highest")
         except Exception as exc:  # Keep the monitoring snapshot available and retry detection next cycle.
             audit("jira", "flow_bug_create", "", str(run["id"]), run["fence"], run["account_id"], False,
                   "Jira issue creation failed", {"signature": candidate["signature"], "error": type(exc).__name__})
             log.warning("could not create flow-bug for signature %s: %s",
                         candidate["signature"], type(exc).__name__)
             return None
-        # Record the new Bug before any further Jira call, so a failure below never leads to a second Bug for
-        # this signature. The status is refreshed from Jira on the next cycle; it is not Intake until moved.
         run_ids = sorted(item["id"] for item in candidate["runs"])
-        ctx.db.run("INSERT INTO flow_bug_tracker (signature, ticket_key, run_ids, repeat_count, in_intake)"
-                   " VALUES (%s,%s,%s,0,false) ON CONFLICT (signature) DO UPDATE SET ticket_key=EXCLUDED.ticket_key,"
-                   " run_ids=EXCLUDED.run_ids, repeat_count=0, in_intake=false, updated_at=now()",
-                   (candidate["signature"], ticket_key, run_ids))
-        ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
-                   " VALUES (%s,%s,'Created','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
-                   " type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
+        flow_bug_repository.create_tracker(ctx.db, candidate, ticket_key, breaker_active)
+        ctx.db.run("INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, jira_created, jira_updated)"
+                   " VALUES (%s,%s,'Created','Bug','Highest',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
+                   " type='Bug', priority='Highest', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
                    " description=EXCLUDED.description, synced_at=now()",
                    (ticket_key, project, ["flow-bug"], summary, description))
         publish_for(ctx, FlowBugCreated(run_id=str(run["id"]), fence=run["fence"], ticket=ticket_key,
                                         actor=run["account_id"], reason=reason, signature=candidate["signature"],
                                         run_ids=run_ids, tickets=candidate["tickets"], labels=["flow-bug"]))
-        status = move_flow_bug_to_intake(run, ticket_key, candidate["signature"])
+        status = _move_flow_bug_to_intake(ctx, run, ticket_key, candidate["signature"], audit, log)
         ctx.events.emit("flow_bug.created", ticket=ticket_key, project=project, run_id=str(run["id"]),
                         fence=run["fence"], account=run["account_id"], node=run["node"],
                         outcome=status or "created", reason=candidate["pattern"],
                         data={"signature": candidate["signature"], "run_ids": run_ids,
                               "tickets": candidate["tickets"]})
         return {"action": "created", "ticket": ticket_key, "signature": candidate["signature"],
-                "run_ids": run_ids, "in_intake": status == "Intake"}
+                "run_ids": run_ids, "count": len(run_ids), "in_intake": status == "Intake",
+                "breaker_active": breaker_active}
+
+    def move_flow_bug_to_intake(run: dict, ticket_key: str, signature: str) -> str | None:
+        return _move_flow_bug_to_intake(ctx, run, ticket_key, signature, audit, log)
 
     def process_flow_bugs(run: dict) -> list[dict]:
-        """Create or update detected Bugs in the maintenance project from this valid, fenced master cycle."""
+        """Create or update all-project root-cause Bugs from this valid, fenced master cycle."""
+        flow_bug_repository.prune_expired_members(ctx.db)
         if not ctx.jira:
             return []
         reports: list[dict] = []
-        terminal = {"done", "closed", "resolved", "cancelled", "canceled"}
+        statuses = _refresh_open_flow_bug_statuses(ctx, log)
         for candidate in flow_bug_candidates(ctx):
-            tracker = ctx.db.one("SELECT ticket_key, run_ids, repeat_count, in_intake FROM flow_bug_tracker"
-                                 " WHERE signature=%s", (candidate["signature"],))
+            tracker = flow_bug_repository.tracker(ctx.db, candidate["signature"])
             if tracker:
-                ticket_key = tracker["ticket_key"]
-                try:
-                    status = ctx.jira.status(ticket_key)
-                except Exception as exc:  # Jira reads can fail transiently; retry on the next master cycle.
-                    log.warning("could not check status of flow-bug %s: %s", ticket_key, type(exc).__name__)
-                    continue
-                ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, ticket_key))
-                if status.casefold() not in terminal:
-                    if not tracker["in_intake"]:  # created earlier, but the move to Intake failed: retry only that
-                        if status == "Intake":
-                            ctx.db.run("UPDATE flow_bug_tracker SET in_intake=true, updated_at=now()"
-                                       " WHERE signature=%s", (candidate["signature"],))
-                        elif move_flow_bug_to_intake(run, ticket_key, candidate["signature"]):
-                            reports.append({"action": "moved_to_intake", "ticket": ticket_key,
-                                            "signature": candidate["signature"]})
-                    known = set(tracker["run_ids"] or [])
-                    new_runs = [r for r in candidate["runs"] if r["id"] not in known]
-                    if new_runs:
-                        repeat_count = int(tracker["repeat_count"]) + len(new_runs)
-                        total = len(known) + len(new_runs)
-                        new_tokens = sum(int(r.get("tokens") or 0) for r in new_runs)
-                        tokens_part = f"\nTokens used: {new_tokens:,}" if new_tokens else ""
-                        body = ("AI Flow · master · repeated flow error\n"
-                                f"Pattern: {candidate['pattern']}\n"
-                                f"Repeat count: {repeat_count} additional failed runs since this Bug was opened "
-                                f"({total} matching runs recorded).\n"
-                                f"Affected tickets: {', '.join(candidate['tickets'])}\n"
-                                "New run IDs: " + ", ".join(r["id"] for r in new_runs)
-                                + tokens_part)
-                        comment_id = ctx.jira.comment(ticket_key, body)
-                        all_ids = sorted(known | {r["id"] for r in new_runs})
-                        ctx.db.run("UPDATE flow_bug_tracker SET run_ids=%s, repeat_count=%s, updated_at=now()"
-                                   " WHERE signature=%s", (all_ids, repeat_count, candidate["signature"]))
-                        publish_for(ctx, FlowBugRepeated(run_id=str(run["id"]), fence=run["fence"],
-                                                         ticket=ticket_key, actor=run["account_id"],
-                                                         comment_id=comment_id, signature=candidate["signature"],
-                                                         repeat_count=repeat_count,
-                                                         new_run_ids=[r["id"] for r in new_runs]))
-                        ctx.events.emit("flow_bug.repeated", ticket=ticket_key,
-                                        project=ctx.settings.maintenance_project, run_id=str(run["id"]),
-                                        fence=run["fence"], account=run["account_id"], node=run["node"],
-                                        outcome="commented", reason=candidate["pattern"],
-                                        data={"repeat_count": repeat_count, "new_run_ids": [r["id"] for r in new_runs]})
-                        reports.append({"action": "repeated", "ticket": ticket_key,
-                                        "repeat_count": repeat_count, "new_run_ids": [r["id"] for r in new_runs]})
-                    continue
-
-            if not candidate["creation_eligible"]:
-                # The tracker keeps low-volume recurrences visible for open Bugs, but a closed Bug only
-                # gets replaced after the normal repetition threshold or an aged ticket_stuck incident.
-                continue
-
-            created = create_flow_bug(run, candidate)
-            if created:
-                reports.append(created)
+                status = statuses.get(candidate["signature"])
+                if status is None:
+                    try:
+                        status = ctx.jira.status(tracker["ticket_key"])
+                    except Exception as exc:  # Jira reads can fail transiently; retry on the next master cycle.
+                        log.warning("could not check status of flow-bug %s: %s", tracker["ticket_key"],
+                                    type(exc).__name__)
+                        continue
+                    _save_flow_bug_status(ctx, tracker, status)
+                    tracker = flow_bug_repository.tracker(ctx.db, candidate["signature"])
+                reports.extend(_process_tracked_flow_bug(ctx, run, candidate, tracker, status, audit, log))
+            elif candidate["creation_eligible"]:
+                created = create_flow_bug(run, candidate)
+                if created:
+                    reports.append(created)
         return reports
-
-    def move_flow_bug_to_intake(run: dict, ticket_key: str, signature: str) -> str | None:
-        """Move a tracked flow-bug to Intake once; returns "Intake", or None when the move failed (retried later)."""
-        try:
-            status = ctx.jira.transition_to(ticket_key, "Intake")
-            if status != "Intake":
-                raise RuntimeError("flow-bug did not reach Intake")
-        except Exception as exc:  # The tracker row keeps the key; the next master cycle retries only the move.
-            audit("jira", "flow_bug_intake", ticket_key, str(run["id"]), run["fence"], run["account_id"], False,
-                  "Intake transition failed", {"signature": signature, "error": type(exc).__name__})
-            log.warning("could not move flow-bug %s to Intake: %s", ticket_key, type(exc).__name__)
-            return None
-        ctx.db.run("UPDATE flow_bug_tracker SET in_intake=true, updated_at=now() WHERE signature=%s", (signature,))
-        ctx.db.run("UPDATE tickets SET status='Intake', synced_at=now() WHERE key=%s", (ticket_key,))
-        publish_for(ctx, FlowBugIntakeMoved(run_id=str(run["id"]), fence=run["fence"], ticket=ticket_key,
-                                            actor=run["account_id"], signature=signature))
-        return "Intake"
 
     # --- nodes ----------------------------------------------------------------------------------------------
 

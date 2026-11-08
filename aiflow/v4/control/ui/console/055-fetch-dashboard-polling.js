@@ -93,14 +93,45 @@ function loadDashboardDisagreements() {
     });
 }
 function disagreementsPanel() {
+  loadDashboardFlowFailures();
   var state = S.dashboardDisagreements, rows = state.rows || [];
   var h = '<section class="panel" data-block="disagreements" id="p-disagreements"><div class="panel-h"><h2>Jira and GitHub disagree</h2><span class="hint">More than five minutes apart · the flow keeps fixing them</span></div>';
   if (state.error) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';
-  if (state.rows === null) return h + '<div class="muted">Loading…</div></section>';
-  if (!rows.length) return h + '<div class="empty">Every ticket matches its pull request.</div></section>';
+  if (state.rows === null) return h + '<div class="muted">Loading…</div></section>' + flowFailuresPanel();
+  if (!rows.length) return h + '<div class="empty">Every ticket matches its pull request.</div></section>' + flowFailuresPanel();
   h += '<div class="tablebox"><table><thead><tr><th>Ticket</th><th>Jira</th><th>Pull request</th><th>The flow will set</th><th>For</th><th>Why it is not fixed yet</th></tr></thead><tbody>';
   rows.forEach(function (r) {
     h += '<tr><td><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(r.key) + '">' + esc(r.key) + '</button><div class="small">' + esc(r.summary) + '</div></td><td>' + esc(r.jira_status) + '</td><td>' + (r.pr_url ? '<a href="' + esc(safeHref(r.pr_url)) + '" target="_blank" rel="noopener">PR #' + esc(String(r.pr_url).split('/').pop()) + '</a> · ' : '') + esc(r.github_state) + '</td><td>' + esc(r.expected) + '</td><td class="mono">' + mmss(r.age_s) + '</td><td class="small" style="white-space:normal">' + esc(r.detail) + '</td></tr>';
+  });
+  return h + '</tbody></table></div></section>' + flowFailuresPanel();
+}
+function loadDashboardFlowFailures(force) {
+  var state = S.dashboardFlowFailures, user = S.consoleUser && S.consoleUser.user || '';
+  if (state.user !== user) { state.data = null; state.error = ''; state.loadedAt = 0; state.user = user; }
+  if (state.loading || (S.consoleUser && !consoleCan('view.dashboard')) ||
+      (!force && state.data && Date.now() - state.loadedAt < 30000)) return;
+  state.loading = true;
+  fetch('/v1/dashboard/flow-failures', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) { state.data = data; state.error = ''; })
+    .catch(function (e) { state.error = String(e.message || e); if (!state.data) state.data = { signatures: [] }; })
+    .then(function () {
+      state.loading = false; state.loadedAt = Date.now();
+      if (S.view === 'cc' && S.data) renderDashboard();
+    });
+}
+function flowFailuresPanel() {
+  var state = S.dashboardFlowFailures, data = state.data, rows = data && data.signatures || [];
+  var share = data ? (100 * Number(data.bugged_run_share || 0)).toFixed(1) : '—';
+  var h = '<section class="panel" data-block="flow-failures"><div class="panel-h"><h2>Repeated failures</h2><span class="hint">Last 24 hours · ' + share + '% of terminal runs match a known bug</span></div>';
+  if (state.error) h += '<div class="stakeholder-error">Failure data unavailable: ' + esc(state.error) + '</div>';
+  if (!data) return h + '<div class="muted">Loading…</div></section>';
+  if (!rows.length) return h + '<div class="empty">No repeating failure signatures in the last 24 hours.</div></section>';
+  h += '<div class="tablebox"><table><thead><tr><th>Signature</th><th>Count</th><th>Tickets</th><th>Tokens</th><th>Cost</th><th>Root-cause bug</th></tr></thead><tbody>';
+  rows.forEach(function (row) {
+    var bug = row.bug ? '<button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(row.bug.ticket) + '">' + esc(row.bug.ticket) + '</button><div class="small">' + esc(row.bug.state) + ' · ' + esc(row.bug.regressions) + ' regressions</div>' : '<span class="muted">Not filed</span>';
+    h += '<tr><td><span class="mono">' + esc(row.signature) + '</span><div class="small">' + esc(row.pattern || '') + '</div></td><td>' + esc(row.count) + '</td><td>' + esc(row.tickets.join(', ')) + '</td><td class="mono">' + tok(row.tokens) + '</td><td class="mono">' + usd(row.cost_usd) + '</td><td>' + bug + '</td></tr>';
   });
   return h + '</tbody></table></div></section>';
 }

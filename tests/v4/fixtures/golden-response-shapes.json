@@ -112,6 +112,16 @@
   },
   "status": 200
  },
+ "/v1/dashboard/flow-failures": {
+  "shape": {
+   "bugged_run_share": "float",
+   "runs_with_bug": "int",
+   "signatures": [],
+   "total_runs": "int",
+   "window_hours": "int"
+  },
+  "status": 200
+ },
  "/v1/dashboard/quota": {
   "shape": {
    "rows": [

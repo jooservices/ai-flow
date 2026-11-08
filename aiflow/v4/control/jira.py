@@ -351,7 +351,7 @@ class Jira:
     # --- writes ---------------------------------------------------------------------------------------------
     def create_issue(self, project: str, summary: str, description: str, issuetype: str = "Story",
                      labels: list[str] | None = None, parent: str = "", fix_version: str = "",
-                     version_field: str = "") -> str:
+                     version_field: str = "", priority: str = "") -> str:
         """Create an issue and return its key; `parent` links it to an epic (team-managed and company-managed)."""
         fields: dict[str, Any] = {"project": {"key": project}, "summary": summary, "issuetype": {"name": issuetype},
                                   "description": text_to_adf(description), "labels": list(labels or [])}
@@ -363,6 +363,8 @@ class Jira:
             field_id = self.custom_field("Version")
             if field_id:
                 fields[field_id] = str(version_field)
+        if priority:
+            fields["priority"] = {"name": priority}
         return self.call("POST", "/rest/api/3/issue", {"fields": fields})["key"]
 
     def link_issues(self, blocker: str, blocked: str, link_type: str = "Blocks") -> None:

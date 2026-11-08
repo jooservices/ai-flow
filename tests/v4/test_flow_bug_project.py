@@ -37,16 +37,17 @@ def ready(client, name, account):
     return headers
 
 
-def test_candidates_follow_the_maintenance_project(ctx):
+def test_candidates_include_every_project_and_allow_same_ticket_repeats(ctx):
     ctx.settings.maintenance_project = "OPSX"
-    for project in ("OPSX", "TESTFLOW"):
-        for ticket in (f"{project}-1", f"{project}-2", f"{project}-1"):
-            failed_run(ctx, project, ticket)
+    failed_run(ctx, "OPSX", "OPSX-1")
+    failed_run(ctx, "OTHER", "OTHER-1")
+    failed_run(ctx, "OTHER", "OTHER-1")
 
     candidates = flow_bug_candidates(ctx)
 
     assert len(candidates) == 1
-    assert candidates[0]["tickets"] == ["OPSX-1", "OPSX-2"]
+    assert candidates[0]["tickets"] == ["OPSX-1", "OTHER-1"]
+    assert candidates[0]["window_count"] == 3
 
 
 def test_ticket_stuck_incidents_are_matched_by_literal_prefix(ctx):
@@ -66,7 +67,7 @@ def test_ticket_stuck_incidents_are_matched_by_literal_prefix(ctx):
     assert matching_run in candidate_run_ids and nonmatching_run not in candidate_run_ids
 
 
-def test_flow_bug_is_filed_in_the_maintenance_project(client, ctx):
+def test_flow_bug_from_another_project_is_filed_in_the_ai_flow_project(client, ctx):
     ctx.settings.maintenance_project = "OPSX"
     headers = ready(client, "cc", "claude-01")
     claimed = client.post("/v1/work/claim", json={
@@ -74,8 +75,8 @@ def test_flow_bug_is_filed_in_the_maintenance_project(client, ctx):
     }, headers=headers)
     assert claimed.status_code == 200 and claimed.json()["claimed"]
     run = claimed.json()
-    for ticket in ("OPSX-1", "OPSX-1", "OPSX-2"):
-        failed_run(ctx, "OPSX", ticket)
+    for _ in range(3):
+        failed_run(ctx, "OTHER", "OTHER-1")
 
     scan = client.post("/v1/master/flow-bugs", json={"run_id": run["run_id"], "fence": run["fence"]},
                        headers=headers)
@@ -83,6 +84,9 @@ def test_flow_bug_is_filed_in_the_maintenance_project(client, ctx):
     assert scan.status_code == 200 and scan.json()["reports"][0]["action"] == "created"
     created = ctx.jira.created[-1]
     assert created["project"] == "OPSX"
+    assert created["priority"] == "Highest"
+    assert "Count: 3 matching failures" in created["description"]
+    assert "Accounts: codex-01" in created["description"]
     assert ctx.db.one("SELECT project FROM tickets WHERE key=%s", (created["key"],))["project"] == "OPSX"
     event = ctx.db.one("SELECT project FROM events WHERE type='flow_bug.created' AND ticket=%s", (created["key"],))
     assert event["project"] == "OPSX"

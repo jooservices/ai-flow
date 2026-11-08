@@ -23,6 +23,12 @@ from .master_actions import (MasterActionState, decide, deny_policy_decision, es
 
 def _prepare_run_result(ctx, run, body, node, still_owner):
     details = dict(body.details)
+    token_usage_reported = body.details.get("token_usage_reported")
+    details["diagnostic_usage_reported"] = {
+        "tokens_in": body.tokens_in is not None and token_usage_reported is not False,
+        "tokens_out": body.tokens_out is not None and token_usage_reported is not False,
+        "cost_usd": body.cost_usd is not None,
+    }
     details.pop("pr_url_source", None)  # provenance is set by the control API, never trusted from the worker
     details.pop("quota_reservation", None)  # quota reservations are set by the control API
     if body.pr_url:
@@ -182,8 +188,8 @@ def _install_run_routes(app, ctx, deps, log) -> SimpleNamespace:
         dur = _capture_run_result_followups(ctx, run, run_id, body, late_result, last_dev, log)
         run_finished(ctx, run_id=run_id, ticket_key=run["ticket_key"], project=run["project"], step=run["step"],
                      fence=body.fence, account=run["account_id"], provider=run["provider"], model=run["model"], node=node,
-                     duration_ms=dur, outcome=outcome, reason=error_kind or body.summary[:200], usage_in=body.tokens_in,
-                     usage_out=body.tokens_out, cost_usd=body.cost_usd, still_owner=still_owner, pr_url=body.pr_url)
+                     duration_ms=dur, outcome=outcome, reason=error_kind or body.summary[:200], usage_in=body.tokens_in or 0,
+                     usage_out=body.tokens_out or 0, cost_usd=body.cost_usd or 0.0, still_owner=still_owner, pr_url=body.pr_url)
         _evaluate_run_result_health(ctx, run, run_id, late_result, last_dev, log)
         return {"ok": True, "still_owner": still_owner}
 

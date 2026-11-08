@@ -56,3 +56,13 @@ def assign_project(conn, key: str, nodes: list[str]) -> None:
 
 def tools_and_metrics(db, node: str) -> dict:
     return db.one("SELECT tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
+
+
+def record_heartbeat_sample(db, node: str, metrics_json) -> None:
+    """Append one bounded resource sample of a node heartbeat."""
+    db.run("INSERT INTO node_heartbeat_samples (node,heartbeat_at,metrics) VALUES (%s,now(),%s)", (node, metrics_json))
+
+
+def prune_heartbeat_samples(db, days: int = 30) -> None:
+    """Drop heartbeat resource samples older than the retention window."""
+    db.run("DELETE FROM node_heartbeat_samples WHERE heartbeat_at<now()-make_interval(days => %s)", (days,))

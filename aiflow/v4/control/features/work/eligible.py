@@ -17,6 +17,7 @@ from .eligibility_candidates import (dev_candidates, impact_candidates, intake_c
                                      post_merge_candidates, triage_candidates, verify_candidates)
 from .eligibility_scope import (Scope, account_may_work, node_accepts_work, online_node_row,
                                 open_projects)
+from .repository import WorkRepository
 
 __all__ = [
     "BACKOFF_SQL", "CONTAINER_RUNTIME_TOOL", "HTTPException", "INTAKE_BACKOFF_SQL", "PRIORITY", "Scope",
@@ -67,6 +68,12 @@ def eligible(ctx, deps, account_id: str, node: str, *, routing: bool = True, cap
     return finalize(scope, out, routing=routing, capacity_routing=capacity_routing)
 
 
+def _exclude_blocked_handoffs(ctx, out: list[dict]) -> list[dict]:
+    """Drop tickets whose hand-off to the coordinator is unresolved (JAIF-354)."""
+    blocked = WorkRepository(ctx.db).blocked_handoff_tickets([ticket["key"] for ticket in out])
+    return [ticket for ticket in out if ticket["key"] not in blocked]
+
+
 def _exclude_flow_breakers(ctx, out: list[dict]) -> list[dict]:
     blocked = incidents.flow_breaker_exclusions(ctx, out)
     return [ticket for ticket in out if (ticket["key"], ticket["step"]) not in blocked]
@@ -107,6 +114,7 @@ def _route_capacity(scope: Scope, out: list[dict], capacity_routing: bool) -> li
 
 def finalize(scope: Scope, out: list[dict], *, routing: bool, capacity_routing: bool) -> list[dict]:
     """Apply the Flow doctor exclusion, workflow ordering, provider quota and capacity routing."""
+    out = _exclude_blocked_handoffs(scope.ctx, out)
     out = _exclude_flow_breakers(scope.ctx, out)
     out = _exclude_flow_doctor(scope, out)
     out.sort(key=lambda ticket: "flow-bug" not in (ticket.get("labels") or []))

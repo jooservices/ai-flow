@@ -208,17 +208,30 @@ def dev_assignment(work: Claim) -> None:
 def register_run(work: Claim) -> JSONResponse | None:
     """Register the run, releasing its lease and hot files if capacity refuses it."""
     account, ticket, body = work.account, work.ticket, work.body
+    if work.store.handoff_blocked(ticket["key"]):
+        return refuse_handoff(work)
     values = (work.run_id, ticket["key"], ticket["project"], body.step, account.id, account.provider,
               work.model, work.node, work.lease.fence, h(work.run_token))
     accepted = load_policy_api.claim_run(
         work.ctx, account, values, work.load_capacity, run_details=work.run_details,
         quota_reservation_tokens=work.quota_reservation_tokens)
     if not accepted:
+        if work.store.handoff_blocked(ticket["key"]):
+            return refuse_handoff(work)
         work.ctx.leases.release(ticket["key"], work.run_id, work.lease.fence)
         hotfiles.unreserve(work.ctx.db, work.run_id)
         return JSONResponse({"claimed": False, "reason": f"account {account.id} is at its limit of {account.sessions}"
                             " concurrent sessions or machine load capacity is full"}, status_code=409)
     return None
+
+
+def refuse_handoff(work: Claim) -> JSONResponse:
+    work.ctx.leases.release(work.ticket["key"], work.run_id, work.lease.fence)
+    hotfiles.unreserve(work.ctx.db, work.run_id)
+    if work.probation_id is not None:
+        role_health.drop_probation(work.ctx.db, work.probation_id)
+    return JSONResponse({"claimed": False, "reason": "ticket is blocked for coordinator resolution"},
+                        status_code=409)
 
 
 def record_claim(work: Claim) -> None:

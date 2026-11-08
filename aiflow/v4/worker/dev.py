@@ -381,13 +381,23 @@ def record_response(run: DevRun) -> None:
                                "log": response.log_path})
 
 
+def _summary_text(response) -> str:
+    summary_match = SUMMARY.search(response.final_text or "")
+    if summary_match:
+        return summary_match.group(1).strip()
+    return (response.final_text or "").strip()[-600:] or response.error_message
+
+
+def _test_progress_text(response) -> str:
+    tests_match = TESTS.search(response.final_text or "")
+    return tests_match.group(1).strip() if tests_match else ""
+
+
 def collect_summary(run: DevRun) -> None:
     response, c = run.response, run.claim
-    summary_match = SUMMARY.search(response.final_text or "")
-    tests_match = TESTS.search(response.final_text or "")
-    run.summary = (summary_match.group(1).strip() if summary_match else
-                   ((response.final_text or "").strip()[-600:] or response.error_message))
-    run.tests = tests_match.group(1).strip() if tests_match else ""
+    run.summary = _summary_text(response)
+    run.tests = _test_progress_text(response)
+    run.result.setdefault("details", {})["test_progress"] = run.tests or "unavailable"
     if response.error_kind == "silent":
         run.summary = response.verdict_reason or response.error_message or SILENT_TWICE_REASON
     run.result["summary"] = run.summary

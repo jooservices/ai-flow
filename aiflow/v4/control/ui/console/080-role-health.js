@@ -88,7 +88,7 @@ function accMatch(a, f) {
 }
 function incCard(i, closed) {
   var tn = closed ? 'ok' : i.severity === 'critical' ? 'crit' : i.severity === 'warning' ? 'warn' : 'info';
-  return '<button class="inc" data-act="open-inc" data-id="' + esc(i.id) + '"' + (closed ? ' data-closed' : '') + '><span class="inc-top"><span class="mono muted" style="font-size:12px">#' + i.id + ' · ' + esc(when(i.opened_at)) + '</span><span style="font-weight:600">' + esc(i.title) + '</span><span class="spacer"></span>' + pill(tn, closed ? 'Resolved ' + when(i.closed_at) : (i.severity === 'critical' ? 'Critical' : 'Warning'), !closed && i.severity === 'critical') + '</span><span class="muted" style="font-size:12.5px">' + esc(i.detail) + '</span></button>';
+  return '<button class="inc" data-act="open-inc" data-id="' + esc(i.id) + '"' + (closed ? ' data-closed' : '') + '><span class="inc-top"><span class="mono muted" style="font-size:12px">#' + i.id + ' · ' + esc(when(i.opened_at)) + '</span><span style="font-weight:600">' + esc(i.title) + '</span><span class="spacer"></span>' + pill(tn, closed ? 'Resolved ' + when(i.closed_at) : (i.severity === 'critical' ? 'Critical' : 'Warning'), !closed && i.severity === 'critical') + '</span><span class="muted" style="font-size:12.5px">' + esc(incidentPreview(i)) + '</span></button>';
 }
 function versionsBox() {
   var d = D(), pin = (d.versions && d.versions.tools) || {};

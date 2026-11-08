@@ -1,18 +1,37 @@
 """Named phases used by the fleet node heartbeat route."""
+import math
+
+from ...repositories import nodes as node_repository
+
+
+def _resource_sample(reported_metrics):
+    keys = {"cpu_pct", "load1", "cpus", "mem_used", "mem_total"}
+    sample = {}
+    for key, value in reported_metrics.items():
+        if key not in keys or isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if (isinstance(value, float) and not math.isfinite(value)) or value < 0 or (key == "cpu_pct" and value > 100):
+            continue
+        sample[key] = value
+    return sample
 
 
 def update_node_heartbeat_row(ctx, node, body, reported_tools, reported_release, reported_metrics,
                               reported_services, inventory, json_value):
-    """Persist reported node capacity, inventory, runtime settings, and last-seen time."""
-    ctx.db.run("UPDATE nodes SET status=CASE WHEN accepting_work THEN 'online' ELSE 'draining' END,"
-               " slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
-               " metrics=%s, runtime_settings=%s, runtime_settings_public_key=%s,"
-               " release_protocol=%s, last_heartbeat=now(),"
-               " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
-               (body.slots_total, body.slots_used, reported_release, json_value(reported_tools),
-                json_value({**reported_metrics, "services": reported_services}),
-                json_value(inventory), body.runtime_settings_public_key,
-                body.release_protocol, body.slots_used, node))
+    """Persist node state and an indexed, bounded resource sample in one transaction."""
+    sample = _resource_sample(reported_metrics)
+    with ctx.db.transaction():
+        ctx.db.run("UPDATE nodes SET status=CASE WHEN accepting_work THEN 'online' ELSE 'draining' END,"
+                   " slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
+                   " metrics=%s, runtime_settings=%s, runtime_settings_public_key=%s,"
+                   " release_protocol=%s, last_heartbeat=now(),"
+                   " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
+                   (body.slots_total, body.slots_used, reported_release, json_value(reported_tools),
+                    json_value({**reported_metrics, "services": reported_services}),
+                    json_value(inventory), body.runtime_settings_public_key,
+                    body.release_protocol, body.slots_used, node))
+        node_repository.record_heartbeat_sample(ctx.db, node, json_value(sample))
+        node_repository.prune_heartbeat_samples(ctx.db)
 
 
 def persist_heartbeat_credentials(ctx, node, body, repo, json_value):

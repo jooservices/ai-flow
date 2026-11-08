@@ -82,6 +82,7 @@
 {"method":"POST","path":"/v1/github/token","auth":"bearer-header+node-token","response":"dict"}
 {"method":"POST","path":"/v1/github/update-branch","auth":"bearer-header+node-token","response":"dict"}
 {"method":"POST","path":"/v1/github/webhook","auth":"public","response":"dict"}
+{"method":"POST","path":"/v1/incidents/{incident_id}/resolve-and-requeue","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/install.sh","auth":"public","response":"PlainTextResponse"}
 {"method":"GET","path":"/v1/integrations/github","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/integrations/github/connections","auth":"console-session","response":"dict"}
@@ -196,6 +197,7 @@
 {"method":"POST","path":"/v1/reviews/{key}/skip-gate","auth":"bearer-header+reviewer-token","response":"dict"}
 {"method":"GET","path":"/v1/role-health","auth":"console-session","response":"dict"}
 {"method":"PUT","path":"/v1/role-health/settings","auth":"console-session","response":"dict"}
+{"method":"GET","path":"/v1/runs/{run_id}/diagnostic-log","auth":"console-session","response":"PlainTextResponse"}
 {"method":"POST","path":"/v1/runs/{run_id}/heartbeat","auth":"bearer-header+node-token","response":"dict"}
 {"method":"GET","path":"/v1/runs/{run_id}/inbox","auth":"console-session","response":"dict"}
 {"method":"POST","path":"/v1/runs/{run_id}/inbox","auth":"console-session","response":"dict"}

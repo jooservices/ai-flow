@@ -4,6 +4,11 @@ from __future__ import annotations
 from uuid import UUID
 
 
+def terminal_run(db, run_id: str) -> dict | None:
+    return db.one("SELECT id,ticket_key,project,step,account_id,provider,model,node,fence,status,outcome,"
+                  "started_at,ended_at FROM runs WHERE id=%s", (run_id,))
+
+
 def get_run(db, run_id: str) -> dict | None:
     return db.one("SELECT id,ticket_key,project,node,fence,status,step FROM runs WHERE id=%s", (run_id,))
 

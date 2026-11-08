@@ -152,8 +152,8 @@ def record_run_result(db, run: dict, body: Any, *, update_account: bool) -> date
         connection.execute(
             "INSERT INTO account_quota_samples (account_id,provider,model,quota,tokens_in,tokens_out,cost_usd,"
             "duration_ms,source,observed_at,sampled_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'run',%s,%s)",
-            (account_id, run["provider"], run["model"], J(body.quota), body.tokens_in, body.tokens_out,
-             body.cost_usd, duration_ms, observed_at, observed_at))
+            (account_id, run["provider"], run["model"], J(body.quota), body.tokens_in or 0, body.tokens_out or 0,
+             body.cost_usd or 0.0, duration_ms, observed_at, observed_at))
         updated = False
         if update_account and (account["quota_observed_at"] is None or account["quota_observed_at"] <= observed_at):
             result = connection.execute(

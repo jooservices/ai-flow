@@ -1,4 +1,25 @@
 /* ---------- Command Center ---------- */
+function incidentHandoff(i) {
+  var prefix = 'handoff-v1:';
+  if (!i || typeof i.detail !== 'string' || i.detail.indexOf(prefix) !== 0) return null;
+  try {
+    var payload = JSON.parse(i.detail.slice(prefix.length));
+    return payload && payload.schema === 'aiflow.ticket-handoff/v1' ? payload : null;
+  } catch (_) { return null; }
+}
+function incidentPreview(i) {
+  var payload = incidentHandoff(i);
+  if (!payload) return i.detail || '';
+  var run = (payload.runs || []).slice(-1)[0] || {}, usage = run.tokens == null ? 'unavailable' : tok(run.tokens);
+  var cost = typeof run.cost_usd === 'number' ? '$' + run.cost_usd.toFixed(4) : 'unavailable';
+  var note = 'Blocked · ' + payload.streak_count + ' consecutive failures · ' + mmss(payload.elapsed_ms / 1000) +
+    ' · ' + (run.node || 'unavailable') + ' · ' + (run.provider || 'unavailable') + '/' + (run.model || 'unavailable') +
+    ' · ' + usage + ' tokens · ' + cost;
+  var notification = (payload.notification || {}).state || 'unavailable';
+  note += ' · notification ' + notification;
+  if ((payload.notification || {}).configuration_gap) note += ' · ' + payload.notification.configuration_gap;
+  return note;
+}
 function dashboardProjectCounts(projectKey) {
   var allTickets = D().tickets;
   var allRows = allTickets.filter(function (t) { return t.project === projectKey; });
@@ -401,7 +422,7 @@ function renderCC() {
   if (alerts.length) {
     h += '<section class="alerts" aria-label="Alerts">';
     alerts.forEach(function (i) {
-      h += '<div class="alert"><span class="pill" data-tone="' + (i.severity === 'critical' ? 'crit' : 'warn') + '">' + esc(KIND[i.kind] || i.kind) + '</span><span class="a-title">' + esc(i.title) + '</span><span class="a-detail">' + esc(i.detail) + '</span><span class="spacer"></span><span class="a-detail mono">' + esc(when(i.opened_at)) + '</span><button class="btn sm" data-act="open-inc" data-id="' + esc(i.id) + '">Details</button></div>';
+      h += '<div class="alert"><span class="pill" data-tone="' + (i.severity === 'critical' ? 'crit' : 'warn') + '">' + esc(KIND[i.kind] || i.kind) + '</span><span class="a-title">' + esc(i.title) + '</span><span class="a-detail">' + esc(incidentPreview(i)) + '</span><span class="spacer"></span><span class="a-detail mono">' + esc(when(i.opened_at)) + '</span><button class="btn sm" data-act="open-inc" data-id="' + esc(i.id) + '">Details</button></div>';
     });
     h += '</section>';
   }
@@ -486,7 +507,7 @@ function renderCC() {
   });
   h += '</div></section>';
 
-  h += '<div class="stack"><section class="panel" id="p-incidents" aria-labelledby="h-inc"><div class="panel-h"><h2 id="h-inc">Incidents</h2><span class="hint">Opened and closed by the watchdog; critical ones are emailed</span></div>';
+  h += '<div class="stack"><section class="panel" id="p-incidents" aria-labelledby="h-inc"><div class="panel-h"><h2 id="h-inc">Incidents</h2><span class="hint">Watchdog alerts and coordinator handoffs route through Notifications</span></div>';
   if (!d.incidents.length) h += '<div class="empty">Nothing open.</div>';
   d.incidents.forEach(function (i) { h += incCard(i, false); });
   (d.incidents_recent || []).slice(0, 6).forEach(function (i) { h += incCard(i, true); });

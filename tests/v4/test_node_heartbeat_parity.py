@@ -1,4 +1,5 @@
 """Characterize the node heartbeat route's response and ordered effects."""
+import contextlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -98,6 +99,9 @@ class _DB:
     def __init__(self, config, trace):
         self.config = config
         self.trace = trace
+
+    def transaction(self):
+        return contextlib.nullcontext()
 
     def one(self, sql, params=()):
         label = "previous" if "accepting_work,release_version" in sql else "node_state"

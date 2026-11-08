@@ -42,6 +42,18 @@ def register_listeners(ctx, registry: Registry) -> None:
         if item.severity not in ("critical", "warning"):
             return
         from ... import incidents, notify
+        if item.kind == "ticket_stuck":
+            from . import repository, service
+            payload = service.handoff_payload(item.detail)
+            if payload:
+                configured = notify.configured_channels(ctx, "ticket_needs_person")
+                channels = notify.send(
+                    item.severity, item.title, service.notification_detail(payload), ctx.settings.public_url + "/cc",
+                    ctx=ctx, alert_kind="ticket_needs_person", ticket=item.subject,
+                    needed="Coordinator resolution and requeue are required before another run.", queued_ok=True)
+                service.update_notification(ctx, item.incident_id, item.detail, channels, configured)
+                repository.mark_notified(ctx.db, item.incident_id, bool(channels))
+                return
         channels = notify.send(item.severity, item.title, item.detail, ctx.settings.public_url + "/cc", ctx=ctx,
                                alert_kind="critical_incident" if item.severity == "critical" else "ticket_needs_person",
                                ticket=item.subject if incidents._TICKET_KEY.fullmatch(item.subject or "") else "",

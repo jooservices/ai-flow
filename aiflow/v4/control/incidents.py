@@ -198,6 +198,17 @@ def close_incident(ctx, kind: str, subject: str, note: str = "") -> None:
                     alert_kind="critical_incident", needed=note or "The incident has been resolved.")
 
 
+def record_run_outcome(ctx, item) -> None:
+    """RunFinished reaction retained here as the incidents feature's public compatibility entry point."""
+    from .features.incidents import service
+    service.record_run_outcome(ctx, item)
+
+
+def blocked_handoff_tickets(ctx) -> set[str]:
+    from .features.incidents import service
+    return service.blocked_handoff_tickets(ctx)
+
+
 # --- a flow that stands still -------------------------------------------------------------------------------
 IDLE_DEFAULT_MINUTES = 15.0
 

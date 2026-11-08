@@ -82,6 +82,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Console view mapping structure](../../docs/v4/docsite_views-structure.md): named steps map changed console sections and renderers to their screen documentation
 - [Console layouts](../../docs/v4/console-layouts.md): every section of a console page is a block each person can drag, resize, hide and reset, saved with the user on the server and reset to the default of their role
 - [Retry hold](../../docs/v4/retry-hold.md): the third consecutive unsuccessful run holds the ticket with the label aiflow-hold until a coordinator releases it
+- [Repeated run handoff](../../docs/v4/ticket-handoff.md): three unsuccessful developer or verification runs block automatic claims until a coordinator resolves and requeues the ticket
 - [Command Center Dashboard V2](../../docs/v4/dashboard-v2.md): Work and AI and machines tabs, linked work summaries, live usage and quota, and a per-person dark or light theme
 - [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
 - [Telegram BA chat](../../docs/v4/telegram-ba-chat.md): private-chat follow-up questions, owner-approved epic/story/task proposals, and Jira ticket creation through the configured Telegram channel

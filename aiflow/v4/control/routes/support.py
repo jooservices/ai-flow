@@ -51,7 +51,7 @@ def download_support_bundle(bundle_id: str, request: Request) -> Response:
     key = ctx.leases._k("support_bundle", bundle_id)
     try:
         stored = ctx.leases.r.get(key)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - any storage failure must answer the same 503, never a 500
         log.warning("temporary support bundle storage is unavailable: %s", type(exc).__name__)
         raise HTTPException(503, "temporary bundle storage is unavailable") from exc
     if not stored:

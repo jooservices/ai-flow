@@ -182,7 +182,7 @@ def start_release_run(ctx, project, version, snapshot, acc, node, load_capacity,
                                 "github_connection": connection_id},
                                "github-release-branch", "created" if branch_created else "existing",
                                {"branch": release_branch, "source": source_branch, "source_sha": source_sha})
-    except Exception:
+    except Exception:  # noqa: BLE001 - any setup failure must release the claimed version lease
         ctx.leases.release(key, run_id, lease.fence)
         raise
     return StartedRelease(key, run_id, lease, tracker, source_branch, source_sha, release_branch)

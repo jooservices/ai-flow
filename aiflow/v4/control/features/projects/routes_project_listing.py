@@ -45,7 +45,7 @@ def _install_project_catalog_route(app, ctx, deps, runtime, support):
         try:
             jira_projects = ctx.jira.projects()
             github_repos = compat._github_catalog(runtime, user.subject, "project_catalog")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider, network, and catalog audit failures map to HTTP 502
             runtime.log.warning("project catalog could not be loaded (%s)", type(exc).__name__)
             raise compat.HTTPException(502, "could not load connected Jira projects and GitHub repositories") from exc
         return {"jira_sites": [compat._jira_site(runtime)], "jira_projects": jira_projects,

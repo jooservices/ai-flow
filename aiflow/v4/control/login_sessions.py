@@ -58,7 +58,7 @@ def session_revoked(ctx, sid: str) -> bool:
     try:
         return ctx.db.one("SELECT 1 AS x FROM console_sessions WHERE sid=%s AND revoked_at IS NULL"
                           " AND expires_at > now()", (sid,)) is None
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - fail closed when the session database cannot be checked
         log.exception("console session check failed")
         return True
 

@@ -15,6 +15,19 @@ class WorkRepository:
         row = self.db.one("SELECT id,quota_forecast FROM accounts WHERE id=%s", (account_id,))
         return AccountForecast(id=str(row["id"]), quota_forecast=row.get("quota_forecast") or {}) if row else None
 
+    def completed_verify_runs(self, ticket: str) -> list[dict]:
+        """Return the completed verification runs used to carry review history into the next claim."""
+        return self.db.all(
+            "SELECT account_id,outcome,details FROM runs WHERE ticket_key=%s AND step='verify'"
+            " AND status<>'running' ORDER BY started_at,id", (ticket,))
+
+    def first_review_account(self, ticket: str) -> str:
+        """Return the account that completed the earliest verdict-bearing review for a ticket."""
+        row = self.db.one(
+            "SELECT account_id FROM runs WHERE ticket_key=%s AND step='verify' AND status<>'running'"
+            " AND details->>'verdict' IN ('PASS','FAIL') ORDER BY started_at,id LIMIT 1", (ticket,))
+        return str((row or {}).get("account_id") or "")
+
     def set_run_details(self, run_id: str, details: dict) -> None:
         self.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(details), run_id))
 

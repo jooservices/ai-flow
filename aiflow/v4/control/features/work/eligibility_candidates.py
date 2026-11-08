@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from ... import environment as environment_reports, hotfiles, tooling, worker_candidates
 from .eligibility_scope import Scope
+from .repository import WorkRepository
 
 
 def verify_candidates(scope: Scope) -> list[dict]:
@@ -34,18 +35,12 @@ def _verify_candidate_ready(scope: Scope, ticket: dict, verify_cooling: set[str]
     dev = scope.deps.last_dev(ticket["key"], done=True)
     if not dev or not dev["pr_url"] or dev["account_id"] == scope.account.id:
         return False
-    if scope.explicit_only_blocks(ticket) or not scope.allowed("verify", ticket):
-        return False
-    return True
+    return not (scope.explicit_only_blocks(ticket) or not scope.allowed("verify", ticket))
 
 
 def first_review_account(scope: Scope, ticket_key: str) -> str:
     """Find the account from the earliest completed AI review of this ticket."""
-    row = scope.ctx.db.one(
-        "SELECT account_id FROM runs WHERE ticket_key=%s AND step='verify' AND status<>'running'"
-        " AND details->>'verdict' IN ('PASS','FAIL')"
-        " ORDER BY started_at,id LIMIT 1", (ticket_key,))
-    return str((row or {}).get("account_id") or "")
+    return WorkRepository(scope.ctx.db).first_review_account(ticket_key)
 
 
 def preferred_review_available(scope: Scope, account_id: str, ticket: dict) -> bool:

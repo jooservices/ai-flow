@@ -263,6 +263,7 @@ def test_each_step_extras_builder_returns_its_step_payload(monkeypatch):
     timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store = SimpleNamespace(
         intake_wording_refusals=lambda _key: 2,
+        completed_verify_runs=lambda _key: [],
         node_tools=lambda _node: SimpleNamespace(as_row=lambda: {"tools": []}),
         latest_rework=lambda _key: None, latest_answered_triage=lambda _key: None,
         dev_finished_since=lambda *_args: False, blocked_question_before=lambda *_args: "",

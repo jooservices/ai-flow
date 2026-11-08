@@ -47,9 +47,7 @@ def verify_extras(work: Claim) -> dict[str, Any]:
     dev = work.prior_dev
     if not dev:
         return {}
-    reviews = work.ctx.db.all(
-        "SELECT account_id,outcome,details FROM runs WHERE ticket_key=%s AND step='verify'"
-        " AND status<>'running' ORDER BY started_at,id", (work.ticket["key"],))
+    reviews = work.store.completed_verify_runs(work.ticket["key"])
     return {"pr": {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
                     "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],
                     "dev_summary": (dev["summary"] or "") + handover.render(dev.get("details")),

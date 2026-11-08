@@ -10,10 +10,17 @@ def _section(text: str, heading: str) -> str | None:
     return match.group(1) if match else None
 
 
-def legacy_findings(text: str) -> list[str]:
-    """Read old bullet-only FINDINGS output and remove list markers while retaining its wording."""
+def legacy_findings(text: str, require_section: bool = False) -> list[str]:
+    """Read old bullet-only FINDINGS output and remove list markers while retaining its wording.
+
+    A reviewer's answer needs its FINDINGS section: bullets elsewhere (for example the deferred checks of a PASS) are not
+    defects. A stored rework summary is already only the findings, so it is read without the heading.
+    """
     body = _section(text, "FINDINGS")
-    body = text if body is None else body
+    if body is None:
+        if require_section:
+            return []
+        body = text
     items = []
     for line in body.splitlines():
         match = re.match(r"^[ \t]*[-*][ \t]*(.+)$", line)
@@ -41,7 +48,7 @@ def format_review_history(history: list[dict[str, Any]]) -> str:
 
 
 def _legacy_new_items(text: str, history: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    reported = legacy_findings(text)
+    reported = legacy_findings(text, require_section=True)
     for item in history:
         item["status"] = "not_fixed"
     return [("", value) for value in reported
@@ -126,12 +133,19 @@ def _legacy_history(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if verdict in {"PASS", "FAIL"}:
             round_number += 1
         if run.get("outcome") == "rework" and details.get("findings"):
-            history, _, _ = update_review_findings(str(details["findings"]), history, max(1, round_number))
+            # a stored rework summary holds only the findings: give it the heading a reviewer's answer would carry
+            history, _, _ = update_review_findings("FINDINGS:\n" + str(details["findings"]), history, max(1, round_number))
     return history
 
 
 def review_rounds_completed(runs: list[dict[str, Any]]) -> int:
     """Count completed AI reviews, excluding verification runs that never received a review response."""
     return sum(1 for run in runs if (run.get("details") or {}).get("verdict") in {"PASS", "FAIL"})
+
+
+def first_reviewer(runs: list[dict[str, Any]]) -> str:
+    """Return the account from the earliest run that received a completed review verdict."""
+    return next((str(run.get("account_id") or "") for run in runs
+                 if (run.get("details") or {}).get("verdict") in {"PASS", "FAIL"}), "")
 
 

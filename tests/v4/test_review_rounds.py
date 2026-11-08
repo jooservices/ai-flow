@@ -180,7 +180,7 @@ def test_verify_claim_carries_prior_findings_round_count_and_reviewer():
     work = SimpleNamespace(
         prior_dev={"pr_url": "https://github.test/org/repo/pull/7", "branch": "fix-retry", "head_sha": "abc",
                    "account_id": "claude-01", "summary": "Fixed retry", "details": {}},
-        ticket={"key": "TESTWP-1"}, ctx=SimpleNamespace(db=SimpleNamespace(all=lambda *_args: runs)),
+        ticket={"key": "TESTWP-1"}, store=SimpleNamespace(completed_verify_runs=lambda _key: runs),
     )
 
     pr = verify_extras(work)["pr"]

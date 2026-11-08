@@ -426,7 +426,7 @@ def _rework(c, api, jira, pr_comment, result: dict, findings: str, why: str, che
                               + (f"\nChecks: {checks}" if checks else ""),
                               next_="Back to To Do with the rework label; the next dev run continues the branch with these findings",
                               t0=t0, node=api_node(api)))
-    jira("fields", add_labels=["rework"])
+    jira("fields", add_labels=["rework"], remove_labels=["aiflow-ready"])
     jira("transition", to="To Do")
     result.update(outcome="rework", summary=f"{why}: {findings}"[:1500])
     result.setdefault("details", {})["findings"] = findings

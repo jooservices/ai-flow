@@ -24,12 +24,12 @@ aiflow4 = "aiflow.v4.cli:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.3",
+    "pytest>=9.2.0",
     "ruff>=0.17.3",
 ]
 
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.33.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

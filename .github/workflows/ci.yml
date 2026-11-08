@@ -263,6 +263,7 @@ jobs:
         run: |
           files="$(uv run python -m aiflow.v4.core.test_shards files --index ${{ matrix.shard }} --total 4)"
           test -n "$files"
+          # shellcheck disable=SC2086 # the shard lists test paths separated by spaces; splitting them is intended
           uv run pytest $files -p no:warnings
 
   v4-browser:
@@ -298,7 +299,7 @@ jobs:
           restore-keys: uv-${{ runner.os }}-
 
       - name: Install
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
           npm install --global playwright@1.64.1
@@ -420,7 +421,7 @@ jobs:
 
       - name: Install
         if: steps.touched.outputs.run == 'true'
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
           npm install --global playwright@1.64.1
@@ -480,7 +481,7 @@ jobs:
           persist-credentials: false
 
       - name: Install
-        run: |
+        run: |  # zizmor: ignore[adhoc-packages]  The v4 tests call the playwright CLI on PATH, so this ad-hoc install at an exact version is intended.
           pip install uv==0.13.4
           uv sync --frozen --group dev
           npm install --global playwright@1.64.1

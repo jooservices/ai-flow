@@ -29,10 +29,17 @@ only step names and statuses in the run record. The result is sent through the e
 
 ## Git hooks
 
-`python3 -m aiflow.v4.core.local_gate install-hooks` (once per clone) points `core.hooksPath` at `.githooks`:
+`python3 -m aiflow.v4.core.local_gate install-hooks` (once per clone) checks that the `pre-commit`, `commit-msg` and
+`pre-push` hook files exist and are readable, then points `core.hooksPath` at `.githooks` (details:
+`docs/v4/git-hooks.md`). If the clone already uses a different `core.hooksPath`, the installer warns and refuses to
+replace it unless invoked with `--force`. The setting is shared by linked worktrees, but permissions are repaired per
+worktree; run the installer in each affected linked worktree too.
 
-- `commit-msg` rejects commit messages that break `core/commit_rules.py`.
-- `pre-push` runs the built-in gate before a push.
+- `commit-msg` rejects a message that breaks the commitlint rules (`core/commit_rules.py`) when you commit, so the error is
+  found in the editor and not after the push or in CI.
+- `pre-push` runs the tests of the v4 files the push changes, plus the smoke tests (`docs/v4/git-hooks.md`). The whole gate
+  runs in the developer run and in CI.
+- `pre-commit` runs the fast checks of the staged change (`docs/v4/git-hooks.md`).
 
 ## Adding a check
 

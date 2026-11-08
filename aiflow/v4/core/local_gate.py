@@ -17,6 +17,7 @@ import json
 import os
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -238,6 +239,53 @@ def render(result: GateResult) -> str:
     return "\n".join(lines)
 
 
+HOOKS = ("pre-commit", "commit-msg", "pre-push")
+
+
+def install_hooks(path: Path, force: bool = False) -> int:
+    """Point the clone's ``core.hooksPath`` at ``.githooks``. The setting is shared by every worktree of the clone.
+
+    Git skips a hook that is not executable without a word, so the hooks are made executable here as well.
+    """
+    hooks = [path / ".githooks" / name for name in HOOKS]
+    unreadable = []
+    for hook in hooks:
+        try:
+            mode = hook.stat().st_mode
+        except OSError:
+            unreadable.append(hook.name)
+            continue
+        if (not hook.is_file() or not (mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH))
+                or not os.access(hook, os.R_OK)):
+            unreadable.append(hook.name)
+    if unreadable:
+        print("hook installation failed: required hook file(s) missing or unreadable: " + ", ".join(unreadable),
+              file=sys.stderr)
+        return 1
+
+    current = subprocess.run(["git", "config", "--get", "core.hooksPath"], cwd=path, capture_output=True, text=True)
+    if current.returncode == 0:
+        configured = current.stdout.strip()
+        if configured and configured != ".githooks":
+            print(f"warning: core.hooksPath is already set to {configured!r}; installing .githooks will replace it. "
+                  "Pass --force to replace the existing hook path.", file=sys.stderr)
+            if not force:
+                return 1
+    elif current.returncode != 1:
+        print(current.stderr.strip() or "could not read core.hooksPath", file=sys.stderr)
+        return current.returncode
+
+    out = subprocess.run(["git", "config", "core.hooksPath", ".githooks"], cwd=path, capture_output=True, text=True)
+    if out.returncode:
+        print(out.stderr.strip())
+        return out.returncode
+    for hook in hooks:
+        if not (hook.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)) or not os.access(hook, os.X_OK):
+            os.chmod(hook, 0o755)
+    print("git hooks installed: pre-commit (fast checks), commit-msg (commit rules) and pre-push (affected tests)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="local_gate", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -252,11 +300,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("steps", help="list the steps")
     hooks = sub.add_parser("install-hooks", help="use .githooks (commit message rules, gate before push) in this clone")
     hooks.add_argument("--path", default=".")
+    hooks.add_argument("--force", action="store_true", help="replace a different existing core.hooksPath")
     args = parser.parse_args(argv)
     if args.command == "install-hooks":
-        out = subprocess.run(["git", "config", "core.hooksPath", ".githooks"], cwd=args.path, capture_output=True, text=True)
-        print(out.stderr.strip() or "git hooks installed: commit-msg (title rules) and pre-push (CI checks)")
-        return out.returncode
+        return install_hooks(Path(args.path), force=args.force)
     if args.command == "steps":
         for step in steps("<base>"):
             print(f"{step.name:<12} {step.ci_job or '-':<12} {normalize(step.argv) or '(in-process check)'}")

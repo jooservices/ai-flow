@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fast checks of the staged change (JAIF-581): whitespace, lint, secrets and the project guards. No AI tokens are spent.
+exec python3 -m aiflow.v4.core.git_hooks pre-commit --path .

@@ -1,6 +1,8 @@
 """The local gate (JAIF-365): parity with CI, step results, and the developer run's use of it."""
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,8 @@ from aiflow.v4.core.local_gate import Context, Step
 from aiflow.v4.worker import gate_step
 
 ROOT = Path(__file__).resolve().parents[2]
+GUARD_BASELINES = ("docs/v4/duplicate-blocks-baseline.json", "docs/v4/broad-except-baseline.json",
+                   "docs/v4/sql-outside-data-access-baseline.json", "deploy/v4/ci/gitleaks.toml")
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
 
@@ -138,22 +142,31 @@ def test_docs_build_writes_outside_the_worktree(tmp_path):
 
 
 def hook_repo(tmp_path):
-    """A scratch repository that uses this repository's hooks and code."""
+    """A scratch repository that uses this repository's hooks and code, with the guard baselines committed on develop."""
     git(tmp_path, "init", "-q", "-b", "develop")
     subprocess.run(["git", "config", "core.hooksPath", str(ROOT / ".githooks")], cwd=tmp_path, check=True)
+    for baseline in GUARD_BASELINES:
+        (tmp_path / baseline).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / baseline).write_bytes((ROOT / baseline).read_bytes())
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-q", "--no-verify", "-m", "chore: Start the repository")
+    git(tmp_path, "update-ref", "refs/remotes/origin/develop", "HEAD")
     (tmp_path / "f").write_text("1")
     git(tmp_path, "add", ".")
     return tmp_path
 
 
 def commit(path, message):
-    import os
-    env = {**os.environ, "PYTHONPATH": str(ROOT), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    # CI runners have no gitleaks: the secret check is skipped here, and the report names it (JAIF-581)
+    env = os.environ.copy()
+    env.pop("AIFLOW_HOOK_SKIP", None)
+    env.update({"PYTHONPATH": str(ROOT), "AIFLOW_HOOK_SKIP": "secrets", "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
     return subprocess.run(["git", "commit", "-q", "-m", message], cwd=path, capture_output=True, text=True, env=env)
 
 
-def test_the_commit_msg_hook_rejects_a_bad_message_when_committing(tmp_path):
+def test_the_commit_msg_hook_rejects_a_bad_message_when_committing(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIFLOW_HOOK_SKIP", "commit-msg")
     repo = hook_repo(tmp_path)
     bad = commit(repo, "fix: lower case subject")
     assert bad.returncode != 0 and "Commit message rejected" in bad.stdout + bad.stderr
@@ -172,6 +185,9 @@ def test_the_commit_msg_hook_lets_merge_and_fixup_headers_through(tmp_path):
 
 def test_install_hooks_points_the_clone_at_the_hooks_folder(tmp_path):
     git(tmp_path, "init", "-q", "-b", "develop")
+    (tmp_path / ".githooks").mkdir()
+    for name in gate.HOOKS:
+        shutil.copy2(ROOT / ".githooks" / name, tmp_path / ".githooks" / name)
     assert gate.main(["install-hooks", "--path", str(tmp_path)]) == 0
     out = subprocess.run(["git", "config", "core.hooksPath"], cwd=tmp_path, capture_output=True, text=True)
     assert out.stdout.strip() == ".githooks"
@@ -208,10 +224,11 @@ def test_a_detached_child_holding_the_pipe_does_not_hang_the_gate(tmp_path):
 
 
 def test_the_pre_push_hook_refuses_a_ref_that_is_not_the_checked_out_commit(tmp_path):
-    import os
     repo = hook_repo(tmp_path)
     commit(repo, "fix: A valid first commit (JAIF-1)")
-    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    env = os.environ.copy()
+    env.pop("AIFLOW_HOOK_SKIP", None)
+    env["PYTHONPATH"] = str(ROOT)
     hook = ROOT / ".githooks" / "pre-push"
     other = subprocess.run([str(hook)], cwd=repo, input="refs/heads/x " + "1" * 40 + " refs/heads/x " + "0" * 40 + "\n",
                            text=True, capture_output=True, env=env)
@@ -256,7 +273,7 @@ def test_the_pre_push_hook_refuses_a_dirty_working_tree(tmp_path):
     (repo / "f").write_text("changed")
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
     out = subprocess.run([str(ROOT / ".githooks" / "pre-push")], cwd=repo, input=f"refs/heads/x {head} refs/heads/x {'0' * 40}\n",
-                         text=True, capture_output=True, env={**os.environ, "PYTHONPATH": str(ROOT)})
+                         text=True, capture_output=True, env={**{k: v for k, v in os.environ.items() if k != "AIFLOW_HOOK_SKIP"}, "PYTHONPATH": str(ROOT)})
     assert out.returncode == 1 and "uncommitted changes" in out.stderr
 
 

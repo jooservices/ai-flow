@@ -1,16 +1,9 @@
 #!/bin/sh
-# Runs the same checks as CI (core/local_gate.py) before anything is pushed. Needs the test services (docs/v4/local-gate.md).
-# The gate checks the checked-out HEAD, so every ref being pushed must be that commit.
+# Runs the v4 tests that the push changes and the smoke tests before anything is pushed (JAIF-581, docs/v4/git-hooks.md).
+# The test services are needed for the affected tests (AIFLOW4_TEST_REDIS_URL, AIFLOW4_TEST_DATABASE_URL).
+# Git supplies the exact destination SHA for each ref on stdin; the gate checks those ranges.
 if [ -n "$(git status --porcelain)" ]; then
   echo "pre-push: the working tree has uncommitted changes, so the gate result would not describe what is pushed; commit or stash them." >&2
   exit 1
 fi
-head=$(git rev-parse HEAD)
-while read -r local_ref local_sha remote_ref remote_sha; do
-  case "$local_sha" in 0000000*) continue ;; esac
-  if [ "$local_sha" != "$head" ]; then
-    echo "pre-push: the gate checks the checked-out commit ($head) but you push $local_ref ($local_sha); check that branch out first." >&2
-    exit 1
-  fi
-done
-exec python3 -m aiflow.v4.core.local_gate run --path . --base "${AIFLOW_BASE:-develop}"
+exec python3 -m aiflow.v4.core.git_hooks pre-push --path . --push-stdin

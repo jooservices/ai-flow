@@ -158,8 +158,8 @@ register_heartbeat_provider("services", dict, _services, order=5)
 
 
 def _metrics(context: HeartbeatContext) -> dict:
-    hostname = context.sources.hostname()
     relay = context.relay.health() if context.relay else {"enabled": False, "healthy": False}
+    hostname = context.sources.hostname()
     return {**(context.node_metrics or {}), "hostname": hostname, "policy_relay": relay}
 
 

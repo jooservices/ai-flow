@@ -19,6 +19,7 @@ condition clears. Critical and warning incidents are emailed. The list below has
 | [node_no_ai](node_no_ai.md) | warning | A node has no AI account |
 | [master_invalid_plan](master_invalid_plan.md) | critical | The master repeatedly returned an invalid action plan |
 | [ticket_stuck](ticket_stuck.md) | warning | A ticket failed three runs in a row |
+| [verify_no_verdict](verify_no_verdict.md) | warning | Every eligible account ended verification of a ticket without a verdict twice |
 | [run_slow](run_slow.md) | warning | A run passed its warning time |
 | [run_hard_limit](run_hard_limit.md) | critical | A run passed its hard time limit |
 | [account_quota](account_quota.md) | warning | An AI account is out of quota, signed out or failing |

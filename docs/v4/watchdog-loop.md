@@ -19,12 +19,13 @@
 `run_flow_and_quota_checks` then calls these checks, in order:
 
 1. `stuck_tickets` opens a warning after three dev or verify failures in a row, and leaves tool-wait warnings to the tool-wait pass.
-2. `retry_and_deadline_passes` applies retry holds, answers overdue owner questions, then checks stack pins and an idle flow.
-3. `lost_leases_and_run_clocks` records a run whose lease is gone and opens the warn and hard-limit incidents for a run that is still owned.
-4. `account_cooldowns` returns an account to idle when its cooldown has ended, and keeps a warning open while an account is cooling down, signed out or failing its check.
-5. `role_coverage` warns when a flow role has ready accounts from fewer than two providers.
-6. `quota_windows` opens and closes the warning for a provider quota window.
-7. `quota_forecasts` stores each account's quota forecast and opens a warning when the forecast runs out before reset.
+2. `verify_no_verdict` opens one warning when every eligible account is barred from verifying a ticket after consecutive missing verdicts.
+3. `retry_and_deadline_passes` applies retry holds, answers overdue owner questions, then checks stack pins and an idle flow.
+4. `lost_leases_and_run_clocks` records a run whose lease is gone and opens the warn and hard-limit incidents for a run that is still owned.
+5. `account_cooldowns` returns an account to idle when its cooldown has ended, and keeps a warning open while an account is cooling down, signed out or failing its check.
+6. `role_coverage` warns when a flow role has ready accounts from fewer than two providers.
+7. `quota_windows` opens and closes the warning for a provider quota window.
+8. `quota_forecasts` stores each account's quota forecast and opens a warning when the forecast runs out before reset.
 
 Each check lives in `aiflow/v4/control/watchdog_checks/<name>.py`. The SQL those checks run lives in `aiflow/v4/control/repositories/watchdog.py`.
 

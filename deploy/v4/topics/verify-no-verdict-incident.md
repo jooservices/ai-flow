@@ -1,0 +1,1 @@
+- [Verification exhaustion incident](../../../docs/v4/verify-no-verdict-incident.md): one `verify_no_verdict` warning when every eligible account is barred from a ticket

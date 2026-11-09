@@ -1,6 +1,6 @@
 """The control watchdog runs independent checks in a fixed order (JAIF-308).
 
-Each check is a function in `watchdog_checks`. `CHECKS` lists all fourteen.
+Each check is a function in `watchdog_checks`. `CHECKS` lists all fifteen.
 `run` calls the two groups below, and each group runs its part of `CHECKS`.
 A check that raises is logged and the later checks still run. Add a check by
 importing it and inserting it into `CHECKS`.
@@ -23,6 +23,7 @@ from .watchdog_checks.retry_and_deadline_passes import retry_and_deadline_passes
 from .watchdog_checks.role_coverage import role_coverage
 from .watchdog_checks.stuck_tickets import stuck_tickets
 from .watchdog_checks.tool_and_environment_waits import tool_and_environment_waits
+from .watchdog_checks.verify_no_verdict import verify_no_verdict
 from .watchdog_checks.version_skew import version_skew
 
 log = logging.getLogger("aiflow4.loops")
@@ -38,6 +39,7 @@ CHECKS = (
     nodes_without_accounts,
     orphaned_tickets,
     stuck_tickets,
+    verify_no_verdict,
     retry_and_deadline_passes,
     lost_leases_and_run_clocks,
     account_cooldowns,

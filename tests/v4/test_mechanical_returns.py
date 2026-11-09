@@ -10,7 +10,7 @@ import pytest
 from aiflow.v4.adapters import RunResult, RunSpec
 from aiflow.v4.core.local_gate import GateResult, StepResult
 from aiflow.v4.worker import dev, gate_step, mechanical, verify
-from aiflow.v4.worker.gitops import Git
+from aiflow.v4.worker.gitops import Git, GitError
 
 
 IDENTITY = ("AI Flow", "aiflow@example.test")
@@ -340,6 +340,225 @@ def test_documentation_repair_rejects_deployment_changes(monkeypatch, tmp_path):
     monkeypatch.setattr(dev, "run_ai", lambda target, _prepared: setattr(target, "response", repair_response))
 
     assert not dev.repair_documentation_gap(run, "missing docs")
+    assert committed == []
+
+
+def _gate_repair_run(tmp_path, changed, repair_response, head_values=("head", "head")):
+    heads = iter(head_values)
+    committed = []
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    run = SimpleNamespace(
+        claim=SimpleNamespace(ticket={"key": "JAIF-430", "summary": "Repair gate failure", "type": "Story"},
+                              identity=IDENTITY, run_id="run-gate", account="dev", provider="codex", model="",
+                              step="dev", fence=3),
+        project={"checks": ["pytest"]}, worktree=worktree, env={"PASSWORD": "gate-secret"}, run_as=[],
+        heartbeat=SimpleNamespace(progress={}), result={"tokens_in": 10, "tokens_out": 4, "cost_usd": 0.5,
+                                                         "quota": {"used": 1}, "details": {}},
+        response=RunResult(tokens_in=10, tokens_out=4, cost_usd=0.5, permission_denials=1,
+                           quota={"used": 1}, token_usage_reported=True, duration_s=2),
+        summary="Implementation complete", tests="passed", handed={}, srv_root=str(tmp_path), key="JAIF-430",
+        failed_work_commits=[],
+        git=SimpleNamespace(changed=lambda _path: changed,
+                            run=lambda *_args, **_kwargs: next(heads),
+                            commit_all=lambda *_args: committed.append("repair commit") or "repair-head"),
+    )
+    return run, committed, repair_response
+
+
+def test_failed_gate_repair_uses_same_worktree_and_reruns_once(monkeypatch, tmp_path):
+    gate_calls, prompts = [], []
+    repair = RunResult(final_text="RESULT: DONE", verdict="DONE", tokens_in=7, tokens_out=3, cost_usd=0.75,
+                       permission_denials=2, token_usage_reported=True, duration_s=3)
+    run, committed, _ = _gate_repair_run(tmp_path, ["src/fix.py"], repair)
+    first = GateResult([StepResult("unit", "failed", tail="assertion failed; expected gate-secret")])
+    green = GateResult([StepResult("unit", "passed")])
+    monkeypatch.setattr(dev.gate_step, "plan", lambda _project: [object()])
+    monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs: gate_calls.append("gate") or
+                        (first if len(gate_calls) == 1 else green))
+    monkeypatch.setattr(dev, "set_run_progress", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dev, "brief", lambda _run: SimpleNamespace(
+        spec=RunSpec(prompt="ticket instructions", cwd=str(_run.worktree), account_home=str(tmp_path))))
+
+    def run_ai(target, prepared):
+        prompts.append((prepared.spec.cwd, prepared.spec.prompt))
+        target.response = repair
+
+    monkeypatch.setattr(dev, "run_ai", run_ai)
+
+    outcome = dev.run_local_gate(run)
+
+    assert outcome == ""
+    assert len(prompts) == 1 and prompts[0][0] == str(run.worktree)
+    assert "unit" in prompts[0][1] and "assertion failed" in prompts[0][1]
+    assert "[redacted]" in prompts[0][1] and "gate-secret" not in prompts[0][1]
+    assert gate_calls == ["gate", "gate"] and committed == ["repair commit"]
+    assert run.result["tokens_in"] == 17 and run.result["tokens_out"] == 7
+    assert run.result["cost_usd"] == 1.25 and run.response.permission_denials == 3
+    assert run.result["details"]["duration_s"] == 5
+    assert run.result["details"]["local_gate"]["status"] == "green"
+
+
+@pytest.mark.parametrize(
+    ("repair", "changed", "heads", "accepted"),
+    [
+        (RunResult(final_text="RESULT: FAIL", verdict="FAIL"), ["src/fix.py"], ("head", "head"), False),
+        (RunResult(final_text="RESULT: DONE", verdict="DONE"), [], ("head", "head"), False),
+        (RunResult(final_text="RESULT: DONE", verdict="DONE"), ["src/fix.py"], ("head", "other-head"), False),
+        (RunResult(final_text="RESULT: DONE", verdict="DONE", error_kind="provider"),
+         ["src/fix.py"], ("head", "head"), False),
+        (RunResult(final_text="RESULT: DONE", verdict="DONE"), ["src/fix.py"], ("head", "head"), True),
+    ],
+)
+def test_gate_repair_accepts_only_done_with_unchanged_head_and_changes(
+        monkeypatch, tmp_path, repair, changed, heads, accepted):
+    run, committed, response = _gate_repair_run(tmp_path, changed, repair, heads)
+    monkeypatch.setattr(dev, "brief", lambda _run: SimpleNamespace(
+        spec=RunSpec(prompt="instructions", cwd=str(tmp_path), account_home=str(tmp_path))))
+    monkeypatch.setattr(dev, "run_ai", lambda target, _prepared: setattr(target, "response", response))
+
+    actual = dev.repair_gate_failure(run, "unit", "step unit failed:\nassertion failed")
+
+    assert actual is accepted
+    assert bool(committed) is accepted
+    if heads[0] != heads[1]:
+        assert run.failed_work_commits == [heads[1]]
+    elif accepted:
+        assert run.failed_work_commits == ["repair-head"]
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_status"),
+    [
+        (GateResult([StepResult("slow", "timeout")]), "incomplete"),
+        (GateResult([StepResult("db", "missing_env")]), "incomplete"),
+    ],
+)
+def test_incomplete_only_gate_results_do_not_start_repair(monkeypatch, tmp_path, result, expected_status):
+    calls = []
+    run, _committed, _repair = _gate_repair_run(tmp_path, ["src/fix.py"], RunResult(verdict="DONE"))
+    monkeypatch.setattr(dev.gate_step, "plan", lambda _project: [object()])
+    monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(dev, "set_run_progress", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dev, "run_ai", lambda *_args: calls.append("repair"))
+    monkeypatch.setattr(dev, "report_gate_failure", lambda *_args: "refused")
+
+    assert dev.run_local_gate(run) == "refused"
+    assert calls == []
+    assert run.result["details"]["local_gate"]["status"] == expected_status
+
+
+def test_gate_error_does_not_start_repair(monkeypatch, tmp_path):
+    calls = []
+    run, _committed, _repair = _gate_repair_run(tmp_path, ["src/fix.py"], RunResult(verdict="DONE"))
+    monkeypatch.setattr(dev.gate_step, "plan", lambda _project: [object()])
+    monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("broken")))
+    monkeypatch.setattr(dev, "set_run_progress", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dev, "run_ai", lambda *_args: calls.append("repair"))
+    monkeypatch.setattr(dev, "report_gate_failure", lambda *_args: "refused")
+
+    assert dev.run_local_gate(run) == "refused"
+    assert calls == []
+    assert run.result["details"]["local_gate"]["status"] == "error"
+
+
+def test_named_docs_gap_still_restricts_repair_to_documentation_paths(monkeypatch, tmp_path):
+    run, committed, repair = _gate_repair_run(tmp_path, ["src/implementation.py"], RunResult(verdict="DONE"))
+    monkeypatch.setattr(dev, "brief", lambda _run: SimpleNamespace(
+        spec=RunSpec(prompt="instructions", cwd=str(tmp_path), account_home=str(tmp_path))))
+    monkeypatch.setattr(dev, "run_ai", lambda target, _prepared: setattr(target, "response", repair))
+
+    assert not dev.repair_documentation_gap(run, "step docs-check failed: missing docs/v4/topic.md")
+    assert committed == []
+
+
+def test_repeated_gate_failure_is_reported_after_one_repair_without_publication(monkeypatch, tmp_path):
+    gate_calls, repairs, reports, pushes = [], [], [], []
+    run, _committed, repair = _gate_repair_run(tmp_path, ["src/fix.py"],
+                                                RunResult(final_text="RESULT: DONE", verdict="DONE"))
+    first = GateResult([StepResult("unit", "failed", tail="first failure")])
+    second = GateResult([StepResult("unit", "failed", tail="still failing")])
+    monkeypatch.setattr(dev.gate_step, "plan", lambda _project: [object()])
+    monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs: gate_calls.append("gate") or
+                        (first if len(gate_calls) == 1 else second))
+    monkeypatch.setattr(dev, "set_run_progress", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dev, "brief", lambda _run: SimpleNamespace(
+        spec=RunSpec(prompt="instructions", cwd=str(tmp_path), account_home=str(tmp_path))))
+    monkeypatch.setattr(dev, "run_ai", lambda target, _prepared: repairs.append("repair") or
+                        setattr(target, "response", repair))
+    monkeypatch.setattr(dev, "report_gate_failure", lambda _run, reason, kind: reports.append((reason, kind)) or
+                        {"outcome": "failed"})
+    run.git.commit_all = lambda *_args: "initial-commit"
+    run.git.push = lambda *_args, **_kwargs: pushes.append("push")
+    run.git.run = lambda *_args, **_kwargs: "head"
+    run.changed = ["src/original.py"]
+    run.repo, run.branch, run.project = "org/repo", "JAIF-430-work", {"base": "develop", "checks": ["pytest"]}
+    run.api = SimpleNamespace(call=lambda *_args, **_kwargs: {"token": "unused"})
+    monkeypatch.setattr(mechanical, "refresh_base", lambda _run: None)
+
+    outcome = dev.publish_changes(run)
+
+    assert outcome == {"outcome": "failed"}
+    assert gate_calls == ["gate", "gate"] and repairs == ["repair"]
+    assert reports and reports[0][1] == "gate_failed"
+    assert pushes == []
+
+
+def test_green_gate_repair_reaches_the_existing_push_and_pr_flow(monkeypatch, tmp_path):
+    events, gates = [], []
+    repair = RunResult(final_text="RESULT: DONE", verdict="DONE", tokens_in=2)
+    run, _committed, _ = _gate_repair_run(tmp_path, ["src/fix.py"], repair)
+    first = GateResult([StepResult("unit", "failed", tail="assertion failed")])
+    green = GateResult([StepResult("unit", "passed")])
+    run.changed = ["src/original.py"]
+    run.repo, run.branch, run.branch_lease = "org/repo", "JAIF-430-gate", "checkout-head"
+    run.project = {"base": "develop", "checks": ["pytest"]}
+    run.started_at, run.handed, run.tests = 0, {}, "passed"
+    run.git.commit_all = lambda *_args: events.append("commit") or f"commit-{len(events)}"
+    run.git.run = lambda *_args, **_kwargs: "published-head"
+    run.git.push = lambda *_args, **_kwargs: events.append("push")
+    run.api = SimpleNamespace(call=lambda _method, endpoint, _body: (
+        events.append("token") or {"token": "test-token"}) if endpoint == "/v1/github/token" else
+        events.append("pr") or {"url": "https://example.test/pr/430"})
+    run.reporter = SimpleNamespace(comment=lambda **_kwargs: events.append("comment"),
+                                   transition=lambda **kwargs: events.append(kwargs["to"]))
+    monkeypatch.setattr(dev.gate_step, "plan", lambda _project: [object()])
+    def run_gate(*_args, **_kwargs):
+        gates.append("gate")
+        events.append("gate")
+        return first if len(gates) == 1 else green
+
+    monkeypatch.setattr(dev.gate_step, "run", run_gate)
+    monkeypatch.setattr(dev, "set_run_progress", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dev, "brief", lambda target: SimpleNamespace(
+        spec=RunSpec(prompt="instructions", cwd=str(target.worktree), account_home=str(tmp_path))))
+    monkeypatch.setattr(dev, "run_ai", lambda target, _prepared: setattr(target, "response", repair))
+    monkeypatch.setattr(mechanical, "refresh_base", lambda _run: None)
+
+    outcome = dev.publish_changes(run)
+
+    assert outcome["outcome"] == "done" and outcome["pr_url"] == "https://example.test/pr/430"
+    assert gates == ["gate", "gate"]
+    assert events.index("push") > events.index("gate")
+    assert events.index("pr") > events.index("push")
+
+
+def test_gate_output_redaction_removes_short_named_secrets_and_credentials():
+    output = dev.redact_gate_output(
+        "token=abc password=hunter2", {"TOKEN": "abc"}, {"environment": [{"name": "TOKEN", "kind": "secret"}]})
+
+    assert output == "[server detail removed] [server detail removed]"
+
+
+def test_gate_repair_commit_error_rejects_repair(monkeypatch, tmp_path):
+    run, committed, repair = _gate_repair_run(tmp_path, ["src/fix.py"],
+                                                RunResult(final_text="RESULT: DONE", verdict="DONE"))
+    run.git.commit_all = lambda *_args: (_ for _ in ()).throw(GitError("commit refused"))
+    monkeypatch.setattr(dev, "brief", lambda _run: SimpleNamespace(
+        spec=RunSpec(prompt="instructions", cwd=str(tmp_path), account_home=str(tmp_path))))
+    monkeypatch.setattr(dev, "run_ai", lambda target, _prepared: setattr(target, "response", repair))
+
+    assert not dev.repair_gate_failure(run, "unit", "step unit failed: issue")
     assert committed == []
 
 

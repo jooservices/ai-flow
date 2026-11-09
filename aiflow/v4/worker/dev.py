@@ -762,9 +762,12 @@ def run_local_gate(run: DevRun) -> str | dict:
         run.result.setdefault("details", {})["local_gate"] = {"status": "missing", "steps": []}
         return report_gate_failure(run, "no local checks are configured for this project", "gate_failed")
     gate, reason, error_kind = execute_local_gate(run)
-    if (gate is not None and gate.exit_code and mechanical.documentation_gap(gate)
-            and repair_documentation_gap(run, reason)):
-        gate, reason, error_kind = execute_local_gate(run)
+    if gate is not None and gate.failed:
+        step_name = gate.failed.name
+        repaired = (repair_documentation_gap(run, reason) if mechanical.documentation_gap(gate)
+                    else repair_gate_failure(run, step_name, reason))
+        if repaired:
+            gate, reason, error_kind = execute_local_gate(run)
     if gate is None or gate.exit_code:
         return report_gate_failure(run, reason, error_kind)
     return ""
@@ -785,43 +788,72 @@ def execute_local_gate(run: DevRun):
 
 def repair_documentation_gap(run: DevRun, reason: str) -> bool:
     """Ask the developer to add only the named documentation, then commit that repair for a second gate run."""
+    return repair_gate_failure(run, "docs-check", reason, docs_only=True)
+
+
+def repair_gate_failure(run: DevRun, failed_step: str, reason: str, docs_only: bool = False) -> bool:
+    """Give the developer one same-worktree repair turn, then commit accepted changes for one gate rerun."""
     original_head = run.git.run("rev-parse", "HEAD", cwd=run.worktree).strip()
     original_response = run.response
     prepared = brief(run)
+    output = redact_gate_output(reason, run.env, run.project)
+    repair_scope = ("Add or update only the required docs/v4 topic Markdown page and deploy/v4/README.md topic index. "
+                    "Preserve the implementation and project behavior." if docs_only else
+                    "Repair the ticket work in this same worktree. Preserve valid changes and fix the reported check.")
     prepared.spec = replace(
         prepared.spec,
-        prompt=(prepared.spec.prompt + "\n\nThe committed docs-check failed before hand-over and named this missing "
-                "documentation: \n" + reason + "\nAdd or update only the required docs/v4 topic Markdown page "
-                "and deploy/v4/README.md topic index. Preserve the implementation and project behavior. Run the "
-                "documentation check again, "
-                "then finish with RESULT: DONE and a short summary."),
+        prompt=(prepared.spec.prompt + f"\n\nThe committed local gate step '{failed_step}' failed before hand-over.\n"
+                f"Redacted output:\n{output}\n{repair_scope} Run the relevant checks, do not commit, and finish "
+                "with RESULT: DONE and a short summary."),
         log_append=True,
     )
     run_ai(run, prepared)
     repair_response = run.response
-    run.response = merge_response(original_response, repair_response)
+    record_gate_repair_response(run, original_response, repair_response)
+    repaired_head = run.git.run("rev-parse", "HEAD", cwd=run.worktree).strip()
+    if repaired_head != original_head:
+        if repaired_head:
+            run.failed_work_commits.append(repaired_head)
+        return False
+    if repair_response.error_kind or repair_response.verdict != "DONE":
+        return False
+    changed = run.git.changed(run.worktree)
+    if not changed or (docs_only and any(not _documentation_repair_path(path) for path in changed)):
+        return False
+    if docs_only and not any(path.startswith("docs/v4/") for path in changed):
+        return False
+    try:
+        repair_sha = run.git.commit_all(run.worktree, commit_message(run.claim, run.summary), run.claim.identity)
+    except GitError:
+        return False
+    run.failed_work_commits.append(repair_sha)
+    repair_record = {"step": failed_step, "files": changed[:100]}
+    detail_key = "documentation_repaired" if docs_only else "gate_repair"
+    run.result.setdefault("details", {})[detail_key] = changed[:100] if docs_only else repair_record
+    return True
+
+
+def record_gate_repair_response(run: DevRun, original: RunResult, repair: RunResult) -> None:
+    """Aggregate provider usage and expose the repair turn through the normal run metadata."""
+    run.response = merge_response(original, repair)
     run.result.update(run_result_metadata(run.response))
     run.result.setdefault("details", {}).update(
         permission_denials=run.response.permission_denials,
         token_usage_reported=bool(getattr(run.response, "token_usage_reported", False)),
         duration_s=int(run.response.duration_s), verdict=run.response.verdict,
         verdict_reason=(run.response.verdict_reason or "")[:2000])
-    repaired_head = run.git.run("rev-parse", "HEAD", cwd=run.worktree).strip()
-    if repaired_head != original_head:
-        if repaired_head:
-            run.failed_work_commits.append(repaired_head)
-        return False
-    if run.response.error_kind or run.response.verdict != "DONE":
-        return False
-    changed = run.git.changed(run.worktree)
-    if not changed or any(not _documentation_repair_path(path) for path in changed):
-        return False
-    if not any(path.startswith("docs/v4/") for path in changed):
-        return False
-    repair_sha = run.git.commit_all(run.worktree, commit_message(run.claim, run.summary), run.claim.identity)
-    run.failed_work_commits.append(repair_sha)
-    run.result.setdefault("details", {})["documentation_repaired"] = changed[:100]
-    return True
+
+
+def redact_gate_output(text: str, env: dict[str, str], project: dict) -> str:
+    """Remove configured values and credential-like fields before failed output enters a repair prompt."""
+    secret_names = {item.name for item in items_of(project.get("environment") or []) if item.secret}
+    values = {value for name, value in env.items() if value and (len(value) >= 4 or name in secret_names)}
+    output = redact(text)
+    for value in sorted(values, key=len, reverse=True):
+        output = output.replace(value, "[redacted]")
+    output = re.sub(r"(?i)(token|password|secret|api[_-]?key)(\s*[=:]\s*)[^\s,;]+",
+                    r"\1\2[redacted]", output)
+    return output[-12000:]
 
 
 def _documentation_repair_path(path: str) -> bool:

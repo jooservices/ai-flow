@@ -4,12 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from fastapi import FastAPI, Request
-from fastapi.testclient import TestClient
-
-from aiflow.v4.control.app_helpers import install as install_app_helpers, repository_for_run
+from aiflow.v4.control.app_helpers import install as install_app_helpers
 from aiflow.v4.control.features.projects.routes import _ticket_epic
-from aiflow.v4.control.ticket_helpers import ticket_epic
 
 
 class RecordingProject:
@@ -79,6 +75,26 @@ def test_supplied_project_and_looked_up_project_keep_the_legacy_ticket_fallback(
         assert tickets.lookups == ["DEMO-1"]
 
 
+def test_installed_helper_uses_resolved_epic_for_legacy_run_repository_selection():
+    ticket = {"key": "DEMO-1", "type": "Story", "parent_key": "DEMO-2"}
+    project = RecordingProject("org/project")
+    ctx, tickets = _context(
+        {"DEMO": project},
+        ticket,
+        {
+            "DEMO-2": {"type": "Story", "parent_key": "DEMO-EPIC"},
+            "DEMO-EPIC": {"type": "Epic", "parent_key": ""},
+        },
+    )
+
+    repository = _legacy_helpers(ctx).repository_for_run(
+        {"project": "DEMO", "ticket_key": "DEMO-1", "details": {}})
+
+    assert repository == "org/project:DEMO-EPIC"
+    assert project.tickets == [{**ticket, "epic": "DEMO-EPIC"}]
+    assert tickets.lookups == ["DEMO-1", "DEMO-2", "DEMO-EPIC"]
+
+
 def test_missing_project_returns_empty_without_ticket_lookup():
     ctx, tickets = _context()
 
@@ -101,33 +117,6 @@ def test_ticket_epic_resolves_ancestor_chain_and_missing_parent_fallback():
     assert tickets.lookups == ["DEMO-2", "DEMO-EPIC", "UNKNOWN"]
 
 
-def test_module_helper_accepts_context_and_external_router_reads_it_from_app_state():
-    project = RecordingProject("org/router")
-    ctx, _tickets = _context({"DEMO": project}, {"key": "DEMO-1", "type": "Story"})
-    app = FastAPI()
-    app.state.ctx = ctx
-
-    @app.get("/repository")
-    def repository(request: Request):
-        run = {"project": "DEMO", "ticket_key": "DEMO-1", "details": {}}
-        return {"repository": repository_for_run(request.app.state.ctx, run)}
-
-    response = TestClient(app).get("/repository")
-
-    assert response.status_code == 200
-    assert response.json() == {"repository": "org/router:"}
-
-
-def test_module_helper_returns_saved_repository_and_uses_supplied_project():
-    project = RecordingProject("org/supplied")
-    ctx, tickets = _context(ticket={"key": "DEMO-1", "type": "Story"})
-
-    assert repository_for_run(ctx, {"details": {"repository": "saved/repo"}}, project) == "saved/repo"
-    assert repository_for_run(ctx, {"project": "DEMO", "ticket_key": "DEMO-1", "details": {}}, project) == "org/supplied:"
-    assert project.tickets == [{"key": "DEMO-1", "type": "Story", "epic": ""}]
-    assert tickets.lookups == ["DEMO-1"]
-
-
 def test_ticket_epic_handles_epic_ticket_and_cyclic_parent_chain():
     tickets = RecordingTickets(ancestors={
         "DEMO-2": {"type": "Story", "parent_key": "DEMO-1"},
@@ -135,6 +124,6 @@ def test_ticket_epic_handles_epic_ticket_and_cyclic_parent_chain():
     })
     ctx = SimpleNamespace(ticket_repository=tickets)
 
-    assert ticket_epic(ctx, {"key": "DEMO-EPIC", "type": "Epic"}) == "DEMO-EPIC"
-    assert ticket_epic(ctx, {"key": "DEMO-1", "type": "Story", "parent_key": "DEMO-2"}) == ""
+    assert _ticket_epic(SimpleNamespace(ctx=ctx), {"key": "DEMO-EPIC", "type": "Epic"}) == "DEMO-EPIC"
+    assert _ticket_epic(SimpleNamespace(ctx=ctx), {"key": "DEMO-1", "type": "Story", "parent_key": "DEMO-2"}) == ""
     assert tickets.lookups == ["DEMO-2", "DEMO-1"]

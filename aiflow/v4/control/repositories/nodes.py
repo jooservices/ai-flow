@@ -66,3 +66,9 @@ def record_heartbeat_sample(db, node: str, metrics_json) -> None:
 def prune_heartbeat_samples(db, days: int = 30) -> None:
     """Drop heartbeat resource samples older than the retention window."""
     db.run("DELETE FROM node_heartbeat_samples WHERE heartbeat_at<now()-make_interval(days => %s)", (days,))
+
+
+def cpu_rows(db) -> list[dict]:
+    """The latest heartbeat of every registered machine with its age in seconds, for the CPU overview."""
+    return db.all("SELECT name,role,metrics,extract(epoch FROM now()-last_heartbeat) AS age FROM nodes"
+                  " WHERE removed_at IS NULL ORDER BY role DESC, name")

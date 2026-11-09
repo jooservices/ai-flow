@@ -540,7 +540,8 @@ def _autodeploy(tmp_path, current, image_present=True, build_present=True):
 
 
 def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, requested=None, healthy=True,
-                       canary_settings=None, pending_builds=(), install_timeout_override=None):
+                       canary_settings=None, pending_builds=(), install_timeout_override=None,
+                       minimum_age_override=None):
     """active: the canary installed the candidate at `now`; requested: the candidate was requested at that time
     and the canary node still reports the previous release."""
     root = tmp_path / "srv"
@@ -600,6 +601,8 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, reque
            "AIFLOW4_SECRETS_DIR": str(secrets)}
     if install_timeout_override is not None:
         env["AIFLOW4_CANARY_INSTALL_TIMEOUT_S"] = str(install_timeout_override)
+    if minimum_age_override is not None:
+        env["AIFLOW4_CANARY_MIN_AGE_S"] = str(minimum_age_override)
     result = subprocess.run(["bash", str(AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
     canary_file = releases / "CANARY.json"
     current = (releases / "CURRENT").read_text().strip()
@@ -741,7 +744,8 @@ def test_autodeploy_marks_pending_ancestors_live_with_the_promoted_build(tmp_pat
 
 
 def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, ci="ok", api_port=None,
-                        canary_settings=None, pending_builds=(), install_timeout_override=None, requested=None):
+                        canary_settings=None, pending_builds=(), install_timeout_override=None, requested=None,
+                        minimum_age_override=None):
     """api_port: forward the /v1/deploy/ requests to a control API listening there; else answer them from fixtures."""
     root = tmp_path / "srv"
     releases = root / "control" / "releases"
@@ -811,6 +815,8 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
            "AIFLOW4_SECRETS_DIR": str(secrets)}
     if install_timeout_override is not None:
         env["AIFLOW4_CANARY_INSTALL_TIMEOUT_S"] = str(install_timeout_override)
+    if minimum_age_override is not None:
+        env["AIFLOW4_CANARY_MIN_AGE_S"] = str(minimum_age_override)
     if api_port is not None:
         env["AIFLOW4_CONTROL_URL"] = f"http://127.0.0.1:{api_port}"
     result = subprocess.run(["bash", str(DEVELOP_AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
@@ -1129,3 +1135,19 @@ def test_ci_state_reads_every_check_run_page_before_deciding():
         assert [int(call[1].rsplit("page=", 1)[1]) for call in app.calls] == visited_pages
         assert all(call[0] == "GET" and call[2] == "ai-flow" and
                    set(call[3].values()) == {"read"} for call in app.calls)
+
+
+def test_both_autodeploy_channels_pass_the_environment_minimum_age_override(tmp_path):
+    settings = {"minimum_age_s": 180, "minimum_runs": 2, "maximum_age_s": 900}
+    for channel in ("release", "develop"):
+        channel_path = tmp_path / channel
+        if channel == "release":
+            result, calls, *_ = _canary_autodeploy(
+                channel_path, active=True, canary_settings=settings, minimum_age_override=600)
+        else:
+            result, calls, *_ = _develop_autodeploy(
+                channel_path, active=True, canary_settings=settings, minimum_age_override=600)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        evaluate_call = next(line for line in calls.splitlines() if "canary evaluate" in line)
+        assert "--minimum-age-s 600" in evaluate_call

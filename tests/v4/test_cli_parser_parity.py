@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -32,8 +31,14 @@ PARSE_CASES = [
     (["canary", "evaluate", "--node", "node-a", "--target", "v4.3.0", "--previous", "v4.2.9",
       "--started-at", "2026-01-02T03:04:05+00:00"],
      {"cmd": "canary", "canary_action": "evaluate", "node": "node-a", "target": "v4.3.0",
-      "previous": "v4.2.9", "started_at": "2026-01-02T03:04:05+00:00", "minimum_age_s": 300,
+      "previous": "v4.2.9", "started_at": "2026-01-02T03:04:05+00:00", "minimum_age_s": None,
       "minimum_runs": 3, "maximum_age_s": 900, "from_settings": False, "failure_ratio": "2",
+      "minimum_infra_failures": 3}),
+    (["canary", "evaluate", "--node", "node-a", "--target", "v4.3.0", "--previous", "v4.2.9",
+      "--started-at", "2026-01-02T03:04:05+00:00", "--from-settings", "--minimum-age-s", "600"],
+     {"cmd": "canary", "canary_action": "evaluate", "node": "node-a", "target": "v4.3.0",
+      "previous": "v4.2.9", "started_at": "2026-01-02T03:04:05+00:00", "minimum_age_s": 600,
+      "minimum_runs": 3, "maximum_age_s": 900, "from_settings": True, "failure_ratio": "2",
       "minimum_infra_failures": 3}),
     (["canary", "evaluate", "--node", "node-a", "--target", "v4.3.0", "--previous", "v4.2.9",
       "--started-at", "2026-01-02T03:04:05+00:00", "--minimum-age-s", "90", "--minimum-runs", "3",

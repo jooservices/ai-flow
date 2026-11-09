@@ -7,7 +7,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 ## Topics
 
-- [Deploy lint](../../docs/v4/deploy-lint.md): hadolint for the Dockerfiles and shellcheck for the shell scripts, only when deploy files change
+- [Deploy lint](../../docs/v4/deploy-lint.md): hadolint for the Dockerfiles and shellcheck for the shell scripts; runs on pull requests that change `deploy/`, `scripts/`, `.hadolint.yaml` or the workflow, and always in the merge queue
 - [Atomic code and configuration deploy](../../docs/v4/atomic-deploy.md): fetch, check and activate both repositories together for each configured machine
 - [Unified test command for every layer](../../docs/v4/test-command.md): one script runs fast (lint, types, guards, unit), integration, smoke and e2e layers
 - [Pipeline checks and first-run failures](../../docs/v4/pipeline-checks.md): CI jobs map to local project checks or a stated pipeline-only reason, and the Dashboard reports first-run failures

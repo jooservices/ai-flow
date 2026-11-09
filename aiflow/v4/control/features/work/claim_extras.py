@@ -77,7 +77,7 @@ def intake_extras(work: Claim) -> dict[str, Any]:
     try:
         comments = work.ctx.jira.recent_comments(work.ticket["key"], limit=10) if work.ctx.jira else []
         return {"recent_comments": comments}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - optional comments; no Jira or credential failure may block a claim
         log.warning("comments of %s for intake failed: %s", work.ticket["key"], exc)
         return {}
 

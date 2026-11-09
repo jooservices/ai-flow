@@ -59,7 +59,7 @@ def _deliver(ctx, project: str, scope: str, subject: str, result: dict[str, Any]
         sent = notify.send("info", title, result["markdown"], "/knowledge", ctx=ctx,
                            alert_kind="daily_summary", project=project, ticket=f"{project} project report",
                            needed="Review the completed project report and study case.")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - the report is saved; a notification failure must not fail the close
         log.warning("project report notification failed for %s: %s", project, exc)
         sent = []
     ctx.db.run("UPDATE project_reports SET sent_channels=%s WHERE id=%s", (sent, result["id"]))

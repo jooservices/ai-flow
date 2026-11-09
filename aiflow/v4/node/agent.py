@@ -679,7 +679,7 @@ def apply_heartbeat(api: ControlClient, name: str, desired: dict, state: _AgentL
     _apply_queued_work(api, name, state)
     try:
         _apply_worker_state(api, name, desired, state, manage_workers)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - a failing worker or self-update step must not stop the heartbeat loop
         log.warning("heartbeat failed: %s", exc)
     return True
 

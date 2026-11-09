@@ -266,7 +266,7 @@ def _related_hits(runtime: WorkRouteRuntime, ticket: dict) -> list[dict]:
         return memory.related(
             runtime.ctx.db, ticket["project"], ticket["summary"], exclude_ticket=ticket["key"], limit=3
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - memory is advice; any lookup error must not block a claim
         runtime.logger.warning("memory lookup for %s failed: %s", ticket["key"], exc)
         return []
 

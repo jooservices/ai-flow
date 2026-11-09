@@ -2,7 +2,6 @@
 import json
 import uuid
 
-from conftest import add_ticket
 from test_business import DOM, STATE, business
 from test_console import run_script
 from test_release_readiness import issue, sync, verify, VERSION
@@ -23,6 +22,10 @@ def added(version_id: str, at: str) -> tuple[str, dict]:
 
 def started(at: str) -> tuple[str, dict]:
     return at, {"field": "status", "fromString": "To Do", "toString": "In Progress"}
+
+
+def parent_changed(at: str) -> tuple[str, dict]:
+    return at, {"field": "Parent", "from": "TESTWP-1", "to": "TESTWP-2"}
 
 
 def with_history(i: dict, *items: tuple[str, dict]) -> dict:
@@ -97,10 +100,14 @@ def test_history_parser_keeps_the_latest_attach_and_the_first_in_progress():
         added("100", "2026-10-01T09:00:00.000+0000"),
         ("2026-10-02T09:00:00.000+0000", {"field": "Fix Version", "from": "100", "to": None}),
         added("100", "2026-10-03T09:00:00.000+0000"),
-        started("2026-10-04T09:00:00.000+0000"), started("2026-10-06T09:00:00.000+0000"))})
+        started("2026-10-04T09:00:00.000+0000"), started("2026-10-06T09:00:00.000+0000"),
+        parent_changed("2026-10-07T09:00:00.000+0000"))})
     assert {k: v.isoformat() for k, v in got["fix_version_added"].items()} == {"100": "2026-10-03T09:00:00+00:00"}
     assert got["first_in_progress"].isoformat() == "2026-10-04T09:00:00+00:00"
-    assert Jira.history({}) == {"fix_version_added": {}, "first_in_progress": None}
+    assert got["status_changed_at"].isoformat() == "2026-10-06T09:00:00+00:00"
+    assert got["parent_changed_at"].isoformat() == "2026-10-07T09:00:00+00:00"
+    assert Jira.history({}) == {"fix_version_added": {}, "first_in_progress": None,
+                               "status_changed_at": None, "parent_changed_at": None}
 
 
 # --- AC3: reasons --------------------------------------------------------------------------------------------------

@@ -6,17 +6,24 @@ from typing import Any
 
 from . import notify
 from .db import J
+from .features.projects import repository as projects_repository
 from .report import build_report, render_markdown
 
 log = logging.getLogger("aiflow4.projects")
 
 
-def _save_report(ctx, project: str, scope: str, subject: str, actor: str) -> dict[str, Any]:
+def _save_report(ctx, project: str, scope: str, subject: str, actor: str,
+                 lifecycle_key: str = "") -> dict[str, Any]:
     """Persist one report and its memory entry atomically; callers handle notification after commit."""
     with ctx.db.transaction() as c:
         with c.transaction():
             c.execute("INSERT INTO project_lifecycle (project) VALUES (%s) ON CONFLICT (project) DO NOTHING",
                       (project,))
+            if lifecycle_key:
+                prior = projects_repository.report_by_lifecycle_key(c, lifecycle_key)
+                if prior:
+                    return {**prior, "created": False,
+                            "study_case_ref": f"{project}:epic:{subject}:v{prior['version']}"}
             lifecycle = c.execute("SELECT status, version FROM project_lifecycle WHERE project=%s FOR UPDATE",
                                   (project,)).fetchone()
             if scope == "project" and lifecycle["status"] == "closed":
@@ -36,9 +43,8 @@ def _save_report(ctx, project: str, scope: str, subject: str, actor: str) -> dic
             report = build_report(ctx, project, subject if scope == "epic" else None)
             markdown = render_markdown(report)
             ref = f"{project}:v{version}" if scope == "project" else f"{project}:epic:{subject}:v{version}"
-            stored = c.execute("INSERT INTO project_reports (project, scope, subject, version, report, markdown)"
-                                " VALUES (%s,%s,%s,%s,%s,%s) RETURNING id, created_at",
-                                (project, scope, subject, version, J(report), markdown)).fetchone()
+            stored = projects_repository.insert_report(c, project, scope, subject, version,
+                                                       J(report), markdown, lifecycle_key or None)
             c.execute("INSERT INTO memory (project, kind, ref, ticket, text, created_at)"
                       " VALUES (%s,'study_case',%s,'',%s,%s)",
                       (project, ref, markdown, stored["created_at"]))
@@ -78,9 +84,9 @@ def close_project(ctx, project: str, actor: str = "owner") -> dict[str, Any]:
     return result
 
 
-def report_done_epic(ctx, project: str, epic: str) -> dict[str, Any]:
-    """Create a study case when Jira first reports an epic as Done."""
-    result = _save_report(ctx, project, "epic", epic, "system")
+def report_done_epic(ctx, project: str, epic: str, lifecycle_key: str = "") -> dict[str, Any]:
+    """Create a study case when Jira reports an epic as Done, idempotent for a saved transition key."""
+    result = _save_report(ctx, project, "epic", epic, "system", lifecycle_key)
     result["sent_channels"] = _deliver(ctx, project, "epic", epic, result)
     return result
 

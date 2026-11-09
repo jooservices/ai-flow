@@ -22,3 +22,18 @@ def listing_data(db) -> ProjectListingData:
         "'[]'::jsonb) FROM project_check_probes) AS probe_rows")
     return ProjectListingData(ticket_counts=row["ticket_counts"], node_rows=row["node_rows"],
                               probe_rows=row["probe_rows"])
+
+
+def report_by_lifecycle_key(connection, lifecycle_key: str) -> dict[str, Any] | None:
+    """Find a previously saved report for an idempotent lifecycle follow-up."""
+    return connection.execute("SELECT id,version,report,markdown,created_at FROM project_reports"
+                              " WHERE lifecycle_key=%s", (lifecycle_key,)).fetchone()
+
+
+def insert_report(connection, project: str, scope: str, subject: str, version: int, report: Any,
+                  markdown: str, lifecycle_key: str | None) -> dict[str, Any]:
+    """Insert one report snapshot and return its persisted identity."""
+    return connection.execute("INSERT INTO project_reports"
+                              " (project,scope,subject,version,report,markdown,lifecycle_key)"
+                              " VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id,created_at",
+                              (project, scope, subject, version, report, markdown, lifecycle_key)).fetchone()

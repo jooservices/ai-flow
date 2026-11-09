@@ -16,7 +16,8 @@ disagreements  a fix that fails is retried every pass and listed on the Dashboar
              the state GitHub implies.
 
 Every move records its cause in `ticket_moves`: `flow merge` (the merge step), `person` (a console review action or a
-move made in Jira), `reconcile` (this loop) or `flow` (any other step of the flow, the watchdog's requeues included).
+move made in Jira), `reconcile` (this loop), `epic children` (an automatic move from child state), or `flow` (any other
+step of the flow, the watchdog's requeues included).
 The control plane writes Jira under the same ticket lease as a worker (claimed, and renewed before every outside
 call), so a merge or a reconcile never races with a run that still holds a valid fence: when a run owns the ticket the
 write waits for the next pass.
@@ -38,8 +39,8 @@ from aiflow.v4.control.features.tickets import ticket_repository_of
 log = logging.getLogger("aiflow4.merge_flow")
 
 READY_TO_MERGE = "Ready to merge"
-FLOW_MERGE, PERSON, RECONCILE, FLOW = "flow merge", "person", "reconcile", "flow"
-CAUSES = (FLOW_MERGE, PERSON, RECONCILE, FLOW)
+FLOW_MERGE, PERSON, RECONCILE, FLOW, EPIC_CHILD = "flow merge", "person", "reconcile", "flow", "epic children"
+CAUSES = (FLOW_MERGE, PERSON, RECONCILE, FLOW, EPIC_CHILD)
 DISAGREEMENT_AFTER_S = 300
 MERGE_EVERY_S = 30
 RECONCILE_EVERY_S = 20    # start of a pass to the start of the next
@@ -91,16 +92,19 @@ def pr_ref(url: str) -> dict[str, Any] | None:
     return {"url": url, "repository": f"{m.group(1)}/{m.group(2)}", "name": m.group(2), "number": int(m.group(3))}
 
 
-def record_move(ctx, ticket: str, from_status: str, to_status: str, cause: str, detail: str = "") -> None:
+def record_move(ctx, ticket: str, from_status: str, to_status: str, cause: str, detail: str = "",
+                at: datetime | None = None, followup_id: int | None = None) -> None:
     """Keep who or what moved a ticket, in the move table, and publish `TicketMoved` (its timeline row is a listener)."""
     from .features.tickets.events import TicketMoved
     from .platform.events.wiring import publish_for
 
     with ctx.db.transaction():
-        ctx.db.run("INSERT INTO ticket_moves (ticket, from_status, to_status, cause, detail) VALUES (%s,%s,%s,%s,%s)",
-                   (ticket, from_status or "", to_status, cause, detail[:500]))
+        repository = ticket_repository_of(ctx)
+        repository.record_ticket_move((at, ticket, from_status or "", to_status, cause, detail[:500]))
         publish_for(ctx, TicketMoved(ticket_key=ticket, from_status=from_status or "", to_status=to_status, cause=cause,
                                      detail=detail[:300]))
+        if followup_id is not None:
+            repository.finish_epic_followup_move((followup_id,))
 
 
 def moves(db, ticket: str, limit: int = 30) -> list[dict]:

@@ -324,7 +324,17 @@ def test_a_move_made_in_jira_is_recorded_as_a_persons(ctx):
 
 
 def test_every_cause_is_one_of_the_named_ones():
-    assert set(merge_flow.CAUSES) == {"flow merge", "person", "reconcile", "flow"}
+    assert set(merge_flow.CAUSES) == {"flow merge", "person", "reconcile", "flow", "epic children"}
+
+
+def test_record_move_preserves_the_jira_transition_time(ctx):
+    add_ticket(ctx.db, "TESTWP-742", status="To Do", labels=())
+    happened_at = datetime(2026, 11, 8, 10, 30, tzinfo=timezone.utc)
+
+    merge_flow.record_move(ctx, "TESTWP-742", "To Do", "In Progress", merge_flow.PERSON,
+                           "moved in Jira", at=happened_at)
+
+    assert ctx.db.one("SELECT ts FROM ticket_moves WHERE ticket=%s", ("TESTWP-742",))["ts"] == happened_at
 
 
 def test_the_watchdog_records_its_requeue_of_an_orphan_as_a_flow_move(ctx):

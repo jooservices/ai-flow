@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from ...platform.events import IN_TRANSACTION, Registry
+from ... import epic_lifecycle
 from .events import TicketMoved
 from aiflow.v4.control.features.tickets import ticket_repository_of
 
@@ -21,13 +22,16 @@ def register_listeners(ctx, registry: Registry) -> None:
 
     @registry.on(TicketMoved, name="tickets.report_done_epic")
     def report_done_epic(envelope, item: TicketMoved) -> None:
-        """An epic that reached Done gets its completion report (it was inline in the Jira transition and sync)."""
-        if item.to_status != "Done" or item.from_status == "Done":
-            return
+        """Reconcile parent epics and report newly completed epics after a ticket move."""
         ticket = ticket_repository_of(ctx).get(item.ticket_key)
-        if ticket is None or ticket.type != "Epic":
+        if ticket is not None and ticket.type.strip().casefold() != "epic" and ticket.parent_key:
+            projects = sorted(key for key, project in ctx.repo().projects.items() if not project.paused)
+            epic_lifecycle.reconcile(ctx, projects, {ticket.key}, set(), set(), "child_transition")
+        if (ticket is None or item.cause == "epic children" or item.to_status != "Done" or
+                item.from_status == "Done" or ticket.type.strip().casefold() != "epic"):
             return
         from ... import projects as project_lifecycle
+
         try:
             project_lifecycle.report_done_epic(ctx, ticket.project, ticket.key)
         except Exception as exc:  # noqa: BLE001 - a missing report must not retry the delivery forever

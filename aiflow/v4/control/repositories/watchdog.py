@@ -17,6 +17,7 @@ NODES_NAME_STATUS = "SELECT name, status FROM nodes"
 
 ORPHAN_TICKETS = (
     "SELECT t.key FROM tickets t WHERE t.status = 'In Progress'"
+    " AND lower(btrim(t.type)) <> 'epic'"
     " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = t.key AND r.status = 'running')"
     " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = t.key AND r.started_at > now() - interval '10 minutes')"
     " AND t.synced_at > now() - interval '5 minutes'"

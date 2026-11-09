@@ -34,6 +34,8 @@ PIPELINE_JOBS = (
     PipelineJob("architecture", "Architecture", ("architecture",), command_markers=("test_architecture.py",)),
     PipelineJob("coverage", "Coverage", pipeline_only_reason=(
         "Requires Redis and PostgreSQL, CI-only coverage tools, and a Codecov upload for the pull-request diff gate.")),
+    PipelineJob("sonar", "SonarCloud", pipeline_only_reason=(
+        "Needs the organization SonarCloud token and uploads the analysis to SonarCloud, so it only runs in CI.")),
     PipelineJob("v4-shard", "Test (v4) shard", ("v4",), name_prefix=True, command_markers=("tests/v4",)),
     PipelineJob("changes", "Changed paths", pipeline_only_reason=(
         "Compares the pull request with its base commit, which only the pull-request checkout provides.")),

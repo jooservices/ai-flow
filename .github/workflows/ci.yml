@@ -529,6 +529,59 @@ jobs:
           fail_ci_if_error: true
           verbose: true
 
+  # SonarCloud analysis (JAIF-576): uploads the analysis to the organization project, in parallel with the other jobs
+  # and without coverage so the required shards stay fast. Coverage reaches the quality gate later through the
+  # Codecov job of JAIF-574. Free for a public repository. Skipped for bot PRs.
+  sonar:
+    name: SonarCloud
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require SonarCloud token
+        if: github.event.pull_request.user.type != 'Bot'
+        id: sonar-token
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SONAR_TOKEN}" ]; then
+            echo "SONAR_TOKEN is not configured; add the organization secret SONAR_TOKEN"
+            exit 1
+          fi
+
+      - name: Resolve SonarQube host URL
+        if: github.event.pull_request.user.type != 'Bot'
+        id: sonar-config
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          set -euo pipefail
+          host_url="${SONAR_HOST_URL:-https://sonarcloud.io}"
+          host_url="${host_url%/}"
+          case "${host_url}" in
+            http://*|https://*) ;;
+            *) host_url="https://${host_url}" ;;
+          esac
+          if [[ ! "${host_url}" =~ ^https?://[^[:space:]/]+ ]]; then
+            echo "SONAR_HOST_URL must be a valid HTTP(S) URL"
+            exit 1
+          fi
+          echo "host_url=${host_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload SonarQube analysis
+        if: github.event.pull_request.user.type != 'Bot'
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ steps.sonar-config.outputs.host_url }}
+
   # Clean-install acceptance test (docs/v4/clean-install-acceptance.md): the fast version on every pull request
   # that touches install, deploy, control or node code ...
   acceptance-fast:

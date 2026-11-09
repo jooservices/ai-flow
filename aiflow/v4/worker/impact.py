@@ -115,7 +115,7 @@ def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                              logs / f"{key}-{c.run_id}.jsonl", {}, timeout_s)
         adapter = adapter_for_run(c.provider, run_as, get_adapter)
         res = run_with_inbox(adapter, spec, hb, lambda ev: None)
-        result.update(run_result_metadata(res),
+        result.update(run_result_metadata(res, c.context_pack),
                       details={"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})
         if hb.lost.is_set():
             raise LeaseLost()

@@ -16,6 +16,7 @@ from typing import Any
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, run_with_inbox, with_knowledge_context
+from .run_steps import record_reported_knowledge_ids
 
 log = logging.getLogger("aiflow4.master")
 
@@ -67,7 +68,7 @@ MASTER_ACTION_FIELDS = frozenset({
     "options", "observation_key", "account_id", "pause_minutes", "target_run_id", "signature"})
 STRICT_FORMAT_REMINDER = (
     "\n\nSTRICT FORMAT RETRY: Your previous response was invalid. Return only one JSON object with exactly "
-    "the required summary and actions fields. Every action must be an object with action and intent. "
+    "the required summary, actions and knowledge_used_ids fields. Every action must be an object with action and intent. "
     "Use an empty actions array if no safe action is needed. Do not include markdown or prose.")
 
 
@@ -160,11 +161,13 @@ def finish_master_model_error(result: dict, response, claimed: Claimed, quota_fi
                       summary=f"master account {claimed.account} cannot work now ({response.error_kind})",
                       tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
                       **quota_fields, details={"model_time_s": math.ceil(time.monotonic() - model_started)})
+        record_reported_knowledge_ids(result, getattr(response, "final_text", "") or "", claimed.context_pack)
         return result
     result.update(outcome="timeout" if response.error_kind == "timeout" else "failed",
                   error_kind=response.error_kind, summary=f"master cycle failed: {response.error_message[:400]}",
                   tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
                   **quota_fields, details={"model_time_s": math.ceil(time.monotonic() - model_started)})
+    record_reported_knowledge_ids(result, getattr(response, "final_text", "") or "", claimed.context_pack)
     return result
 
 
@@ -176,6 +179,7 @@ def finish_master_retry_error(result: dict, responses, response, claimed: Claime
                   cost_usd=sum(item.cost_usd for item in responses), **quota_fields,
                   error_kind=response.error_kind,
                   reset_at=response.reset_at.isoformat() if response.reset_at else None)
+    record_reported_knowledge_ids(result, getattr(response, "final_text", "") or "", claimed.context_pack)
     if response.error_kind in ("quota", "auth"):
         result.update(outcome="quota",
                       summary=f"master account {claimed.account} cannot work now ({response.error_kind})")
@@ -204,13 +208,15 @@ def retry_invalid_master_plan(adapter, spec: RunSpec, heartbeat: Heartbeat, on_p
     return parse_plan(response.final_text or ""), response, quota_fields, None
 
 
-def record_master_usage(result: dict, responses, response, quota_fields: dict) -> None:
+def record_master_usage(result: dict, responses, response, quota_fields: dict,
+                        context_pack: dict | None = None) -> None:
     """Store token totals and the latest reset time on the cycle result."""
     result.update(tokens_in=sum(item.tokens_in for item in responses),
                   tokens_out=sum(item.tokens_out for item in responses),
                   cost_usd=sum(item.cost_usd for item in responses), **quota_fields,
                   error_kind=response.error_kind,
                   reset_at=response.reset_at.isoformat() if response.reset_at else None)
+    record_reported_knowledge_ids(result, getattr(response, "final_text", "") or "", context_pack)
 
 
 def master_action_payload(action: dict, claimed: Claimed) -> dict:
@@ -249,7 +255,7 @@ def perform_master_actions(api: ControlClient, claimed: Claimed, heartbeat: Hear
 def apply_master_plan(api: ControlClient, claimed: Claimed, heartbeat: Heartbeat, result: dict, plan, responses,
                       response, quota_fields: dict, model_started: float, started: float) -> dict:
     """Record usage, report whether the plan parsed, and perform its actions."""
-    record_master_usage(result, responses, response, quota_fields)
+    record_master_usage(result, responses, response, quota_fields, claimed.context_pack)
     model_time_s = math.ceil(time.monotonic() - model_started)
     api.call("POST", "/v1/master/plan-outcome", {"run_id": claimed.run_id, "fence": claimed.fence,
                                                  "valid": bool(plan)})

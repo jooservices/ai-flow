@@ -384,7 +384,7 @@ def collect(run: DevRun) -> dict | None:
 
 def record_response(run: DevRun) -> None:
     response = run.response
-    run.result.update(run_result_metadata(response),
+    run.result.update(run_result_metadata(response, run.claim.context_pack),
                       details={"verdict": response.verdict, "permission_denials": response.permission_denials,
                                "token_usage_reported": bool(getattr(response, "token_usage_reported", False)),
                                "verdict_reason": (response.verdict_reason or "")[:2000],

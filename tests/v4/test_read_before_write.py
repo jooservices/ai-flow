@@ -1,8 +1,4 @@
-"""Characterization of the developer prompt before the read-before-write brief and study cases (JAIF-584).
-
-These tests pass on the code as it was before the change and must keep passing: a run that gets no lessons sees the
-same developer prompt as before.
-"""
+"""Characterization of developer prompt sections when no study-case lessons are added."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -25,7 +21,8 @@ def test_developer_prompt_keeps_its_sections_when_no_lessons_are_added():
     assert "1. Requirements ledger." in prompt
     assert "Test order and time budget:" in prompt
     assert study_cases.LESSON_HEADER not in prompt
-    assert "Knowledge context pack" not in prompt
+    assert "Knowledge context pack" in prompt
+    assert "KNOWLEDGE_USED_IDS" in prompt
 
 
 def test_developer_prompt_is_the_same_for_the_same_claim():

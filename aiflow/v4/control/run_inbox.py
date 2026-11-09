@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from . import ticket_split_apply
 from .db import J
 from .platform.errors import Conflict, DomainError, Forbidden
+from .repositories import knowledge_usefulness as knowledge_usefulness
 from .repositories import run_inbox
 
 
@@ -37,7 +38,8 @@ def _publish_terminal_failure(ctx, run_id: str, changed: int, current_status: st
 
 def _close_messages(ctx, run: dict, run_id: str, fence: int, node: str, reason: str,
                     update_sql: str, params: tuple = (), *, require_running: bool = False,
-                    allowed_statuses: tuple[str, ...] = (), require_unrecorded: bool = False) -> tuple[list[int], str]:
+                    allowed_statuses: tuple[str, ...] = (), require_unrecorded: bool = False,
+                    ticket_key: str = "", reported_ids: list[int] | None = None) -> tuple[list[int], str]:
     with ctx.db.transaction() as connection:
         current = connection.execute("SELECT status,result_received_at,inbox_pending_count FROM runs"
                                      " WHERE id=%s FOR UPDATE", (run_id,)).fetchone()
@@ -45,6 +47,9 @@ def _close_messages(ctx, run: dict, run_id: str, fence: int, node: str, reason: 
         message_ids = (run_inbox.mark_undelivered(connection, run_id, reason)
                        if int(current["inbox_pending_count"] or 0) else [])
         changed = connection.execute(update_sql, params).rowcount
+        if changed and current["status"] == "running" and reported_ids is not None:
+            knowledge_usefulness.record_run_usefulness(connection, run_id=run_id, ticket_key=ticket_key,
+                                                       reported_ids=reported_ids)
         _publish_terminal_failure(ctx, run_id, changed, current["status"])
     _emit_undelivered(ctx, run, run_id, fence, node, reason, message_ids)
     return message_ids, current["status"]
@@ -135,7 +140,9 @@ def finish(ctx, run: dict, run_id: str, body, details: dict, node: str) -> bool:
               body.cost_usd or 0,
               body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(details), run_id)
     _message_ids, run_status = _close_messages(ctx, run, run_id, body.fence, node, reason, update_sql, params,
-                                               allowed_statuses=("running", "lost"), require_unrecorded=True)
+                                               allowed_statuses=("running", "lost"), require_unrecorded=True,
+                                               ticket_key=run["ticket_key"],
+                                               reported_ids=body.knowledge_used_ids)
     late = run_status == "lost"
     if not late:
         ticket_split_apply.after_intake_result(ctx, run, body)

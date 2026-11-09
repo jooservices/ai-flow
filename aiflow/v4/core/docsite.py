@@ -134,6 +134,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderReviews": ("review",),
     "loadReviews": ("review",),
     "renderKnowledge": ("knowledge",),
+    "knowledgeComparisonText": ("knowledge",),
     "renderLearningKnowledge": ("knowledge",),
     "renderMachines": ("machines",),
     "addMachineAccount": ("machines",),

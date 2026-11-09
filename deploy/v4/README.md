@@ -177,6 +177,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Knowledge route installer structure](../../docs/v4/knowledge-install-structure.md): item, resource and policy approval routes register through ordered route-group installers
 - [Analytics routes](../../docs/v4/route-module-analytics.md): the analytics routes are served from their own router module
 - [Persistent learning and run context](../../docs/v4/knowledge-learning.md): automatically capture run, ticket and incident learning, then hand scoped semantic context to each run
+- [Knowledge usefulness](../../docs/v4/knowledge-usefulness.md): compare context-pack deliveries, reported uses, verification outcomes and retirement candidates
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
 - [Machines and accounts in the database](../../docs/v4/inventory-in-database.md): machines, AI accounts, roles and worker counts are managed on screen, stored in the control database, backed up with it and imported once from the control repository
 - [Machines and AI management](../../docs/v4/machines-and-ai.md): enroll machines and add, pause, resume, sign in, edit and remove AI accounts on screen

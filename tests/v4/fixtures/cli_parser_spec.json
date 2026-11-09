@@ -417,12 +417,12 @@
         "--minimum-age-s"
        ],
        "dest": "minimum_age_s",
-       "default": 300,
+       "default": null,
        "choices": null,
        "required": false,
        "nargs": null,
        "type_name": "int",
-       "help": null,
+       "help": "minimum canary age in seconds; overrides the setting with --from-settings",
        "metavar": null
       },
       {

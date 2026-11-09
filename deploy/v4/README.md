@@ -221,6 +221,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Project report build](../../docs/v4/report_build-structure.md): named builders for each section of the project and epic progress report
 - [Master run structure](../../docs/v4/master_run-structure.md): named steps of one fenced master cycle and how to add a step
 - [Silent developer runs](../../docs/v4/silent-developer-runs.md): resume silent developer runs once, terminate on second silence, count toward signature detector and report silent share on the Dashboard
+- [Read-before-write brief and study cases](../../docs/v4/read-before-write.md): the developer's READ brief is checked against the code, and only matching study cases of past review defects are given, within a token cap
 
 ## Tools on a node
 

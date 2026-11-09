@@ -1,0 +1,82 @@
+[
+  {
+    "id": "undefined-name",
+    "title": "A moved function lost an import",
+    "areas": [],
+    "task_types": [],
+    "defect": "A module split left out imports; it compiled, but a route raised NameError at run time.",
+    "cause": "The names the moved functions use were not imported or defined in the new module.",
+    "fix": "For every new module, list its free names and confirm each one is imported or defined there.",
+    "signature": ["undefined name", "F821", "nameerror"]
+  },
+  {
+    "id": "hidden-call",
+    "title": "A call hidden from the docs check",
+    "areas": ["aiflow/v4/control/"],
+    "task_types": [],
+    "defect": "A route called a helper through a module-name lookup or dict dispatch, so the docs check did not see the call.",
+    "cause": "The docs check follows plain calls from route handlers only.",
+    "fix": "Use plain, explicit calls, especially for anything that publishes an event or writes an audit row.",
+    "signature": ["indirection", "dynamic dispatch", "docsite"]
+  },
+  {
+    "id": "giant-file-growth",
+    "title": "Tests appended to a file over 1,500 lines",
+    "areas": ["tests/v4/test_console.py", "tests/v4/test_escalations.py", "aiflow/supervisor.py", "tests/test_supervisor.py"],
+    "task_types": [],
+    "defect": "New tests were appended to a file that is already over 1,500 lines, so its size grew.",
+    "cause": "The giant-files rule forbids growing a large file and was not checked before the edit.",
+    "fix": "Put new tests in a new test file named for the behaviour.",
+    "signature": ["giant", "1,500 lines"]
+  },
+  {
+    "id": "sql-outside-repository",
+    "title": "SQL written in a route or service",
+    "areas": ["aiflow/v4/control/"],
+    "task_types": [],
+    "defect": "A route or service module contained a SQL statement.",
+    "cause": "SQL belongs only in repository or data-access modules; the boundary check rejects it.",
+    "fix": "Move the query into the aggregate's repository and call the repository from the service.",
+    "signature": ["sql boundary", "sql outside", "select ", "insert into"]
+  },
+  {
+    "id": "broad-except",
+    "title": "Broad except without a reason",
+    "areas": ["aiflow/v4/"],
+    "task_types": [],
+    "defect": "A new 'except Exception' had no written reason and hid a failure.",
+    "cause": "The broad-except baseline counts every handler that catches Exception without a reason.",
+    "fix": "Catch the narrowest type that can occur, or add a comment that states the reason.",
+    "signature": ["broad except", "except exception", "broad-except"]
+  },
+  {
+    "id": "undocumented-route",
+    "title": "New route missing from the docs Routes section",
+    "areas": ["aiflow/v4/control/", "docs/v4/"],
+    "task_types": ["change"],
+    "defect": "A changed HTTP route was not named under a Routes heading of a changed docs/v4 page, so the docs check failed.",
+    "cause": "The documentation check requires one bullet per changed route, read from the route code.",
+    "fix": "Add one bullet per changed route, as '- `METHOD /path` one plain sentence', after reading the handler.",
+    "signature": ["documentation check", "routes heading", "not documented"]
+  },
+  {
+    "id": "unrequested-behaviour-change",
+    "title": "An oddity was fixed during a refactor",
+    "areas": [],
+    "task_types": ["change"],
+    "defect": "A refactor changed a response or a log line that the ticket did not ask to change.",
+    "cause": "Oddities were corrected in place instead of being pinned by a test and listed for a decision.",
+    "fix": "Pin the current behaviour with a test that passes on unchanged code, then list each oddity under Needs a decision.",
+    "signature": ["behaviour changed", "changed behaviour", "response changed", "not in the ticket"]
+  },
+  {
+    "id": "function-over-budget",
+    "title": "Function grew past the size or complexity budget",
+    "areas": ["aiflow/v4/"],
+    "task_types": [],
+    "defect": "A function passed 80 lines or McCabe complexity 12 after an edit.",
+    "cause": "The quality baseline may only shrink, and the change added branches to an existing function.",
+    "fix": "Split the new decision into a small helper with its own unit test before adding the branch.",
+    "signature": ["long-function", "complexity", "80 lines", "c901"]
+  }
+]

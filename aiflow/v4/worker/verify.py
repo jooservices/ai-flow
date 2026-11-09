@@ -258,7 +258,7 @@ def execute_verify(state: VerifyRun, workspace: VerifyWorkspace) -> VerifyReview
     wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
     runtime = runtime_for_run(spec, state.run_as, project, wordpress)
     response = run_verify_ai(state, workspace, spec, adapter, runtime, wordpress)
-    state.result.update(run_result_metadata(response), head_sha=workspace.head)
+    state.result.update(run_result_metadata(response, c.context_pack), head_sha=workspace.head)
     if state.heartbeat.lost.is_set():
         raise LeaseLost()
     review = parse_verify_review(response, pr.get("review_history") or [], int(pr.get("review_round") or 1))

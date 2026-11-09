@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from .features.tickets.repository import TicketRepository
+from .repositories import knowledge_usefulness as usefulness_repository
 
 KINDS = ("study_case", "knowledge", "skill", "agent", "guide", "policy")
 FOLDERS = {"study_case": "study-cases", "knowledge": "knowledge", "skill": "skills",
@@ -289,6 +290,12 @@ def _pack_item(row: dict) -> dict:
             "repeated_mistake": row["repeated_mistake"]}
 
 
+def context_pack_token_count(items: list[dict]) -> int:
+    """Estimate delivered item text at four characters per token, including its stable id and title."""
+    chars = sum(len(f"ID {item['id']}: {item.get('title', '')}\n{item.get('content', '')}") for item in items)
+    return (chars + 3) // 4
+
+
 def _visible_sql() -> str:
     return "(scope='general' OR (scope='project' AND project=%s AND (epic='' OR epic=%s)))"
 
@@ -333,15 +340,9 @@ def context_pack(db, *, project: str, ticket: str, epic: str = "", query: str = 
         add(allowed.get(int(hit["id"])))
     items = [_pack_item(row) for row in selected]
     if run_id:
-        db.run("INSERT INTO knowledge_context_packs (run_id,project,ticket_key,epic,item_count) VALUES (%s,%s,%s,%s,%s) "
-               "ON CONFLICT (run_id) DO UPDATE SET item_count=EXCLUDED.item_count",
-               (run_id, project, ticket, epic, len(items)))
-        for row in selected:
-            inserted = db.run("INSERT INTO knowledge_deliveries (run_id,item_id,project,ticket_key) VALUES (%s,%s,%s,%s) "
-                              "ON CONFLICT (run_id,item_id) DO NOTHING", (run_id, row["id"], project, ticket))
-            if inserted:
-                db.run("UPDATE knowledge_items SET handed_count=handed_count+1,last_handed_at=now() WHERE id=%s",
-                       (row["id"],))
+        usefulness_repository.record_context_pack(
+            db, run_id=run_id, project=project, ticket_key=ticket, epic=epic, items=items,
+            token_count=context_pack_token_count(items))
     return {"project": project, "ticket": ticket, "epic": epic, "overview": [i for i in items if i["kind"] == "convention"],
             "working_rules": [i for i in items if i["kind"] in {"convention", "guide", "skill"}],
             "latest_decisions": [i for i in items if i["kind"] == "decision"],
@@ -408,10 +409,17 @@ def dashboard(db, project: str = "", q: str = "", include_retired: bool = True) 
                     "FROM runs WHERE (project=%s OR project='') AND step='verify' AND outcome='rework' "
                     "GROUP BY 1 ORDER BY 1 DESC LIMIT 12", (project,))
     visible = search_items(db, project=project, q=q, limit=100, include_retired=include_retired)
+    usefulness = usefulness_repository.report(db, project=project)
     return {"counts": counts, "newest": [_pack_item(r) for r in newest],
             "most_used": [_pack_item(r) for r in most_used], "items": [_pack_item(r) for r in visible],
             "effectiveness": {"runs_with_context_pack": deliveries["count"],
-                              "known_mistakes_repeated": repeated["count"], "rework_by_week": rework}}
+                              "known_mistakes_repeated": repeated["count"], "rework_by_week": rework,
+                              "usefulness": usefulness}}
+
+
+def usefulness_report(db, *, project: str | None = None, start=None, end=None) -> dict:
+    """Return the item and kind report for the requested project and time window."""
+    return usefulness_repository.report(db, project=project, start=start, end=end)
 
 
 def moderate_item(db, item_id: int, *, action: str, actor: str = "", content: str = "", title: str = "",

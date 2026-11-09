@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import json
+import re
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -10,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..adapters import RunResult, RunSpec, get_adapter
-from ..core import commit_rules, handover, work_limits
+from ..core import commit_rules, work_limits
 from . import gate_step
 from .client import Conflict, ControlClient
 from .gitops import Git
@@ -142,14 +144,16 @@ def environment_status(items: list[dict] | None, step: str, env: dict[str, str])
     return ", ".join(rows) or "No environment items configured"
 
 
-def run_result_metadata(response: RunResult) -> dict:
+def run_result_metadata(response: RunResult, context_pack: dict | None = None) -> dict:
     """Return the provider usage fields shared by the developer, verify and impact results."""
-    return {"tokens_in": response.tokens_in, "tokens_out": response.tokens_out, "cost_usd": response.cost_usd,
-            "quota": response.quota,
-            "quota_observed_at": (getattr(response, "quota_observed_at", None).isoformat()
-                                   if getattr(response, "quota_observed_at", None) else None),
-            "error_kind": response.error_kind,
-            "reset_at": response.reset_at.isoformat() if response.reset_at else None}
+    result = {"tokens_in": response.tokens_in, "tokens_out": response.tokens_out, "cost_usd": response.cost_usd,
+              "quota": response.quota,
+              "quota_observed_at": (getattr(response, "quota_observed_at", None).isoformat()
+                                     if getattr(response, "quota_observed_at", None) else None),
+              "error_kind": response.error_kind,
+              "reset_at": response.reset_at.isoformat() if response.reset_at else None}
+    record_reported_knowledge_ids(result, response.final_text or "", context_pack)
+    return result
 
 
 def worktree_path(srv_root: str, project_key: str, name: str, suffix: str = "") -> Path:
@@ -351,20 +355,51 @@ def classify_question(api: ControlClient, claim: Any, question: str) -> dict | N
 
 
 def with_knowledge_context(prompt: str, pack: dict | None) -> str:
-    """Append the stored, project-isolated context pack to a worker prompt."""
-    if not pack or not pack.get("items"):
+    """Append stable ids and the final-result usage contract to a worker prompt."""
+    if pack is None:
         return prompt
+    items = pack.get("items") or []
     labels = {"study_case": "Study case", "decision": "Decision", "convention": "Convention",
               "skill": "Skill", "guide": "Guide"}
     lines = ["\nKnowledge context pack (stored AI Flow knowledge; check the ticket if details conflict):"]
-    for item in pack["items"]:
+    for item in items:
         scope = "general" if item.get("scope") == "general" else item.get("project", "")
         if item.get("epic"):
             scope += f" / epic {item['epic']}"
         stale = " [flagged for review]" if item.get("status") == "stale" else ""
-        lines.append(f"- [{labels.get(item.get('kind'), item.get('kind'))}; {scope}{stale}] {item.get('title', '')}: "
+        lines.append(f"- [ID {item['id']}; {labels.get(item.get('kind'), item.get('kind'))}; {scope}{stale}] "
+                     f"{item.get('title', '')}: "
                      f"{item.get('content', '')}")
+    lines.append("Report only the knowledge item ids you relied on in your final result. For ordinary text output, "
+                 "end with KNOWLEDGE_USED_IDS: [<numeric ids>] (use [] when none). For strict JSON output, include "
+                 "the knowledge_used_ids array in the JSON object (use [] when none).")
     return prompt + "\n".join(lines) + "\n"
+
+
+def reported_knowledge_ids(text: str, context_pack: dict | None) -> list[int]:
+    """Parse the AI's final usage field and retain only stable ids delivered in this pack."""
+    if not context_pack:
+        return []
+    match = re.search(r"(?m)^KNOWLEDGE_USED_IDS:\s*(\[[^\]\r\n]*\])\s*$", text or "")
+    try:
+        value = json.loads(match.group(1)) if match else json.loads((text or "").strip()).get("knowledge_used_ids")
+    except (AttributeError, TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    delivered = {int(item["id"]) for item in context_pack.get("items") or [] if str(item.get("id", "")).isdigit()}
+    used = []
+    for item_id in value:
+        if isinstance(item_id, int) and not isinstance(item_id, bool) and item_id in delivered and item_id not in used:
+            used.append(item_id)
+    return used
+
+
+def record_reported_knowledge_ids(result: dict, text: str, context_pack: dict | None) -> None:
+    """Add only reported ids present in this run's context pack to its result."""
+    used_ids = reported_knowledge_ids(text, context_pack)
+    if used_ids:
+        result["knowledge_used_ids"] = used_ids
 
 
 def machine_block(tools: dict) -> str:

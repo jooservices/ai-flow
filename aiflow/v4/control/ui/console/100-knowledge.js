@@ -36,9 +36,17 @@ function knowledgeSlug(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
 }
 function knowledgeDate(value) { return value ? when(value) : '—'; }
+function knowledgeComparisonText(comparison) {
+  var w = comparison.with_item || {}, n = comparison.without_item || {};
+  var wr = w.rework_rate == null ? 'n/a' : (w.rework_rate * 100).toFixed(1) + '%';
+  var nr = n.rework_rate == null ? 'n/a' : (n.rework_rate * 100).toFixed(1) + '%';
+  var wf = w.first_pass_rate == null ? 'n/a' : (w.first_pass_rate * 100).toFixed(1) + '%';
+  var nf = n.first_pass_rate == null ? 'n/a' : (n.first_pass_rate * 100).toFixed(1) + '%';
+  return 'rework with/without ' + wr + '/' + nr + ' · first pass ' + wf + '/' + nf;
+}
 function renderLearningKnowledge(k, canManage) {
   var d = k.learning || { counts: [], newest: [], most_used: [], items: [], effectiveness: {} };
-  var stats = d.effectiveness || {}, items = d.items || [];
+  var stats = d.effectiveness || {}, items = d.items || [], usefulness = stats.usefulness || {};
   var h = '<section class="panel" data-block="learning"><div class="panel-h"><h2 style="margin:0">Learning and study cases</h2><span class="hint">Automatic run, ticket, rework and incident records for ' + esc(S.project || 'general knowledge') + '.</span></div>';
   h += '<div class="lead-controls"><label>Search this project and general knowledge<input data-knowledge-search value="' + esc(k.search || '') + '" placeholder="Search by meaning or words"></label><button class="btn" data-act="knowledge-search">Search</button>';
   if (canManage) h += '<button class="btn primary" data-act="knowledge-item-new">Add knowledge item</button>';
@@ -51,6 +59,20 @@ function renderLearningKnowledge(k, canManage) {
   h += '</div><h3 style="margin-top:14px">Rework rounds per week</h3><div class="knowledge-list">';
   (stats.rework_by_week || []).forEach(function (row) { h += '<div class="small">' + esc(row.week) + ' · ' + Number(row.rounds) + ' rounds across ' + Number(row.tickets) + ' tickets · ' + Number(row.rounds_per_ticket || 0) + ' rounds per ticket</div>'; });
   if (!(stats.rework_by_week || []).length) h += '<div class="small">No verification rework recorded.</div>';
+  h += '</div><h3 style="margin-top:14px">Context pack usefulness</h3><div class="knowledge-list"><div class="small">Estimated pack tokens: ' + Number(usefulness.pack_tokens && usefulness.pack_tokens.tokens || 0) + ' across ' + Number(usefulness.pack_tokens && usefulness.pack_tokens.known_packs || 0) + ' measured packs</div>';
+  (usefulness.by_kind || []).forEach(function (row) {
+    h += '<div class="small">' + esc(KNOWLEDGE_TYPES[row.kind] || row.kind) + ': delivered ' + Number(row.delivered_count) + ', used ' + Number(row.used_count) + ' · ' + knowledgeComparisonText(row.comparison || {}) + '</div>';
+  });
+  h += '</div><h3 style="margin-top:14px">By item</h3><div class="knowledge-list">';
+  (usefulness.items || []).forEach(function (row) {
+    h += '<div class="small">ID ' + Number(row.id) + ' · ' + esc(row.title) + ': delivered ' + Number(row.delivered_count) + ', used ' + Number(row.used_count) + ' · ' + knowledgeComparisonText(row.comparison || {}) + '</div>';
+  });
+  if (!(usefulness.items || []).length) h += '<div class="small">No knowledge items recorded yet.</div>';
+  h += '</div><h3 style="margin-top:14px">Retirement review</h3><div class="knowledge-list">';
+  (usefulness.retirement_review || []).forEach(function (row) {
+    h += '<div class="small">ID ' + Number(row.id) + ' · ' + esc(row.title) + ' · delivered ' + Number(row.delivered_count) + ' times, never reported used</div>';
+  });
+  if (!(usefulness.retirement_review || []).length) h += '<div class="small">No items meet the retirement review threshold.</div>';
   h += '</div><h3 style="margin-top:14px">Newest</h3><div class="knowledge-list">';
   (d.newest || []).forEach(function (item) { h += '<div class="small">' + esc(item.title) + ' · ' + esc(item.kind) + '</div>'; });
   h += '</div><h3 style="margin-top:14px">Most used</h3><div class="knowledge-list">';

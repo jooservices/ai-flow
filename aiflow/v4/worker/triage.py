@@ -11,6 +11,7 @@ from ..adapters import RunSpec, get_adapter
 from ..core.owner_escalation import owner_question_comment
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
+from .run_steps import record_reported_knowledge_ids
 from .gitops import Git
 from .notes import note
 
@@ -174,6 +175,7 @@ def _apply_decision(api: ControlClient, c: Claimed, decision: dict, head: str, t
 
 def _adapter_result(api: ControlClient, c: Claimed, heartbeat: Heartbeat, response, head: str,
                     started_at: float, result: dict) -> dict:
+    record_reported_knowledge_ids(result, response.final_text or "", c.context_pack)
     result.update(tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
                   quota=response.quota,
                   quota_observed_at=(response.quota_observed_at.isoformat()

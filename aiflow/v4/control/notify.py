@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ..core import secretbox
+from . import knowledge
 from .db import J
 from aiflow.v4.control.features.tickets import ticket_repository_of
 
@@ -587,7 +588,43 @@ def _summary(ctx, start: datetime, end: datetime, period: str, label: str) -> tu
     title = f"{period} summary for {label}"
     detail = (f"Finished: {items(finished)}\nNeeds a person: {items(waiting)}\nFailed: {items(failed)}\n"
               f"Spend: ${cost:.2f} USD")
+    if period == "Weekly":
+        detail += "\n\n" + _knowledge_usefulness_summary(ctx, start, end)
     return title, detail
+
+
+def _usefulness_rate(value) -> str:
+    """Format an unavailable or measured rate for the weekly notification."""
+    return "unavailable" if value is None else f"{value * 100:.1f}%"
+
+
+def _knowledge_usefulness_summary(ctx, start: datetime, end: datetime) -> str:
+    """Include the weekly by-kind and delivered-item usefulness measures and retirement review list."""
+    report = knowledge.usefulness_report(ctx.db, start=start, end=end)
+    retirement = knowledge.usefulness_report(ctx.db)["retirement_review"]
+
+    lines = ["Knowledge usefulness by kind:"]
+    for row in report["by_kind"]:
+        with_item, without_item = row["comparison"]["with_item"], row["comparison"]["without_item"]
+        lines.append(f"{row['kind']}: delivered {row['delivered_count']}, used {row['used_count']}; "
+                     f"rework with/without {_usefulness_rate(with_item['rework_rate'])}/"
+                     f"{_usefulness_rate(without_item['rework_rate'])}; "
+                     f"first pass with/without {_usefulness_rate(with_item['first_pass_rate'])}/"
+                     f"{_usefulness_rate(without_item['first_pass_rate'])}")
+    lines.append("Delivered items:")
+    for row in report["items"]:
+        if row["delivered_count"]:
+            with_item = row["comparison"]["with_item"]
+            without_item = row["comparison"]["without_item"]
+            lines.append(f"ID {row['id']} {row['kind']} · {row['title']}: delivered {row['delivered_count']}, "
+                         f"used {row['used_count']}; rework with/without "
+                         f"{_usefulness_rate(with_item['rework_rate'])}/{_usefulness_rate(without_item['rework_rate'])}; "
+                         f"first pass with/without "
+                         f"{_usefulness_rate(with_item['first_pass_rate'])}/"
+                         f"{_usefulness_rate(without_item['first_pass_rate'])}")
+    lines.append("Retirement review: " + ("; ".join(f"ID {row['id']} {row['title']}" for row in retirement)
+                                                if retirement else "none"))
+    return "\n".join(lines)
 
 
 def summary_content(ctx, day: date | None = None) -> str:

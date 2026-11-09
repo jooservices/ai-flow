@@ -28,6 +28,7 @@ from ..core.technical_decision import is_technical
 from ..core.ticket_splitting import InvalidSplitPlan, validate_plan
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
+from .run_steps import record_reported_knowledge_ids
 from .gitops import Git
 from .notes import note
 
@@ -262,13 +263,15 @@ def _outline_section(section: str) -> str:
     return f"{section} {prompts[section]}"
 
 
-def _provider_result(res) -> dict:
+def _provider_result(res, context_pack: dict | None = None) -> dict:
     """What the provider run reported: usage, the quota reading with its observation time, errors and the log."""
     observed = getattr(res, "quota_observed_at", None)
-    return {"tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd, "quota": res.quota,
-            "quota_observed_at": observed.isoformat() if observed else None, "error_kind": res.error_kind,
-            "reset_at": res.reset_at.isoformat() if res.reset_at else None,
-            "details": {"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path}}
+    result = {"tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd,
+              "quota": res.quota, "quota_observed_at": observed.isoformat() if observed else None,
+              "error_kind": res.error_kind, "reset_at": res.reset_at.isoformat() if res.reset_at else None,
+              "details": {"exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path}}
+    record_reported_knowledge_ids(result, res.final_text or "", context_pack)
+    return result
 
 
 def _jira_write(api: ControlClient, c: Claimed, key: str, path: str, **body) -> dict:
@@ -370,7 +373,7 @@ def _perform_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: 
                     git: Git, hb: Heartbeat, result: dict, t0: float, jira) -> dict:
     """Run the intake provider and dispatch its answer."""
     res, needs_split = _execute_intake(api, c, srv_root, control_url, run_as, git, hb, t0)
-    result.update(_provider_result(res))
+    result.update(_provider_result(res, c.context_pack))
     if hb.lost.is_set():
         raise LeaseLost()
     if res.error_kind in ("quota", "auth"):

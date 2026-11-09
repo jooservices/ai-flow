@@ -386,6 +386,7 @@ def test_knowledge_screen_items_dashboard_and_moderation_routes(client, ctx, mon
     assert data["items"][0]["approved_by"] == ""
     assert any(row["kind"] == "guide" and row["project"] == "TESTWP" for row in data["counts"])
     assert "runs_with_context_pack" in data["effectiveness"]
+    assert {"items", "by_kind", "retirement_review"} <= set(data["effectiveness"]["usefulness"])
     assert client.post(f"/v1/knowledge/items/{item_id}/approve", json={"actor": "Admin"}).status_code == 200
     assert client.post(f"/v1/knowledge/items/{item_id}/retire", json={"actor": "Admin"}).status_code == 200
     retired_search = client.get("/v1/knowledge/items", params={"project": "TESTWP", "q": "checkout", "include_retired": False})
@@ -411,6 +412,30 @@ def test_learning_items_api_rejects_personal_data(client, ctx):
     managed = client.post("/v1/knowledge/resources", json={"type": "guide", "id": "contact-guide",
                             "title": "Contact", "content": "email: person@example.test", "actor": "Admin"})
     assert managed.status_code == 400 and "cannot be saved" in managed.json()["detail"]
+
+
+def _verify_knowledge_browser_screen(page, base_url: str, password: str) -> None:
+    page.goto(base_url + "/login?next=%2Fcc", wait_until="domcontentloaded")
+    page.get_by_label("Email").fill("knowledge-browser@example.test")
+    page.get_by_label("Password").fill(password)
+    page.get_by_role("button", name="Sign in").click()
+    page.wait_for_url(base_url + "/cc")
+    assert page.locator("#tab-knowledge").count() == 1, (
+        f"console shell missing at {page.evaluate('location.pathname')} ({page.title()})")
+    page.get_by_role("tab", name="Knowledge").click()
+    page.get_by_role("heading", name="Learning and study cases").wait_for(state="visible", timeout=10000)
+    page.get_by_placeholder("Search by meaning or words").wait_for(state="visible")
+    for heading in ("Counts by project and kind", "Newest", "Most used", "Context pack usefulness",
+                    "By item", "Retirement review"):
+        page.get_by_role("heading", name=heading, exact=True).wait_for(state="visible")
+    for text in ("Browser verification lesson", "run · browser-run", "approved by Browser Reviewer",
+                 "handed to 1 runs", "Runs with context pack: 1", "Known mistakes repeated: 1", "rounds per ticket"):
+        page.get_by_text(text, exact=text == "Browser verification lesson").first.wait_for(state="visible")
+    for action in ("Correct", "Approve / review", "Flag for review", "Retire", "Merge duplicate…"):
+        page.get_by_role("button", name=action, exact=True).first.wait_for(state="visible")
+    page.get_by_placeholder("Search by meaning or words").fill("project dashboard before release")
+    page.locator("#view-knowledge [data-act='knowledge-search']").click()
+    page.get_by_role("heading", name="Knowledge items · 1", exact=True).wait_for(state="visible")
 
 
 def test_knowledge_learning_screen_is_verified_in_a_browser(ctx, monkeypatch):
@@ -474,30 +499,7 @@ def test_knowledge_learning_screen_is_verified_in_a_browser(ctx, monkeypatch):
             assert server.started, "Knowledge browser test server did not start"
 
             page = browser.new_page()
-            page.goto(base_url + "/login?next=%2Fcc", wait_until="domcontentloaded")
-            page.get_by_label("Email").fill("knowledge-browser@example.test")
-            page.get_by_label("Password").fill(password)
-            page.get_by_role("button", name="Sign in").click()
-            page.wait_for_url(base_url + "/cc")
-            assert page.locator("#tab-knowledge").count() == 1, (
-                f"console shell missing at {page.evaluate('location.pathname')} ({page.title()})")
-            page.get_by_role("tab", name="Knowledge").click()
-            page.get_by_role("heading", name="Learning and study cases").wait_for(state="visible", timeout=10000)
-            page.get_by_placeholder("Search by meaning or words").wait_for(state="visible")
-            for heading in ("Counts by project and kind", "Newest", "Most used"):
-                page.get_by_role("heading", name=heading, exact=True).wait_for(state="visible")
-            page.get_by_text("Browser verification lesson", exact=True).wait_for(state="visible")
-            page.get_by_text("run · browser-run", exact=False).wait_for(state="visible")
-            page.get_by_text("approved by Browser Reviewer", exact=False).first.wait_for(state="visible")
-            page.get_by_text("handed to 1 runs", exact=False).first.wait_for(state="visible")
-            page.get_by_text("Runs with context pack: 1", exact=False).wait_for(state="visible")
-            page.get_by_text("Known mistakes repeated: 1", exact=False).wait_for(state="visible")
-            page.get_by_text("rounds per ticket", exact=False).wait_for(state="visible")
-            for action in ("Correct", "Approve / review", "Flag for review", "Retire", "Merge duplicate…"):
-                page.get_by_role("button", name=action, exact=True).first.wait_for(state="visible")
-            page.get_by_placeholder("Search by meaning or words").fill("project dashboard before release")
-            page.locator("#view-knowledge [data-act='knowledge-search']").click()
-            page.get_by_role("heading", name="Knowledge items · 1", exact=True).wait_for(state="visible")
+            _verify_knowledge_browser_screen(page, base_url, password)
         finally:
             browser.close()
             server.should_exit = True

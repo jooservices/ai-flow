@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from fastapi import HTTPException
 
 from ....core.toolchains import CONTAINER_RUNTIME_TOOL, toolchain_gaps
-from ... import knowledge, licensing, load_policy_api, rollout, shared_accounts, system_check_api, version_release
+from ... import licensing, load_policy_api, rollout, shared_accounts, system_check_api, version_release
 from ...db import J
 from ...github_connections import DEFAULT_ID
 from ...route_deps import github_connection_used
@@ -213,12 +213,7 @@ def claim_response(ctx, log, project, version, snapshot, acc, started: StartedRe
               "description": (f"Run full configured project checks on {started.release_branch}, "
                              f"cut from {started.source_branch}."),
               "labels": [], "priority": "Highest", "type": "Release"}
-    try:
-        context_pack = knowledge.context_pack(ctx.db, project=project.key, ticket=key,
-                                              query=f"{ticket['summary']}\n{ticket['description']}", run_id=run_id)
-    except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
-        log.warning("knowledge context pack for release %s failed: %s", version["name"], type(exc).__name__)
-        context_pack = {"project": project.key, "ticket": key, "items": []}
+    context_pack = {"project": project.key, "ticket": key, "items": []}
     return {"claimed": True, "step": "version_release", "run_id": run_id, "fence": started.lease.fence,
             "run_token": secrets.token_urlsafe(32), "lease_ms": ctx.settings.lease_ms,
             "provider": acc.provider, "model": "", "effort": "", "account": acc.id,

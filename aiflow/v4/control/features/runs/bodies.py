@@ -73,3 +73,4 @@ class ResultBody(BaseModel):
     quota: dict[str, Any] = Field(default_factory=dict)
     quota_observed_at: datetime | None = None
     details: dict[str, Any] = Field(default_factory=dict)
+    knowledge_used_ids: list[int] = Field(default_factory=list, max_length=100)

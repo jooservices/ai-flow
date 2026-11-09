@@ -106,7 +106,7 @@ def create(database_url: str, out: Path, layout: Layout | None = None) -> dict:
     try:
         manifest = _write(fd, database_url, lay)
         os.replace(tmp, out)
-    except BaseException:
+    except BaseException:  # noqa: BLE001 - an interrupt or any other exit must also remove the partial file
         tmp.unlink(missing_ok=True)
         raise
     return manifest

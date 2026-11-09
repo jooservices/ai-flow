@@ -141,7 +141,7 @@ def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
     except Conflict:
         result.update(outcome="lost", summary="fencing token refused; another run owns the ticket")
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - the worker loop must survive any failure of one impact run
         log.exception("impact step failed")
         result.update(outcome="failed", summary=f"impact worker error: {e}"[:1000])
         return result

@@ -233,7 +233,7 @@ def _handle_provider_sign_in_error(api: ControlClient, node: str, account: str, 
         if not shared_account:
             _post_sign_in_status(api, node, account, request_id, "failed",
                                  error=f"Provider sign-in could not start ({type(exc).__name__}).")
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - a failed status report must not hide the original error or skip the log
         pass
     log.warning("provider sign-in failed for %s (%s)", account, type(exc).__name__)
 

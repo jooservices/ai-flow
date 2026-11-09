@@ -263,7 +263,7 @@ def read_quota(provider: str, account_home: str, run_as: list[str] | None = None
         try:
             os.chdir(account_home)
             os.execvpe(argv[0], argv, env)
-        except Exception:
+        except (OSError, TypeError, ValueError):
             os._exit(127)
     try:
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 140, 0, 0))

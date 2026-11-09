@@ -215,7 +215,7 @@ def _confirm_sample_issue(connection, ctx, actor: str, key: str, project: str) -
             current = ctx.jira.transition_to(key, "Intake")
         if current != "Intake":
             raise RuntimeError("Jira did not confirm Intake")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - any Jira, credential or storage error must become a 502, not a 500
         repo.audit_sample(connection, actor, False, "sample issue not confirmed in Intake", project, key)
         return exc
     repo.record_sample_confirmed(connection, key, project, actor)

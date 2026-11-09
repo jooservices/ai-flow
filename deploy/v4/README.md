@@ -24,6 +24,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Technical decisions](../../docs/v4/technical-decisions.md): engineering questions are decided and recorded by the SA role and never sent to the owner
 - [CLI structure](../../docs/v4/cli-structure.md): how the developer and CI parser and dispatcher are organized
 - [v4 control plane architecture](../../docs/v4/architecture.md): layers, dependency direction, registration points, patterns and architectural checks
+- [Token budget per task by size](../../docs/v4/token-budget.md): four size groups with a token budget each; phase one lists tasks above budget without stopping them
 - [Architecture tests on every pull request](../../docs/v4/architecture-tests.md): the architecture rules as tests, run by a dedicated pull-request check and by the v4 shards
 - [Broad exception guard](../../docs/v4/broad-except.md): CI and the local gate track unexplained broad handlers against a shrink-only per-file baseline
 - [Container runtime structure](../../docs/v4/container-structure.md): modules for Compose policy, process execution, and client shims

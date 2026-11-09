@@ -197,6 +197,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Role-based console views](../../docs/v4/role-based-views.md): role menus and API access, project scoping, people management, view-as and administrator safeguards
 - [No CLI for end users](../../docs/v4/no-cli.md): inventory of owner and user operations that still need commands, their replacement tickets, and proposed backlog gaps
 - [Leftover test databases](../../docs/v4/test-database-sweep.md): the node agent drops `aiflow4_t_*` databases of killed pytest sessions
+- [Test database from one template](../../docs/v4/test-database-template.md): the tests migrate one template database per session and copy it for every test
 - [Install the control plane](../../docs/v4/control-install.md): `aiflow4 install control --version vX.Y.Z --domain D` on a new Ubuntu host, hidden secret entry, idempotent reruns, upgrade and rollback, pinned server-installer and `SI_*`
 - [Idle flow alert](../../docs/v4/idle-flow-alert.md): critical incidents when ready tickets get no worker, naming the cause, and when a stack pin is missing
 - [Flow doctor and operator interventions](../../docs/v4/no-operator.md): minute-leased stall recovery, host/API/Jira audit, Dashboard role coverage, and reboot recovery

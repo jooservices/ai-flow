@@ -80,7 +80,7 @@ def test_concurrent_sweeps_do_not_drop_the_active_session_database(admin, test_d
 
     def sweep_at_once():
         start.wait(timeout=10)
-        return testdb.sweep(DATABASE_URL, now=int(time.time()) + 3 * 3600, max_databases=1)
+        return testdb.sweep(DATABASE_URL, now=int(time.time()) + 3 * 3600, max_databases=1, only={session_db})
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         sweeps = [pool.submit(sweep_at_once) for _ in range(2)]
@@ -115,10 +115,33 @@ def test_node_agent_sweeps_the_databases_named_in_the_project_env_files(admin, t
     assert agent.sweep_test_databases(str(tmp_path), every_s=600) == 0  # not again within ten minutes
 
 
-def test_sweeper_keeps_the_active_pytest_session_database(test_database_url, admin):
-    name = psycopg.conninfo.conninfo_to_dict(test_database_url)["dbname"]
+def test_sweeper_keeps_the_active_migrated_template(migrated_template, admin):
+    name = migrated_template
 
-    dropped = testdb.sweep(DATABASE_URL, now=time.time() + testdb.STALE_AFTER_S + 1, max_databases=0)
+    dropped = testdb.sweep(DATABASE_URL, now=time.time() + testdb.STALE_AFTER_S + 1, max_databases=0, only={name})
 
     assert name not in dropped
     assert exists(admin, name)
+
+
+def test_template_lease_blocks_sweeps_and_releases_abandoned_template_for_cleanup(admin):
+    now = int(time.time())
+    name = admin.make(testdb.new_name(now - 3 * 3600))
+    lease = testdb.protect_template(DATABASE_URL, name)
+    try:
+        dropped = testdb.sweep(DATABASE_URL, now=now, max_databases=0, only={name})
+        assert name not in dropped
+        assert exists(admin, name)
+    finally:
+        lease.close()
+
+    dropped = testdb.sweep(DATABASE_URL, now=now, max_databases=0, only={name})
+    assert name in dropped
+    assert not exists(admin, name)
+
+
+def test_session_templates_use_their_own_prefix_and_the_sweeper_still_knows_them():
+    name = testdb.new_template_name(1_700_000_000)
+    assert name.startswith("aiflow4_tpl_1700000000_") and testdb.created_at(name) == 1_700_000_000
+    # a sweeper that only knows the plain prefix never sees a template
+    assert not name.startswith(testdb.PREFIX)

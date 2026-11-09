@@ -171,12 +171,12 @@ def _restore_database_snapshot(path: Path, database_url: str) -> None:
                          " VALUES (%(id)s,%(project)s,%(kind)s,%(ref)s,%(ticket)s,%(text)s,%(created_at)s)", row)
 
 
-def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_database_url, control_repo, tmp_path, monkeypatch):
+def test_sample_installation_full_backup_restore_round_trip(ctx, db, control_repo, tmp_path, monkeypatch):
     source_roots = configure_paths(ctx, tmp_path / "original", control_repo)
     source_roots["projects"] = tmp_path / "original" / "projects"
     source_roots["projects"].mkdir()
     ctx.settings.project_env_dir = str(source_roots["projects"])
-    ctx.settings.database_url = test_database_url
+    ctx.settings.database_url = db.url
     fixed = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
     db.run("INSERT INTO tickets (key,project,status,summary,description) VALUES ('SAMPLE-229','SAMPLE','Done','Original ticket','Original database data')")
     db.run("INSERT INTO managed_resources (resource_type,resource_id,title,content,path,version,updated_by,updated_at)"
@@ -187,7 +187,7 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
     (control_repo / "knowledge").mkdir(exist_ok=True)
     (control_repo / "knowledge" / "sample-data.md").write_text("repository knowledge content\n")
     (source_roots["control"] / "aiflow4.env").write_text(
-        f"DATABASE_PASSWORD=encrypted in backup\nAIFLOW4_DATABASE_URL={test_database_url}\n")
+        f"DATABASE_PASSWORD=encrypted in backup\nAIFLOW4_DATABASE_URL={db.url}\n")
     (source_roots["jira"] / "jira.env").write_text("JIRA_API_TOKEN=encrypted in backup\n")
     (source_roots["github"] / "app.pem").write_text("github app key\n")
     (source_roots["console"] / "admin-password").write_text("admin secret\n")
@@ -197,7 +197,7 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
 
     def fake_pg(command, label, timeout=3600, env=None):
         if label == "database backup":
-            with psycopg.connect(test_database_url, row_factory=dict_row) as conn:
+            with psycopg.connect(db.url, row_factory=dict_row) as conn:
                 snapshot = {table: [dict(row) for row in conn.execute(f"SELECT * FROM {table} WHERE " +
                                    ("key='SAMPLE-229'" if table == "tickets" else "true") + " ORDER BY 1").fetchall()]
                             for table in ("tickets", "managed_resources", "memory")}
@@ -210,21 +210,21 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
     monkeypatch.setattr(backups, "_run_db_command", fake_pg)
     destination = tmp_path / "original-backups"
     config = {"destination_kind": "local", "destination_path": str(destination), "retention_days": 30}
-    made = backups.create_backup(test_database_url, control_repo, ctx.settings, config, key, fixed)
+    made = backups.create_backup(db.url, control_repo, ctx.settings, config, key, fixed)
     archive = destination / made["name"]
     assert archive.is_file()
     assert not archive.read_bytes().startswith(b"SAMPLE")
     # The archived URL points to the source installation. Its knowledge changes after the backup,
     # so restore verification must query the distinct target database after applying the dump.
-    with psycopg.connect(test_database_url) as source:
+    with psycopg.connect(db.url) as source:
         source.execute("UPDATE managed_resources SET content='changed after backup' WHERE resource_id='sample-data'")
 
     target_name = "aiflow4_restore_" + secrets.token_hex(6)
-    admin_url = make_conninfo(test_database_url, dbname="postgres")
+    admin_url = make_conninfo(db.url, dbname="postgres")
     with psycopg.connect(admin_url, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(target_name)))
-    target_url = make_conninfo(test_database_url, dbname=target_name)
-    assert target_url != test_database_url
+    target_url = make_conninfo(db.url, dbname=target_name)
+    assert target_url != db.url
     target_db = DB(target_url)
     target_db.migrate()
     target_db.close()
@@ -246,7 +246,7 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
         assert managed == {"title": "Sample knowledge", "content": "Original knowledge"}
         assert memory == {"text": "Original indexed knowledge"}
         assert (restore_roots["control"] / "aiflow4.env").read_text() == (
-            f"DATABASE_PASSWORD=encrypted in backup\nAIFLOW4_DATABASE_URL={test_database_url}\n")
+            f"DATABASE_PASSWORD=encrypted in backup\nAIFLOW4_DATABASE_URL={db.url}\n")
         assert (restore_roots["jira"] / "jira.env").read_text() == "JIRA_API_TOKEN=encrypted in backup\n"
         assert (restore_roots["github"] / "app.pem").read_text() == "github app key\n"
         assert (restore_roots["console"] / "admin-password").read_text() == "admin secret\n"
@@ -270,11 +270,11 @@ def test_real_postgres_tools_backup_restore_share_snapshot(ctx, db, test_databas
         pytest.skip(f"pg_dump {client_major} cannot dump PostgreSQL {server_major}")
 
     source_roots = configure_paths(ctx, tmp_path / "real-source", control_repo)
-    ctx.settings.database_url = test_database_url
+    ctx.settings.database_url = db.url
     token = secrets.token_hex(8)
     resource_id = f"snapshot-{token}"
     memory_ref = f"snapshot-{token}"
-    with psycopg.connect(test_database_url) as source:
+    with psycopg.connect(db.url) as source:
         source.execute("INSERT INTO managed_resources (resource_type,resource_id,title,content,path,version,updated_by)"
                        " VALUES ('knowledge',%s,'Snapshot resource','before dump','knowledge/snapshot.md',1,'test')",
                        (resource_id,))
@@ -296,7 +296,7 @@ def test_real_postgres_tools_backup_restore_share_snapshot(ctx, db, test_databas
         actual_run_db_command(command, label, timeout=timeout, env=env)
         if label == "database backup" and not changed_after_dump:
             assert "--snapshot" in command
-            with psycopg.connect(test_database_url) as writer:
+            with psycopg.connect(db.url) as writer:
                 writer.execute("UPDATE managed_resources SET content='after dump' WHERE resource_id=%s", (resource_id,))
                 writer.execute("UPDATE memory SET text='after dump' WHERE ref=%s", (memory_ref,))
             changed_after_dump = True
@@ -304,7 +304,7 @@ def test_real_postgres_tools_backup_restore_share_snapshot(ctx, db, test_databas
     monkeypatch.setattr(backups, "_run_db_command", mutate_live_knowledge_after_dump)
     destination = tmp_path / "real-backups"
     config = {"destination_kind": "local", "destination_path": str(destination), "retention_days": 30}
-    made = backups.create_backup(test_database_url, control_repo, ctx.settings, config, key)
+    made = backups.create_backup(db.url, control_repo, ctx.settings, config, key)
     archive = destination / made["name"]
     assert changed_after_dump is True
     assert archive.is_file()
@@ -379,8 +379,8 @@ def test_postgres_tool_arguments_keep_database_password_out_of_argv(monkeypatch)
 
 
 def test_scratch_restore_keeps_scratch_database_and_live_credentials_untouched(
-        ctx, db, test_database_url, control_repo, tmp_path, monkeypatch):
-    live_url = test_database_url
+        ctx, db, control_repo, tmp_path, monkeypatch):
+    live_url = db.url
     with psycopg.connect(live_url) as live:
         live.execute("INSERT INTO memory (project,kind,ref,text) VALUES ('LIVE','answer','live-only','keep this data')")
     with psycopg.connect(live_url) as live:

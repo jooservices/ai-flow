@@ -383,11 +383,11 @@ def test_upgrade_check_blocks_when_a_node_would_leave_the_skew_policy(client, ct
                                  " 2 minors behind the control plane's v4.3.0 (at most 1 allowed)"]
 
 
-def test_blocked_upgrade_check_is_recorded_and_exits_9(ctx, tmp_path, monkeypatch, test_database_url, capsys):
+def test_blocked_upgrade_check_is_recorded_and_exits_9(ctx, tmp_path, monkeypatch, capsys):
     from aiflow.v4 import cli
     new = _release_migrations(tmp_path)
     (new / "003_sa_health.sql").unlink()
-    monkeypatch.setenv("AIFLOW4_DATABASE_URL", test_database_url)
+    monkeypatch.setenv("AIFLOW4_DATABASE_URL", ctx.db.url)
     assert cli.main(["upgrade-check", "--target", NEW, "--current", OLD, "--migrations", str(new)]) == 9
     assert '"ok":false' in capsys.readouterr().out
     audit = ctx.db.one("SELECT accepted, result FROM write_audit WHERE action='upgrade_check' ORDER BY id DESC LIMIT 1")

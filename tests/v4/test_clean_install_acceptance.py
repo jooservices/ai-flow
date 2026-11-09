@@ -522,7 +522,7 @@ def test_every_deploy_script_parses_and_probes_only_open_endpoints():
 
 # --- AC3: backup and restore ------------------------------------------------------------------------------------------
 def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_working(
-        fresh, test_database_url, tmp_path):
+        fresh, tmp_path):
     ctx, lay = fresh.ctx, Layout(fresh.machine.root)
     fresh.sign_in()
     cc, _ = fresh.join("cc")
@@ -562,7 +562,7 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
 
     archive = tmp_path / "aiflow-backup.tar.gz"  # invoked only by deploy/v4/ci/acceptance-backup.py
     source_audit_count = ctx.db.one("SELECT count(*) AS n FROM audit_log")["n"]
-    made = backup.create(test_database_url, archive, lay)
+    made = backup.create(ctx.db.url, archive, lay)
     assert archive.stat().st_mode & 0o777 == 0o600
     assert made["release"] == "v4.1.0" and {"console_users", "nodes", "tickets"} <= set(made["tables"])
     with tarfile.open(archive) as tar:
@@ -585,7 +585,7 @@ def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_
     ctx.db.run("INSERT INTO audit_log (actor, category, action, target, ip, detail) "
                "VALUES ('restore-target', 'security', 'fresh_install', 'control', '', '{}')")
     assert fresh.client.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password}).status_code == 401
-    restored = backup.restore(test_database_url, archive, lay)
+    restored = backup.restore(ctx.db.url, archive, lay)
     assert restored["release"] == "v4.1.0"
     assert ctx.db.one("SELECT 1 FROM audit_log WHERE action='fresh_install'")
     assert ctx.db.one("SELECT count(*) AS n FROM audit_log")["n"] >= source_audit_count + 1
@@ -662,10 +662,10 @@ def test_restore_refuses_a_file_that_is_not_a_backup_and_backup_is_not_an_operat
 @pytest.mark.parametrize("member", ["secrets/control//etc/passwd", "secrets/control/../x", "secrets/other/f",
                                     "secrets/control/sub/f", "secrets/control/..", "/etc/passwd", "db/unknown.copy",
                                     "db/../x.copy"])
-def test_restore_refuses_members_outside_the_allowlist_before_changing_anything(fresh, test_database_url, tmp_path, member):
+def test_restore_refuses_members_outside_the_allowlist_before_changing_anything(fresh, tmp_path, member):
     lay = Layout(fresh.machine.root)
     good = tmp_path / "good.tar.gz"
-    made = backup.create(test_database_url, good, lay)
+    made = backup.create(fresh.ctx.db.url, good, lay)
     evil = tmp_path / "evil.tar.gz"
     with tarfile.open(good) as src, tarfile.open(evil, "w:gz") as dst:
         for m in src.getmembers():
@@ -677,7 +677,7 @@ def test_restore_refuses_members_outside_the_allowlist_before_changing_anything(
     env = fresh.machine.p("/etc/aiflow/secrets/control/aiflow4.env")
     env_before = env.read_bytes()
     with pytest.raises(backup.BackupError, match="unexpected entry"):
-        backup.restore(test_database_url, evil, lay)
+        backup.restore(fresh.ctx.db.url, evil, lay)
     assert fresh.ctx.db.one("SELECT count(*) AS n FROM console_users")["n"] == users and made["tables"]
     assert env.read_bytes() == env_before
     assert not (fresh.machine.root / "etc/passwd").exists()

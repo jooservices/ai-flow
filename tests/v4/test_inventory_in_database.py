@@ -307,7 +307,7 @@ def _assert_restored_inventory(url: str, account_id: str) -> None:
 
 
 def test_backup_and_restore_keep_machines_accounts_roles_and_worker_counts(
-        client, ctx, db, test_database_url, control_repo, tmp_path, monkeypatch):
+        client, ctx, db, control_repo, tmp_path, monkeypatch):
     owner_session(client, ctx)
     ctx.repo().nodes["node1"].purpose = "backup profile"
     join_node(client, "backup-box")
@@ -315,17 +315,17 @@ def test_backup_and_restore_keep_machines_accounts_roles_and_worker_counts(
         "provider": "codex", "name": "Backed up", "sessions": 3, "jobs": ["develop", "master"]}).json()["account"]
     client.app.state.import_inventory()
     source_roots = configure_paths(ctx, tmp_path / "original", control_repo)
-    ctx.settings.database_url = test_database_url
+    ctx.settings.database_url = db.url
     key = secrets.token_bytes(32)
     backups.install_key(ctx.settings.backup_key_file, key)
-    (source_roots["control"] / "aiflow4.env").write_text(f"AIFLOW4_DATABASE_URL={test_database_url}\n")
+    (source_roots["control"] / "aiflow4.env").write_text(f"AIFLOW4_DATABASE_URL={db.url}\n")
     _plant_legacy_inventory(control_repo)
     commands: list[list[str]] = []
     target = {"url": ""}
-    _fake_database_tools(monkeypatch, test_database_url, target, commands)
+    _fake_database_tools(monkeypatch, db.url, target, commands)
     destination = tmp_path / "backups"
     config = {"destination_kind": "local", "destination_path": str(destination), "retention_days": 30}
-    made = backups.create_backup(test_database_url, control_repo, ctx.settings, config, key,
+    made = backups.create_backup(db.url, control_repo, ctx.settings, config, key,
                                  datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc))
     assert not any(part.startswith(("--table", "--exclude", "-t")) for part in commands[0])
     _assert_archive_has_policy_only(destination / made["name"], key, tmp_path)
@@ -333,10 +333,10 @@ def test_backup_and_restore_keep_machines_accounts_roles_and_worker_counts(
     client.patch(f"/v1/accounts/{account_id}", json={"sessions": 1, "jobs": ["verify"]})
 
     target_name = "aiflow4_inventory_restore_" + secrets.token_hex(6)
-    admin_url = make_conninfo(test_database_url, dbname="postgres")
+    admin_url = make_conninfo(db.url, dbname="postgres")
     with psycopg.connect(admin_url, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(target_name)))
-    target["url"] = make_conninfo(test_database_url, dbname=target_name)
+    target["url"] = make_conninfo(db.url, dbname=target_name)
     target_db = DB(target["url"])
     target_db.migrate()
     target_db.close()

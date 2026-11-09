@@ -61,8 +61,7 @@ def _prepare_ensure_installers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     return install_dir, install_dir.parent
 
 
-def _assert_operation_error_reports_backup(monkeypatch: pytest.MonkeyPatch,
-                                           error: operations._InstallerBackupPreservationError) -> None:
+def _reported_operation_error(monkeypatch: pytest.MonkeyPatch, error: operations.OperationError) -> str:
     calls = []
 
     class FakeApi:
@@ -78,13 +77,20 @@ def _assert_operation_error_reports_backup(monkeypatch: pytest.MonkeyPatch,
     agent.process_node_operation(FakeApi(), "node-test")
 
     result = calls[-1][2]["result"]
-    reported_error = result["error"]
     assert calls[-1][1] == "/v1/nodes/node-test/operations/op-backup/result"
     assert calls[-1][2]["status"] == "failed"
+    return result["error"]
+
+
+def _assert_operation_error_reports_backup(monkeypatch: pytest.MonkeyPatch,
+                                           error: operations._InstallerBackupPreservationError,
+                                           *details: str) -> None:
+    reported_error = _reported_operation_error(monkeypatch, error)
     assert len(reported_error) <= 300
     assert str(error.backup_path) in reported_error
     assert "replacement=OSError" in reported_error
     assert "rollback=PermissionError" in reported_error
+    assert all(detail in reported_error for detail in details)
 
 
 def test_restore_failure_keeps_the_backup_and_reports_both_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -99,8 +105,8 @@ def test_restore_failure_keeps_the_backup_and_reports_both_errors(monkeypatch: p
         operations._replace_server_installer(install_dir, source_dir, staging)
 
     message = str(error.value)
-    assert "replacement failed (OSError)" in message
-    assert "restoring the previous installer failed (PermissionError)" in message
+    assert "replacement=OSError" in message
+    assert "rollback=PermissionError" in message
     assert str(kept_dir) in message
     assert (kept_dir / "bin" / "server-installer").read_text(encoding="utf-8") == "old"
 
@@ -121,10 +127,10 @@ def test_ensure_preserves_backup_when_preferred_move_fails_and_cleans_staging(
         operations._ensure_server_installer()
 
     message = str(error.value)
-    assert "replacement failed (OSError)" in message
-    assert "restoring the previous installer failed (PermissionError)" in message
+    assert "replacement=OSError" in message
+    assert "rollback=PermissionError" in message
     assert "private" not in message
-    backup_path = Path(message.rsplit(" ", 1)[-1])
+    backup_path = error.value.backup_path
     assert backup_path.parent == installer_root
     assert backup_path.name.startswith("v1.1.0.previous-")
     assert (backup_path / "lib" / "previous-module.sh").read_text(encoding="utf-8") == "old installer files"
@@ -149,7 +155,7 @@ def test_ensure_preserves_backup_without_overwriting_existing_previous(
     with pytest.raises(operations.OperationError) as error:
         operations._ensure_server_installer()
 
-    backup_path = Path(str(error.value).rsplit(" ", 1)[-1])
+    backup_path = error.value.backup_path
     assert backup_path != existing_backup
     assert backup_path.parent == installer_root
     assert (backup_path / "lib" / "previous-module.sh").read_text(encoding="utf-8") == "old installer files"
@@ -173,7 +179,7 @@ def test_ensure_copies_backup_when_unique_preservation_move_fails(
 
     message = str(error.value)
     assert "private" not in message
-    backup_path = Path(message.rsplit(" ", 1)[-1])
+    backup_path = error.value.backup_path
     assert backup_path.parent.parent == installer_root
     assert backup_path.parent.name.startswith("v1.1.0.previous-")
     assert backup_path.name == "v1.1.0"
@@ -221,7 +227,7 @@ def test_ensure_retains_staging_backup_when_unique_destination_creation_fails(
     assert error.value.__context__.__cause__ is destination_error
     assert rollback_error.__context__ is replacement_error
     assert not install_dir.with_name("v1.1.0.previous").exists()
-    _assert_operation_error_reports_backup(monkeypatch, error.value)
+    _assert_operation_error_reports_backup(monkeypatch, error.value, "unique path creation=OSError")
 
 
 def test_ensure_retains_staging_backup_when_unique_copy_fails(
@@ -267,7 +273,7 @@ def test_ensure_retains_staging_backup_when_unique_copy_fails(
     assert rollback_error.__context__ is replacement_error
     assert not [path for path in installer_root.iterdir() if path.name.startswith("v1.1.0.previous-")]
     assert not install_dir.with_name("v1.1.0.previous").exists()
-    _assert_operation_error_reports_backup(monkeypatch, error.value)
+    _assert_operation_error_reports_backup(monkeypatch, error.value, "unique move=OSError", "copy=Error")
 
 
 def test_ensure_reports_staging_cleanup_failure_after_successful_replacement(
@@ -298,6 +304,85 @@ def test_ensure_reports_staging_cleanup_failure_after_successful_replacement(
     assert len(staging_dirs) == 1
     assert (staging_dirs[0] / "previous" / "lib" / "previous-module.sh").read_text(encoding="utf-8") == \
         "old installer files"
+
+
+def test_ensure_reports_cleanup_failure_without_hiding_rollback_recovery_details(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    install_dir, installer_root = _prepare_ensure_installers(tmp_path, monkeypatch)
+    existing_backup = install_dir.with_name("v1.1.0.previous")
+    (existing_backup / "bin").mkdir(parents=True)
+    (existing_backup / "bin" / "server-installer").write_text("older backup", encoding="utf-8")
+    replacement_error = OSError("private replacement detail")
+    rollback_error = PermissionError("private rollback detail")
+    cleanup_error = PermissionError("private cleanup detail")
+    _patch_replace(monkeypatch, {
+        REPLACE_STAGED_TO_INSTALL: replacement_error,
+        REPLACE_BACKUP_TO_INSTALL: rollback_error,
+    })
+    real_rmtree = shutil.rmtree
+
+    def fail_staging_cleanup(path, *args, **kwargs):
+        path = Path(path)
+        if path.parent == installer_root and path.name.startswith(".v1.1.0-"):
+            raise cleanup_error
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(operations.shutil, "rmtree", fail_staging_cleanup)
+
+    with pytest.raises(operations.OperationError) as error:
+        operations._ensure_server_installer()
+
+    assert isinstance(error.value, operations._InstallerRollbackError)
+    assert str(error.value.backup_path).startswith(str(installer_root / "v1.1.0.previous-"))
+    assert error.value.backup_path.parent == installer_root
+    assert error.value.cleanup_error is cleanup_error
+    assert error.value.__cause__ is rollback_error
+    assert rollback_error.__context__ is replacement_error
+    message = str(error.value)
+    assert "replacement=OSError" in message
+    assert "rollback=PermissionError" in message
+    assert "staging cleanup=PermissionError" in message
+    assert "private" not in message
+    reported_error = _reported_operation_error(monkeypatch, error.value)
+    assert len(reported_error) <= 300
+    assert str(error.value.backup_path) in reported_error
+    assert "replacement=OSError" in reported_error
+    assert "rollback=PermissionError" in reported_error
+    assert "staging cleanup=PermissionError" in reported_error
+    assert (error.value.backup_path / "lib" / "previous-module.sh").read_text(encoding="utf-8") == \
+        "old installer files"
+    assert (existing_backup / "bin" / "server-installer").read_text(encoding="utf-8") == "older backup"
+
+
+def test_ensure_retries_staging_cleanup_for_read_only_installer_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    install_dir, installer_root = _prepare_ensure_installers(tmp_path, monkeypatch)
+    readonly_dir = install_dir / "lib" / "readonly"
+    readonly_dir.mkdir()
+    readonly_file = readonly_dir / "module.sh"
+    readonly_file.write_text("old installer data", encoding="utf-8")
+    readonly_dir.chmod(0o555)
+    real_rmtree = shutil.rmtree
+    retries: list[Path] = []
+
+    def inject_readonly_permission_error(path, *args, **kwargs):
+        path = Path(path)
+        if path.parent == installer_root and path.name.startswith(".v1.1.0-"):
+            onerror = kwargs["onexc"]
+            failure = PermissionError("simulated read-only cleanup")
+            onerror(os.unlink, str(path / "previous" / "lib" / "readonly" / "module.sh"), failure)
+            retries.append(path)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(operations.shutil, "rmtree", inject_readonly_permission_error)
+
+    operations._ensure_server_installer()
+
+    assert len(retries) == 1
+    assert not retries[0].exists()
+    assert (install_dir / "bin" / "server-installer").read_text(encoding="utf-8") == "new"
 
 
 def test_failed_replacement_restores_the_previous_installer_and_reraises_the_original_error(

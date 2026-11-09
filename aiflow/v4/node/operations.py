@@ -89,6 +89,29 @@ class _InstallerBackupPreservationError(OperationError):
         super().__init__(message)
 
 
+class _InstallerRollbackError(OperationError):
+    """A failed replacement kept its backup beside the installer for manual recovery."""
+
+    def __init__(self, backup_path: Path, replacement_error: OSError, restore_error: OSError):
+        self.backup_path = backup_path
+        self.replacement_error = replacement_error
+        self.restore_error = restore_error
+        self.cleanup_error: OSError | None = None
+        super().__init__(self._message())
+
+    def _message(self) -> str:
+        message = (f"Installer backup retained at {self.backup_path}; "
+                   f"replacement={type(self.replacement_error).__name__}; "
+                   f"rollback={type(self.restore_error).__name__}")
+        if self.cleanup_error is not None:
+            message += f"; staging cleanup={type(self.cleanup_error).__name__}"
+        return message
+
+    def note_cleanup_failure(self, error: OSError) -> None:
+        self.cleanup_error = error
+        self.args = (self._message(),)
+
+
 def _check_version(value: str, *, required: bool = False) -> str:
     version = str(value or "").strip()
     if required and not version:
@@ -219,8 +242,6 @@ def _restore_previous_installer(backup_dir: Path, install_dir: Path, replace_err
     try:
         os.replace(backup_dir, install_dir)
     except OSError as restore_error:
-        failure = (f"server-installer replacement failed ({type(replace_error).__name__}) and restoring "
-                   f"the previous installer failed ({type(restore_error).__name__})")
         try:
             kept_dir = _preserve_installer_backup(backup_dir, install_dir)
         except _InstallerBackupPreservationError as preserve_error:
@@ -228,7 +249,7 @@ def _restore_previous_installer(backup_dir: Path, install_dir: Path, replace_err
                 preserve_error.backup_path, list(preserve_error.failures),
                 replacement_error=replace_error, restore_error=restore_error,
             ) from restore_error
-        raise OperationError(f"{failure}; the previous installer is preserved at {kept_dir}") from restore_error
+        raise _InstallerRollbackError(kept_dir, replace_error, restore_error) from restore_error
 
 
 def _replace_server_installer(install_dir: Path, source_dir: Path, staging: Path) -> None:
@@ -257,6 +278,7 @@ def _ensure_server_installer() -> None:
     root = install_dir.parent
     staging: Path | None = None
     retain_staging = False
+    rollback_error: _InstallerRollbackError | None = None
     try:
         root.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix=f".{install_dir.name}-", dir=root))
@@ -267,6 +289,9 @@ def _ensure_server_installer() -> None:
     except _InstallerBackupPreservationError:
         retain_staging = True
         raise
+    except _InstallerRollbackError as exc:
+        rollback_error = exc
+        raise
     except OperationError:
         raise
     except (httpx.HTTPError, OSError, tarfile.TarError) as exc:
@@ -275,10 +300,15 @@ def _ensure_server_installer() -> None:
     finally:
         if staging is not None and not retain_staging:
             try:
-                shutil.rmtree(staging)
+                # Match TemporaryDirectory's permission-recovery behavior while retaining conditional cleanup.
+                tempfile.TemporaryDirectory._rmtree(staging)
             except OSError as exc:
-                raise OperationError(f"could not provision jooservices/server-installer {SERVER_INSTALLER_VERSION} "
-                                     f"({type(exc).__name__})") from exc
+                if rollback_error is not None:
+                    rollback_error.note_cleanup_failure(exc)
+                else:
+                    raise OperationError(
+                        f"could not provision jooservices/server-installer {SERVER_INSTALLER_VERSION} "
+                        f"({type(exc).__name__})") from exc
     if not SERVER_INSTALLER.is_file():
         raise OperationError(f"jooservices/server-installer {SERVER_INSTALLER_VERSION} was not installed")
 

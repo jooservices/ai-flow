@@ -32,6 +32,8 @@ PIPELINE_JOBS = (
                 command_markers=("sql_boundary", "sql-boundary")),
     PipelineJob("quality", "Code quality", ("quality",), command_markers=("quality_checks",)),
     PipelineJob("architecture", "Architecture", ("architecture",), command_markers=("test_architecture.py",)),
+    PipelineJob("coverage", "Coverage", pipeline_only_reason=(
+        "Requires Redis and PostgreSQL, CI-only coverage tools, and a Codecov upload for the pull-request diff gate.")),
     PipelineJob("v4-shard", "Test (v4) shard", ("v4",), name_prefix=True, command_markers=("tests/v4",)),
     PipelineJob("changes", "Changed paths", pipeline_only_reason=(
         "Compares the pull request with its base commit, which only the pull-request checkout provides.")),

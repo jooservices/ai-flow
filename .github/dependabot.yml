@@ -40,6 +40,10 @@ updates:
       include: "scope"
     cooldown:
       default-days: 7
+    ignore:
+      # Base images follow Ubuntu LTS only (owner rule 2026-11-09): skip the interim 25.x releases; LTS releases still arrive.
+      - dependency-name: "ubuntu"
+        versions: [">= 25.0, < 26"]
 
   - package-ecosystem: "github-actions"
     directory: "/"

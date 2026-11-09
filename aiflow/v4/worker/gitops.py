@@ -44,7 +44,7 @@ class Git:
             self.askpass.chmod(0o755)
 
     def run(self, *args: str, cwd: str | Path | None = None, token: str = "", check: bool = True,
-            identity: tuple[str, str] | None = None, extra_env: dict[str, str] | None = None) -> str:
+            identity: tuple[str, str] | None = None) -> str:
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.root / "cache"), "LANG": "C.UTF-8",
                "GIT_TERMINAL_PROMPT": "0"}
         if token:
@@ -54,7 +54,6 @@ class Git:
         if identity:
             env.update({"GIT_AUTHOR_NAME": identity[0], "GIT_AUTHOR_EMAIL": identity[1],
                         "GIT_COMMITTER_NAME": identity[0], "GIT_COMMITTER_EMAIL": identity[1]})
-        env.update(extra_env or {})
         p = subprocess.run(self.run_as + ["git", *args], cwd=str(cwd) if cwd else None, env=env,
                            capture_output=True, text=True, timeout=600)
         if check and p.returncode != 0:

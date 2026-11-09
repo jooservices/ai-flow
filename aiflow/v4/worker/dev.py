@@ -875,7 +875,7 @@ def record_gate_repair_response(run: DevRun, original: RunResult, repair: RunRes
     run.result.setdefault("details", {}).update(
         permission_denials=run.response.permission_denials,
         token_usage_reported=bool(getattr(run.response, "token_usage_reported", False)),
-        duration_s=int(run.response.duration_s), verdict=run.response.verdict,
+        exit_code=run.response.exit_code, duration_s=int(run.response.duration_s), verdict=run.response.verdict,
         verdict_reason=(run.response.verdict_reason or "")[:2000])
 
 
@@ -887,7 +887,14 @@ def redact_gate_output(text: str, env: dict[str, str], project: dict) -> str:
     for value in sorted(values, key=len, reverse=True):
         output = output.replace(value, "[redacted]")
     credential_name = (r"[A-Za-z0-9_-]*(?:access[_-]?(?:token|key)|refresh[_-]?token|token|password|passwd|pwd|"
-                       r"secret|api[_-]?key|authorization|private[_-]?key)")
+                       r"secret|api[_-]?key|private[_-]?key)")
+    authorization = re.compile(
+        r"(?im)(?P<prefix>[\"']?authorization[\"']?\s*[:=]\s*)"
+        r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n,;}]+)"
+    )
+    output = authorization.sub(lambda match: match.group("prefix") + "[redacted]", output)
+    url_userinfo = re.compile(r"(?i)(?P<prefix>\b[a-z][a-z0-9+.-]*://)[^/@\s?#]*@")
+    output = url_userinfo.sub(lambda match: match.group("prefix") + "[redacted]@", output)
     credential = re.compile(
         rf"(?i)(?P<prefix>[\"']?{credential_name}[\"']?\s*[:=]\s*)"
         r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|(?:Bearer\s+)?[^,\s;}}\]]+)"

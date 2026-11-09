@@ -644,6 +644,18 @@ def test_gate_repair_accepts_only_done_with_unchanged_head_and_changes(
         assert run.failed_work_commits == ["repair-head"]
 
 
+def test_gate_repair_records_repair_exit_code_over_successful_initial_exit(monkeypatch, tmp_path):
+    repair = RunResult(final_text="RESULT: DONE", verdict="DONE", exit_code=17)
+    run, _committed, _ = _gate_repair_run(tmp_path, ["src/fix.py"], repair)
+    run.response.exit_code = 0
+    monkeypatch.setattr(dev, "brief", lambda _run: SimpleNamespace(
+        spec=RunSpec(prompt="instructions", cwd=str(tmp_path), account_home=str(tmp_path))))
+    monkeypatch.setattr(dev, "run_ai_once", lambda target, _prepared: setattr(target, "response", repair))
+
+    assert not dev.repair_gate_failure(run, "unit", "step unit failed: assertion failed")
+    assert run.result["details"]["exit_code"] == 17
+
+
 @pytest.mark.parametrize(
     ("result", "expected_status"),
     [
@@ -773,6 +785,9 @@ def test_gate_output_redaction_removes_short_named_secrets_and_credentials():
     ('{"clientSecret": "generated-client-value"}', "generated-client-value"),
     ('{"private-key": "generated-private-value"}', "generated-private-value"),
     ("Authorization: Bearer generated-bearer-value", "generated-bearer-value"),
+    ("Authorization: Basic generated-basic-value", "generated-basic-value"),
+    ("database failed: postgresql://service:generated-url-password@db.test/app", "generated-url-password"),
+    ('{"Authorization": "Basic generated-json-basic-value"}', "generated-json-basic-value"),
 ])
 def test_gate_output_redaction_removes_quoted_and_header_credentials_not_in_environment(output, value):
     redacted = dev.redact_gate_output(output, {}, {})

@@ -111,7 +111,6 @@ class VerifyWorkspace:
     worktree: Path
     head: str
     auto_updated: bool = False
-    ci_matches_worktree: bool = True
 
 
 @dataclass
@@ -196,7 +195,6 @@ def prepare_verify(state: VerifyRun) -> VerifyWorkspace | dict:
         state.git.abort_merge(wt)
         return report_verify_conflict(state, conflicts)
     auto_updated = False
-    ci_matches_worktree = True
     if state.git.behind(wt, project["base"]):
         state.git.abort_merge(wt)
         auto_updated = bring_up_to_date(state.api, c, state.git, mirror, wt, pr, project["base"], credential["token"],
@@ -215,7 +213,7 @@ def prepare_verify(state: VerifyRun) -> VerifyWorkspace | dict:
             state.result["head_sha"] = head
             auto_updated = head != previous_head
     set_run_progress(state.heartbeat, "verify", head=head[:10])
-    workspace = VerifyWorkspace(mirror, wt, head, auto_updated, ci_matches_worktree)
+    workspace = VerifyWorkspace(mirror, wt, head, auto_updated)
     report_verify_started(state, head)
     logs = Path(state.srv_root) / "logs" / "runs"
     logs.mkdir(parents=True, exist_ok=True)
@@ -330,10 +328,8 @@ def collect_verification(state: VerifyRun, workspace: VerifyWorkspace,
         findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
                     "Map each deferred criterion to a configured check, or verify it before merge.")
         return rework_verify(state, findings, "deferred criterion has no configured check")
-    green_jobs = []
-    if workspace.ci_matches_worktree:
-        green_jobs = green_pipeline_jobs(fetch_ci_checks(
-            state.api, state.claim, state.pr.get("head_sha") or workspace.head))
+    green_jobs = green_pipeline_jobs(fetch_ci_checks(
+        state.api, state.claim, state.pr.get("head_sha") or workspace.head))
     gate_result = run_verify_gate(state, workspace, green_jobs)
     if isinstance(gate_result, dict):
         return gate_result

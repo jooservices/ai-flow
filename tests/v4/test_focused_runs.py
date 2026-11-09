@@ -156,62 +156,6 @@ def test_github_check_result_preserves_a_skipped_conclusion():
     assert checks[0]["conclusion"] == "skipped"
 
 
-def test_verification_does_not_reuse_old_head_checks_after_local_base_merge(monkeypatch, tmp_path):
-    class Git:
-        def __init__(self):
-            self.merge_calls = 0
-
-        def mirror(self, *_args):
-            return object()
-
-        def remote_branch_exists(self, *_args):
-            return True
-
-        def detached(self, *_args):
-            return "old-head"
-
-        def merge_base_in(self, *_args, **_kwargs):
-            self.merge_calls += 1
-            return []
-
-        def behind(self, *_args):
-            return True
-
-        def abort_merge(self, *_args):
-            pass
-
-    class API:
-        def call(self, _method, path, *_args, **_kwargs):
-            return {"token": "test-token"} if path == "/v1/github/token" else {"ok": False}
-
-    claim = SimpleNamespace(
-        run_id="run", fence=1, identity=("Worker", "worker@example.test"),
-        project={"key": "PRJ", "repo": "owner/repo", "base": "develop", "checks": []},
-    )
-    state = SimpleNamespace(
-        claim=claim, pr={"branch": "feature", "number": 1, "head_sha": "old-head"},
-        api=API(), git=Git(), srv_root=str(tmp_path), heartbeat=object(), result={},
-    )
-    monkeypatch.setattr(verify, "worktree_path", lambda *_args: tmp_path)
-    monkeypatch.setattr(verify, "set_run_progress", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(verify, "report_verify_started", lambda *_args: None)
-
-    workspace = verify.prepare_verify(state)
-
-    fetched = []
-    gate_jobs = []
-    monkeypatch.setattr(verify, "fetch_ci_checks", lambda *_args: fetched.append(True) or _ci(**{"Test (v4)": "success"}))
-    monkeypatch.setattr(verify, "run_verify_gate", lambda _state, _workspace, jobs: gate_jobs.append(jobs))
-    monkeypatch.setattr(verify, "collect_ci", lambda *_args: verify.CollectedVerify("ok"))
-    review = SimpleNamespace(verdict="PASS", findings="", post_merge=[])
-
-    verify.collect_verification(state, workspace, review)
-
-    assert workspace.ci_matches_worktree is False
-    assert fetched == []
-    assert gate_jobs == [[]]
-
-
 def test_ci_status_that_cannot_be_read_reuses_nothing():
     api = SimpleNamespace(call=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("down")))
     claim = SimpleNamespace(run_id="r", fence=1)

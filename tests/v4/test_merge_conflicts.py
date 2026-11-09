@@ -328,7 +328,7 @@ def test_clean_behind_pull_request_is_updated_by_ai_flow_and_verified_on_the_new
     assert result["outcome"] == "merged"
     assert [p for _, p, _, _ in api.calls].count("/v1/github/update-branch") == 1
     assert result["details"]["auto_updated"] is True
-    assert git.detached_refs[-1] == "origin/JOOWP-4-work" and seen_ci == ["new-head", "new-head"]  # one read to find the green pipeline jobs, one to wait for the rest
+    assert git.detached_refs[-1] == "origin/JOOWP-4-work" and seen_ci == ["new-head"]  # no local gate: only the wait for CI reads the checks
     assert not any(p == "/v1/jira/JOOWP-4/fields" and (b or {}).get("add_labels") for _, p, b, _ in api.calls)
 
 

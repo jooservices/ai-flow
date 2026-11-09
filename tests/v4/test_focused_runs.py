@@ -177,10 +177,34 @@ def test_verification_reads_the_checks_of_the_verified_commit(monkeypatch):
     monkeypatch.setattr(verify, "fetch_ci_checks", lambda _api, _claim, sha: fetched.append(sha) or [])
     monkeypatch.setattr(verify, "run_verify_gate", lambda _state, _workspace, jobs: None)
     monkeypatch.setattr(verify, "collect_ci", lambda *_args: verify.CollectedVerify("ok"))
-    state = SimpleNamespace(api=None, claim=SimpleNamespace(project={"checks": []}), pr={"head_sha": "older-sha"},
+    state = SimpleNamespace(api=None, claim=SimpleNamespace(project={"checks": [], "local_gate": "ai-flow"}), pr={"head_sha": "older-sha"},
                             result={})
     review = SimpleNamespace(verdict="PASS", findings="", post_merge=[])
 
     verify.collect_verification(state, SimpleNamespace(head="verified-sha"), review)
 
     assert fetched == ["verified-sha"]
+
+
+def test_verification_without_a_local_gate_does_not_read_checks_early(monkeypatch):
+    fetched = []
+    monkeypatch.setattr(verify, "fetch_ci_checks", lambda *_args: fetched.append(True) or [])
+    monkeypatch.setattr(verify, "run_verify_gate", lambda _state, _workspace, jobs: None)
+    monkeypatch.setattr(verify, "collect_ci", lambda *_args: verify.CollectedVerify("ok"))
+    state = SimpleNamespace(api=None, claim=SimpleNamespace(project={"checks": []}), pr={}, result={})
+    review = SimpleNamespace(verdict="PASS", findings="", post_merge=[])
+
+    verify.collect_verification(state, SimpleNamespace(head="sha"), review)
+
+    assert fetched == []
+
+
+def test_a_skipped_check_passes_qc_but_is_not_reused(monkeypatch):
+    ci = [{"name": "Documentation", "state": "skipped", "conclusion": "skipped"}]
+    monkeypatch.setattr(verify, "wait_for_ci", lambda *_args: ci)
+    state = SimpleNamespace(api=None, claim=None, pr={}, heartbeat=None, result={"details": {}})
+
+    verify.collect_ci(state, SimpleNamespace(head="sha"), SimpleNamespace(checks="ok"))
+
+    assert state.result["details"]["qc_passed"] is True
+    assert verify.green_pipeline_jobs(ci) == []

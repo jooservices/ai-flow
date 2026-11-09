@@ -37,7 +37,7 @@ log = logging.getLogger("aiflow4.verify")
 VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL|BLOCKED)\b", re.M)
 CHECKS = re.compile(r"^CHECKS:\s*(.+)$", re.M)
 QUEUE_POLL_S = 15
-PASSING_CI_STATES = ("success", "neutral")
+PASSING_CI_STATES = ("success", "neutral", "skipped")  # a skipped check passes QC but is never reused as a green job
 POST_MERGE_CHECKS = re.compile(r"^POST-MERGE CHECKS:\s*\n((?:\s*[-*].*\n?)+)", re.M | re.I)
 
 
@@ -328,7 +328,8 @@ def collect_verification(state: VerifyRun, workspace: VerifyWorkspace,
         findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
                     "Map each deferred criterion to a configured check, or verify it before merge.")
         return rework_verify(state, findings, "deferred criterion has no configured check")
-    green_jobs = green_pipeline_jobs(fetch_ci_checks(state.api, state.claim, workspace.head))
+    green_jobs = (green_pipeline_jobs(fetch_ci_checks(state.api, state.claim, workspace.head))
+                  if gate_step.enabled(project) else [])
     gate_result = run_verify_gate(state, workspace, green_jobs)
     if isinstance(gate_result, dict):
         return gate_result

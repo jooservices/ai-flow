@@ -223,6 +223,7 @@ def test_apply_heartbeat_reconciles_desired_worker_units_and_signins(monkeypatch
     monkeypatch.setattr(agent, "SLOT_DIRECTORY", slots_directory)
     monkeypatch.setattr(pwd, "getpwnam", lambda _name: SimpleNamespace(pw_gid=os.getgid()))
     monkeypatch.setattr(agent.os, "chown", lambda *_args: None)
+    monkeypatch.setattr(agent.os, "fchown", lambda *_args: None)
     calls = []
     sync_requests = []
 

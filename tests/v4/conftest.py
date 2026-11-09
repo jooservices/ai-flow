@@ -153,8 +153,11 @@ def test_database_url():
 def migrated_template(test_database_url):
     """One database, migrated once per session: every test copies it instead of migrating a schema of its own.
     It starts from AIFLOW4_TEST_DATABASE_TEMPLATE (a database that already carries pgvector) when that is set."""
-    name = testdb.create_from_template(test_database_url, os.environ.get("AIFLOW4_TEST_DATABASE_TEMPLATE") or None)
+    name = testdb.new_template_name()
+    lease = testdb.protect_template(test_database_url, name)
     try:
+        testdb.create_from_template(test_database_url, os.environ.get("AIFLOW4_TEST_DATABASE_TEMPLATE") or None,
+                                    name=name)
         template = DB(testdb.url_for(test_database_url, name), min_size=1, max_size=1)
         try:
             template.migrate()
@@ -162,7 +165,10 @@ def migrated_template(test_database_url):
             template.close()
         yield name
     finally:
-        testdb.drop(test_database_url, name)
+        try:
+            testdb.drop(test_database_url, name)
+        finally:
+            lease.close()
 
 
 @pytest.fixture(scope="session")

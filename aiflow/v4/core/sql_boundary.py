@@ -19,6 +19,7 @@ from typing import Mapping
 BASELINE = "docs/v4/sql-outside-data-access-baseline.json"
 SOURCE = "aiflow/v4"
 ALLOWED_PATH_PATTERNS = (
+    "aiflow/v4/core/testdb_repository.py",
     "aiflow/v4/control/features/*/repository.py",
     "aiflow/v4/control/repositories/*.py",
     "aiflow/v4/control/repositories/**/*.py",

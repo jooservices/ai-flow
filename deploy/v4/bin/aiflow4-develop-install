@@ -6,6 +6,7 @@
 # Refuses to run unless this node is explicitly on the develop channel (AIFLOW4_CHANNEL=develop in node.env).
 set -euo pipefail
 NODE_ENV=${AIFLOW4_NODE_ENV:-/etc/aiflow/node.env}
+# shellcheck source=/dev/null
 if [ -r "$NODE_ENV" ]; then set -a; . "$NODE_ENV"; set +a; fi
 [ "${AIFLOW4_CHANNEL:-release}" = develop ] || { echo "this node is not on the develop channel (set AIFLOW4_CHANNEL=develop in $NODE_ENV)" >&2; exit 3; }
 [ $# -eq 2 ] || { echo "usage: aiflow4-develop-install <develop.tar.gz> <sha>" >&2; exit 2; }

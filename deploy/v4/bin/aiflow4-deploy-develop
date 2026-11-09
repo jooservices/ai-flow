@@ -7,6 +7,7 @@ set -euo pipefail
 STAGE_ONLY=no
 if [ "${1:-}" = --stage-only ]; then STAGE_ONLY=yes; shift; fi
 [ -r /etc/aiflow/deploy.env ] && { set -a; . /etc/aiflow/deploy.env; set +a; }
+# shellcheck source=/dev/null
 [ -r "${AIFLOW4_CONTROL_ENV:-/etc/aiflow/control.env}" ] && { set -a; . "${AIFLOW4_CONTROL_ENV:-/etc/aiflow/control.env}"; set +a; }   # node agent on/off, as aiflow4-deploy
 [ "${AIFLOW4_CHANNEL:-release}" = develop ] || { echo "this host is not on the develop channel (set AIFLOW4_CHANNEL=develop in /etc/aiflow/deploy.env)" >&2; exit 3; }
 exec 9>/run/aiflow4-deploy.lock; flock -w 1800 9 || { echo "another deploy is running" >&2; exit 8; }   # one deploy at a time
@@ -58,7 +59,7 @@ PY
 healthy() { [ "$(docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null)" = healthy ]; }
 for svc in control-api-a control-api-b; do               # one at a time: the other keeps serving
   AIFLOW4_IMAGE_REPOSITORY=aiflow4/control AIFLOW4_IMAGE_TAG=$SHA docker compose -f "$CF" up -d --no-deps "$svc" 2>&1 | grep -v -e '^$' | tail -1
-  for i in $(seq 1 40); do healthy "aiflow4-$svc" && break; sleep 2; done
+  for _ in $(seq 1 40); do healthy "aiflow4-$svc" && break; sleep 2; done
   healthy "aiflow4-$svc" || { echo "aiflow4-$svc did not become healthy"; exit 5; }
   sleep 4                                                # let Traefik's health check see it
   docker rm -f aiflow4-control-api >/dev/null 2>&1 || true # the single container of the first layout
@@ -85,5 +86,5 @@ else
 fi
 # end node-agent-step
 ls -1t "$RELEASES"/aiflow4-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f   # keep 10 releases
-for i in $(seq 1 30); do curl -fsS http://127.0.0.1/healthz >/dev/null 2>&1 && break; sleep 2; done
+for _ in $(seq 1 30); do curl -fsS http://127.0.0.1/healthz >/dev/null 2>&1 && break; sleep 2; done
 echo "deployed $SHA"

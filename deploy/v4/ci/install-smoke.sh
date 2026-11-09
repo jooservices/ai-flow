@@ -205,6 +205,7 @@ PY
 SEED_TICKET
 
 bootstrap_nodes() {
+  # shellcheck disable=SC2034 # the third argument is kept so callers keep their argument order
   local container=$1 node=$2 account=$3 token
   docker exec --env VERSION="$VERSION" "$container" bash -se <<'NODE_BOOTSTRAP'
 set -euo pipefail

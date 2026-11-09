@@ -1,0 +1,60 @@
+name: Deploy lint
+
+# Dockerfiles and shell scripts of the v4 deployment are checked only when they change (JAIF-572).
+on:
+  merge_group:
+  pull_request:
+    paths:
+      - 'deploy/**'
+      - 'scripts/**'
+      - '.hadolint.yaml'
+      - '.github/workflows/lint-deploy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dockerfiles:
+    name: Hadolint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # tests/v4/test_deploy_lint.py fails when a Dockerfile under deploy/ is missing from this list
+        dockerfile:
+          - deploy/v4/control/Dockerfile
+          - deploy/v4/ci/offline-target.Dockerfile
+          - deploy/v4/ci/systemd.Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the Dockerfile
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+          config: .hadolint.yaml
+
+  shell-scripts:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the shell scripts
+        run: |
+          set -euo pipefail
+          # shell scripts are found by their first line; the Python scripts in the same folders are skipped
+          mapfile -t files < <(git ls-files 'deploy/*' 'scripts/*' | while read -r f; do
+            head -1 "$f" 2>/dev/null | grep -qE '^#!.*(ba)?sh( |$)' && echo "$f"; done)
+          printf '%s\n' "${files[@]}"
+          shellcheck --severity=warning "${files[@]}" deploy/v4/ci/install-smoke-artifacts.sh

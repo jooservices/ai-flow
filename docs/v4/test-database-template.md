@@ -14,6 +14,9 @@ Isolation is the same as before or stronger: a test never shares a database with
 setting or a sequence value written by one test cannot reach the next. `tests/v4/test_template_database.py` pins
 this (a row written in one test is absent in the next, the template stays untouched by its copies).
 
+- `AIFLOW4_TEST_DATABASE_TEMPLATE` must be copyable by the test role: owned by that role, or marked
+  `IS_TEMPLATE true`. The test role has `CREATEDB` but is not a superuser, so a template owned by an administrator and
+  not marked as a template makes the `db` fixture fail during session setup.
 - PostgreSQL refuses to copy a database that has a connection, and two copies of one template cannot run at the same
   moment. `create_from_template` retries such a refusal for up to ten seconds.
 - The copies are named like the other test databases, so a killed run is cleaned up by the sweeper in

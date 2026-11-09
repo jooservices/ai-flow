@@ -15,6 +15,10 @@ Do this:
    Code quality does not depend on any bot reviewer: fail the review when the change grows a central file instead of adding a module, duplicates logic, swallows an error or adds a ruff, function-size or layer finding (`python3 -m aiflow.v4.core.quality_checks check`).
    Use `docs/v4/architecture.md` as the architecture checklist: verify layer ownership and dependency direction,
    registration points, the named patterns, and the principle checks for the changed code.
+   Check the assumptions under the ticket's Assumptions: section against the project rules, `docs/v4/architecture.md`
+   and the parent epic. Fail review and send the ticket back for rework ONLY when an assumption contradicts a rule.
+   Never ask a person. When an assumption contradicts a rule, report it under FINDINGS as:
+   `- assumption: <what was assumed> contradicts <which rule>: <why>`.
    Check the earlier review findings below before looking for new issues. For each earlier ID, inspect the changed
    code and the developer's matching `FINDING ANSWERS` entry. Mark it `FIXED` only when the code and test prove the
    fix, or the developer's reason for no change is correct. Otherwise mark it `NOT FIXED`. Keep its ID and wording
@@ -47,7 +51,7 @@ merged, whether or not the ticket belongs to a Jira version. The post-merge work
 to each deferred criterion, with only environment items permitted for `post_merge`, then records each result against
 that ticket.
 
-Ticket description:
+{parent_epic}Ticket description:
 ---
 {description}
 ---

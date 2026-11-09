@@ -5,6 +5,7 @@ function dashboardWorkStatusMatches(ticket, filter) {
   if (filter === 'done') return ticket.status === 'Done';
   if (filter === 'in-flight') return ['In Progress', 'In Verify', 'Human review', 'Ready to merge'].indexOf(ticket.status) >= 0;
   if (filter === 'waiting') return dashboardVisibleWaitingTickets(D().tickets, S.dashboardWaiting.keys).some(function (row) { return row.key === ticket.key; });
+  if (filter === 'Needs owner') return ticket.status === 'Needs owner' && !!ticket.is_business_needs_owner;
   return ticket.status === filter;
 }
 function projectCloseControl(project) {

@@ -60,11 +60,16 @@ Rules:
   can only be proven on one particular machine is verified by AI Flow after the merge (canary, release checks), not
   by this run: implement it, test what runs here, and say in your summary what AI Flow verifies after the merge.
 - Keep the change focused on this ticket; no unrelated refactors.
-- When something in the ticket is ambiguous, choose the option that best fits the acceptance criteria and the
-  existing code, and state the choice in your summary. Stop for the owner only for a real requirement conflict, an
-  infrastructure change or a production release; a missing tool is never one of them.
+- The owner is a person who gives business requirements and must not be asked about structure, naming, scope,
+  metrics, defaults or tools. Only two kinds of question may reach a person: a business decision (what the product
+  should do for a customer, money, licensing, legal) and an irreversible action. Every other question is decided by
+  the flow.
+- When you are unsure about structure, naming, scope, a metric, a default or a tool, do not stop and never report
+  RESULT: BLOCKED. Pick the most conservative option that agrees with docs/v4/architecture.md, the project rules and
+  the parent epic. Write the choice into an "Assumptions" section of the ticket or summary (what you assumed and why)
+  and continue.
 {machine}{environment}
-Ticket description:
+{parent_epic}Ticket description:
 ---
 {description}
 ---

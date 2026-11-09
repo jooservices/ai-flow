@@ -1451,7 +1451,7 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
             {"key": "ALPHA-3", "project": "ALPHA", "type": "Story", "summary": "Building story",
              "status": "In Progress", "labels": [], "parent_key": "ALPHA-2", "run": None},
             {"key": "ALPHA-4", "project": "ALPHA", "type": "Bug", "summary": "Owner question",
-             "status": "Needs owner", "labels": [], "parent_key": "ALPHA-2", "run": None},
+             "status": "Needs owner", "is_business_needs_owner": True, "labels": [], "parent_key": "ALPHA-2", "run": None},
             {"key": "ALPHA-5", "project": "ALPHA", "type": "Story", "summary": "Review this",
              "status": "Human review", "labels": [], "parent_key": "ALPHA-2", "run": None},
             {"key": "ALPHA-6", "project": "ALPHA", "type": "Story", "summary": "Done this week",
@@ -1612,7 +1612,7 @@ S.data = {projects: [{key: 'ALPHA'}, {key: 'BETA'}], tickets: [
   {key: 'ALPHA-2', project: 'ALPHA', type: 'Story', status: 'Done'},
   {key: 'ALPHA-3', project: 'ALPHA', type: 'Story', status: 'In Progress'},
   {key: 'ALPHA-4', project: 'ALPHA', type: 'Bug', status: 'In Verify'},
-  {key: 'BETA-1', project: 'BETA', type: 'Story', status: 'Needs owner'},
+  {key: 'BETA-1', project: 'BETA', type: 'Story', status: 'Needs owner', is_business_needs_owner: true},
   {key: 'BETA-2', project: 'BETA', type: 'Story', status: 'Human review'},
   {key: 'BETA-3', project: 'BETA', type: 'Story', status: 'To Do', blocked_by: ['BETA-4']},
   {key: 'BETA-4', project: 'BETA', type: 'Story', status: 'In Progress'},
@@ -1639,7 +1639,7 @@ var tickets = [
   {key: 'ALPHA-3', project: 'ALPHA', type: 'Story', status: 'Closed', blocked_by: ['ALPHA-5']},
   {key: 'ALPHA-4', project: 'ALPHA', type: 'Epic', status: 'To Do', blocked_by: ['ALPHA-5']},
   {key: 'ALPHA-5', project: 'ALPHA', type: 'Story', status: 'In Progress'},
-  {key: 'ALPHA-6', project: 'ALPHA', type: 'Story', status: 'Needs owner'}
+  {key: 'ALPHA-6', project: 'ALPHA', type: 'Story', status: 'Needs owner', is_business_needs_owner: true}
 ];
 var inferred = dashboardWaitingTickets(tickets).map(function (ticket) { return ticket.key; });
 var fromReviewApi = dashboardWaitingTickets(tickets, ['ALPHA-4', 'ALPHA-6']).map(function (ticket) { return ticket.key; });
@@ -1662,7 +1662,7 @@ def test_dashboard_waiting_endpoint_matches_human_review_for_project_scoped_snap
     for key, status in (("TESTWP-120", "To Do"), ("TESTWP-121", "Done"), ("TESTWP-122", "Closed"),
                         ("TESTWP-123", "To Do"), ("TESTWP-124", "Needs owner"),
                         ("TESTWP-125", "In Progress"), ("HIDDEN-1", "Done")):
-        add_ticket(ctx.db, key, status=status, labels=())
+        add_ticket(ctx.db, key, status=status, labels=(), business=key == "TESTWP-124")
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-123'")
     ctx.db.run("UPDATE tickets SET blocked_by=%s WHERE key='TESTWP-120'", (["HIDDEN-1"],))
     ctx.db.run("UPDATE tickets SET blocked_by=%s WHERE key IN ('TESTWP-121','TESTWP-122','TESTWP-123')",
@@ -1736,7 +1736,7 @@ def test_non_reviewer_waiting_card_matches_work_board_when_queue_contains_epic()
     assert "view.human_review" not in user["permissions"]
     state = {"projects": [{"key": "ALPHA", "repo": "jooservices/alpha"}], "tickets": [
         {"key": "ALPHA-EPIC", "project": "ALPHA", "type": "Epic", "status": "Needs owner"},
-        {"key": "ALPHA-1", "project": "ALPHA", "type": "Story", "status": "Needs owner"},
+        {"key": "ALPHA-1", "project": "ALPHA", "type": "Story", "status": "Needs owner", "is_business_needs_owner": True},
     ], "active_runs": [], "recent_runs": [], "accounts": [], "events": [], "totals": {}}
     queue_keys = ["ALPHA-EPIC", "ALPHA-1"]
     dashboard = render_dashboard(state, dashboard_waiting_keys=queue_keys, console_user=user)
@@ -1767,7 +1767,7 @@ def test_dashboard_ticket_counts_match_state_work_board_filters_and_human_review
                         ("TESTWP-107", "To Do"), ("TESTWP-108", "Done"),
                         ("TESTWP-109", "To Do"), ("TESTWP-110", "Closed"),
                         ("TESTWP-111", "To Do")):
-        add_ticket(ctx.db, key, status=status, labels=())
+        add_ticket(ctx.db, key, status=status, labels=(), business=key == "TESTWP-104")
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key IN ('TESTWP-108','TESTWP-110')")
     ctx.db.run("UPDATE tickets SET done_at=now() WHERE key='TESTWP-101'")
     ctx.db.run("UPDATE tickets SET blocked_by=%s WHERE key='TESTWP-107'", (["TESTWP-106"],))

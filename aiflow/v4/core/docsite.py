@@ -84,6 +84,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "loadDashboardReviewRounds": ("cc",),
     "pollDashboardReviewRounds": ("cc",),
     "reviewRoundsPanel": ("cc",),
+    "loadDashboardAssumptions": ("cc",),
+    "assumptionsPanel": ("cc",),
     "loadDashboardFlowFailures": ("cc",),
     "flowFailuresPanel": ("cc",),
     "pipelineFailuresPanel": ("cc",),
@@ -353,7 +355,7 @@ SCREEN_LINE_VIEWS += (
     (re.compile(r"^\s*\.card-(?:wrap|pr-link)\b"), "delivery"),
     (re.compile(r"^\s*--provider-(?:claude|codex|grok|opencode):"), "cc"),
     (re.compile(r"dashboardUsage|dashboardTab|dashboard-card|dashboard-tab|flow-step"), "cc"),
-    (re.compile(r"dashboardReviewRounds|pollDashboardReviewRounds"), "cc"),
+    (re.compile(r"dashboardReviewRounds|pollDashboardReviewRounds|dashboardAssumptions|pollDashboardAssumptions"), "cc"),
     (re.compile(r"workStatusFilter|work-status-filter|S\.view === 'work' && S\.project === 'all'|"
                 r"get\('status'\)"), "work"),
     (re.compile(r"history\.replaceState|boardPath|renderDBody\(\); tick\(\)"), "work"),

@@ -109,6 +109,8 @@ class FakeDb:
         self.calls = []
 
     def all(self, sql, params=None):
+        if "FROM owner_decisions" in sql:  # business-decision lookup: not one of the recorded queries
+            return [{"ticket_key": row["key"]} for row in self.tickets if row["status"] == "Needs owner"]
         self.calls.append((sql, params))
         if sql == TICKETS_SQL:
             rows = [dict(row) for row in self.tickets if row["project"] == params[0]]

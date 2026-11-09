@@ -585,11 +585,20 @@ def client(ctx):
     system_check_api._PENDING_REFRESHES.clear()
 
 
-def add_ticket(db, key: str, status: str = "To Do", labels=("aiflow-ready",), priority: str = "Medium", blocked_by=()):
+def add_business_decision(db, key: str) -> None:
+    """The ticket waits for a business decision only the owner can make (it counts as a real Needs owner)."""
+    db.run("INSERT INTO owner_decisions (topic,title,question,options,recommended,patterns,project,status,source,"
+           "ticket_key,waiting_tickets,question_key) VALUES (%s,'Business choice','Which price?','[]'::jsonb,'',"
+           "'[]'::jsonb,'','asked','ask',%s,%s,%s)", (f"business-{key}", key, [key], f"business-{key}"))
+
+
+def add_ticket(db, key: str, status: str = "To Do", labels=("aiflow-ready",), priority: str = "Medium", blocked_by=(), business: bool = False):
     db.run("INSERT INTO tickets (key, project, status, labels, summary, description, priority, blocked_by)"
            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, labels=EXCLUDED.labels",
            (key, key.split("-")[0], status, list(labels), f"Summary of {key}", "Acceptance criteria:\n- AC1: works",
             priority, list(blocked_by)))
+    if business:
+        add_business_decision(db, key)
 
 
 def add_open_escalation(db, key: str, question: str = "Which option should be used?") -> None:

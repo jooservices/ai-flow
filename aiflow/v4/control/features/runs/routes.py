@@ -11,7 +11,9 @@ from fastapi import Depends, HTTPException, Query, Request
 from ... import (knowledge, load_policy, quota_refresh, role_health, support_bundle, tooling)
 from ... import run_inbox as run_inbox_control
 from ... import environment as environment_reports
+from ....core import assumptions as assumptions_core
 from ...db import J
+from ...repositories import assumptions as assumptions_repo
 from ...features.work.constants import utcnow
 from ...features.work.listeners import run_finished
 from . import autonomy, master_cycles, plan_outcome
@@ -122,6 +124,7 @@ def _capture_run_result_followups(ctx, run, run_id, body, late_result, last_dev,
             knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
         except Exception as exc:  # noqa: BLE001 - per-run capture cannot undo a completed worker run
             log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
+        _record_assumptions_from_run(ctx, run, run_id, body, log)
     dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
     if ctx.jira and run["step"] == "dev" and not late_result and body.outcome not in ("lost",):
         try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve
@@ -132,6 +135,28 @@ def _capture_run_result_followups(ctx, run, run_id, body, late_result, last_dev,
         except Exception as e:  # noqa: BLE001
             log.warning("worklog for %s failed: %s", run["ticket_key"], e)
     return dur
+
+
+def _record_assumptions_from_run(ctx, run, run_id, body, log) -> None:
+    assumptions = (body.details or {}).get("assumptions")
+    if isinstance(assumptions, list) and assumptions:
+        try:
+            assumptions_repo.record_assumptions(
+                ctx.db, run["ticket_key"], run["project"], run_id, run["step"], assumptions
+            )
+        except Exception as exc:  # noqa: BLE001 - assumption tracking must not fail the run
+            log.warning("record assumptions for ticket %s failed: %s", run["ticket_key"], type(exc).__name__)
+    contradicted = (body.details or {}).get("contradicted_assumptions")
+    if run["step"] == "verify" and body.outcome in ("rework", "split_plan") and isinstance(contradicted, list):
+        try:
+            marked = assumptions_repo.contradict_assumptions(
+                ctx.db, run["ticket_key"], run_id, str((body.details or {}).get("findings") or body.summary or ""),
+                [str(text) for text in contradicted])
+            if marked < len(set(str(text).strip().lower() for text in contradicted)):
+                log.warning("verification named %d contradicted assumptions of %s, %d matched a stored assumption",
+                            len(contradicted), run["ticket_key"], marked)
+        except Exception as exc:  # noqa: BLE001 - contradiction tracking must not fail the run
+            log.warning("contradict assumptions for %s failed: %s", run["ticket_key"], type(exc).__name__)
 
 
 def _evaluate_run_result_health(ctx, run, run_id, late_result, last_dev, log):
@@ -175,6 +200,9 @@ def _install_run_routes(app, ctx, deps, log) -> SimpleNamespace:
             raise HTTPException(403, "run belongs to another node")
         if int(run["fence"]) != body.fence:
             raise HTTPException(409, "run fence is no longer active")
+        invalid = assumptions_core.invalid_assumption_items((body.details or {}).get("assumptions", []))
+        if invalid:
+            raise HTTPException(422, "; ".join(invalid))
         still_owner = ctx.leases.valid(run["ticket_key"], run_id, body.fence)
         details, run_log, outcome, error_kind = _prepare_run_result(ctx, run, body, node, still_owner)
         late_result, account_update_allowed, status_update_allowed = _finish_run_result(

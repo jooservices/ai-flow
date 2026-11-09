@@ -262,7 +262,7 @@ def test_each_step_extras_builder_returns_its_step_payload(monkeypatch):
     ticket = _ticket()
     timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store = SimpleNamespace(
-        intake_wording_refusals=lambda _key: 2,
+        intake_wording_refusals=lambda _key: 2, intake_technical_answers=lambda _key: 0,
         completed_verify_runs=lambda _key: [],
         node_tools=lambda _node: SimpleNamespace(as_row=lambda: {"tools": []}),
         latest_rework=lambda _key: None, latest_answered_triage=lambda _key: None,
@@ -285,7 +285,7 @@ def test_each_step_extras_builder_returns_its_step_payload(monkeypatch):
     assert claim_extras.triage_extras(work) == {"question": "Which?"}
     assert claim_extras.post_merge_extras(work) == {"post_merge_criteria": []}
     assert claim_extras.intake_extras(work) == {"recent_comments": ["comment"]}
-    assert work.ticket_data == {"intake_wording_refusals": 2}
+    assert work.ticket_data == {"intake_wording_refusals": 2, "intake_technical_answers": 0}
     assert claim_extras.impact_extras(work)["project_tickets"][0]["key"] == "TESTWP-OTHER"
     assert claim_extras.master_extras(work) == {"master_scope": "global"}
     assert claim_extras.related_extras(work) == {"related": ["hit"]}

@@ -24,6 +24,7 @@ from ..core import work_limits
 from ..adapters import RunSpec, get_adapter
 from ..control.ticket_split_decision import decide_split
 from ..core.environment import find_server_wording, is_server_question, kinds_of, redact, rejection_message
+from ..core.technical_decision import is_technical
 from ..core.ticket_splitting import InvalidSplitPlan, validate_plan
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, run_with_inbox, with_knowledge_context
@@ -37,6 +38,7 @@ SPLIT_BLOCK = re.compile(r"^SPLIT:\s*\n<<<\s*\n(.*?)\n>>>\s*$", re.M | re.S)
 QUESTIONS = re.compile(r"^QUESTIONS:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
 REMOVED = re.compile(r"^REMOVED:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
 ENVIRONMENT_NEEDS = re.compile(r"^ENVIRONMENT NEEDS:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
+MAX_TECHNICAL_ANSWERS = 2  # after this many, a technical question reaches the owner path instead of looping in Intake
 SPEC_CHARS = 20_000
 # The common template headings and the additions for each supported Jira issue type. Keep these in the same order
 # as docs/v4/issue-types.md; unknown Jira types deliberately use the Story template without changing the Jira type.
@@ -187,10 +189,16 @@ def build_prompt(c: Claimed, spec: str, needs_split: bool = False) -> str:
                                     for item in environment_items)
                            or "- none configured")
     outline = "\n".join(_outline_section(section) for section in required_sections(issue_type))
+    parent_epic = t.get("parent_epic") or {}
+    epic_context = (
+        f"\nParent epic {parent_epic['key']}: \"{parent_epic.get('summary', '')}\"\n"
+        f"---\n{parent_epic.get('description', '')}\n---\n"
+        if parent_epic and parent_epic.get("key") else ""
+    )
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"], spec=spec,
                       issue_type=issue_type, original_issue_type=t.get("type") or "Task",
                       template_outline=outline, label_context=label_context,
-                      environment=environment_context,
+                      environment=environment_context, parent_epic=epic_context,
                       description=t["description"] or "(no description)",
                       comments="\n".join(comments) or "(no comments)",
                       split_instructions=_split_instructions(needs_split))
@@ -328,6 +336,19 @@ def _handle_intake_answer(api: ControlClient, c: Claimed, result: dict, res, nee
     if kind == "questions":
         if is_server_question(text):
             return environment_questions(c, jira, result, c.project.get("environment") or [], t0)
+        if is_technical(text):
+            if int(c.ticket.get("intake_technical_answers", 0) or 0) < MAX_TECHNICAL_ANSWERS:
+                return technical_choice_questions(c, jira, result, text, t0, api_node(api))
+            # The AI keeps asking what the flow already answered: the owner is not asked. The ticket is held and the run fails.
+            jira("fields", add_labels=["aiflow-hold"])  # intake skips held tickets, so the loop cannot repeat
+            jira("comment", body=note(
+                c, "intake held after repeated technical questions",
+                what="Intake asked technical questions again after the flow answered twice",
+                why="Question asked: " + text[:500], result="The ticket is held (label aiflow-hold); the owner is not asked",
+                next_="A flow fix or a clearer ticket is needed; remove aiflow-hold to retry", t0=t0, node=api_node(api)))
+            result.update(outcome="failed", error_kind="intake_technical_loop",
+                          summary="intake kept asking technical questions after two answers: " + text[:500])
+            return result
         return questions(c, jira, result, text, t0, api_node(api))
     if needs_split:
         return _split_result(result, kind, text)
@@ -461,6 +482,10 @@ def refined(c: Claimed, jira, result: dict, description: str, t0: float | None, 
     if summary_refused:
         return result
     original = (c.ticket.get("description") or "").strip() or "(empty)"
+    from ..core.assumptions import parse_assumptions
+    assumptions = parse_assumptions(description)
+    if assumptions:
+        result.setdefault("details", {})["assumptions"] = assumptions
     found = find_server_wording(original)
     original, removal_lines = _record_environment_removal(c, api, result, original, found, removed, needs)
     if allow_wording_bypass and (find_server_wording(description) or summary_has_wording):
@@ -468,6 +493,26 @@ def refined(c: Claimed, jira, result: dict, description: str, t0: float | None, 
                              "the retry loop.")
     kept = "Original description:\n\n" + original
     return _write_refined_ticket(c, jira, result, description, kept, removal_lines, t0, node)
+
+
+def technical_choice_questions(c: Claimed, jira, result: dict, text: str, t0: float | None, node: str) -> dict:
+    """Refuse structure, naming, scope and technical questions: the AI must pick conservative assumptions."""
+    answer = (
+        "The owner is a person who gives business requirements and must not be asked about structure, "
+        "naming, scope, metrics, defaults or tools. The flow decides these itself: pick the most conservative "
+        "option that agrees with docs/v4/architecture.md, the project rules and the parent epic. "
+        "Write the choice into an 'Assumptions:' section of the ticket (what you assumed and why) and continue."
+    )
+    jira("comment", body=note(
+        c, "technical question answered without the owner",
+        what="The owner must not be asked about structure, naming, scope, metrics, defaults or tools",
+        why="Question asked: " + text[:500],
+        result=answer,
+        next_="The ticket stays in Intake for refinement: record the choice under Assumptions: and rewrite",
+        t0=t0, node=node))
+    result.update(outcome="technical_choice_answered", summary=answer[:1000])
+    result.setdefault("details", {})["questions"] = text
+    return result
 
 
 def questions(c: Claimed, jira, result: dict, text: str, t0: float | None, node: str) -> dict:

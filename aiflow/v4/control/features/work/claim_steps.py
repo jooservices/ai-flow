@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from ... import (capacity, dev_history, hotfiles, licensing, load_policy_api, role_health, rollout,
                  triage_claim as triage_claim_service)
 from ...platform.events.wiring import publish_for
+from ...repositories.owner_decisions import parent_epic_context
 from .events import RunStarted
 from ..work.constants import utcnow
 from ...route_deps import h
@@ -155,6 +156,10 @@ def repository_settings(work: Claim) -> None:
     work.ticket_data = {
         **{key: ticket[key] for key in ("key", "project", "summary", "description", "labels", "priority", "type")},
         "parent_key": ticket.get("parent_key"), "epic": work.epic}
+    if work.epic and work.epic != ticket["key"]:
+        parent_epic = parent_epic_context(work.ctx.db, work.epic)
+        if parent_epic:
+            work.ticket_data["parent_epic"] = parent_epic
     work.prior_dev = None if body.step == "master" else dev_history.delivered_or_last(
         work.ctx.db, ticket["key"])
     work.selected_repo = work.project.settings_for_ticket(work.ticket_data) if work.project else {}

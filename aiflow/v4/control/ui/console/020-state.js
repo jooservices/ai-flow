@@ -6,6 +6,7 @@ var S = {
   dashboardQuota: { rows: null, error: '', loading: false, loadedAt: 0, user: '' },
   dashboardDisagreements: { rows: null, error: '', loading: false, loadedAt: 0 },
   dashboardReviewRounds: { data: null, error: '', loading: false, loadedAt: 0 },
+  dashboardAssumptions: { data: null, error: '', loading: false, loadedAt: 0 },
   dashboardFlowFailures: { data: null, error: '', loading: false, loadedAt: 0, user: '' },
   pipelineFailures: { data: null, error: '', loading: false, loadedAt: 0 },
   dashboardTab: 'work', workStatusFilter: 'all',

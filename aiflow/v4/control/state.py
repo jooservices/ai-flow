@@ -11,6 +11,7 @@ from ..core.toolchains import missing_tools, toolchain_gaps
 from . import flow_doctor, role_health
 from . import tooling
 from . import load_policy
+from .repositories.owner_decisions import business_decision_ticket_keys
 from .sa import dashboard_data, thresholds
 from .shared_accounts import machines_views
 
@@ -287,7 +288,9 @@ def _ticket_section(db, repo, active, recent):
     for run in recent:
         last_by_ticket.setdefault(run["ticket"], run)
     already_done = _verified_run_markers(db, tickets)
+    business_keys = business_decision_ticket_keys(db)
     for ticket in tickets:
+        ticket["is_business_needs_owner"] = ticket["key"] in business_keys
         ticket["already_done"] = already_done.get(ticket["key"]) if ticket["status"] == "In Verify" else None
         ticket["run"] = run_by_ticket.get(ticket["key"])
         ticket["last_run"] = last_by_ticket.get(ticket["key"])

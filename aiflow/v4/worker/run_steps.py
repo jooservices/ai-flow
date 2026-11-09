@@ -301,8 +301,15 @@ def format_dev_prompt(tpl: str, claim: Any, branch: str, conflicts: list[str] | 
                    " markers (<<<<<<<, =======, >>>>>>>): " + ", ".join(conflicts) + ". Resolve them so both sides'"
                    " intent is kept; AI Flow commits the merge with your work.\n")
     ticket = claim.ticket
+    parent_epic = ticket.get("parent_epic") or {}
+    parent_epic_block = (
+        f"\nParent epic {parent_epic['key']}: \"{parent_epic.get('summary', '')}\"\n"
+        f"---\n{parent_epic.get('description', '')}\n---\n"
+        if parent_epic and parent_epic.get("key") else ""
+    )
     prompt = tpl.format(key=ticket["key"], project=ticket["project"], summary=ticket["summary"],
                         repo=claim.project["repo"], branch=branch, base=claim.project["base"], checks=checks,
+                        parent_epic=parent_epic_block,
                         description=ticket["description"] or "(no description)", rework=rework,
                         related=related_block(claim.related), machine=machine_block(claim.machine_tools),
                         test_time_slice=work_limits.FULL_SUITE_TIME_SLICE_MINUTES,

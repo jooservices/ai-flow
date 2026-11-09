@@ -150,8 +150,27 @@ function loadDashboardReviewRounds(force) {
       if (S.view === 'cc' && S.data) renderDashboard();
     });
 }
+function loadDashboardAssumptions(force) {
+  var state = S.dashboardAssumptions;
+  if (!state) return;
+  if (state.loading || (S.consoleUser && !consoleCan('view.dashboard'))) return;
+  if (!force && state.data !== null && Date.now() - state.loadedAt < ANALYTICS_MS) return;
+  state.loading = true;
+  fetch('/v1/dashboard/assumptions', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) { state.data = data; state.error = ''; })
+    .catch(function (e) { state.error = String(e.message || e); if (state.data === null) state.data = {}; })
+    .then(function () {
+      state.loading = false; state.loadedAt = Date.now();
+      if (S.view === 'cc' && S.data) renderDashboard();
+    });
+}
 function pollDashboardReviewRounds() {
-  if (S.view === 'cc') loadDashboardReviewRounds();
+  if (S.view === 'cc') {
+    loadDashboardReviewRounds();
+    loadDashboardAssumptions();
+  }
   setTimeout(pollDashboardReviewRounds, 15000);
 }
 function loadDashboardQuota(force) {

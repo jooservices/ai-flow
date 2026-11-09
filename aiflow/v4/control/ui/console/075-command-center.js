@@ -164,7 +164,8 @@ function dashboardWaitingTickets(tickets, queueKeys) {
   allTickets.forEach(function (ticket) { byKey[ticket.key] = ticket; });
   return allTickets.filter(function (ticket) {
     if (ticket.status === 'Done' || ticket.status === 'Closed') return false;
-    if (ticket.status === 'Needs owner' || ticket.status === 'Human review') return true;
+    if (ticket.status === 'Needs owner') return !!ticket.is_business_needs_owner;
+    if (ticket.status === 'Human review') return true;
     return (ticket.blocked_by || []).some(function (key) {
       var blocker = byKey[key]; return blocker && blocker.status !== 'Done' && blocker.status !== 'Closed';
     });
@@ -198,6 +199,7 @@ function renderDashboard() {
   if (!canSeeMachines) loadDashboardQuota(false);
   loadDashboardDisagreements();
   loadDashboardReviewRounds(false);
+  loadDashboardAssumptions(false);
   var oldSearch = $('#dash-project-search'), focusSearch = oldSearch && document.activeElement === oldSearch;
   var cursor = focusSearch && oldSearch.selectionStart;
   var d = D(), tickets = d.tickets.filter(function (t) { return t.type !== 'Epic'; }), totals = d.totals || {};
@@ -209,10 +211,12 @@ function renderDashboard() {
   var doneTrend = days.map(function (day) { return done.filter(function (t) { return t.done_at && String(t.done_at).slice(0, 10) === day; }).length; });
   var waitingTrend = days.map(function () { return 0; }), inFlightTrend = days.map(function () { return 0; }), byWaitingDay = {};
   days.forEach(function (day, index) { byWaitingDay[day] = index; });
+  var businessKeys = {};
+  tickets.forEach(function (t) { if (t.is_business_needs_owner) businessKeys[t.key] = true; });
   (d.events || []).forEach(function (event) {
     var date = String(event.ts || '').slice(0, 10), index = byWaitingDay[date];
     if (index == null || ['ticket.status', 'jira.transition'].indexOf(event.type) < 0) return;
-    if (event.outcome === 'Needs owner' || event.outcome === 'Human review') waitingTrend[index] += 1;
+    if (event.outcome === 'Human review' || (event.outcome === 'Needs owner' && businessKeys[event.ticket])) waitingTrend[index] += 1;
     if (inFlightStatuses.indexOf(event.outcome) >= 0) inFlightTrend[index] += 1;
   });
   var doneThisWeek = doneTrend.reduce(function (sum, count) { return sum + count; }, 0);
@@ -229,7 +233,12 @@ function renderDashboard() {
     return (left - right) * S.dashboardSortDir;
   });
   var recentRuns = d.active_runs.slice().sort(function (a, b) { return (a.elapsed_s || 0) - (b.elapsed_s || 0); }).slice(0, 8);
-  var flowCounts = STATUS_COLS.map(function (c) { return tickets.filter(function (t) { return inColumn(t, c[0]); }).length; });
+  var flowCounts = STATUS_COLS.map(function (c) {
+    if (c[0] === 'Needs owner') {
+      return tickets.filter(function (t) { return inColumn(t, 'Needs owner') && !!t.is_business_needs_owner; }).length;
+    }
+    return tickets.filter(function (t) { return inColumn(t, c[0]); }).length;
+  });
   var flowMax = Math.max.apply(null, flowCounts.concat([1]));
   var flow = STATUS_COLS.map(function (c, index) {
     var count = flowCounts[index], color = c[0] === 'Done' ? 'var(--good)' :
@@ -281,7 +290,7 @@ function renderDashboard() {
   h += '</section><section class="panel" data-block="waiting"><div class="panel-h"><h2>Waiting for you</h2><span class="hint">Human review or owner decision</span></div><div class="att">';
   if (!waiting.length) h += '<div class="empty">Nothing is waiting on a person.</div>';
   waiting.slice(0, 12).forEach(function (t) { h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(t.key) + '"><span class="pill" data-tone="' + (t.status === 'Needs owner' ? 'warn' : 'info') + '">' + esc(t.status) + '</span><span class="t"><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '<span class="d">' + esc(t.project) + '</span></span><span class="muted">Open</span></button>'; });
-  h += '</div></section>' + reviewRoundsPanel() + disagreementsPanel() + pipelineFailuresPanel() + escalationsPanel() + '</section>';
+  h += '</div></section>' + reviewRoundsPanel() + assumptionsPanel() + disagreementsPanel() + pipelineFailuresPanel() + escalationsPanel() + '</section>';
   var tokenTotal = (S.dashboardUsage || []).reduce(function (n, row) { return n + Number(row.tokens || 0); }, 0);
   var costTotal = (S.dashboardUsage || []).reduce(function (n, row) { return n + Number(row.cost_usd || 0); }, 0);
   var providers = Object.keys(PROVIDER).filter(function (key) { return (S.dashboardUsage || []).some(function (row) { return row.key === key; }) || d.accounts.some(function (a) { return a.provider === key; }); });

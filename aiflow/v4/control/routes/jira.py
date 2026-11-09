@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import logging
 
+import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import Any
 
 from .. import merge_flow, route_deps
+from ...core.assumptions import parse_assumptions
+from ..repositories import assumptions as assumptions_repo
 
 log = logging.getLogger("aiflow4.api")  # the logger name the handlers always used
 router = APIRouter()
@@ -97,6 +100,12 @@ def jira_description(request: Request, key: str, body: JiraWrite, node: str = De
           {"chars": len(body.body)})
     ctx.events.emit("jira.description", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
                     node=node, outcome="replaced")
+    try:  # the Jira write is done and audited; the intake run result carries the same assumptions and records them again
+        assumptions_repo.record_assumptions(
+            ctx.db, key, run["project"], body.run_id, "intake", parse_assumptions(body.body), source="flow")
+    except psycopg.Error as error:
+        logging.getLogger("aiflow.v4.control").warning(
+            "assumptions of %s not stored from the description write: %s", key, type(error).__name__)
     return {"ok": True}
 
 

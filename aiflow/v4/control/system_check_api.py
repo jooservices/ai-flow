@@ -108,9 +108,10 @@ def refresh_heartbeat(ctx, node: str, body, previous: dict | None, reported_rele
     schedule_heartbeat_readiness(ctx, node, trigger)
 
 
-def projects_readiness(ctx, repo) -> dict[str, list[dict[str, object]]]:
+def projects_readiness(ctx, repo, node_rows: list[dict] | None = None) -> dict[str, list[dict[str, object]]]:
     """Return machine readiness for every project with one node query for the Projects screen."""
-    nodes = ctx.db.all("SELECT name,readiness,projects,dynamic FROM nodes ORDER BY name")
+    nodes = node_rows if node_rows is not None else ctx.db.all(
+        "SELECT name,readiness,projects,dynamic FROM nodes ORDER BY name")
     project_nodes = {key: [] for key in repo.projects}
     for node in nodes:
         name = node["name"]

@@ -195,6 +195,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
 - [Console browser tests](../../docs/v4/console-browser-tests.md): Playwright covers every role and console view, all primary journeys in light, dark and phone modes, and uploads sanitized failure traces from pull request and release install checks
 - [Scale proof](../../docs/v4/scale-proof.md): 100 projects, 50 machines and 200 simulated AI sessions measured against written performance budgets on every release; a regression blocks the release and files tickets
+- [Scale-sensitive read paths](../../docs/v4/scale-proof-budgets.md): batch state release progress and Projects picker reads so their cost does not grow with each version or listing section
 - [Support bundles](../../docs/v4/support-bundle.md): build, scan, review the inventory of and download a temporary support bundle from the console
 - [Host and service log viewer](../../docs/v4/log-viewer.md): administrators read recent host, systemd service and fixed control-container logs from the Command Center with server-side secret redaction
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost

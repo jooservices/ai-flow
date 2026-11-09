@@ -337,7 +337,7 @@ def test_a_regression_makes_the_jira_version_release_not_ready(ctx):
 
 
 def test_already_released_versions_are_grandfathered_without_a_proof(ctx):
-    from test_version_release import CORE, configure, evidence
+    from test_version_release import configure, evidence
     from aiflow.v4.control import version_release
 
     configure(ctx)

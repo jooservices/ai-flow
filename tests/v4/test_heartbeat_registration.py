@@ -1,4 +1,4 @@
-"""Characterize heartbeat collection before moving providers to local registration."""
+"""Test the registered node heartbeat provider API."""
 
 from types import SimpleNamespace
 
@@ -73,60 +73,6 @@ def _context(events):
     return HeartbeatContext(state, 4, Relay(), "public-key", sources)
 
 
-def test_heartbeat_collection_preserves_field_order_and_preparation_effects():
-    events = []
-    context = _context(events)
-
-    payload = collect_heartbeat_fields(context)
-
-    assert tuple(payload) == FIELD_ORDER
-    assert events == [
-        "metrics",
-        "now",
-        "workers",
-        "env:/etc/aiflow/projects/DEMO.env",
-        "installed_release",
-        "services",
-        "relay",
-        "hostname",
-        "credential_expiries",
-        "system_conditions",
-        "credential_checks",
-        "runtime_settings",
-    ]
-    assert payload == {
-        "slots_total": 4,
-        "slots_used": 1,
-        "release_version": "v4.2.0",
-        "release_protocol": 1,
-        "tools": {"git": "git 1"},
-        "services": {"redis": {"healthy": True}},
-        "metrics": {"cpu_pct": 23.5, "hostname": "node-test", "policy_relay": {"enabled": True, "healthy": True}},
-        "workers": [{"account": "codex-01", "state": "working", "alive": True}],
-        "credential_expiries": {"count": 1},
-        "system_conditions": ["healthy", "disk-space"],
-        "credential_checks": {"count": 1},
-        "auto_fixed_tools": ["tool-a"],
-        "auto_fixed_conditions": ["disk-space"],
-        "runtime_settings": {"DEMO": ["API_KEY"]},
-        "runtime_settings_public_key": "public-key",
-        "environment_items": {"DEMO": ["API_KEY"]},
-    }
-    assert context.state.previous_metrics == (6, 7)
-
-
-def test_metrics_and_workers_are_collected_once_and_previous_metrics_advance():
-    events = []
-    context = _context(events)
-
-    payload = collect_heartbeat_fields(context)
-
-    assert events.count("metrics") == 1
-    assert events.count("workers") == 1
-    assert context.state.previous_metrics == (6, 7)
-    assert payload["workers"] is context.workers
-
-
 @pytest.mark.parametrize(
     ("now_values", "tools_at", "expected_events", "expected_tools", "expected_timestamp"),
     [
@@ -162,10 +108,11 @@ def test_heartbeat_integer_validation_rejects_bool_with_existing_error():
 
 
 def test_heartbeat_provider_validation_error_propagates_from_collection():
-    context = SimpleNamespace(slots=True)
+    context = _context([])
+    context.slots = True
 
     with pytest.raises(TypeError, match="heartbeat field slots_total must be int"):
-        HEARTBEAT_PROVIDERS["slots_total"].provide(context)
+        collect_heartbeat_fields(context)
 
 
 def test_heartbeat_provider_registration_preserves_explicit_orders():

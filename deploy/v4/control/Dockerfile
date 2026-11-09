@@ -2,7 +2,7 @@
 # Keep uv in a build-only stage so the runtime image does not carry the package manager.
 FROM ghcr.io/astral-sh/uv:0.13.7 AS uv-build
 
-FROM ubuntu:24.04
+FROM ubuntu:24.10
 ARG AIFLOW4_VERSION=4.0.0a1
 ARG AIFLOW4_REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/jooservices/ai-flow" \

@@ -7,8 +7,8 @@ runs that job again for every open pull request after each merge. The v4 suite n
 | Job | What it runs | Required |
 |---|---|---|
 | `Test (v4) shard 1..4` | the test files of one shard, each runner with its own Redis and PostgreSQL | through `Test (v4)` |
-| `Test (v4) browser journeys` | `test_console_browser.py` and `test_log_viewer_browser.py` (Playwright) | through `Test (v4)` |
-| `Test (v4)` | passes only when every shard and the browser journeys passed | yes |
+| `Test (v4) browser journeys` | `test_console_browser.py` and `test_log_viewer_browser.py` (Playwright); runs only when a pull request changes the console (`aiflow/v4/control/ui/`) or a browser test, decided by the job `Changed paths` | through `Test (v4)` |
+| `Test (v4)` | passes only when every shard passed and the browser journeys passed or were skipped for an unrelated change | yes |
 | `Scale proof (not required)` | `tests/v4/test_scale_proof.py` against a fresh PostgreSQL service | no |
 
 The required check keeps its old name, so branch protection does not change.

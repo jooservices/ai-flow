@@ -33,6 +33,8 @@ PIPELINE_JOBS = (
     PipelineJob("quality", "Code quality", ("quality",), command_markers=("quality_checks",)),
     PipelineJob("architecture", "Architecture", ("architecture",), command_markers=("test_architecture.py",)),
     PipelineJob("v4-shard", "Test (v4) shard", ("v4",), name_prefix=True, command_markers=("tests/v4",)),
+    PipelineJob("changes", "Changed paths", pipeline_only_reason=(
+        "Compares the pull request with its base commit, which only the pull-request checkout provides.")),
     PipelineJob("v4-browser", "Test (v4) browser journeys", pipeline_only_reason=(
         "Requires provisioned Playwright Chromium plus isolated PostgreSQL and Redis services.")),
     PipelineJob("v4-scale", "Scale proof (not required)", ("scale-proof",),

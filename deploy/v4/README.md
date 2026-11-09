@@ -8,6 +8,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 ## Topics
 
 - [Explained broad exception handlers, first batch](../../docs/v4/broad-except-explained.md): ten handlers carry their reason, one is narrowed; behaviour unchanged
+- [Browser journeys path filter](../../docs/v4/browser-path-filter.md): the browser journeys run only when a pull request changes the console or a browser test, and `Test (v4)` accepts their skip
 - [Deploy lint](../../docs/v4/deploy-lint.md): hadolint for the Dockerfiles and shellcheck for the shell scripts; runs on pull requests that change `deploy/`, `scripts/`, `.hadolint.yaml` or the workflow, and always in the merge queue
 - [Atomic code and configuration deploy](../../docs/v4/atomic-deploy.md): fetch, check and activate both repositories together for each configured machine
 - [Unified test command for every layer](../../docs/v4/test-command.md): one script runs fast (lint, types, guards, unit), integration, smoke and e2e layers

@@ -212,9 +212,44 @@ jobs:
       - name: Architecture rules of docs/v4/architecture.md
         run: uv run --frozen pytest tests/v4/test_architecture.py -p no:warnings
 
+  # The browser journeys run only when a pull request changes the console or a browser test (JAIF-592); the job
+  # `changes` decides it. Every other event, a push included, runs them.
+  changes:
+    name: Changed paths
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      browser: ${{ steps.paths.outputs.browser }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Does the change touch the console or a browser test?
+        id: paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != pull_request ] && [ "$EVENT" != merge_group ]; then
+            echo "browser=true" >> "$GITHUB_OUTPUT"
+          else
+            changed="$(git diff --name-only "$BASE" HEAD)"  # a failing diff must fail the job, not skip the journeys
+            if grep -qE '^(aiflow/v4/control/ui/|tests/v4/(test_console_browser|test_log_viewer_browser)\.py$|tests/v4/(console|log_viewer)_browser_suite\.cjs$)' <<< "$changed"; then
+              echo "browser=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "browser=false" >> "$GITHUB_OUTPUT"
+              echo "no console or browser test change: the browser journeys are skipped"
+            fi
+          fi
+
   # The v4 suite runs on parallel runners (JAIF-431): balanced shards of the test files, the browser journeys, and the
   # scale proof (JAIF-432, not a required check). Each runner has its own Redis and PostgreSQL. The required check
-  # "Test (v4)" is the job `v4` below: it passes only when every shard and the browser journeys passed.
+  # "Test (v4)" is the job `v4` below: it passes when the filter and every shard passed and the browser journeys passed
+  # or were skipped by the filter.
   v4-shard:
     name: Test (v4) shard ${{ matrix.shard }}
     if: github.event_name != 'schedule'
@@ -268,7 +303,8 @@ jobs:
 
   v4-browser:
     name: Test (v4) browser journeys
-    if: github.event_name != 'schedule'
+    needs: [changes]
+    if: github.event_name != 'schedule' && needs.changes.outputs.browser == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -368,16 +404,21 @@ jobs:
   v4:
     name: Test (v4)
     if: always() && github.event_name != 'schedule'
-    needs: [v4-shard, v4-browser]
+    needs: [changes, v4-shard, v4-browser]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Every shard and the browser journeys passed
+      - name: Every shard passed, and the browser journeys passed or were skipped for an unrelated change
         env:
-          RESULTS: ${{ needs.v4-shard.result }} ${{ needs.v4-browser.result }}
+          CHANGES: ${{ needs.changes.result }}
+          SHARDS: ${{ needs.v4-shard.result }}
+          BROWSER: ${{ needs.v4-browser.result }}
+          BROWSER_NEEDED: ${{ needs.changes.outputs.browser }}
         run: |
-          echo "results: $RESULTS"
-          for result in $RESULTS; do test "$result" = success || exit 1; done
+          echo "changes: $CHANGES, shards: $SHARDS, browser journeys: $BROWSER (needed: $BROWSER_NEEDED)"
+          test "$CHANGES" = success
+          test "$SHARDS" = success
+          if [ "$BROWSER_NEEDED" = true ]; then test "$BROWSER" = success; else test "$BROWSER" = skipped; fi
 
   # Clean-install acceptance test (docs/v4/clean-install-acceptance.md): the fast version on every pull request
   # that touches install, deploy, control or node code ...

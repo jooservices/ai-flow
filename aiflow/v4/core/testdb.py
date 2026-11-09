@@ -12,7 +12,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 
 import psycopg
@@ -90,31 +90,36 @@ def protect_template(admin_url: str, name: str) -> testdb_repository.TemplateLea
     return lease
 
 
-def _drop_with_retries(admin_url: str, name: str) -> None:
+def _drop_with_retries(admin_url: str, name: str, drop_database: Callable[[str, str], None],
+                       retry_delay_s: float) -> None:
     """Retry transient PostgreSQL failures while dropping one test database."""
     for attempt in range(1, DROP_ATTEMPTS + 1):
         try:
-            drop(admin_url, name)
+            drop_database(admin_url, name)
             return
         except psycopg.Error as exc:
             if attempt == DROP_ATTEMPTS:
                 raise
             log.warning("test database %s drop attempt %d/%d failed: %s",
                         name, attempt, DROP_ATTEMPTS, type(exc).__name__)
-            time.sleep(DROP_RETRY_DELAY_S * attempt)
+            time.sleep(retry_delay_s * attempt)
 
 
 class BackgroundDropper:
     """Drops test databases on one background thread: DROP DATABASE waits for a server checkpoint (seconds on a busy
     server), and the test that owned the database has no reason to wait for it. `wait` returns when all are gone."""
 
-    def __init__(self, admin_url: str) -> None:
+    def __init__(self, admin_url: str, *, drop_database: Callable[[str, str], None] = drop,
+                 retry_delay_s: float = DROP_RETRY_DELAY_S) -> None:
         self._admin_url = admin_url
+        self._drop_database = drop_database
+        self._retry_delay_s = retry_delay_s
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aiflow4-testdb-drop")
         self._pending: list[tuple[str, Future]] = []
 
     def submit(self, name: str) -> None:
-        self._pending.append((name, self._worker.submit(_drop_with_retries, self._admin_url, name)))
+        self._pending.append((name, self._worker.submit(_drop_with_retries, self._admin_url, name,
+                                                        self._drop_database, self._retry_delay_s)))
 
     def wait(self) -> None:
         """Wait for every drop, then stop the thread and report all databases that remain."""

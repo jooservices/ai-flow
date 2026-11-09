@@ -1,4 +1,6 @@
-"""Sign-in page, credential checks, rate limits, and failed sign-in audit rows."""
+"""Console sign-in, sessions and user management use cases (no FastAPI: routes turn the results into responses).
+
+Sign-in order and the rules behind it are described in `control/login.py` and `docs/v4/security.md`."""
 from __future__ import annotations
 
 import hashlib
@@ -6,29 +8,16 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass
+from functools import partial
 
-import redis
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
-from starlette.concurrency import run_in_threadpool
-
-from . import audit as audit_log, mfa
-from .application_context import ApplicationContext
-from .console_auth import issue_session
-from .db import J
-from .emails import normalize_email
-from . import login
-from .login import (LOGIN_PAGE, LOCK_S, MAX_FAILURES, RATE_WINDOW_S, REFUSED, SESSION_TTL_S, _dummy_hash, client_ip,
-                    mfa_role, preauth_origin_allowed, require_mfa, session_ttl_s)
-from .login_sessions import register_session_revocation, set_session_cookies, user_json
+from ... import audit as audit_log, console_auth, licensing, login, mfa
+from ...console_auth import ROLE_LABELS, landing_page, normalize_roles, resolve_session_user, verify_session
+from ...emails import normalize_email
+from ...login import (LOCK_S, MAX_FAILURES, RATE_WINDOW_S, REFUSED, _dummy_hash, mfa_role, require_mfa, seed_user,
+                      session_ttl_s)
+from . import repository
 
 log = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class SignInParts:
-    ctx: ApplicationContext
-    settings: object
 
 
 @dataclass(frozen=True)
@@ -42,6 +31,7 @@ class AttemptState:
     factor: str
 
 
+# --- sign-in --------------------------------------------------------------------------------------------------------
 def rate_limit_key(prefix: str, *parts: str) -> str:
     return prefix + "console_login:" + ":".join(parts)
 
@@ -51,9 +41,7 @@ def rate_limit_digest(value: str) -> str:
 
 
 def audit_console_event(ctx, action: str, email: str, accepted: bool, result: str) -> None:
-    ctx.db.run("INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
-               " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-               ("console", action, "", "", None, email, accepted, result, J({})))
+    repository.write_console_audit(ctx.db, action, email, accepted, result)
 
 
 def audit_failed_signin(ctx, email: str, result: str) -> None:
@@ -88,10 +76,8 @@ def over_limit(ctx, ip: str, email: str) -> int:
 def find_console_user(ctx, email: str):
     if not email:
         return None
-    ctx.db.run("UPDATE console_users SET failed_attempts=0, locked_until=NULL, updated_at=now()"
-               " WHERE email=%s AND locked_until IS NOT NULL AND locked_until <= now()", (email,))
-    return ctx.db.one("SELECT email, display_name, role, roles, password_hash, disabled, locked_until,"
-                      " totp_secret, totp_enabled FROM console_users WHERE email=%s", (email,))
+    repository.clear_expired_lock(ctx.db, email)
+    return repository.find_user(ctx.db, email)
 
 
 def limited_signin_response(limited: bool, usable: bool, good: bool, enrolled: bool, factor: str,
@@ -103,16 +89,13 @@ def limited_signin_response(limited: bool, usable: bool, good: bool, enrolled: b
 
 def failed_signin_response(ctx, email: str, usable: bool, locked: bool, second_factor: bool):
     if usable and not locked:
-        ctx.db.run("UPDATE console_users SET failed_attempts=failed_attempts+1,"
-                   " locked_until=CASE WHEN failed_attempts+1 >= %s THEN now() + make_interval(secs => %s)"
-                   " ELSE locked_until END, updated_at=now() WHERE email=%s", (MAX_FAILURES, LOCK_S, email))
+        repository.record_failed_attempt(ctx.db, email, MAX_FAILURES, LOCK_S)
     audit_failed_signin(ctx, email, "account locked" if locked and not second_factor else REFUSED)
     return 401, {"detail": REFUSED}, {}
 
 
 def successful_signin(ctx, settings, ip: str, email: str, row, factor: str):
-    ctx.db.run("UPDATE console_users SET failed_attempts=0, locked_until=NULL, last_login_at=now(), updated_at=now()"
-               " WHERE email=%s", (email,))
+    repository.record_signed_in(ctx.db, email)
     ctx.leases.r.delete(rate_limit_key(ctx.leases.p, "ip_email",
                                        rate_limit_digest(f"{ip}\n{email}")))
     audit_console_event(ctx, "login", email, True, "signed in")
@@ -120,8 +103,7 @@ def successful_signin(ctx, settings, ip: str, email: str, row, factor: str):
     pending = mfa_role(roles) and not row["totp_enabled"] and require_mfa(ctx)
     ttl = session_ttl_s(ctx)
     sid = secrets.token_urlsafe(18)
-    ctx.db.run("INSERT INTO console_sessions (sid, email, role, ip, expires_at)"
-               " VALUES (%s,%s,%s,%s, now() + make_interval(secs => %s))", (sid, email, row["role"], ip, ttl))
+    repository.open_session(ctx.db, sid, email, row["role"], ip, ttl)
     audit_log.record(ctx.db, email, "auth", "signed_in", email,
                      {"second_factor": factor or "none", "mfa_setup_required": pending}, ip)
     body = user_json(email, roles, row["display_name"])
@@ -170,49 +152,83 @@ def attempt_signin(ctx, settings, ip: str, email: str, password: str, code: str 
         return check_signin(ctx, settings, ip, email, password, code, wait, bool(wait))
 
 
-async def login_response(ctx, request: Request) -> JSONResponse:
-    settings = ctx.settings
-    secret = settings.console_session_secret
-    if len(secret.encode()) < 32:
-        return JSONResponse({"detail": "console sign-in is not configured"}, status_code=503)
-    if not preauth_origin_allowed(request, settings.public_url):
-        return JSONResponse({"detail": "cross-site sign-in request refused"}, status_code=403)
+# --- sessions -------------------------------------------------------------------------------------------------------
+def user_json(email: str, roles: list[str] | tuple[str, ...], name: str = "") -> dict:
+    assigned = normalize_roles(roles)
+    return {"email": email, "name": name, "role": assigned[0], "role_label": ROLE_LABELS[assigned[0]],
+            "roles": list(assigned), "role_labels": [ROLE_LABELS[role] for role in assigned],
+            "landing_page": landing_page(assigned)}
+
+
+def end_session(ctx, settings, session_cookie: str) -> str:
+    """Mark the session named by the cookie as ended; return who it belonged to."""
+    user = verify_session(session_cookie, settings.console_session_secret, allow_pending=True)
+    if user and user.sid:
+        repository.end_session(ctx.db, user.sid, user.subject)
+        audit_log.record(ctx.db, user.subject, "auth", "signed_out", user.subject)
+    return user.subject if user else ""
+
+
+def session_revoked(ctx, sid: str) -> bool:
+    """Fail closed when a session was ended, expired, unknown, or cannot be checked."""
     try:
-        data = await request.json()
-    except ValueError:
-        data = None
-    if not isinstance(data, dict) or not isinstance(data.get("email"), str) or not isinstance(data.get("password"), str):
-        return JSONResponse({"detail": "enter your email and password"}, status_code=400)
+        return not repository.session_is_live(ctx.db, sid)
+    except Exception:  # noqa: BLE001 - fail closed when the session database cannot be checked
+        log.exception("console session check failed")
+        return True
+
+
+def register_session_revocation(ctx) -> None:
+    secret = ctx.settings.console_session_secret
+    if len(secret.encode()) >= 32:
+        console_auth.SESSION_REVOKED[secret] = partial(session_revoked, ctx)
+
+
+def current_user(ctx, settings, session_cookie: str) -> dict | None:
+    """The signed-in user as the console reads it (also a session that still owes its second factor), or None."""
+    claims = verify_session(session_cookie, settings.console_session_secret, allow_pending=True)
+    user = resolve_session_user(ctx.db, claims, True) if claims else None
+    if not user:
+        return None
+    data = user_json(user.subject, list(user.assigned_roles), repository.display_name(ctx.db, user.subject))
+    data["landing_page"] = landing_page(user.effective_roles)
+    data["mfa_setup_required"] = user.mfa_pending
+    return data
+
+
+# --- users ----------------------------------------------------------------------------------------------------------
+def list_console_users(ctx, settings) -> dict:
+    rows = repository.list_users(ctx.db)
+    state = licensing.snapshot(ctx.db, settings.license_public_key)
+    count = repository.count_active_users(ctx.db)
+    users = [user_json(row["email"], row["role"], row["display_name"])
+             | {"disabled": row["disabled"], "created_at": row["created_at"].isoformat()} for row in rows]
+    return {"users": users, "count": count, "limit": state["limits"]["users"]}
+
+
+def valid_new_user(data) -> bool:
+    return (isinstance(data, dict) and isinstance(data.get("email"), str) and isinstance(data.get("role"), str))
+
+
+def create_console_user(ctx, settings, actor: str, data, ip: str) -> tuple[int, dict]:
+    """Create a user with a generated password; return the status and the body of the response."""
+    if not valid_new_user(data):
+        return 422, {"detail": "Enter an email address and choose a role."}
+    display_name = data.get("display_name", "")
+    if not isinstance(display_name, str) or len(display_name) > 120:
+        return 422, {"detail": "Display name must be 120 characters or fewer."}
     try:
         email = normalize_email(data["email"])
-    except ValueError:
-        email = ""
-    try:
-        code = data.get("code") if isinstance(data.get("code"), str) else ""
-        status, body, headers = await run_in_threadpool(
-            attempt_signin, ctx, settings, client_ip(request, settings.trusted_proxies),
-            email, data["password"][:1024], code[:64])
-    except redis.RedisError:
-        log.exception("console sign-in: Redis is unavailable")
-        return JSONResponse({"detail": "sign-in is unavailable; try again shortly"}, status_code=503)
-    sid, ttl = body.pop("_sid", ""), body.pop("_ttl", SESSION_TTL_S)
-    response = JSONResponse(body, status_code=status, headers={"Cache-Control": "no-store", **headers})
-    if status == 200:
-        register_session_revocation(ctx)
-        token = issue_session(email, body["roles"], int(time.time()) + ttl, secret, sid=sid,
-                              mfa_pending=body["mfa_setup_required"])
-        set_session_cookies(settings, response, token, ttl)
-    return response
-
-
-def install_signin(app: FastAPI, ctx: ApplicationContext) -> None:
-    from . import setup_wizard
-
-    parts = SignInParts(ctx, ctx.settings)
-
-    @app.get("/login", include_in_schema=False)
-    def login_page(request: Request) -> HTMLResponse:
-        if setup_wizard.user_count(parts.ctx) == 0:
-            return setup_wizard.setup_form_response(request, parts.ctx)
-        return HTMLResponse(LOGIN_PAGE, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
-
+        password = seed_user(ctx.db, email, data["role"], display_name, public_key=settings.license_public_key)
+    except ValueError as exc:
+        if isinstance(exc, licensing.LicenseError):
+            status = 423 if "read-only" in str(exc).lower() else 409
+        else:
+            status = 422
+        return status, {"detail": str(exc)}
+    if password is None:
+        return 409, {"detail": "A console user with this email already exists."}
+    audit_console_event(ctx, "create_user", email, True, "created")
+    audit_log.record(ctx.db, actor, "people", "person_added", email, {"roles": [data["role"]]}, ip)
+    return 201, {"email": email, "name": display_name.strip(), "role": data["role"], "initial_password": password,
+                 "message": "Account created. Copy the initial password and share it securely."}

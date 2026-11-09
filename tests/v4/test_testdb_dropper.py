@@ -9,7 +9,7 @@ import pytest
 from aiflow.v4.core import testdb
 
 
-def test_background_dropper_retries_and_reports_every_remaining_database(monkeypatch, caplog):
+def test_background_dropper_retries_and_reports_every_remaining_database(caplog):
     attempts: Counter[str] = Counter()
 
     def drop(_admin_url: str, name: str) -> None:
@@ -19,9 +19,7 @@ def test_background_dropper_retries_and_reports_every_remaining_database(monkeyp
         if name != "transient":
             raise psycopg.OperationalError("database unavailable")
 
-    monkeypatch.setattr(testdb, "drop", drop)
-    monkeypatch.setattr(testdb, "DROP_RETRY_DELAY_S", 0)
-    dropper = testdb.BackgroundDropper("postgresql://unused")
+    dropper = testdb.BackgroundDropper("postgresql://unused", drop_database=drop, retry_delay_s=0)
     for name in ("transient", "stuck_one", "stuck_two"):
         dropper.submit(name)
 

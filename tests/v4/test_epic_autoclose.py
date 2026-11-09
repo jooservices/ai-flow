@@ -95,6 +95,71 @@ def test_jira_sync_leaves_done_epic_alone_for_an_old_unfinished_child(ctx):
     assert not ctx.jira.comments
 
 
+def test_first_seen_old_child_reopens_preexisting_done_epic_even_with_a_completion_time(ctx):
+    from datetime import datetime, timedelta, timezone
+
+    epic_key = "TESTWP-1210"
+    old_created = datetime.now(timezone.utc) - timedelta(days=10)
+    add_ticket(ctx.db, epic_key, status="Done", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic',done_at=%s WHERE key=%s", (old_created, epic_key))
+    ctx.jira.status_of[epic_key] = "Done"
+    child = issue("TESTWP-1211", "To Do", parent=epic_key)
+    child["fields"]["created"] = old_created.isoformat()
+    sync_issues(ctx, [child])
+
+    assert jira_sync(ctx) == 1
+
+    assert ctx.jira.status(epic_key) == "To Do"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (epic_key,))["status"] == "To Do"
+
+
+def test_epic_report_is_idempotent_for_a_transition_followup_key(ctx):
+    from aiflow.v4.control.projects import report_done_epic
+
+    epic_key = "TESTWP-1212"
+    add_ticket(ctx.db, epic_key, status="Done", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key=%s", (epic_key,))
+
+    report_done_epic(ctx, "TESTWP", epic_key, lifecycle_key="epic-transition:77")
+    report_done_epic(ctx, "TESTWP", epic_key, lifecycle_key="epic-transition:77")
+
+    assert ctx.db.one("SELECT count(*) AS n FROM project_reports WHERE lifecycle_key=%s",
+                      ("epic-transition:77",))["n"] == 1
+
+
+def test_jira_sync_keeps_the_descendant_tree_atomic_for_concurrent_watchdogs(ctx, monkeypatch):
+    from aiflow.v4.control import loops
+
+    epic_key, done_child, open_child = "TESTWP-1220", "TESTWP-1221", "TESTWP-1222"
+    add_ticket(ctx.db, epic_key, status="In Progress", labels=())
+    add_ticket(ctx.db, done_child, status="To Do", labels=())
+    add_ticket(ctx.db, open_child, status="To Do", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key=%s", (epic_key,))
+    ctx.db.run("UPDATE tickets SET parent_key=%s WHERE key IN (%s,%s)", (epic_key, done_child, open_child))
+    ctx.jira.status_of[epic_key] = "In Progress"
+    sync_issues(ctx, [issue(epic_key, "In Progress", "Epic"),
+                      issue(done_child, "Done", parent=epic_key),
+                      issue(open_child, "To Do", parent=epic_key)])
+    original_sync = loops._sync_jira_issue
+    visible_mid_sync = []
+
+    def inspect_after_first_child(*args, **kwargs):
+        result = original_sync(*args, **kwargs)
+        issue_arg = args[1]
+        if issue_arg["key"] == done_child:
+            with ctx.db.pool.connection() as connection:
+                visible_mid_sync.append(connection.execute(
+                    "SELECT status FROM tickets WHERE key=%s", (done_child,)).fetchone()["status"])
+        return result
+
+    monkeypatch.setattr(loops, "_sync_jira_issue", inspect_after_first_child)
+    assert loops.jira_sync(ctx, full=True) == 3
+
+    assert visible_mid_sync == ["To Do"]
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (done_child,))["status"] == "Done"
+    assert ctx.jira.status(epic_key) == "In Progress"
+
+
 def test_jira_sync_reopens_done_epic_when_an_existing_child_is_reopened(ctx):
     epic_key = "TESTWP-117"
     child_key = "TESTWP-118"

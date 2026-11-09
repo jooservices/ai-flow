@@ -93,17 +93,18 @@ def pr_ref(url: str) -> dict[str, Any] | None:
 
 
 def record_move(ctx, ticket: str, from_status: str, to_status: str, cause: str, detail: str = "",
-                at: datetime | None = None) -> None:
+                at: datetime | None = None, followup_id: int | None = None) -> None:
     """Keep who or what moved a ticket, in the move table, and publish `TicketMoved` (its timeline row is a listener)."""
     from .features.tickets.events import TicketMoved
     from .platform.events.wiring import publish_for
 
     with ctx.db.transaction():
-        ctx.db.run("INSERT INTO ticket_moves (ts, ticket, from_status, to_status, cause, detail)"
-                   " VALUES (COALESCE(%s,now()),%s,%s,%s,%s,%s)",
-                   (at, ticket, from_status or "", to_status, cause, detail[:500]))
+        repository = ticket_repository_of(ctx)
+        repository.record_ticket_move((at, ticket, from_status or "", to_status, cause, detail[:500]))
         publish_for(ctx, TicketMoved(ticket_key=ticket, from_status=from_status or "", to_status=to_status, cause=cause,
                                      detail=detail[:300]))
+        if followup_id is not None:
+            repository.finish_epic_followup_move((followup_id,))
 
 
 def moves(db, ticket: str, limit: int = 30) -> list[dict]:

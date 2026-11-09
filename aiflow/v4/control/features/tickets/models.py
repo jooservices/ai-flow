@@ -47,3 +47,32 @@ class TicketMove:
     def from_row(cls, row: dict[str, Any]) -> "TicketMove":
         """Build the immutable move model from a repository row."""
         return cls(ticket=row["ticket"], ts=row["ts"])
+
+
+@dataclass(frozen=True)
+class EpicTransitionFollowup:
+    """Durable work left by one automatic epic transition."""
+
+    id: int
+    ticket: str
+    project: str
+    from_status: str
+    to_status: str
+    source: str
+    reason: str
+    child_count: int
+    completed_at: datetime
+    comment: str
+    ready: bool
+    moved: bool
+    status_event_done: bool
+    report_done: bool
+    transition_event_done: bool
+    move_done: bool
+    audit_done: bool
+    comment_done: bool
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "EpicTransitionFollowup":
+        """Build a frozen follow-up model from its repository row."""
+        return cls(**{field: row[field] for field in cls.__dataclass_fields__})

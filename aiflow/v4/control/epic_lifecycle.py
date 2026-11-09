@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timezone
 from urllib.parse import quote
@@ -46,7 +47,8 @@ def target_status(epic: dict, children: list[dict], changed: set[str], first_see
     changed_reopened = any(
             child["key"] in changed and child["status"] not in FINISHED and
             (child["key"] not in first_seen or epic["key"] in preexisting) and
-            (epic.get("done_at") is None or _child_changed_after(child, epic["done_at"], latest_moves))
+            (epic.get("done_at") is None or _child_changed_after(child, epic["done_at"], latest_moves) or
+             (child["key"] in first_seen and epic["key"] in preexisting))
             for child in children)
     epic_done_at = epic.get("done_at")
     watchdog_reopened = epic_done_at is not None and latest_moves is not None and any(
@@ -100,40 +102,162 @@ def completion_comment(ctx: ApplicationContext, project: str, epic: dict, childr
 
 
 def apply_transition(ctx: ApplicationContext, project: str, epic: dict, children: list[dict],
-                     epics: list[dict], target: str, source: str) -> None:
-    """Move one epic and record its mirror, timeline, audit and completion comment."""
+                     epics: list[dict], target: str, source: str, changed: set[str] | None = None,
+                     first_seen: set[str] | None = None, preexisting: set[str] | None = None,
+                     latest_moves: dict[str, datetime] | None = None) -> None:
+    """Move one epic from a locked, refreshed child snapshot and persist follow-up work."""
     key = epic["key"]
-    previous = epic["status"]
-    detail = transition_reason(target, children)
+    repository = ticket_repository_of(ctx, fallback=bool(getattr(ctx, "db", None)))
+    changed, first_seen, preexisting = changed or set(), first_seen or set(), preexisting or set()
+    transaction = ctx.db.transaction() if getattr(ctx, "db", None) else nullcontext()
     try:
-        current = ctx.jira.status(key)
-        if target == "In Progress" and current in FINISHED:
-            return
-        moved = current != target
-        status = ctx.jira.transition_to(key, target) if moved else current
-        if status != target:
-            return
-        now = datetime.now(timezone.utc)
-        ticket_repository_of(ctx).update_status_with_done_timestamp((status, status, now, key))
-        epic["status"] = status
-        ready = "aiflow-ready" in (epic.get("labels") or [])
-        ctx.events.emit("ticket.status", ticket=key, project=project, outcome=status,
-                        reason=f"from {previous}", from_status=previous, ready=ready, source=source)
-        if target == "Done":
+        with transaction:
+            if hasattr(repository, "lock_epic_lifecycle"):
+                repository.lock_epic_lifecycle(key)
+            current_epic, children, epics = _refresh_epic_snapshot(
+                repository, project, key, changed, first_seen, preexisting, latest_moves, epic, children, epics)
+            if current_epic is None:
+                return
+            live_target = target_status(current_epic, children, changed, first_seen, preexisting,
+                                        _latest_moves(repository, project, latest_moves))
+            if live_target != target:
+                if hasattr(repository, "clear_epic_reopen_requests"):
+                    repository.clear_epic_reopen_requests(key)
+                return
+            now = datetime.now(timezone.utc)
+            if target == "To Do" and hasattr(repository, "queue_epic_reopen_request"):
+                for child in children:
+                    if child["status"] not in FINISHED:
+                        repository.queue_epic_reopen_request((key, child["key"], project, now))
             try:
-                project_lifecycle.report_done_epic(ctx, project, key)
-            except Exception as error:  # noqa: BLE001 - reporting must not undo the completed epic transition
-                log.warning("could not generate completion report for epic %s: %s", key, error)
-        if not moved:
-            return
-        ctx.events.emit("jira.transition", ticket=key, account="control", outcome=status, reason=detail)
-        from . import merge_flow
-        merge_flow.record_move(ctx, key, previous, status, merge_flow.EPIC_CHILD, detail)
-        ticket_repository_of(ctx).record_epic_transition(key, status, source, detail, len(children))
-        if target == "Done":
-            ctx.jira.comment(key, completion_comment(ctx, project, epic, children, epics, now))
-    except Exception as error:  # noqa: BLE001 - epic follow-up must not fail the accepted child transition; watchdog retries
+                current = ctx.jira.status(key)
+            except Exception as error:  # noqa: BLE001 - the saved request lets the watchdog retry a failed status read
+                log.warning("could not reconcile epic %s: %s", key, error)
+                return
+            if target == "In Progress" and current in FINISHED:
+                return
+            # Jira may have accepted a prior attempt before the local follow-up transaction failed.
+            moved = current != target or current_epic["status"] != target
+            try:
+                status = ctx.jira.transition_to(key, target) if moved else current
+            except Exception as error:  # noqa: BLE001 - a saved reopen request lets the watchdog retry this move
+                log.warning("could not reconcile epic %s: %s", key, error)
+                return
+            if status != target:
+                return
+            previous = current_epic["status"]
+            detail = transition_reason(target, children)
+            ready = "aiflow-ready" in (current_epic.get("labels") or [])
+            comment = (completion_comment(ctx, project, current_epic, children, epics, now)
+                       if target == "Done" and moved else "")
+            repository.queue_epic_transition_followup({
+                "ticket": key, "project": project, "from_status": previous, "to_status": status,
+                "source": source, "reason": detail, "child_count": len(children), "completed_at": now,
+                "comment": comment, "ready": ready, "moved": moved,
+            })
+            if target == "To Do" and hasattr(repository, "clear_epic_reopen_requests"):
+                repository.clear_epic_reopen_requests(key)
+            current_epic["status"] = status
+            epic["status"] = status
+        retry_epic_transition_followups(ctx)
+    except Exception as error:  # noqa: BLE001 - the accepted child transition must not fail on epic follow-up
         log.warning("could not reconcile epic %s: %s", key, error)
+
+
+def _latest_moves(repository, project: str, fallback: dict[str, datetime] | None) -> dict[str, datetime]:
+    """Load current move timestamps, preserving caller-provided data for repository test doubles."""
+    latest = dict(fallback or {})
+    if hasattr(repository, "latest_project_ticket_moves"):
+        for move in repository.latest_project_ticket_moves(project):
+            if move.ticket not in latest or move.ts > latest[move.ticket]:
+                latest[move.ticket] = move.ts
+    return latest
+
+
+def _refresh_epic_snapshot(repository, project: str, key: str, changed: set[str], first_seen: set[str],
+                           preexisting: set[str], latest_moves: dict[str, datetime] | None,
+                           epic: dict, children: list[dict], epics: list[dict]
+                           ) -> tuple[dict | None, list[dict], list[dict]]:
+    """Re-read the complete descendant tree under its lifecycle lock before any Jira write."""
+    if not hasattr(repository, "list_project_tickets_for_epic_reconcile"):
+        return epic, children, epics
+    rows = [asdict(row) if not isinstance(row, dict) else row
+            for row in repository.list_project_tickets_for_epic_reconcile((project,))]
+    by_key = {row["key"]: row for row in rows}
+    current_epic = by_key.get(key)
+    if current_epic is None:
+        return None, [], []
+    return (current_epic, children_for(current_epic, rows, by_key),
+            [row for row in rows if row.get("project") == project and
+             str(row.get("type") or "").strip().casefold() == "epic"])
+
+
+def retry_epic_transition_followups(ctx: ApplicationContext) -> None:
+    """Retry each persisted event, report, move, audit and comment independently."""
+    repository = ticket_repository_of(ctx)
+    if not hasattr(repository, "pending_epic_transition_followups"):
+        return
+    for followup in repository.pending_epic_transition_followups():
+        _deliver_followup(ctx, repository, followup, "status_event_done", _status_event)
+        if not followup.report_done:
+            _deliver_followup(ctx, repository, followup, "report_done", _report_followup)
+        if not followup.transition_event_done:
+            _deliver_followup(ctx, repository, followup, "transition_event_done", _transition_event)
+        if not followup.move_done:
+            _deliver_followup(ctx, repository, followup, "move_done", _move_followup)
+        if not followup.audit_done:
+            _deliver_followup(ctx, repository, followup, "audit_done", _audit_followup)
+        if not followup.comment_done:
+            _deliver_followup(ctx, repository, followup, "comment_done", _comment_followup)
+
+
+def _deliver_followup(ctx, repository, followup, field: str, deliver) -> None:
+    """Deliver one side effect and commit its completion marker atomically when possible."""
+    if getattr(followup, field):
+        return
+    try:
+        deliver(ctx, repository, followup)
+    except Exception as error:  # noqa: BLE001 - other pending effects must still be attempted
+        log.warning("could not deliver epic %s follow-up %s: %s", followup.ticket, field, error)
+
+
+def _status_event(ctx, repository, followup) -> None:
+    with ctx.db.transaction():
+        ctx.events.emit("ticket.status", ticket=followup.ticket, project=followup.project,
+                        outcome=followup.to_status, reason=f"from {followup.from_status}",
+                        from_status=followup.from_status, ready=followup.ready, source=followup.source)
+        repository.finish_epic_transition_followup((followup.id, "status_event_done"))
+
+
+def _report_followup(ctx, repository, followup) -> None:
+    project_lifecycle.report_done_epic(ctx, followup.project, followup.ticket,
+                                       lifecycle_key=f"epic-transition:{followup.id}")
+    with ctx.db.transaction():
+        repository.finish_epic_transition_followup((followup.id, "report_done"))
+
+
+def _transition_event(ctx, repository, followup) -> None:
+    with ctx.db.transaction():
+        ctx.events.emit("jira.transition", ticket=followup.ticket, account="control",
+                        outcome=followup.to_status, reason=followup.reason)
+        repository.finish_epic_transition_followup((followup.id, "transition_event_done"))
+
+
+def _move_followup(ctx, repository, followup) -> None:
+    from . import merge_flow
+    merge_flow.record_move(ctx, followup.ticket, followup.from_status, followup.to_status,
+                           merge_flow.EPIC_CHILD, followup.reason, at=followup.completed_at,
+                           followup_id=followup.id)
+
+
+def _audit_followup(ctx, repository, followup) -> None:
+    repository.finish_epic_followup_audit(followup)
+
+
+def _comment_followup(ctx, repository, followup) -> None:
+    ctx.jira.comment(followup.ticket, followup.comment)
+    with ctx.db.transaction():
+        repository.finish_epic_transition_followup((followup.id, "comment_done"))
 
 
 def reconcile(ctx: ApplicationContext, projects: list[str], changed: set[str], first_seen: set[str],
@@ -159,13 +283,17 @@ def reconcile(ctx: ApplicationContext, projects: list[str], changed: set[str], f
             children = children_for(epic, rows, by_key)
             target = target_status(epic, children, changed, first_seen, preexisting, latest_moves)
             if target:
-                apply_transition(ctx, project, epic, children, epics, target, source)
+                apply_transition(ctx, project, epic, children, epics, target, source,
+                                 changed, first_seen, preexisting, latest_moves)
+            elif hasattr(repository, "clear_epic_reopen_requests") and epic.get("status") == "Done":
+                repository.clear_epic_reopen_requests(epic["key"])
 
 
 def reconcile_from_watchdog(ctx: ApplicationContext) -> None:
     """Retry failed child-start, completion and recently reopened epic transitions."""
     if not ctx.jira:
         return
+    retry_epic_transition_followups(ctx)
     projects = [key for key, project in ctx.repo().projects.items() if not project.paused]
     repository = ticket_repository_of(ctx)
     latest_moves = {

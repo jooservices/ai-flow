@@ -25,7 +25,7 @@ def register_listeners(ctx, registry: Registry) -> None:
         """Reconcile parent epics and report newly completed epics after a ticket move."""
         ticket = ticket_repository_of(ctx).get(item.ticket_key)
         if ticket is not None and ticket.type.strip().casefold() != "epic" and ticket.parent_key:
-            projects = sorted(set(ctx.repo().projects) | {ticket.project})
+            projects = sorted(key for key, project in ctx.repo().projects.items() if not project.paused)
             epic_lifecycle.reconcile(ctx, projects, {ticket.key}, set(), set(), "child_transition")
         if (ticket is None or item.cause == "epic children" or item.to_status != "Done" or
                 item.from_status == "Done" or ticket.type.strip().casefold() != "epic"):

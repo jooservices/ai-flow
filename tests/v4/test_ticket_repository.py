@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aiflow.v4.control import api
-from aiflow.v4.control.features.tickets.models import Ticket, TicketMove
+from aiflow.v4.control.features.tickets.models import EpicTransitionFollowup, Ticket, TicketMove
 from aiflow.v4.control.features.tickets.repository import FakeTicketRepository, TicketRepository, ticket_repository_of
 
 from tests.v4.conftest import add_ticket
@@ -99,6 +99,23 @@ QUERY_ARGUMENTS = {
     "scale_restore_todo": ("TESTWP-1",),
     "list_project_tickets_for_epic_reconcile": ("TESTWP",),
     "latest_project_ticket_moves": ("TESTWP",),
+    "epic_keys_for_projects": (["TESTWP"],),
+    "lock_epic_lifecycle": ("TESTWP-1",),
+    "epic_ancestor_keys_for_ticket": ("TESTWP-1",),
+    "queue_epic_transition_followup": ({
+        "ticket": "TESTWP-1", "project": "TESTWP", "from_status": "In Progress", "to_status": "Done",
+        "source": "unit", "reason": "all children done", "child_count": 1,
+        "completed_at": datetime.now(timezone.utc), "comment": "done", "ready": False, "moved": True,
+    },),
+    "record_ticket_move": ((None, "TESTWP-1", "To Do", "In Progress", "flow", ""),),
+    "queue_epic_reopen_request": (("TESTWP-1", "TESTWP-2", "TESTWP", datetime.now(timezone.utc)),),
+    "clear_epic_reopen_requests": ("TESTWP-1",),
+    "pending_epic_transition_followups": (),
+    "finish_epic_transition_followup": ((1, "audit_done"),),
+    "finish_epic_followup_audit": (EpicTransitionFollowup(
+        1, "TESTWP-1", "TESTWP", "In Progress", "Done", "unit", "done", 1, datetime.now(timezone.utc),
+        "done", False, True, False, False, False, False, False, False),),
+    "finish_epic_followup_move": ((1,),),
     "verify_candidates": ([],),
     "triage_candidates": ([],),
     "intake_candidates": ([],),
@@ -132,14 +149,20 @@ def test_fake_repository_matches_every_named_ticket_query(name):
 
         def one(self, sql, params=()):
             self.calls.append(("one", sql, params))
+            if "RETURNING id" in sql:
+                return {"id": 1}
             return {"key": "TESTWP-1", "project": "TESTWP", "status": "To Do"}
 
         def all(self, sql, params=()):
             self.calls.append(("all", sql, params))
-            if "WITH RECURSIVE epic_tree" in sql:
-                return [ticket_row]
             if "SELECT t.key AS ticket, latest_move.ts" in sql:
                 return [move_row]
+            if "WITH RECURSIVE epic_tree" in sql:
+                return [ticket_row]
+            if "WITH RECURSIVE ancestors" in sql or "SELECT key FROM tickets WHERE project=ANY" in sql:
+                return [ticket_row]
+            if "FROM epic_transition_followups" in sql:
+                return []
             return [{"query": "all"}]
 
         def run(self, sql, params=()):
@@ -160,10 +183,15 @@ def test_fake_repository_matches_every_named_ticket_query(name):
     expected = getattr(TicketRepository(database), name)(*args)
     operation = database.calls[-1][0] if database.calls else "execute"
     response_by_operation = {"one": ticket_row, "all": [{"query": "all"}], "run": 1}
-    if name == "list_project_tickets_for_epic_reconcile":
+    if name == "queue_epic_transition_followup":
+        response_by_operation["one"] = {"id": 1}
+    if name in {"list_project_tickets_for_epic_reconcile", "epic_ancestor_keys_for_ticket",
+                "epic_keys_for_projects"}:
         response_by_operation["all"] = [ticket_row]
     elif name == "latest_project_ticket_moves":
         response_by_operation["all"] = [move_row]
+    elif name == "pending_epic_transition_followups":
+        response_by_operation["all"] = []
     responses = {name: response_by_operation[operation]} if operation in response_by_operation else {}
     fake = FakeTicketRepository(tickets=[ticket_row], responses=responses)
 
@@ -181,7 +209,7 @@ def test_epic_reconcile_repository_returns_frozen_tickets_and_moves(db):
     repository = TicketRepository(db)
 
     tickets = repository.list_project_tickets_for_epic_reconcile(("TESTWP",))
-    moves = repository.latest_project_ticket_moves("OTHER")
+    moves = repository.latest_project_ticket_moves("TESTWP")
 
     by_key = {ticket.key: ticket for ticket in tickets}
     assert isinstance(by_key["TESTWP-710"], Ticket)
@@ -189,6 +217,26 @@ def test_epic_reconcile_repository_returns_frozen_tickets_and_moves(db):
             by_key["TESTWP-710"].type) == ("TESTWP", "In Progress", "Epic")
     assert by_key["OTHER-711"].parent_key == "TESTWP-710"
     assert moves == [TicketMove(ticket="OTHER-711", ts=moves[0].ts)]
+
+
+def test_epic_followup_repository_persists_and_loads_transition_work(db):
+    add_ticket(db, "TESTWP-712", status="In Progress")
+    db.run("UPDATE tickets SET type='Epic' WHERE key=%s", ("TESTWP-712",))
+    repository = TicketRepository(db)
+
+    with db.transaction():
+        followup_id = repository.queue_epic_transition_followup({
+            "ticket": "TESTWP-712", "project": "TESTWP", "from_status": "In Progress", "to_status": "Done",
+            "source": "unit", "reason": "all children done", "child_count": 1,
+            "completed_at": datetime.now(timezone.utc), "comment": "epic done", "ready": False, "moved": True,
+        })
+
+    pending = repository.pending_epic_transition_followups()
+    assert pending[0].id == followup_id and pending[0].ticket == "TESTWP-712"
+    assert pending[0].report_done is False and pending[0].comment_done is False
+
+    repository.finish_epic_transition_followup((followup_id, "report_done"))
+    assert repository.pending_epic_transition_followups()[0].report_done is True
 
 
 def test_route_uses_fake_repository_injected_through_application_context(ctx):

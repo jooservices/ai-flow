@@ -1,6 +1,8 @@
 """The listeners of TicketMoved (JAIF-471): epic completion report and the human-review notice."""
 from aiflow.v4.control import merge_flow, projects as project_lifecycle
+from aiflow.v4.control import epic_lifecycle
 from aiflow.v4.control.platform.events import wiring
+from aiflow.v4.core.controlrepo import Project
 
 from tests.v4.conftest import add_ticket
 
@@ -62,3 +64,22 @@ def test_entering_human_review_notifies_and_staying_in_it_does_not(ctx, db, monk
     _deliver(ctx)
 
     assert calls == ["TESTWP-14"]
+
+
+def test_late_child_move_does_not_reintroduce_a_paused_or_removed_project(ctx, db, monkeypatch):
+    from types import SimpleNamespace
+
+    add_ticket(db, "OTHER-15")
+    db.run("UPDATE tickets SET parent_key=%s WHERE key=%s", ("TESTWP-10", "OTHER-15"))
+    active = Project(key="TESTWP", repo="jooservices/ai-flow")
+    paused = Project(key="OTHER", repo="jooservices/ai-flow", paused=True)
+    monkeypatch.setattr(ctx, "repo", lambda: SimpleNamespace(projects={"TESTWP": active, "OTHER": paused}))
+    reconciled = []
+    monkeypatch.setattr(epic_lifecycle, "reconcile", lambda *args: reconciled.append(args))
+
+    merge_flow.record_move(ctx, "OTHER-15", "To Do", "In Progress", merge_flow.FLOW)
+    _deliver(ctx)
+
+    assert len(reconciled) == 1
+    assert reconciled[0][1] == ["TESTWP"]
+    assert reconciled[0][2] == {"OTHER-15"}

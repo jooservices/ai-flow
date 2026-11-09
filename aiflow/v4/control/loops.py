@@ -80,7 +80,7 @@ def _report_newly_mirrored_epic(ctx: ApplicationContext, ticket: dict, old: dict
 
 
 def _sync_jira_issue(ctx: ApplicationContext, issue: dict, jira_flow_actor: str,
-                     changed_ticket_keys: set[str], first_seen_ticket_keys: set[str]) -> None:
+                     changed_ticket_keys: set[str], first_seen_ticket_keys: set[str]) -> dict | None:
     """Mirror one Jira issue and record its status, hierarchy and operator changes."""
     ticket = ctx.jira.normalize(issue)
     old = ticket_repository_of(ctx).get_ticket_sync_fields((ticket['key'],))
@@ -102,7 +102,6 @@ def _sync_jira_issue(ctx: ApplicationContext, issue: dict, jira_flow_actor: str,
     _mirror_ticket(ctx, ticket, done_at)
     if not old:
         project_lifecycle.reopen_for_new_ticket(ctx, ticket["project"], ticket["key"])
-    _report_newly_mirrored_epic(ctx, ticket, old)
     if old and old["status"] != ticket["status"]:
         merge_flow.record_move(ctx, ticket["key"], old["status"], ticket["status"], merge_flow.PERSON,
                                "moved in Jira", at=ticket.get("status_changed_at"))
@@ -111,6 +110,7 @@ def _sync_jira_issue(ctx: ApplicationContext, issue: dict, jira_flow_actor: str,
         ctx.events.emit("ticket.status", ticket=ticket["key"], project=ticket["project"],
                         outcome=ticket["status"], reason=f"from {old['status']}" if old else "first seen",
                         from_status=old["status"] if old else "", ready=ready, source="jira_sync")
+    return ticket if ticket["type"] == "Epic" and ticket["status"] == "Done" and not old else None
 
 
 def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
@@ -138,9 +138,21 @@ def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
         jira_flow_actor = ctx.jira.current_account_id()
     except Exception:  # noqa: BLE001 - no authenticated identity means external history cannot be classified safely
         jira_flow_actor = ""
-    for issue in search(jql + " ORDER BY updated DESC"):
-        _sync_jira_issue(ctx, issue, jira_flow_actor, changed_ticket_keys, first_seen_ticket_keys)
-        n += 1
+    issues = list(search(jql + " ORDER BY updated DESC"))
+    newly_done_epics = []
+    repository = ticket_repository_of(ctx)
+    # Apply the completed Jira result set atomically so the watchdog cannot read a partial descendant tree.
+    with ctx.db.transaction():
+        for epic_key in repository.epic_keys_for_projects(keys):
+            repository.lock_epic_lifecycle(epic_key)
+        for issue in issues:
+            newly_done = _sync_jira_issue(ctx, issue, jira_flow_actor,
+                                          changed_ticket_keys, first_seen_ticket_keys)
+            if newly_done:
+                newly_done_epics.append(newly_done)
+            n += 1
+    for ticket in newly_done_epics:
+        _report_newly_mirrored_epic(ctx, ticket, None)
     _reconcile_epics(ctx, keys, changed_ticket_keys, first_seen_ticket_keys, preexisting_ticket_keys)
     try:
         knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site, ticket_repository=ticket_repository_of(ctx))

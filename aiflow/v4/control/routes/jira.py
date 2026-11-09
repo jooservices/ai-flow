@@ -38,17 +38,25 @@ def jira_transition(request: Request, key: str, body: JiraWrite, node: str = Dep
         route_deps.audit(ctx, "jira", "transition", key, body.run_id, body.fence, run["account_id"], False,
               "an impact run only comments", {"to": body.to})
         raise HTTPException(403, "an impact run only comments; the owner moves the ticket")
-    previous = ticket_repository_of(ctx).get_ticket_transition_fields((key,))
-    status = ctx.jira.transition_to(key, body.to)
-    ticket_repository_of(ctx).transition_status_stamping_done_at((status, status, key))
-    route_deps.audit(ctx, "jira", "transition", key, body.run_id, body.fence, run["account_id"], True, status, {"to": body.to})
-    ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
-                    node=node, outcome=status)
-    if previous and previous["status"] != status:
-        merged_by_verify = run["step"] == "verify" and status == "Done"
-        merge_flow.record_move(ctx, key, previous["status"], status,
-                               merge_flow.FLOW_MERGE if merged_by_verify else merge_flow.FLOW,
-                               f"{run['step']} run by {run['account_id']}")
+    repository = ticket_repository_of(ctx)
+    previous = repository.get_ticket_transition_fields((key,))
+    ancestors = repository.epic_ancestor_keys_for_ticket(key) if hasattr(repository, "epic_ancestor_keys_for_ticket") else []
+    if not ancestors and previous and previous.get("parent_key"):
+        ancestors = [previous["parent_key"]]
+    with ctx.db.transaction():
+        for epic_key in ancestors:
+            repository.lock_epic_lifecycle(epic_key)
+        status = ctx.jira.transition_to(key, body.to)
+        repository.transition_status_stamping_done_at((status, status, key))
+        route_deps.audit(ctx, "jira", "transition", key, body.run_id, body.fence, run["account_id"], True,
+                         status, {"to": body.to})
+        ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence,
+                        account=run["account_id"], node=node, outcome=status)
+        if previous and previous["status"] != status:
+            merged_by_verify = run["step"] == "verify" and status == "Done"
+            merge_flow.record_move(ctx, key, previous["status"], status,
+                                   merge_flow.FLOW_MERGE if merged_by_verify else merge_flow.FLOW,
+                                   f"{run['step']} run by {run['account_id']}")
     return {"status": status}
 
 

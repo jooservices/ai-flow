@@ -71,6 +71,33 @@ class ManagedAccountUpdateBody(BaseModel):
     action: Literal["pause", "resume"] | None = None
 
 
+class AccountBody(BaseModel):
+    id: str = Field(min_length=2, max_length=40)
+    provider: str = Field(min_length=2, max_length=24)
+    tier: str = Field(default="middle", pattern=r"^(junior|middle|senior)$")
+    roles: list[str] = Field(default_factory=lambda: ["dev", "verify"], max_length=10)
+    explicit_only: bool = False
+    session_limit: int = Field(default=1, ge=1, le=50)
+
+
+class LimitBody(BaseModel):
+    session_limit: int = Field(ge=1, le=50)
+
+
+class MachineBody(BaseModel):
+    node: str = Field(min_length=1, max_length=63)
+
+
+class SigninPromptBody(BaseModel):
+    link: str = Field(max_length=500)
+    code: str = Field(max_length=64)
+    expires_in_s: int = Field(default=900, ge=60, le=3600)
+
+
+class SigninCompleteBody(BaseModel):
+    request_id: str = Field(min_length=1, max_length=160)
+
+
 class NodeOperationBody(BaseModel):
     model_config = {"extra": "forbid"}
     action: Literal["install", "repair"]

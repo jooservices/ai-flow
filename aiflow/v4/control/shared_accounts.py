@@ -15,31 +15,26 @@ Design (docs/v4/shared-accounts.md):
 """
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request
-from pydantic import BaseModel, Field
+from fastapi import FastAPI
 
 from .capacity import reported_run_tokens, reservation_tokens, unresolved_run_reservation_tokens
 from ..core.controlrepo import Account, ControlRepo
 from .application_context import ApplicationContext
 from .db import J
 from .repositories import claim_guards
-from . import shared_accounts_routes as account_route_work
-from .features.fleet.events import (SharedAccountCreated, SharedAccountMachineEnabled, SharedAccountMachineRemoved,
-                                    SharedAccountRemoved, SharedAccountSessionLimitSet, SharedAccountSignInRetried)
+# Retain request-body import names for existing control consumers.
+from .features.fleet.bodies import AccountBody, LimitBody, MachineBody, SigninCompleteBody, SigninPromptBody  # noqa: F401
+from .features.fleet import shared_sessions_service
+from .features.fleet.shared_sessions_service import ACCOUNT_ID, CODE, PROVIDER  # noqa: F401
 from .platform.events.wiring import publish_for
 
 NODE_ONLINE_S = 75
-ACCOUNT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
-PROVIDER = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
-CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 -]{3,63}$")
-
-
 def overlay(repo: ControlRepo, db) -> ControlRepo:
     """The control repo plus the accounts and machines managed in Command Center (a copy; the snapshot is shared)."""
     try:
@@ -511,135 +506,15 @@ def machines_views(db, accounts: list[Account], node_status: dict[str, str], *,
     return result
 
 
-# --- request bodies ---------------------------------------------------------------------------------------
-class AccountBody(BaseModel):
-    id: str = Field(min_length=2, max_length=40)
-    provider: str = Field(min_length=2, max_length=24)
-    tier: str = Field(default="middle", pattern=r"^(junior|middle|senior)$")
-    roles: list[str] = Field(default_factory=lambda: ["dev", "verify"], max_length=10)
-    explicit_only: bool = False
-    session_limit: int = Field(default=1, ge=1, le=50)
-
-
-class LimitBody(BaseModel):
-    session_limit: int = Field(ge=1, le=50)
-
-
-class MachineBody(BaseModel):
-    node: str = Field(min_length=1, max_length=63)
-
-
-class SigninPromptBody(BaseModel):
-    link: str = Field(max_length=500)
-    code: str = Field(max_length=64)
-    expires_in_s: int = Field(default=900, ge=60, le=3600)
-
-
-class SigninCompleteBody(BaseModel):
-    request_id: str = Field(min_length=1, max_length=160)
-
-
 def _account_view(ctx: ApplicationContext, account: Account, *, include_signin: bool = False) -> dict[str, Any]:
-    return account_route_work.account_view(
-        ctx, account, include_signin=include_signin, online_nodes_fn=online_nodes,
-        running_by_node_fn=running_by_node, machines_view_fn=machines_view)
+    return shared_sessions_service.account_view(ctx.db, account, include_signin=include_signin,
+                                                 online_nodes_fn=online_nodes,
+                                                 running_by_node_fn=running_by_node,
+                                                 machines_view_fn=machines_view)
 
 
 def install(app: FastAPI, ctx: ApplicationContext, console_user, audit, node_auth) -> None:
-    sync_accounts = app.state.sync_accounts
-
-    def sync() -> list[str]:
-        return account_route_work.sync_managed_accounts(ctx, sync_accounts)
-
-    app.state.sync_accounts = sync
-    install_account_listing_and_creation(app, ctx, console_user, sync)
-    install_session_limit_route(app, ctx, console_user)
-    install_machine_enable_and_retry_routes(app, ctx, console_user, sync)
-    install_machine_removal_route(app, ctx, console_user)
-    install_account_removal_route(app, ctx, console_user)
-    install_node_signin_routes(app, ctx, node_auth)
-
-
-def install_account_listing_and_creation(app, ctx, console_user, sync_accounts) -> None:
-    @app.get("/v1/shared-accounts")
-    def list_accounts(request: Request) -> dict:
-        user = console_user(request, {"console.read"})
-        include_signin = "nodes.manage" in user.permissions or "*" in user.permissions
-        return {"accounts": [_account_view(ctx, account, include_signin=include_signin)
-                              for account in ctx.repo().accounts]}
-
-    @app.post("/v1/shared-accounts", status_code=201)
-    def create_account(body: AccountBody, request: Request) -> dict:
-        user = console_user(request, {"nodes.manage"}, target="account", action="create", node=body.id)
-        account_route_work.create_account_record(ctx, body, user, sync_accounts, ACCOUNT_ID, PROVIDER)
-        publish_for(ctx, SharedAccountCreated(account=body.id, actor=user.subject))
-        return _account_view(ctx, account_route_work.account_or_404(ctx, body.id), include_signin=True)
-
-
-def install_session_limit_route(app, ctx, console_user) -> None:
-    @app.put("/v1/shared-accounts/{account_id}/session-limit")
-    def set_limit(account_id: str, body: LimitBody, request: Request) -> dict:
-        user = console_user(request, {"nodes.manage"}, target="account", action="session_limit", node=account_id)
-        account = account_route_work.set_session_limit_record(ctx, account_id, body, user)
-        publish_for(ctx, SharedAccountSessionLimitSet(account=account.id, actor=user.subject,
-                                                      session_limit=body.session_limit))
-        return _account_view(ctx, account_route_work.account_or_404(ctx, account_id), include_signin=True)
-
-
-def install_machine_enable_and_retry_routes(app, ctx, console_user, sync_accounts) -> None:
-    @app.post("/v1/shared-accounts/{account_id}/machines", status_code=201)
-    def enable_machine(account_id: str, body: MachineBody, request: Request) -> dict:
-        user = console_user(request, {"nodes.manage"}, target="account", action="enable_machine", node=account_id)
-        account = account_route_work.enable_machine_record(ctx, account_id, body, user, sync_accounts)
-        publish_for(ctx, SharedAccountMachineEnabled(account=account.id, actor=user.subject, node=body.node))
-        ctx.events.emit("account.machine_enabled", account=account.id, node=body.node, outcome="pending")
-        return _account_view(ctx, account_route_work.account_or_404(ctx, account_id), include_signin=True)
-
-    @app.post("/v1/shared-accounts/{account_id}/machines/{node}/signin")
-    def retry_signin(account_id: str, node: str, request: Request) -> dict:
-        """Start a fresh sign-in attempt on one machine: a new request id makes its agent run the provider login
-        again (a failed or expired attempt otherwise leaves the machine waiting without a link)."""
-        user = console_user(request, {"nodes.manage"}, target="account", action="retry_signin", node=account_id)
-        account = account_route_work.retry_signin_record(ctx, account_id, node, user)
-        publish_for(ctx, SharedAccountSignInRetried(account=account.id, actor=user.subject, node=node))
-        return _account_view(ctx, account_route_work.account_or_404(ctx, account_id), include_signin=True)
-
-
-def install_machine_removal_route(app, ctx, console_user) -> None:
-    @app.delete("/v1/shared-accounts/{account_id}/machines/{node}")
-    def remove_machine(account_id: str, node: str, request: Request, confirm: bool = False) -> dict:
-        user = console_user(request, {"nodes.manage"}, target="account", action="remove_machine", node=account_id)
-        account, removed_account = account_route_work.remove_machine_record(ctx, account_id, node, user, confirm)
-        publish_for(ctx, SharedAccountMachineRemoved(account=account.id, actor=user.subject, node=node,
-                                                     account_removed=removed_account))
-        ctx.events.emit("account.machine_removed", account=account.id, node=node, outcome="removed")
-        return {"account": account.id, "node": node, "account_removed": removed_account,
-                "machines": [] if removed_account else [name for name in account.machines if name != node]}
-
-
-def install_account_removal_route(app, ctx, console_user) -> None:
-    @app.delete("/v1/shared-accounts/{account_id}")
-    def remove_account(account_id: str, request: Request, confirm: bool = False) -> dict:
-        user = console_user(request, {"nodes.manage"}, target="account", action="remove", node=account_id)
-        account, retained = account_route_work.remove_account_record(ctx, account_id, user, confirm)
-        publish_for(ctx, SharedAccountRemoved(account=account.id, actor=user.subject, source_retained=retained))
-        ctx.events.emit("account.removed", account=account.id, outcome="removed")
-        return {"account": account.id, "removed": True, "source_retained": retained,
-                "machines": list(account.machines)}
-
-
-def install_node_signin_routes(app, ctx, node_auth) -> None:
-    @app.post("/v1/accounts/{account_id}/signin-prompt")
-    def signin_prompt(account_id: str, body: SigninPromptBody, node: str = Depends(node_auth)) -> dict:
-        """A machine reports the provider's sign-in link and device code so Command Center can show them. The
-        credential itself is created by the provider CLI on the machine and never sent here."""
-        return account_route_work.signin_prompt_record(ctx, account_id, body, node, CODE, datetime)
-
-    @app.post("/v1/accounts/{account_id}/signin-complete")
-    def signin_complete(account_id: str, body: SigninCompleteBody, node: str = Depends(node_auth)) -> dict:
-        """A successful provider login unlocks the local worker's credential probe for this machine."""
-        account, emit_completed = account_route_work.begin_signin_complete(ctx, account_id, body, node)
-        if emit_completed:
-            ctx.events.emit("account.machine_signed_in", account=account.id, node=node, outcome="completed")
-        account_route_work.finish_signin_complete(ctx, account.id)
-        return {"completed": True, "account": account.id, "node": node}
+    from .features.fleet.routes_shared_sessions import install_shared_session_routes
+    helpers = SimpleNamespace(online_nodes=online_nodes, running_by_node=running_by_node,
+                              machines_view=machines_view, publish_for=publish_for, datetime=datetime)
+    install_shared_session_routes(app, ctx, console_user, node_auth, helpers)

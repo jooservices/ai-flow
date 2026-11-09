@@ -13,6 +13,7 @@ CANARY_FILE=$RELEASES/CANARY.json
 REJECTED_FILE=$RELEASES/CANARY_REJECTED
 FAILURES_FILE=$RELEASES/PROMOTION_FAILURES.json
 CUR=$(cat "$CURRENT_FILE" 2>/dev/null || true)
+# shellcheck disable=SC2034 # assigned from the settings but not read in this script; the control plane judges the age
 CANARY_MIN_AGE_S=${AIFLOW4_CANARY_MIN_AGE_S:-300}
 CANARY_MIN_RUNS=${AIFLOW4_CANARY_MIN_RUNS:-3}
 CANARY_MAX_AGE_S=${AIFLOW4_CANARY_MAX_AGE_S:-900}
@@ -26,6 +27,7 @@ load_canary_settings() {
   IFS=$'\t' read -r age runs max < <(python3 -c 'import json,sys
 d=json.load(sys.stdin).get("control_canary",{}).get("settings") or {}
 print(d.get("minimum_age_s") or "", d.get("minimum_runs") if d.get("minimum_runs") is not None else "", d.get("maximum_age_s") or "", sep="\t")' <<<"$state") || return 0
+  # shellcheck disable=SC2034 # see the default above
   [ -n "$age" ] && CANARY_MIN_AGE_S=$age
   [ -n "$runs" ] && CANARY_MIN_RUNS=$runs
   [ -n "$max" ] && CANARY_MAX_AGE_S=$max
@@ -234,7 +236,6 @@ else
   [ -n "$TARGET" ] || { echo "no versioned release tag on master"; exit 0; }
   [ "$TARGET" != "$CUR" ] || exit 0
   ensure_host_layout || exit 1
-  REJECTED=$(cat "$REJECTED_FILE" 2>/dev/null || true)
   TRY=$(promotion_py - "$REJECTED_FILE" "$FAILURES_FILE" "$TARGET" <<'P'
 import sys
 from pathlib import Path

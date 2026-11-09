@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared artifact setup for install-smoke.sh. Kept separate so the 3-argument
 # first-release fallback can be exercised without starting Docker containers.
 prepare_install_smoke_artifacts() {
@@ -39,6 +40,7 @@ prepare_install_smoke_artifacts() {
     parent=$(git -C "$repo_root" rev-parse "${GITHUB_SHA:?GITHUB_SHA is required for a tagged install smoke test}^")
     PREVIOUS_VERSION=$parent
     PREVIOUS_TARBALL="$artifacts_dir/aiflow4-baseline-$parent.tar.gz"
+    # shellcheck disable=SC2034 # read by install-smoke.sh, which sources this file
     BASELINE=1
     git -C "$repo_root" archive --format=tar.gz --output="$PREVIOUS_TARBALL" "$parent" \
       aiflow pyproject.toml uv.lock prompts deploy

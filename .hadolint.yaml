@@ -1,0 +1,6 @@
+# Hadolint rules for the v4 Dockerfiles (JAIF-572). Findings of severity warning and above fail the check.
+failure-threshold: warning
+ignored:
+  # Ubuntu package versions disappear from the archive within weeks; pinning them would break every rebuild.
+  # The base image is pinned instead (Dependabot keeps it current).
+  - DL3008

@@ -13,7 +13,10 @@ if [[ ! $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; the
 fi
 NODE_ENV=${AIFLOW4_NODE_ENV:-/etc/aiflow/node.env}
 if [ -r "$NODE_ENV" ]; then  # systemd-run does not pass the agent's environment
-  set -a; . "$NODE_ENV"; set +a
+  set -a
+  # shellcheck source=/dev/null
+  . "$NODE_ENV"
+  set +a
 fi
 CONTROL_URL=${AIFLOW4_CONTROL_URL:-http://10.44.0.10}
 NODE_NAME=${AIFLOW4_NODE_NAME:-$(uname -n)}

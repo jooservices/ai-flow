@@ -160,6 +160,11 @@ def test_failed_promotion_alert_records_cause_and_rejects_after_two_strikes(tmp_
         first, calls1, releases = _run_failed_promotion(tmp_path / "promo", script, env_file, control)
         assert first.returncode == 1, first.stdout + first.stderr
         assert "unhealthy; rolling back" in first.stdout
+        notification = next(call for call in calls1 if "aiflow4 notify" in call)
+        assert "--severity critical" in notification
+        assert "[CRITICAL] AI Flow:" in notification and "promotion of v4.2.0 failed" in notification
+        assert all(label in notification for label in (
+            "Failed step: deploy.", "Error:", "Stuck build: v4.2.0", "Merged changes not live:"))
         state = json.loads((releases / promotion.FAILURES_NAME).read_text(encoding="utf-8"))
         assert state["count"] == 1 and state["exhausted"] is False
         assert state["build"] == "v4.2.0"
@@ -187,5 +192,7 @@ def test_docs_describe_upgrade_layout_and_topic_is_linked():
     doc = (ROOT / "docs/v4/upgrade-layout.md").read_text(encoding="utf-8")
     assert "ensure_runtime_layout" in doc
     assert "two" in doc.lower() and "same cause" in doc.lower()
+    readme = (ROOT / "deploy/v4/README.md").read_text(encoding="utf-8")
+    assert "[Upgrade host layout and promotion failures](../../docs/v4/upgrade-layout.md)" in readme
     topic = (ROOT / "deploy/v4/topics/upgrade-layout.md").read_text(encoding="utf-8").strip()
     assert topic.startswith("- [") and "upgrade-layout.md" in topic

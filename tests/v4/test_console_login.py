@@ -448,8 +448,8 @@ def seed_args(path, action="seed"):
 
 
 def test_cli_seed_writes_the_password_to_a_private_file_prints_nothing_secret_and_is_idempotent(
-        ctx, tmp_path, capsys, test_database_url):
-    settings = SimpleNamespace(database_url=test_database_url)
+        ctx, tmp_path, capsys):
+    settings = SimpleNamespace(database_url=ctx.db.url)
     pw = tmp_path / "pw"
     assert cli._console_user(seed_args(pw), settings) == 0
     secret = pw.read_text().strip()
@@ -463,28 +463,28 @@ def test_cli_seed_writes_the_password_to_a_private_file_prints_nothing_secret_an
     assert login.verify_password(secret, before["password_hash"])
 
 
-def test_cli_seed_makes_an_existing_password_file_private(ctx, tmp_path, test_database_url):
+def test_cli_seed_makes_an_existing_password_file_private(ctx, tmp_path):
     pw = tmp_path / "pw"
     pw.write_text("old contents that are much longer than a password\n")
     os.chmod(pw, 0o644)
-    assert cli._console_user(seed_args(pw), SimpleNamespace(database_url=test_database_url)) == 0
+    assert cli._console_user(seed_args(pw), SimpleNamespace(database_url=ctx.db.url)) == 0
     assert stat.S_IMODE(os.stat(pw).st_mode) == 0o600
     assert login.verify_password(pw.read_text().strip(), ctx.db.one("SELECT password_hash FROM console_users")["password_hash"])
 
 
-def test_cli_seed_refuses_a_symlink_and_creates_no_user(ctx, tmp_path, capsys, test_database_url):
+def test_cli_seed_refuses_a_symlink_and_creates_no_user(ctx, tmp_path, capsys):
     target = tmp_path / "elsewhere"
     target.write_text("keep me\n")
     link = tmp_path / "pw"
     link.symlink_to(target)
-    assert cli._console_user(seed_args(link), SimpleNamespace(database_url=test_database_url)) == 2
+    assert cli._console_user(seed_args(link), SimpleNamespace(database_url=ctx.db.url)) == 2
     assert target.read_text() == "keep me\n" and link.is_symlink()
     assert ctx.db.one("SELECT count(*) AS n FROM console_users")["n"] == 0
     assert "nothing changed" in capsys.readouterr().err
 
 
-def test_password_file_is_written_before_the_commit(ctx, tmp_path, monkeypatch, test_database_url):
-    settings = SimpleNamespace(database_url=test_database_url)
+def test_password_file_is_written_before_the_commit(ctx, tmp_path, monkeypatch):
+    settings = SimpleNamespace(database_url=ctx.db.url)
     seen = []
 
     def failing(path, password):

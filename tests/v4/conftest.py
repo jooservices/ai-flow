@@ -20,6 +20,7 @@ from aiflow.v4.control.db import DB, J
 from aiflow.v4.control.events import Events
 from aiflow.v4.control.jira import Jira
 from aiflow.v4.control import licensing
+from aiflow.v4.core import testdb
 from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.fencing import Leases
 from aiflow.v4.core.settings import Settings
@@ -148,14 +149,40 @@ def test_database_url():
             pytest.fail("local tests require a dedicated *_test or *_wt<id> database")
     yield DATABASE_URL
 
+@pytest.fixture(scope="session")
+def migrated_template(test_database_url):
+    """One database, migrated once per session: every test copies it instead of migrating a schema of its own.
+    It starts from AIFLOW4_TEST_DATABASE_TEMPLATE (a database that already carries pgvector) when that is set."""
+    name = testdb.create_from_template(test_database_url, os.environ.get("AIFLOW4_TEST_DATABASE_TEMPLATE") or None)
+    try:
+        template = DB(testdb.url_for(test_database_url, name), min_size=1, max_size=1)
+        try:
+            template.migrate()
+        finally:
+            template.close()
+        yield name
+    finally:
+        testdb.drop(test_database_url, name)
+
+
+@pytest.fixture(scope="session")
+def database_dropper(test_database_url):
+    """Drops the databases of finished tests on a background thread, and waits for it at the end of the session."""
+    dropper = testdb.BackgroundDropper(test_database_url)
+    yield dropper
+    dropper.wait()
+
+
 @pytest.fixture
-def db(test_database_url):
-    d = DB(test_database_url)
-    with d.pool.connection() as c:
-        c.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-    d.migrate()
-    yield d
-    d.close()
+def db(test_database_url, migrated_template, database_dropper):
+    """A migrated database of this test alone; it is dropped in the background after the test."""
+    name = testdb.create_from_template(test_database_url, migrated_template)
+    d = DB(testdb.url_for(test_database_url, name))
+    try:
+        yield d
+    finally:
+        d.close()
+        database_dropper.submit(name)
 
 
 @pytest.fixture

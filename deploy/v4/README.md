@@ -12,6 +12,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Migration design note](../../docs/v4/migration-design-note.md): every migration starts with a five-part design note; older migrations sit in a shrink-only baseline
 - [Explained broad exception handlers, first batch](../../docs/v4/broad-except-explained.md): ten handlers carry their reason, one is narrowed; behaviour unchanged
 - [Browser journeys path filter](../../docs/v4/browser-path-filter.md): the browser journeys run only when a pull request changes the console or a browser test, and `Test (v4)` accepts their skip
+- [Console machine join diagnostics](../../docs/v4/console-machine-join-diagnostics.md): the administrator journey checks the submitted machine name, role, project, exact request path and status while keeping failure output sanitized
 - [Focused developer runs and reused pipeline checks](../../docs/v4/focused-runs.md): a developer run runs the tests covering its changes and verification skips pipeline checks that are already green
 - [Fleet System check routes](../../docs/v4/fleet-system-check-routes.md): the System check report, manual run and support bundle routes live in the fleet feature
 - [Deploy lint](../../docs/v4/deploy-lint.md): hadolint for the Dockerfiles and shellcheck for the shell scripts; runs on pull requests that change `deploy/`, `scripts/`, `.hadolint.yaml` or the workflow, and always in the merge queue

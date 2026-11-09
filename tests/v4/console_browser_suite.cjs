@@ -4,6 +4,10 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require(process.env.AIFLOW4_CONSOLE_BROWSER_MODULE);
+const {
+  assertMachineJoinDiagnostics,
+  waitForMachineJoinResponse,
+} = require('./browser_e2e/machine_join_diagnostics.cjs');
 
 const config = JSON.parse(fs.readFileSync(process.env.AIFLOW4_CONSOLE_BROWSER_CONFIG, 'utf8'));
 const runInboxMessages = Object.create(null);
@@ -476,21 +480,46 @@ async function exerciseReviews(page, mode) {
   }
 }
 
-async function exerciseMachineAndUserAdministration(page, mode) {
+async function exerciseMachineJoin(page, mode) {
   await page.getByRole('tab', { name: 'Machines and AI', exact: true }).click();
   await page.getByRole('heading', { name: 'Machines and AI', exact: true }).waitFor({ state: 'visible' });
   await page.getByRole('button', { name: 'Add a machine', exact: true }).click();
-  await page.getByLabel('Machine name').fill(`jaif252-${mode}-machine`);
-  await page.getByLabel('Machine role', { exact: true }).selectOption('worker');
-  await page.getByLabel('Machine project', { exact: true }).selectOption(config.project);
-  const joinResponse = page.waitForResponse((item) => item.request().method() === 'POST' &&
-    new URL(item.url()).pathname.endsWith('/join-command'));
-  await page.getByRole('button', { name: 'Show one-time command', exact: true }).click();
-  const joinResult = await joinResponse;
-  const joinBody = await joinResult.json();
-  assert.equal(joinResult.status(), 200, `Add machine did not create its one-time join command: ${joinBody.detail || ''}`);
+  const expectedJoin = { name: `jaif252-${mode}-machine`, role: 'worker', project: config.project };
+  const machineName = page.getByLabel('Machine name');
+  const machineRole = page.getByLabel('Machine role', { exact: true });
+  const machineProject = page.getByLabel('Machine project', { exact: true });
+  await machineName.fill(expectedJoin.name);
+  await machineRole.selectOption(expectedJoin.role);
+  await machineProject.selectOption(expectedJoin.project);
+  const submittedForm = {
+    name: await machineName.inputValue(),
+    role: await machineRole.inputValue(),
+    project: await machineProject.inputValue(),
+  };
+  const joinResponse = waitForMachineJoinResponse({
+    page,
+    mode,
+    expected: expectedJoin,
+    form: submittedForm,
+  });
+  const [joinResult] = await Promise.all([
+    joinResponse,
+    page.getByRole('button', { name: 'Show one-time command', exact: true }).click(),
+  ]);
+  const joinRequest = joinResult.request();
+  assertMachineJoinDiagnostics({
+    mode,
+    status: joinResult.status(),
+    expected: expectedJoin,
+    form: submittedForm,
+    pathname: new URL(joinRequest.url()).pathname,
+    postData: joinRequest.postData(),
+  });
   await page.getByRole('button', { name: 'Copy command', exact: true }).waitFor({ state: 'visible' });
+}
 
+async function exerciseMachineAndUserAdministration(page, mode) {
+  await exerciseMachineJoin(page, mode);
   const addAccount = page.getByRole('button', { name: 'Add AI account', exact: true }).first();
   await addAccount.click();
   await page.getByLabel('AI provider', { exact: true }).selectOption('codex');

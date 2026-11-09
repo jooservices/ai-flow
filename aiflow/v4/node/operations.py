@@ -64,6 +64,54 @@ class OperationError(RuntimeError):
     """A requested operation is unsupported or did not converge to the desired state."""
 
 
+class _InstallerBackupPreservationError(OperationError):
+    """A rollback backup could not be relocated, so its staging directory must be retained."""
+
+    def __init__(self, backup_path: Path, failures: list[tuple[str, BaseException]], *,
+                 replacement_error: OSError | None = None, restore_error: OSError | None = None):
+        self.backup_path = backup_path
+        self.failures = tuple(failures)
+        labels = {
+            "creating the preferred backup path": "preferred path creation",
+            "moving the backup to the preferred path": "preferred move",
+            "removing the empty preferred backup path": "preferred path cleanup",
+            "creating a unique backup directory": "unique path creation",
+            "moving the backup to a unique path": "unique move",
+            "copying the backup to a unique path": "copy",
+        }
+        details = ", ".join(f"{labels.get(action, action)}={type(error).__name__}"
+                             for action, error in failures)
+        message = f"Installer backup retained at {backup_path}; preservation={details}"
+        if replacement_error is not None and restore_error is not None:
+            message = (f"Installer backup retained at {backup_path}; "
+                       f"replacement={type(replacement_error).__name__}; "
+                       f"rollback={type(restore_error).__name__}; preservation={details}")
+        super().__init__(message)
+
+
+class _InstallerRollbackError(OperationError):
+    """A failed replacement kept its backup beside the installer for manual recovery."""
+
+    def __init__(self, backup_path: Path, replacement_error: OSError, restore_error: OSError):
+        self.backup_path = backup_path
+        self.replacement_error = replacement_error
+        self.restore_error = restore_error
+        self.cleanup_error: OSError | None = None
+        super().__init__(self._message())
+
+    def _message(self) -> str:
+        message = (f"Installer backup retained at {self.backup_path}; "
+                   f"replacement={type(self.replacement_error).__name__}; "
+                   f"rollback={type(self.restore_error).__name__}")
+        if self.cleanup_error is not None:
+            message += f"; staging cleanup={type(self.cleanup_error).__name__}"
+        return message
+
+    def note_cleanup_failure(self, error: OSError) -> None:
+        self.cleanup_error = error
+        self.args = (self._message(),)
+
+
 def _check_version(value: str, *, required: bool = False) -> str:
     version = str(value or "").strip()
     if required and not version:
@@ -143,20 +191,65 @@ def _server_installer_source(extract_dir: Path) -> Path:
     return candidates[0].parent.parent
 
 
+def _keep_installer_backup(backup_dir: Path, install_dir: Path,
+                           failures: list[tuple[str, BaseException]] | None = None) -> Path:
+    """Keep a backup at a reserved unique sibling path without replacing an older backup."""
+    preservation_failures = list(failures or ())
+    try:
+        kept_dir = Path(tempfile.mkdtemp(prefix=f"{install_dir.name}.previous-", dir=install_dir.parent))
+    except OSError as exc:
+        preservation_failures.append(("creating a unique backup directory", exc))
+        raise _InstallerBackupPreservationError(backup_dir, preservation_failures) from exc
+    try:
+        os.replace(backup_dir, kept_dir)
+    except OSError as move_error:
+        preservation_failures.append(("moving the backup to a unique path", move_error))
+        copied_dir = kept_dir / install_dir.name
+        try:
+            shutil.copytree(backup_dir, copied_dir, symlinks=True)
+        except (OSError, shutil.Error) as copy_error:
+            preservation_failures.append(("copying the backup to a unique path", copy_error))
+            shutil.rmtree(kept_dir, ignore_errors=True)
+            raise _InstallerBackupPreservationError(backup_dir, preservation_failures) from copy_error
+        return copied_dir
+    return kept_dir
+
+
+def _preserve_installer_backup(backup_dir: Path, install_dir: Path) -> Path:
+    """Prefer the documented .previous path, then use a reserved unique sibling path."""
+    kept_dir = install_dir.with_name(f"{install_dir.name}.previous")
+    failures: list[tuple[str, BaseException]] = []
+    try:
+        kept_dir.mkdir()
+    except OSError as create_error:
+        failures.append(("creating the preferred backup path", create_error))
+    else:
+        try:
+            os.replace(backup_dir, kept_dir)
+        except OSError as move_error:
+            failures.append(("moving the backup to the preferred path", move_error))
+            try:
+                kept_dir.rmdir()
+            except OSError as cleanup_error:
+                failures.append(("removing the empty preferred backup path", cleanup_error))
+        else:
+            return kept_dir
+    return _keep_installer_backup(backup_dir, install_dir, failures)
+
+
 def _restore_previous_installer(backup_dir: Path, install_dir: Path, replace_error: OSError) -> None:
-    """Move the previous installer back after a failed replacement, or keep it beside the install directory."""
+    """Restore the previous installer, or preserve it beside the install directory."""
     try:
         os.replace(backup_dir, install_dir)
     except OSError as restore_error:
-        # Outside the staging folder, so the staging cleanup cannot delete the only copy of the previous installer.
-        kept_dir = install_dir.with_name(f"{install_dir.name}.previous")
-        failure = (f"server-installer replacement failed ({type(replace_error).__name__}) and restoring "
-                   f"the previous installer failed ({type(restore_error).__name__})")
         try:
-            os.replace(backup_dir, kept_dir)
-        except OSError as keep_error:
-            raise OperationError(f"{failure}; the previous installer could not be preserved") from keep_error
-        raise OperationError(f"{failure}; the previous installer is kept at {kept_dir}") from restore_error
+            kept_dir = _preserve_installer_backup(backup_dir, install_dir)
+        except _InstallerBackupPreservationError as preserve_error:
+            raise _InstallerBackupPreservationError(
+                preserve_error.backup_path, list(preserve_error.failures),
+                replacement_error=replace_error, restore_error=restore_error,
+            ) from restore_error
+        raise _InstallerRollbackError(kept_dir, replace_error, restore_error) from restore_error
 
 
 def _replace_server_installer(install_dir: Path, source_dir: Path, staging: Path) -> None:
@@ -183,19 +276,39 @@ def _ensure_server_installer() -> None:
         return
     install_dir = SERVER_INSTALLER.parent.parent
     root = install_dir.parent
+    staging: Path | None = None
+    retain_staging = False
+    rollback_error: _InstallerRollbackError | None = None
     try:
         root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=f".{install_dir.name}-", dir=root) as tmp:
-            staging = Path(tmp)
-            extract_dir = staging / "extract"
-            extract_dir.mkdir()
-            source_dir = _server_installer_source(extract_dir)
-            _replace_server_installer(install_dir, source_dir, staging)
+        staging = Path(tempfile.mkdtemp(prefix=f".{install_dir.name}-", dir=root))
+        extract_dir = staging / "extract"
+        extract_dir.mkdir()
+        source_dir = _server_installer_source(extract_dir)
+        _replace_server_installer(install_dir, source_dir, staging)
+    except _InstallerBackupPreservationError:
+        retain_staging = True
+        raise
+    except _InstallerRollbackError as exc:
+        rollback_error = exc
+        raise
     except OperationError:
         raise
     except (httpx.HTTPError, OSError, tarfile.TarError) as exc:
         raise OperationError(f"could not provision jooservices/server-installer {SERVER_INSTALLER_VERSION} "
                              f"({type(exc).__name__})") from exc
+    finally:
+        if staging is not None and not retain_staging:
+            try:
+                # Match TemporaryDirectory's permission-recovery behavior while retaining conditional cleanup.
+                tempfile.TemporaryDirectory._rmtree(staging)
+            except OSError as exc:
+                if rollback_error is not None:
+                    rollback_error.note_cleanup_failure(exc)
+                else:
+                    raise OperationError(
+                        f"could not provision jooservices/server-installer {SERVER_INSTALLER_VERSION} "
+                        f"({type(exc).__name__})") from exc
     if not SERVER_INSTALLER.is_file():
         raise OperationError(f"jooservices/server-installer {SERVER_INSTALLER_VERSION} was not installed")
 

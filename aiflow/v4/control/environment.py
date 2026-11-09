@@ -18,6 +18,7 @@ from typing import Any
 
 from ..core.environment import find_server_wording, kinds_of, redact
 from .db import J
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.environment")
 ENVIRONMENT_LABEL = "environment"
@@ -114,12 +115,9 @@ def sweep(ctx) -> list[str]:
             why = "the configuration of the item changed"
         if why:
             ctx.db.run("UPDATE environment_reports SET resolved_at=now(), resolution=%s WHERE id=%s", (why, r["id"]))
-    ctx.db.run("UPDATE environment_reports SET resolved_at=now(), resolution='ticket is done' WHERE resolved_at IS NULL"
-               " AND ticket_key IN (SELECT key FROM tickets WHERE status='Done')")
+    ticket_repository_of(ctx).resolve_environment_reports_for_done_tickets()
     opened: list[str] = []
-    groups = ctx.db.all("SELECT project, item, min(created_at) AS since, array_agg(ticket_key ORDER BY ticket_key) AS tickets,"
-                        " max(environment_ticket) AS environment_ticket FROM environment_reports"
-                        " WHERE resolved_at IS NULL GROUP BY project, item")
+    groups = ticket_repository_of(ctx).list_open_environment_report_groups()
     for g in groups:
         if g["environment_ticket"] or datetime.now(timezone.utc) - g["since"] < TICKET_AFTER or not ctx.jira:
             continue
@@ -149,9 +147,7 @@ def open_environment_ticket(ctx, project: str, item: str, tickets: list[str]) ->
         return ""
     ctx.db.run("UPDATE environment_reports SET environment_ticket=%s WHERE project=%s AND item=%s AND resolved_at IS NULL",
                (key, project, item))
-    ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
-               " VALUES (%s,%s,'Created','Task',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
-               (key, project_key, [ENVIRONMENT_LABEL], summary, description))
+    ticket_repository_of(ctx).insert_created_task_if_absent((key, project_key, [ENVIRONMENT_LABEL], summary, description))
     ctx.events.emit("environment.ticket", ticket=key, project=project_key, outcome="created",
                     reason=f"{item} missing for {project}; waiting: " + ", ".join(tickets))
     return key
@@ -159,10 +155,7 @@ def open_environment_ticket(ctx, project: str, item: str, tickets: list[str]) ->
 
 def reports(ctx, limit: int = 200) -> list[dict[str, Any]]:
     """Missing environment items for the console: by name, with the waiting ticket and the environment ticket."""
-    rows = ctx.db.all("SELECT r.ticket_key, r.project, r.item, r.machine, r.detail, r.environment_ticket, r.created_at,"
-                      " r.resolved_at, r.resolution, t.summary FROM environment_reports r"
-                      " LEFT JOIN tickets t ON t.key = r.ticket_key"
-                      " ORDER BY (r.resolved_at IS NOT NULL), r.created_at DESC LIMIT %s", (limit,))
+    rows = ticket_repository_of(ctx).list_environment_reports((limit,))
     return [{"ticket": r["ticket_key"], "summary": r["summary"] or "", "project": r["project"], "item": r["item"],
              "machine": r["machine"], "detail": r["detail"], "environment_ticket": r["environment_ticket"],
              "since": r["created_at"].isoformat(), "state": "provided" if r["resolved_at"] else "waiting",
@@ -228,14 +221,9 @@ def pending_post_merge(ctx, project: str, ticket_keys: list[str] | None = None) 
     if ticket_keys is not None and not ticket_keys:
         return []
     if ticket_keys is None:
-        rows = ctx.db.all("SELECT c.ticket_key, c.criteria FROM environment_post_merge_checks c"
-                          " JOIN tickets t ON t.key=c.ticket_key WHERE c.project=%s AND c.status='pending'"
-                          " AND t.status='Done' ORDER BY c.created_at, c.ticket_key", (project,))
+        rows = ticket_repository_of(ctx).list_pending_post_merge_checks((project,))
     else:
-        rows = ctx.db.all("SELECT c.ticket_key, c.criteria FROM environment_post_merge_checks c"
-                          " JOIN tickets t ON t.key=c.ticket_key WHERE c.project=%s AND c.status='pending'"
-                          " AND c.ticket_key = ANY(%s) AND t.status='Done' ORDER BY c.created_at, c.ticket_key",
-                          (project, ticket_keys))
+        rows = ticket_repository_of(ctx).list_pending_post_merge_checks_for_keys((project, ticket_keys))
     return [{"ticket": row["ticket_key"], "criteria": row["criteria"] or []} for row in rows]
 
 
@@ -345,9 +333,8 @@ def _create_pending_need_ticket(ctx, project: str, nk: str) -> tuple[str, bool]:
         return "", False
     ctx.db.run("UPDATE environment_needs SET environment_ticket=%s WHERE project=%s AND need_key=%s"
                " AND environment_ticket=''", (key, project, nk))
-    ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
-               " VALUES (%s,%s,'Created','Task',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
-               (key, project_key, [ENVIRONMENT_LABEL], summary, description))
+    ticket_repository_of(ctx).insert_created_task_if_absent(
+        (key, project_key, [ENVIRONMENT_LABEL], summary, description))
     _link_need_ticket(ctx, key, row["linked_tickets"] or [])
     ctx.events.emit("environment.need_ticket", ticket=key, project=project_key, outcome="created",
                     reason=f"{need}; requested by " + ", ".join(row["linked_tickets"] or []))
@@ -370,8 +357,7 @@ def scan(ctx, actor: str = "system", correct: bool = True) -> dict[str, Any]:
     """List the open tickets of every project that name a host, machine, network or access instruction, send the
     ones nobody works on back to intake (the intake AI removes the wording and keeps the requirement), and keep
     the report. The report never repeats the wording; it names the kinds."""
-    rows = ctx.db.all("SELECT key, project, status, labels, summary, description FROM tickets"
-                      " WHERE NOT (status = ANY(%s)) ORDER BY project, key", (list(CLOSED_STATUSES),))
+    rows = ticket_repository_of(ctx).list_tickets_outside_statuses((list(CLOSED_STATUSES),))
     offenders: list[dict[str, Any]] = []
     for t in rows:
         findings = find_server_wording(f"{t['summary']}\n{t['description']}")
@@ -407,8 +393,7 @@ def _send_to_intake(ctx, t: dict, kinds: list[str]) -> str:
     except Exception as exc:  # noqa: BLE001 - reported, retried by the next scan
         log.warning("could not send %s back to intake: %s", key, type(exc).__name__)
         return "could not be moved; reported"
-    ctx.db.run("UPDATE tickets SET status=%s, labels=array_remove(labels,'aiflow-ready'), synced_at=now() WHERE key=%s",
-               (status, key))
+    ticket_repository_of(ctx).set_status_clearing_ready_label((status, key))
     return "sent back to intake"
 
 

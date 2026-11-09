@@ -19,6 +19,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Project keys](../../docs/v4/project-keys.md): one maintenance project setting, a configurable review preview epic, and the pull-request check for retired keys
 - [Gemini Code Assist review](../../docs/v4/gemini-review.md): a second AI reviewer checks pull requests that change the v4 code against the v4 style guide (old-flow-only changes are not reviewed against it); its `.gemini/config.yaml` keeps only medium and higher comments, at most ten per pull request
 - [SQL boundary](../../docs/v4/sql-boundary.md): AST-based SQL detection outside aggregate repositories and database platform modules, with a shrink-only baseline
+- [Ticket repository](../../docs/v4/ticket-repository.md): the application context supplies named ticket queries to routes and services, with an in-memory fake for tests
 - [Provider sign-in run structure](../../docs/v4/provider_sign_in_run-structure.md): provider sign-in setup, PTY monitoring, handoff relay and result reporting are explicit named steps
 - [Technical decisions](../../docs/v4/technical-decisions.md): engineering questions are decided and recorded by the SA role and never sent to the owner
 - [CLI structure](../../docs/v4/cli-structure.md): how the developer and CI parser and dispatcher are organized

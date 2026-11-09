@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from ... import environment as environment_reports, hotfiles, load_policy, role_health, rollout, tooling, worker_candidates
 from ...repositories.runs import VerifyTicketHistory, verify_retry_backoff, verify_ticket_history
+from ...features.tickets import ticket_repository_of
 from .eligibility_scope import Scope
 from .repository import WorkRepository
 
@@ -17,10 +18,9 @@ def verify_candidates(scope: Scope) -> list[dict]:
     """Collect verification tickets whose completed development run belongs to another account."""
     if "verify" not in scope.roles:
         return []
-    verify_cooling = verify_retry_backoff(scope.ctx.db, scope.ticket_key)
-    tickets = scope.ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
-                               " AND NOT ('aiflow-hold' = ANY(labels))" + scope.scoped_key,
-                               (scope.projects, *scope.scoped_ticket))
+    ticket_key = getattr(scope, "ticket_key", None)
+    verify_cooling = verify_retry_backoff(scope.ctx.db, ticket_key)
+    tickets = ticket_repository_of(scope.ctx).verify_candidates(scope.projects, ticket_key)
     history = verify_ticket_history(scope.ctx.db, [ticket["key"] for ticket in tickets])
     out = []
     peer_eligibility_cache: dict[tuple[str, str], set[str]] = {}
@@ -121,8 +121,9 @@ def _peer_verify_tickets(scope: Scope, account_id: str, node: str,
         return cache[key]
     options = {"routing": False, "capacity_routing": False, "step_filter": "verify",
                "verify_retry_guard": False}
-    if scope.ticket_key is not None:
-        options["ticket_key"] = scope.ticket_key
+    ticket_key = getattr(scope, "ticket_key", None)
+    if ticket_key is not None:
+        options["ticket_key"] = ticket_key
     try:
         offers = scope.deps.eligible(account_id, node, **options)
     except HTTPException:
@@ -170,16 +171,17 @@ def post_merge_candidates(scope: Scope) -> list[dict]:
         return []
     post_merge_cooling = {row["ticket_key"] for row in scope.backoff_rows("post_merge")}
     post_merge_projects = scope.projects
-    if scope.ticket_key is not None:
-        ticket_project = scope.ctx.db.one("SELECT project FROM tickets WHERE key=%s", (scope.ticket_key,))
+    ticket_key = getattr(scope, "ticket_key", None)
+    if ticket_key is not None:
+        ticket_project = ticket_repository_of(scope.ctx).get_ticket_project((ticket_key,))
         project_key = str((ticket_project or {}).get("project") or "")
         post_merge_projects = [project_key] if project_key in scope.projects else []
     pending = [item for project_key in post_merge_projects
                for item in environment_reports.pending_post_merge(
-                   scope.ctx, project_key, [scope.ticket_key] if scope.ticket_key is not None else None)]
+                   scope.ctx, project_key, [ticket_key] if ticket_key is not None else None)]
     out = []
     for waiting in pending:
-        ticket = scope.ctx.db.one("SELECT * FROM tickets WHERE key=%s", (waiting["ticket"],))
+        ticket = ticket_repository_of(scope.ctx).ticket_detail(waiting["ticket"])
         if not ticket or ticket["key"] in scope.held or ticket["key"] in post_merge_cooling:
             continue
         if scope.explicit_only_blocks(ticket):
@@ -197,11 +199,8 @@ def triage_candidates(scope: Scope) -> list[dict]:
     triage_cooling = {row["ticket_key"] for row in scope.backoff_rows("triage")}
     out = []
     # Triage decides a raised escalation; a ticket in Needs owner without an open one has nothing to decide.
-    for ticket in scope.ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
-                                   " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))"
-                                   " AND EXISTS (SELECT 1 FROM escalations e WHERE e.ticket_key = tickets.key"
-                                   " AND e.resolution = 'open')" + scope.scoped_tickets_key,
-                                   (scope.projects, *scope.scoped_ticket)):
+    for ticket in ticket_repository_of(scope.ctx).triage_candidates(
+            scope.projects, getattr(scope, "ticket_key", None)):
         if scope.needs_missing_container_runtime(ticket, "triage"):
             continue
         if ticket["key"] in scope.held or ticket["key"] in triage_cooling:
@@ -229,11 +228,8 @@ def intake_candidates(scope: Scope) -> list[dict]:
         return []
     waiting = _recent_intake_backoff(scope, "intake")
     out = []
-    for ticket in scope.ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'"
-                                   " AND NOT ('aiflow-hold' = ANY(labels))"
-                                   " AND NOT ('aiflow-split-parent' = ANY(labels))" + scope.scoped_key
-                                   + " ORDER BY jira_created NULLS LAST, key",
-                                   (scope.projects, *scope.scoped_ticket)):
+    for ticket in ticket_repository_of(scope.ctx).intake_candidates(
+            scope.projects, getattr(scope, "ticket_key", None)):
         if scope.needs_missing_container_runtime(ticket, "intake"):
             continue
         if ticket["key"] in scope.held or ticket["key"] in waiting:
@@ -252,12 +248,8 @@ def impact_candidates(scope: Scope) -> list[dict]:
         return []
     waiting = _recent_intake_backoff(scope, "impact")
     out = []
-    for ticket in scope.ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Backlog'"
-                                   " AND 'change-request' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))"
-                                   " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
-                                   " AND r.step = 'impact' AND r.outcome = 'assessed')" + scope.scoped_tickets_key
-                                   + " ORDER BY jira_created NULLS LAST, key",
-                                   (scope.projects, *scope.scoped_ticket)):
+    for ticket in ticket_repository_of(scope.ctx).impact_candidates(
+            scope.projects, getattr(scope, "ticket_key", None)):
         if scope.needs_missing_container_runtime(ticket, "impact"):
             continue
         if ticket["key"] in scope.held or ticket["key"] in waiting:
@@ -271,13 +263,11 @@ def impact_candidates(scope: Scope) -> list[dict]:
 
 
 def _dev_ticket_data(scope: Scope) -> tuple[list[dict], set[str], set[str], set[str]]:
-    dev_tickets = scope.ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s)"
-                                   + worker_candidates.DEV_TICKET_SQL + scope.scoped_key,
-                                   (scope.projects, *scope.scoped_ticket))
+    dev_tickets = ticket_repository_of(scope.ctx).developer_candidates(
+        scope.projects, getattr(scope, "ticket_key", None))
     blocker_keys = sorted({str(blocker) for ticket in dev_tickets
                            for blocker in ticket.get("blocked_by") or []})
-    done = ({row["key"] for row in scope.ctx.db.all(
-        "SELECT key FROM tickets WHERE key=ANY(%s) AND status='Done'", (blocker_keys,))}
+    done = ({row["key"] for row in ticket_repository_of(scope.ctx).list_done_keys_among((blocker_keys,))}
             if blocker_keys else set())
     dev_keys = [ticket["key"] for ticket in dev_tickets]
     history_keys = ({row["ticket_key"] for row in scope.ctx.db.all(
@@ -354,7 +344,8 @@ def dev_candidates(scope: Scope) -> list[dict]:
     if "dev" not in scope.roles:
         return []
     cooling = {row["ticket_key"] for row in scope.backoff_rows("dev")}
-    candidate_scope = [scope.ticket_key] if scope.ticket_key is not None else None
+    ticket_key = getattr(scope, "ticket_key", None)
+    candidate_scope = [ticket_key] if ticket_key is not None else None
     parked = tooling.parked_tickets(scope.ctx, scope.node_row, candidate_scope)
     parked |= environment_reports.parked_tickets(scope.ctx, candidate_scope)
     dev_tickets, done, history_keys, blocked_keys = _dev_ticket_data(scope)

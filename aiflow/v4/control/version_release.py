@@ -20,6 +20,7 @@ from . import scale_proof
 from .db import J
 from . import environment as environment_reports
 from ..core.controlrepo import epic_for_ticket
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger(__name__)
 
@@ -356,7 +357,7 @@ def repositories_for_version(ctx, project: Any, version: dict[str, Any]) -> list
     if not ctx.jira:
         return [project.repo]
     issues = ctx.jira.version_issues(project.key, str(version["id"]))
-    tickets = ctx.db.all("SELECT key,type,parent_key FROM tickets WHERE project=%s", (project.key,))
+    tickets = ticket_repository_of(ctx).list_ticket_types_in_project((project.key,))
     by_key = {ticket["key"]: ticket for ticket in tickets}
     names = []
     for issue in issues:
@@ -414,7 +415,7 @@ def evaluate(ctx, project: Any, version: dict[str, Any]) -> dict[str, Any]:
     issues = ctx.jira.version_issues(project.key, version["id"])
     tickets = []
     repositories: list[str] = []
-    hierarchy = ctx.db.all("SELECT key,type,parent_key FROM tickets WHERE project=%s", (project.key,))
+    hierarchy = ticket_repository_of(ctx).list_ticket_types_in_project((project.key,))
     by_key = {row["key"]: row for row in hierarchy}
     for issue in issues:
         fields = issue.get("fields") or {}

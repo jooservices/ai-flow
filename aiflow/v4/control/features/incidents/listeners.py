@@ -5,6 +5,7 @@ import logging
 
 from ...platform.events import IN_TRANSACTION, Registry
 from .events import IncidentOpened
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.incidents")
 
@@ -19,13 +20,14 @@ def register_listeners(ctx, registry: Registry) -> None:
     def study_case(envelope, item: IncidentOpened) -> None:
         """Keep a study case for the incident; a failure here must not stop the alert, so it is only logged."""
         from ... import knowledge
-        ticket = ctx.db.one("SELECT key,project,parent_key FROM tickets WHERE key=%s", (item.subject,))
+        ticket = ticket_repository_of(ctx).get_ticket_project_and_parent((item.subject,))
         latest_run = (ctx.db.one("SELECT id FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 1",
                                  (item.subject,)) if ticket else None)
         try:
             knowledge.write_study_case(
                 ctx.db, project=ticket["project"] if ticket else "", scope="project" if ticket else "general",
-                epic=knowledge._ticket_epic(ctx.db, item.subject, ticket.get("parent_key") or "") if ticket else "",
+                epic=knowledge._ticket_epic(ctx.db, item.subject, ticket.get("parent_key") or "",
+                                            ticket_repository_of(ctx)) if ticket else "",
                 title=f"Incident: {item.title[:170]}", situation=item.detail or item.title, cause=item.title,
                 fix="Resolution pending while this incident is open.",
                 prevention="Use the incident trigger and recovery checks when handling a similar condition.",

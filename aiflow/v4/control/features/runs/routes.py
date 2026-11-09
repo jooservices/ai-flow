@@ -21,6 +21,7 @@ from .events import MasterActionCompleted, MasterDailyBudgetUpdated
 from ...platform.events.wiring import publish_for
 from .master_actions import (MasterActionState, decide, deny_policy_decision, escalate, master_action_event,
                              perform_action, require_intent, validate_ticket_action)
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def _prepare_run_result(ctx, run, body, node, still_owner):
@@ -121,7 +122,9 @@ def _record_run_result_missing(ctx, run, run_id, body, details, late_result, out
 def _capture_run_result_followups(ctx, run, run_id, body, late_result, last_dev, log):
     if not late_result:
         try:
-            knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
+            repository = ticket_repository_of(ctx, fallback=False)
+            capture_kwargs = {"ticket_repository": repository} if repository is not None else {}
+            knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site, **capture_kwargs)
         except Exception as exc:  # noqa: BLE001 - per-run capture cannot undo a completed worker run
             log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
         _record_assumptions_from_run(ctx, run, run_id, body, log)
@@ -297,7 +300,7 @@ def _install_master_routes(app, ctx, deps, log) -> SimpleNamespace:
         run = master_run(body.run_id, body.fence, node, body.action,
                          {"ticket": body.ticket, "intent_chars": len(body.intent), "action": body.action})
         ticket = body.ticket.strip()
-        ticket_row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket,)) if ticket else None
+        ticket_row = ticket_repository_of(ctx).get_ticket_project((ticket,)) if ticket else None
         policy_project = ticket_row["project"] if ticket_row else None
         state = MasterActionState(run, node, policy_project, ticket, body)
         policy = ctx.repo().policy_for(policy_project)

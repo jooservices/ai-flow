@@ -16,6 +16,7 @@ from typing import Any
 from . import role_health, shared_accounts, tooling
 from .db import J
 from .incidents import idle_reasons
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.flow_doctor")
 CHECKED = ("parked tickets and tool waits", "retry backoff", "impossible dependencies", "licence", "version skew",
@@ -183,9 +184,8 @@ def _fix_impossible_dependencies(ctx) -> None:
     _retry_pending_comments(ctx)
     if not ctx.jira:
         return
-    for ticket in ctx.db.all("SELECT key,blocked_by FROM tickets WHERE cardinality(blocked_by)>0"
-                             " AND status NOT IN ('Done','Closed')"):
-        blockers = ctx.db.all("SELECT key,status FROM tickets WHERE key=ANY(%s)", (ticket["blocked_by"],))
+    for ticket in ticket_repository_of(ctx).list_open_tickets_with_blockers():
+        blockers = ticket_repository_of(ctx).list_statuses_for_keys((ticket['blocked_by'],))
         impossible = [b for b in blockers if str(b["status"]).strip().casefold() in IMPOSSIBLE_STATUSES]
         if not impossible:
             continue
@@ -207,8 +207,7 @@ def _fix_impossible_dependencies(ctx) -> None:
                 log.warning("doctor could not remove dependency %s -> %s (%s)", ticket["key"], blocker["key"],
                             type(exc).__name__)
                 continue
-            ctx.db.run("UPDATE tickets SET blocked_by=array_remove(blocked_by,%s),synced_at=now() WHERE key=%s",
-                       (blocker["key"], ticket["key"]))
+            ticket_repository_of(ctx).remove_blocker_from_ticket((blocker['key'], ticket['key']))
             removed.append(blocker)
         if removed:
             names = ", ".join(f"{b['key']} ({b['status']})" for b in removed)
@@ -260,7 +259,7 @@ def _retry_stale_run_requeues(ctx) -> None:
             status = ctx.jira.transition_to(row["ticket_key"], "To Do")
             if status != "To Do":
                 raise RuntimeError("ticket did not reach To Do")
-            ctx.db.run("UPDATE tickets SET status=%s,synced_at=now() WHERE key=%s", (status, row["ticket_key"]))
+            ticket_repository_of(ctx).update_status(row["ticket_key"], status)
             changed = ctx.db.run("UPDATE flow_doctor_actions SET outcome='requeued'"
                                  " WHERE action_key=%s AND outcome='requeue_pending'", (row["action_key"],))
             if changed:
@@ -338,8 +337,7 @@ def _release_backoff(ctx) -> None:
 
     cooling = {step: {row["ticket_key"] for row in ctx.db.all(BACKOFF_SQL, {"step": step})}
                for step in ("dev", "verify")}
-    queue = ctx.db.all("SELECT key,status FROM tickets WHERE NOT ('aiflow-hold'=ANY(labels))"
-                       " AND ((status='To Do' AND 'aiflow-ready'=ANY(labels)) OR status='In Verify')")
+    queue = ticket_repository_of(ctx).list_ready_or_verify_ticket_statuses()
     for ticket in queue:
         step = "verify" if ticket["status"] == "In Verify" else "dev"
         if ticket["key"] in cooling[step]:
@@ -382,9 +380,7 @@ def _route_around_failed_assignment(ctx) -> None:
     """Release tickets from failed account/machine assignments when another ready route exists."""
     repo = ctx.repo()
     online = _routing_ready_nodes(ctx)
-    queue = ctx.db.all("SELECT key,status,project FROM tickets WHERE (status='In Verify' OR"
-                       " (status='To Do' AND 'aiflow-ready'=ANY(labels)))"
-                       " AND NOT ('aiflow-hold'=ANY(labels))")
+    queue = ticket_repository_of(ctx).list_assignable_ready_or_verify_tickets()
     serving_by_project = {}
     for ticket in queue:
         project = ticket["project"]
@@ -576,8 +572,7 @@ def role_coverage(ctx, *, persist: bool = True) -> list[dict[str, Any]]:
 def _diagnose_idle_work(ctx) -> None:
     active_projects = {row["project"] for row in ctx.db.all(
         "SELECT DISTINCT project FROM runs WHERE status='running' AND step<>'master'")}
-    queue = ctx.db.all("SELECT key,project,status,blocked_by FROM tickets WHERE NOT ('aiflow-hold'=ANY(labels))"
-                       " AND ((status='To Do' AND 'aiflow-ready'=ANY(labels)) OR status='In Verify')")
+    queue = ticket_repository_of(ctx).list_ready_or_verify_tickets()
     projects = {ticket["project"] for ticket in queue if ticket["project"] not in active_projects}
     for project in sorted(projects):
         tickets = [t for t in queue if t["project"] == project]
@@ -585,7 +580,8 @@ def _diagnose_idle_work(ctx) -> None:
         reasons = idle_reasons(ctx, {project}, keys)
         for ticket in tickets:
             ticket_reasons = list(reasons)
-            blockers = ctx.db.all("SELECT key,status FROM tickets WHERE key=ANY(%s)", (ticket["blocked_by"],)) \
+            blockers = ticket_repository_of(ctx).list_statuses_for_keys(
+                (ticket["blocked_by"],)) \
                 if ticket["blocked_by"] else []
             impossible = [b for b in blockers if str(b["status"]).strip().casefold() in IMPOSSIBLE_STATUSES]
             if impossible:
@@ -696,9 +692,7 @@ def create_intervention_bugs(ctx, limit: int = 200) -> int:
                    (key, len(rows), session["id"]))
         ctx.db.run("UPDATE operator_interventions SET bug_ticket_key=%s WHERE session_id=%s",
                    (key, session["id"]))
-        ctx.db.run("INSERT INTO tickets (key,project,status,type,labels,summary,description,jira_created,jira_updated)"
-                   " VALUES (%s,%s,'Created','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
-                   (key, key.split("-", 1)[0], labels, summary, description))
+        ticket_repository_of(ctx).insert_created_bug_if_absent((key, key.split('-', 1)[0], labels, summary, description))
         ctx.events.emit("operator.intervention_bug", ticket=key, outcome="created",
                         reason=f"{session['event_count']} intervention(s) require a product fix",
                         data={"session_id": session["id"]})
@@ -739,7 +733,7 @@ def _move_bugs_to_intake(ctx, limit: int) -> None:
             log.warning("could not move intervention Bug %s to Intake (%s)", key, type(exc).__name__)
             continue
         ctx.db.run("UPDATE operator_intervention_sessions SET in_intake=true WHERE id=%s", (session["id"],))
-        ctx.db.run("UPDATE tickets SET status='Intake',synced_at=now() WHERE key=%s", (key,))
+        ticket_repository_of(ctx).set_ticket_status_intake((key,))
 
 
 def operator_intervention_summary(ctx) -> dict[str, Any]:

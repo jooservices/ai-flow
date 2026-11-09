@@ -11,6 +11,7 @@ from typing import Any
 from .. import merge_flow, route_deps
 from ...core.assumptions import parse_assumptions
 from ..repositories import assumptions as assumptions_repo
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.api")  # the logger name the handlers always used
 router = APIRouter()
@@ -36,10 +37,9 @@ def jira_transition(request: Request, key: str, body: JiraWrite, node: str = Dep
         route_deps.audit(ctx, "jira", "transition", key, body.run_id, body.fence, run["account_id"], False,
               "an impact run only comments", {"to": body.to})
         raise HTTPException(403, "an impact run only comments; the owner moves the ticket")
-    previous = ctx.db.one("SELECT project, type, status, labels, summary, fields FROM tickets WHERE key=%s", (key,))
+    previous = ticket_repository_of(ctx).get_ticket_transition_fields((key,))
     status = ctx.jira.transition_to(key, body.to)
-    ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done'"
-               " THEN now() ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, key))
+    ticket_repository_of(ctx).transition_status_stamping_done_at((status, status, key))
     route_deps.audit(ctx, "jira", "transition", key, body.run_id, body.fence, run["account_id"], True, status, {"to": body.to})
     ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
                     node=node, outcome=status)
@@ -74,11 +74,10 @@ def jira_fields(request: Request, key: str, body: JiraWrite, node: str = Depends
         ctx.jira.set_fields(key, body.fields)
     for lab in body.add_labels:
         ctx.jira.add_label(key, lab)
-        ctx.db.run("UPDATE tickets SET labels=CASE WHEN %s = ANY(labels) THEN labels ELSE array_append(labels,%s) END"
-                   " WHERE key=%s", (lab, lab, key))
+        ticket_repository_of(ctx).append_label_if_absent_synced((lab, lab, key))
     for lab in body.remove_labels:
         ctx.jira.remove_label(key, lab)
-        ctx.db.run("UPDATE tickets SET labels=array_remove(labels,%s) WHERE key=%s", (lab, key))
+        ticket_repository_of(ctx).remove_label_from_ticket((lab, key))
     route_deps.audit(ctx, "jira", "fields", key, body.run_id, body.fence, run["account_id"], True, "ok",
           {"fields": list(body.fields), "add": body.add_labels, "remove": body.remove_labels})
     return {"ok": True}
@@ -95,7 +94,7 @@ def jira_description(request: Request, key: str, body: JiraWrite, node: str = De
     if not body.body.strip():
         raise HTTPException(400, "the new description is empty")
     ctx.jira.set_description(key, body.body)
-    ctx.db.run("UPDATE tickets SET description=%s, synced_at=now() WHERE key=%s", (body.body, key))
+    ticket_repository_of(ctx).update_description_synced((body.body, key))
     route_deps.audit(ctx, "jira", "description", key, body.run_id, body.fence, run["account_id"], True, "replaced",
           {"chars": len(body.body)})
     ctx.events.emit("jira.description", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],

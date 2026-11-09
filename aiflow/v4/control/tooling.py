@@ -18,6 +18,7 @@ from ..core.services import ALIASES, SERVICES, service_gaps
 from ..core.toolchains import (CATALOG_TOOLS, NODE_TOOLS, STACK_TOOLS, pinned_version, tool_present,
                                normalize_stacks, tools_for_stacks_in_project)
 from .db import J
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.tooling")
 MAINTENANCE_AFTER = timedelta(hours=24)
@@ -127,9 +128,7 @@ def parked_tickets(ctx, node_row: dict, ticket_keys: list[str] | None = None) ->
 
 def waiting_summary(ctx) -> list[dict[str, Any]]:
     """Tickets waiting per missing requirement, for Command Center."""
-    rows = ctx.db.all("SELECT w.ticket_key, w.project, w.requirement, w.machine, w.created_at, w.detail, t.summary"
-                      " FROM tool_waits w LEFT JOIN tickets t ON t.key = w.ticket_key"
-                      " WHERE w.resolved_at IS NULL ORDER BY w.created_at, w.ticket_key")
+    rows = ticket_repository_of(ctx).list_open_tool_waits()
     gaps = {g["requirement"]: g for g in ctx.db.all("SELECT * FROM tooling_gaps")}
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
@@ -232,8 +231,7 @@ def sweep(ctx) -> list[str]:
             ctx.db.run("UPDATE tool_waits SET resolved_at=now(),resolution='unknown requirement ignored'"
                        " WHERE ticket_key=%s AND requirement=%s AND resolved_at IS NULL",
                        (wait["ticket_key"], wait["requirement"]))
-    ctx.db.run("UPDATE tool_waits SET resolved_at=now(), resolution='ticket is done' WHERE resolved_at IS NULL"
-               " AND ticket_key IN (SELECT key FROM tickets WHERE status='Done')")
+    ticket_repository_of(ctx).resolve_tool_waits_for_done_tickets()
     waiting = {r["requirement"]: r["since"] for r in ctx.db.all(
         "SELECT requirement, min(created_at) AS since FROM tool_waits WHERE resolved_at IS NULL GROUP BY requirement")}
     ctx.db.run("DELETE FROM tooling_gaps WHERE NOT (requirement = ANY(%s))", (list(waiting),))
@@ -350,9 +348,8 @@ def open_maintenance_ticket(ctx, requirement: str, since: datetime) -> str:
         return ""
     ctx.db.run("UPDATE tooling_gaps SET maintenance_key=%s, maintenance_opened_at=now() WHERE requirement=%s",
                (key, requirement))
-    ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
-               " VALUES (%s,%s,'Created','Task',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
-               (key, project, [MAINTENANCE_LABEL], summary, description))
+    ticket_repository_of(ctx).insert_created_task_if_absent(
+        (key, project, [MAINTENANCE_LABEL], summary, description))
     ctx.events.emit("tooling.maintenance_ticket", ticket=key, project=project, outcome="created",
                     reason=f"{requirement} missing for over 24 hours; waiting: " + ", ".join(w["ticket_key"] for w in waits))
     return key

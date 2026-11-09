@@ -17,6 +17,7 @@ from .console_auth import (COOKIE_NAME, PAGE_VIEWS, ConsoleUser, has_permission,
                            permissions_for_view, resolve_session_user, verify_session)
 from .login import OPEN_PATHS, OPEN_PREFIXES, PAGES, safe_next
 from .route_registry import concrete_routes
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 EXACT_API_PERMISSIONS = {
     "/v1/system-check": "node.operations.read",
@@ -92,11 +93,11 @@ def project_for_path(ctx, request: Request) -> str:
         return match.group(1)
     match = re.match(r"^/v1/tickets/([^/]+)", path)
     if match:
-        row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (match.group(1),))
+        row = ticket_repository_of(ctx).get_ticket_project((match.group(1),))
         return str((row or {}).get("project") or "")
     match = re.match(r"^/v1/reviews/([^/]+)", path)
     if match:
-        row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (match.group(1),))
+        row = ticket_repository_of(ctx).get_ticket_project((match.group(1),))
         return str((row or {}).get("project") or "")
     if path.startswith(("/v1/analytics/", "/v1/memory/")) or path in ("/v1/reviews", "/v1/reviews/export.csv"):
         return request.query_params.get("project", "")

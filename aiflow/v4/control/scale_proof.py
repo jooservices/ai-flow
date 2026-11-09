@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .db import J
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.scale_proof")
 
@@ -242,7 +243,8 @@ def _file_finding_locked(ctx, finding: dict[str, Any], run_id: int, report: dict
                          comment_existing: bool) -> dict[str, Any]:
     signature = finding["signature"]
     if ticket:
-        status = (ctx.db.one("SELECT status FROM tickets WHERE key=%s", (ticket,)) or {}).get("status")
+        status = (ticket_repository_of(ctx).get_ticket_status((ticket,)) or {}).get(
+            "status")
         if status != "Done":
             if comment_existing and ctx.jira:
                 try:
@@ -269,9 +271,8 @@ def _file_finding_locked(ctx, finding: dict[str, Any], run_id: int, report: dict
         status = ctx.jira.status(key)
     except Exception:  # noqa: BLE001
         status = "Created"
-    ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created,"
-               " jira_updated) VALUES (%s,%s,%s,'Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
-               (key, project, status, labels, finding["title"][:240], description))
+    ticket_repository_of(ctx).insert_bug_ticket_if_absent(
+        (key, project, status, labels, finding["title"][:240], description))
     ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
                " VALUES ('jira','scale_proof_create',%s,'scale-proof',true,%s,%s)",
                (key, status, J({"project": project, "labels": labels, "signature": signature, "run_id": run_id})))
@@ -315,13 +316,7 @@ def _file_finding(ctx, signature: str,
 
 def file_pending(ctx, exclude: set[str] | None = None) -> list[dict[str, Any]]:
     """Retry stored findings after later submissions, even when those runs have no findings of their own."""
-    rows = ctx.db.all(
-        "SELECT f.signature"
-        " FROM scale_proof_findings f JOIN scale_proof_runs r ON r.id=f.last_run_id"
-        " LEFT JOIN tickets t ON t.key=f.ticket"
-        " WHERE NOT (f.signature=ANY(%s))"
-        " AND (COALESCE(f.ticket,'')='' OR (f.last_error<>'' AND t.status='Done'))"
-        " ORDER BY f.updated_at,f.signature LIMIT %s", (sorted(exclude or set()), 50))
+    rows = ticket_repository_of(ctx).list_pending_scale_proof_signatures((sorted(exclude or set()), 50))
     return [_file_finding(ctx, str(row["signature"])) for row in rows]
 
 

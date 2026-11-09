@@ -5,7 +5,7 @@ import logging
 
 from ...platform.events import IN_TRANSACTION, Registry
 from .events import TicketMoved
-from .repository import TicketRepository
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.api")  # the logger the inline reactions used before they became listeners
 
@@ -24,7 +24,7 @@ def register_listeners(ctx, registry: Registry) -> None:
         """An epic that reached Done gets its completion report (it was inline in the Jira transition and sync)."""
         if item.to_status != "Done" or item.from_status == "Done":
             return
-        ticket = TicketRepository(ctx.db).get(item.ticket_key)
+        ticket = ticket_repository_of(ctx).get(item.ticket_key)
         if ticket is None or ticket.type != "Epic":
             return
         from ... import projects as project_lifecycle

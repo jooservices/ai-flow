@@ -28,6 +28,7 @@ from .db import J
 from .route_deps import h
 from .features.work.constants import utcnow
 from .features.work.listeners import run_finished
+from .features.tickets import ticket_repository_of
 from .features.github_fenced.events import (GitHubMergeCompleted, ReviewerActionAccepted,
                                             ReviewerGitHubCommentPosted, ReviewerJiraCommentPosted,
                                             ReviewerLabelsUpdated, ReviewerTicketTransitioned)
@@ -104,7 +105,7 @@ def _save_flow_bug_status(ctx, tracker: dict, status: str) -> None:
     closed = _flow_bug_is_closed(status)
     was_closed = _flow_bug_is_closed(str(tracker.get("bug_status") or ""))
     flow_bug_repository.set_status(ctx.db, tracker["signature"], status, closed=closed, was_closed=was_closed)
-    ctx.db.run("UPDATE tickets SET status=%s,synced_at=now() WHERE key=%s", (status, tracker["ticket_key"]))
+    ticket_repository_of(ctx).update_ticket_status_synced((status, tracker["ticket_key"]))
 
 
 def _refresh_open_flow_bug_statuses(ctx, logger) -> dict[str, str]:
@@ -134,7 +135,7 @@ def _reopen_flow_bug(ctx, run: dict, candidate: dict, tracker: dict, audit, logg
         logger.warning("could not reopen flow-bug %s: %s", tracker["ticket_key"], type(exc).__name__)
         return None
     flow_bug_repository.reopened(ctx.db, candidate["signature"], status)
-    ctx.db.run("UPDATE tickets SET status=%s,synced_at=now() WHERE key=%s", (status, tracker["ticket_key"]))
+    ticket_repository_of(ctx).update_ticket_status_synced((status, tracker["ticket_key"]))
     audit("jira", "flow_bug_reopen", tracker["ticket_key"], str(run["id"]), run["fence"], run["account_id"],
           True, status, {"signature": candidate["signature"]})
     ctx.events.emit("flow_bug.regression", ticket=tracker["ticket_key"], project=ctx.settings.maintenance_project,
@@ -155,7 +156,7 @@ def _move_flow_bug_to_intake(ctx, run: dict, ticket_key: str, signature: str, au
         logger.warning("could not move flow-bug %s to Intake: %s", ticket_key, type(exc).__name__)
         return None
     flow_bug_repository.intake_moved(ctx.db, signature)
-    ctx.db.run("UPDATE tickets SET status='Intake',synced_at=now() WHERE key=%s", (ticket_key,))
+    ticket_repository_of(ctx).mark_ticket_intake((ticket_key,))
     publish_for(ctx, FlowBugIntakeMoved(run_id=str(run["id"]), fence=run["fence"], ticket=ticket_key,
                                         actor=run["account_id"], signature=signature))
     return "Intake"
@@ -290,7 +291,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         user = resolve_session_user(ctx.db, claims) if claims else None
         if user:
             ticket_key = str(request.path_params.get("key", ""))
-            row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket_key,)) if ticket_key else None
+            row = ticket_repository_of(ctx).get_ticket_project((ticket_key,)) if ticket_key else None
             in_scope = (user.project_keys is None or not row or row["project"] in user.project_keys)
             if has_permission(user.effective_roles, "review.actions") and in_scope:
                 return user.subject
@@ -380,7 +381,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
             licensing.require_writable(ctx.db, ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(423, str(exc)) from None
-        ticket = ctx.db.one("SELECT key, project, status, labels, summary, blocked_by FROM tickets WHERE key=%s", (key,))
+        ticket = ticket_repository_of(ctx).get_review_queue_ticket((key,))
         if not ticket:
             raise HTTPException(404, "unknown ticket")
         if ticket["status"] not in statuses:
@@ -447,10 +448,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
 
     def reviewer_transition(ticket: str, run_id: str, fence: int, target: str, reason: str) -> str:
         transition_run = fenced(run_id, fence, "jira", "transition", {"to": target})
-        before = ctx.db.one("SELECT status FROM tickets WHERE key=%s", (ticket,))
+        before = ticket_repository_of(ctx).get_ticket_status((ticket,))
         status = ctx.jira.transition_to(ticket, target)
-        ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN %s='Done' THEN coalesce(done_at,now())"
-                   " ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, ticket))
+        ticket_repository_of(ctx).update_status_preserving_done_at((status, status, ticket))
         merge_flow.record_move(ctx, ticket, (before or {}).get("status", ""), status, merge_flow.PERSON, reason)
         publish_for(ctx, ReviewerTicketTransitioned(run_id=run_id, fence=fence, ticket=ticket,
                                                     actor=transition_run["account_id"], status=status, target=target))
@@ -465,11 +465,10 @@ def install(app, ctx, deps) -> SimpleNamespace:
         fields_run = fenced(run_id, fence, "jira", "fields", {"add": list(add), "remove": list(remove)})
         for label in add:
             ctx.jira.add_label(ticket, label)
-            ctx.db.run("UPDATE tickets SET labels=CASE WHEN %s=ANY(labels) THEN labels"
-                       " ELSE array_append(labels,%s) END WHERE key=%s", (label, label, ticket))
+            ticket_repository_of(ctx).append_label_if_missing((label, label, ticket))
         for label in remove:
             ctx.jira.remove_label(ticket, label)
-            ctx.db.run("UPDATE tickets SET labels=array_remove(labels,%s) WHERE key=%s", (label, ticket))
+            ticket_repository_of(ctx).remove_label_from_ticket((label, ticket))
         publish_for(ctx, ReviewerLabelsUpdated(run_id=run_id, fence=fence, ticket=ticket,
                                                actor=fields_run["account_id"], add=list(add), remove=list(remove)))
 
@@ -491,7 +490,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         project = project or ctx.repo().projects.get(run.get("project"))
         if not project:
             return ""
-        ticket = ctx.db.one("SELECT key,type,parent_key FROM tickets WHERE key=%s", (run.get("ticket_key"),)) or {}
+        ticket = ticket_repository_of(ctx).get_ticket_type_and_parent((run.get("ticket_key"),)) or {}
         ticket["epic"] = deps.late.projects_routes.ticket_epic(ticket)
         return project.repo_for(ticket)
 
@@ -649,10 +648,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         repo = ctx.repo()
         incidents = ctx.db.all("SELECT id, opened_at, severity, kind, subject, title, detail FROM incidents"
                                " WHERE closed_at IS NULL ORDER BY opened_at")
-        needs_owner = ctx.db.all("SELECT key, project, summary, description, priority, labels, jira_updated,"
-                                 " ('owner-escalated'=ANY(labels)) AS owner_escalated FROM tickets"
-                                 " WHERE status='Needs owner'"
-                                 " ORDER BY priority, jira_created NULLS LAST, key")
+        needs_owner = ticket_repository_of(ctx).list_needs_owner_tickets()
         running = ctx.db.all("SELECT id, ticket_key, project, step, account_id, provider, model, node, fence, started_at"
                              " FROM runs WHERE status='running' AND step<>'master' ORDER BY started_at")
         clocks = []
@@ -701,11 +697,8 @@ def install(app, ctx, deps) -> SimpleNamespace:
             return None
         run_ids = sorted(item["id"] for item in candidate["runs"])
         flow_bug_repository.create_tracker(ctx.db, candidate, ticket_key, breaker_active)
-        ctx.db.run("INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, jira_created, jira_updated)"
-                   " VALUES (%s,%s,'Created','Bug','Highest',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
-                   " type='Bug', priority='Highest', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
-                   " description=EXCLUDED.description, synced_at=now()",
-                   (ticket_key, project, ["flow-bug"], summary, description))
+        ticket_repository_of(ctx).upsert_created_bug_ticket(
+            (ticket_key, project, ["flow-bug"], summary, description))
         publish_for(ctx, FlowBugCreated(run_id=str(run["id"]), fence=run["fence"], ticket=ticket_key,
                                         actor=run["account_id"], reason=reason, signature=candidate["signature"],
                                         run_ids=run_ids, tickets=candidate["tickets"], labels=["flow-bug"]))

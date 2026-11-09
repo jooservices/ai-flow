@@ -41,9 +41,9 @@ updates:
     cooldown:
       default-days: 7
     ignore:
-      # Base images follow Ubuntu LTS only (owner rule 2026-11-09): skip the interim 25.x releases; LTS releases still arrive.
+      # Keep the base image on Ubuntu 24.04 LTS until the next LTS release.
       - dependency-name: "ubuntu"
-        versions: [">= 25.0, < 26"]
+        versions: [">= 24.05, < 26.04"]
 
   - package-ecosystem: "github-actions"
     directory: "/"

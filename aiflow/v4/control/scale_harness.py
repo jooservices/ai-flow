@@ -32,6 +32,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from functools import wraps
 from itertools import pairwise
 from threading import Barrier, Condition, Event, Lock, Thread
@@ -86,6 +87,112 @@ PAGES: dict[str, tuple[str, ...]] = {
                   "/v1/security/sessions", "/v1/security/audit?limit=100"),
     "/support": (),
 }
+QUERY_COUNT_HEADER = "x-aiflow-scale-query-count"
+
+
+class _QueryCounter:
+    def __init__(self) -> None:
+        self.value = 0
+        self.lock = Lock()
+
+    def increment(self) -> None:
+        with self.lock:
+            self.value += 1
+
+
+_QUERY_COUNTER: ContextVar[_QueryCounter | None] = ContextVar("scale_proof_query_counter", default=None)
+
+
+def _record_database_query() -> None:
+    counter = _QUERY_COUNTER.get()
+    if counter is not None:
+        counter.increment()
+
+
+class _CountedContext:
+    def __init__(self, context, wrap: Callable):
+        self.context = context
+        self.wrap = wrap
+
+    def __enter__(self):
+        return self.wrap(self.context.__enter__())
+
+    def __exit__(self, *exc_info):
+        return self.context.__exit__(*exc_info)
+
+
+class _CountedCursor:
+    def __init__(self, cursor):
+        self.cursor = cursor
+
+    def execute(self, *args, **kwargs):
+        _record_database_query()
+        return self.cursor.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        _record_database_query()
+        return self.cursor.executemany(*args, **kwargs)
+
+    def __enter__(self):
+        self.cursor.__enter__()
+        return self
+
+    def __exit__(self, *exc_info):
+        return self.cursor.__exit__(*exc_info)
+
+    def __getattr__(self, name):
+        return getattr(self.cursor, name)
+
+
+class _CountedConnection:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, *args, **kwargs):
+        _record_database_query()
+        return self.connection.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        _record_database_query()
+        return self.connection.executemany(*args, **kwargs)
+
+    def cursor(self, *args, **kwargs):
+        return _CountedCursor(self.connection.cursor(*args, **kwargs))
+
+    def transaction(self, *args, **kwargs):
+        return _CountedContext(self.connection.transaction(*args, **kwargs), _CountedConnection)
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+
+class _CountedPool:
+    def __init__(self, pool):
+        self.pool = pool
+
+    def connection(self, *args, **kwargs):
+        return _CountedContext(self.pool.connection(*args, **kwargs), _CountedConnection)
+
+    def __getattr__(self, name):
+        return getattr(self.pool, name)
+
+
+def _instrument_database_pool(db) -> None:
+    if not isinstance(db.pool, _CountedPool):
+        db.pool = _CountedPool(db.pool)
+
+
+async def _count_request_queries(request, call_next):
+    counter = _QueryCounter()
+    token = _QUERY_COUNTER.set(counter)
+    try:
+        response = await call_next(request)
+        response.headers[QUERY_COUNT_HEADER] = str(counter.value)
+        return response
+    finally:
+        _QUERY_COUNTER.reset(token)
+
+
 JOIN_KEY = "scale-proof-join"
 
 
@@ -298,6 +405,7 @@ def build_context(db, leases, root: Path, sc: Scenario, jira: Any = None):
     from .api import Ctx
     from .events import Events
     from .jira_connect import JiraAuth, SecretStore
+    _instrument_database_pool(db)
     write_control_repo(root, sc)
     snap = ControlRepo.load(root)
     settings = Settings(join_token=JOIN_KEY, join_control_url="https://control.scale.test", reviewer_token="x" * 16,
@@ -360,7 +468,7 @@ def _insert_wave(db, wave: list[dict[str, Any]], offset: int, ticket_repository)
 
 
 # --- the run ----------------------------------------------------------------------------------------------------
-def _timed(client, path: str, forwarded_ip: str = "") -> tuple[float, int, str]:
+def _timed(client, path: str, forwarded_ip: str = "") -> tuple[float, int, str, int, int]:
     start = time.perf_counter()
     headers = {"X-Forwarded-For": forwarded_ip} if forwarded_ip else None
     r = client.get(path, headers=headers)
@@ -371,7 +479,8 @@ def _timed(client, path: str, forwarded_ip: str = "") -> tuple[float, int, str]:
             detail = str(body.get("detail", body.get("error", "")))[:160]
         except (ValueError, AttributeError):
             detail = r.text[:160]
-    return time.perf_counter() - start, r.status_code, detail
+    return (time.perf_counter() - start, r.status_code, detail, len(r.content),
+            int(r.headers.get(QUERY_COUNT_HEADER, "0")))
 
 
 def _claim_session(client, session: dict[str, str], headers: dict[str, dict[str, str]],
@@ -537,6 +646,8 @@ def _sample_page(client, page: str, data: tuple[str, ...], samples: int,
     intervals: list[tuple[float, float]] = []
     errors: list[str] = []
     calls: dict[str, list[float]] = {}
+    query_counts: list[int] = []
+    response_bytes: list[int] = []
     for _ in range(samples):
         started = time.perf_counter()
         paths = (page, *COMMON_CALLS, *data)
@@ -545,16 +656,22 @@ def _sample_page(client, page: str, data: tuple[str, ...], samples: int,
         else:
             futures = [request_pool.submit(_timed, client, path, forwarded_ip) for path in paths]
             results = [future.result() for future in futures]
-        for path, (took, status, detail) in zip(paths, results):
+        queries, byte_count = 0, 0
+        for path, (took, status, detail, response_size, query_count) in zip(paths, results):
             calls.setdefault(path, []).append(took)
+            queries += query_count
+            byte_count += response_size
             if status != 200:
                 suffix = f": {detail}" if detail else ""
                 errors.append(f"{path} answered HTTP {status}{suffix}")
+        query_counts.append(queries)
+        response_bytes.append(byte_count)
         ended = time.perf_counter()
         # Independent browser fetches complete together; view readiness is the batch's wall-clock duration.
         latencies.append(ended - started)
         intervals.append((started, ended))
-    return {"page": page, "latencies": latencies, "intervals": intervals, "errors": errors,
+    return {"page": page, "latencies": latencies, "query_counts": query_counts,
+            "response_bytes": response_bytes, "intervals": intervals, "errors": errors,
             "calls": {path: round(percentile(values, 95), 3) for path, values in calls.items()}}
 
 
@@ -568,9 +685,10 @@ def _sample_picker(client, samples: int, gate: Barrier | None = None, request_po
     for _ in range(samples):
         started = time.perf_counter()
         if request_pool is None:
-            took, status, detail = _timed(client, PICKER, forwarded_ip)
+            took, status, detail, _response_bytes, _queries = _timed(client, PICKER, forwarded_ip)
         else:
-            took, status, detail = request_pool.submit(_timed, client, PICKER, forwarded_ip).result()
+            took, status, detail, _response_bytes, _queries = request_pool.submit(
+                _timed, client, PICKER, forwarded_ip).result()
         ended = time.perf_counter()
         latencies.append(took * 1000)
         intervals.append((started, ended))
@@ -625,12 +743,13 @@ def _claim_round(client, sessions: list[dict[str, str]], headers: dict[str, dict
 
 
 def _without_local_embeddings(function):
-    """Keep local vector-model inference out of the control-plane request budget."""
+    """Keep local model inference and the external monitoring endpoint out of the scale scenario."""
     @wraps(function)
     def wrapped(*args, **kwargs):
         from unittest.mock import patch
 
-        with patch("aiflow.v4.control.knowledge._embedding", return_value=None):
+        with (patch("aiflow.v4.control.knowledge._embedding", return_value=None),
+              patch("aiflow.v4.control.ui.gatus_services", return_value={"services": []})):
             return function(*args, **kwargs)
     return wrapped
 
@@ -673,7 +792,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
             if request_activity["active_workers"] and request_activity["active_console"]:
                 request_activity["worker_console_overlap"] = True
         try:
-            return await call_next(request)
+            return await _count_request_queries(request, call_next)
         finally:
             with activity_lock:
                 if path in worker_route_latencies:
@@ -955,7 +1074,7 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
         "environment": {"python": platform.python_version(), "platform": platform.system().lower(),
                         "cpus": os.cpu_count(), "api_execution": "FastAPI TestClient in-process",
                         "persistence": "PostgreSQL and Redis", "simulated_workers": True,
-                        "simulated_external_integrations": ["GitHub App", "Jira"],
+                        "simulated_external_integrations": ["GitHub App", "Jira", "Gatus"],
                         "external_ai_providers_called": False,
                         "local_embeddings_enabled": False,
                         "max_parallel_worker_requests": sc.claim_concurrency,
@@ -987,10 +1106,14 @@ def _measure_peak(client, ctx, sc: Scenario, live: list, errors: list[str],
     for result in page_results:
         page = result["page"]
         samples = result["latencies"]
+        query_samples = result.get("query_counts", [])
+        byte_samples = result.get("response_bytes", [])
         errors.extend(result["errors"])
         view_intervals.extend(result["intervals"])
         pages[page] = {"p95": round(percentile(samples, 95), 3), "p50": round(percentile(samples, 50), 3),
                        "max": round(max(samples, default=0.0), 3), "samples": len(samples),
+                       "queries_p95": int(percentile(query_samples, 95)),
+                       "response_bytes_p95": int(percentile(byte_samples, 95)),
                        "calls_p95": result.get("calls", {})}
     picker_result = picker_result or {"latencies": [], "intervals": [], "errors": []}
     picker = picker_result["latencies"]
@@ -1004,6 +1127,14 @@ def _measure_peak(client, ctx, sc: Scenario, live: list, errors: list[str],
         "console_page_load": {"value": max((p["p95"] for p in pages.values()), default=0.0), "unit": "s",
                               "statistic": "p95 per view, worst view", "views": pages,
                               "slowest_view": max(pages, key=lambda p: pages[p]["p95"]) if pages else ""},
+        "console_page_queries": {
+            "value": max((p["queries_p95"] for p in pages.values()), default=0), "unit": "queries",
+            "statistic": "p95 per view, worst view", "views": pages,
+            "slowest_view": max(pages, key=lambda p: pages[p]["queries_p95"]) if pages else ""},
+        "console_page_bytes": {
+            "value": max((p["response_bytes_p95"] for p in pages.values()), default=0), "unit": "bytes",
+            "statistic": "p95 per view, worst view", "views": pages,
+            "slowest_view": max(pages, key=lambda p: pages[p]["response_bytes_p95"]) if pages else ""},
         "project_picker": {"value": round(percentile(picker, 95), 3), "unit": "ms", "statistic": "p95",
                            "samples": len(picker), "p50": round(percentile(picker, 50), 3),
                            "max": round(max(picker, default=0.0), 3)}}

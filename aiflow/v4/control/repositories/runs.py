@@ -52,7 +52,12 @@ WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::
 
 VERIFY_TICKET_HISTORY_SQL = """
 SELECT ticket_key, account_id, coalesce(details->>'no_verdict' = 'true', false) AS no_verdict, ended_at
-FROM runs WHERE ticket_key = ANY(%s) AND step = 'verify' AND status <> 'running'
+FROM runs r
+WHERE r.ticket_key = ANY(%s) AND r.step = 'verify' AND r.status <> 'running'
+  AND r.started_at > coalesce((
+      SELECT max(d.started_at) FROM runs d
+      WHERE d.ticket_key = r.ticket_key AND d.step = 'dev' AND d.outcome = 'done'
+  ), '-infinity'::timestamptz)
 ORDER BY started_at DESC
 """
 
@@ -84,7 +89,11 @@ def verify_retry_backoff(db, ticket_key: str | None = None) -> set[str]:
 
 
 def verify_ticket_history(db, ticket_keys: list[str]) -> dict[str, VerifyTicketHistory]:
-    """Newest-first no-verdict markers and latest no-verdict end time per ticket and account."""
+    """Newest-first no-verdict markers for the current development round, and the latest no-verdict end time.
+
+    A finished `dev` run with outcome `done` starts a new round and drops earlier verify history for candidate
+    selection, so a barred account can try again after rework lands a new development submission.
+    """
     history: dict[str, VerifyTicketHistory] = {}
     if not ticket_keys:
         return history

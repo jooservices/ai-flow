@@ -7,10 +7,12 @@ from conftest import add_ticket, join_node
 from aiflow.v4.control import load_policy, role_health, rollout
 from aiflow.v4.control.db import J
 from aiflow.v4.control.features.work.eligibility_candidates import (
-    VERIFY_NO_VERDICT_RETRY_WAIT, _verify_candidate, _verify_retry_blocked, _verify_retry_peer_account,
-    verify_candidates,
+    VERIFY_NO_VERDICT_RETRY_WAIT, _verify_account_barred, _verify_candidate, _verify_retry_blocked,
+    _verify_retry_peer_account, verify_candidates,
 )
-from aiflow.v4.control.repositories.runs import VerifyTicketHistory, verify_retry_backoff, verify_ticket_history
+from aiflow.v4.control.repositories.runs import (
+    VERIFY_TICKET_HISTORY_SQL, VerifyTicketHistory, verify_retry_backoff, verify_ticket_history,
+)
 from aiflow.v4.worker import verify
 
 PR = "https://github.com/jooservices/test-aiflow-wp/pull/7"
@@ -69,6 +71,21 @@ def test_no_verdict_run_goes_to_another_account_at_once(client, ctx):
     _no_verdict(ctx, "TESTWP-50", "codex-01", 3)
     assert ("TESTWP-50", "verify") not in _offered(client, node1, "codex-01")
     assert ("TESTWP-50", "verify") in _offered(client, cc, "claude-01")
+
+
+def test_prior_no_verdict_from_before_new_development_round_is_ignored(client, ctx):
+    cc, node1 = _join(client, "cc"), _join(client, "node1")
+    _in_verify(ctx)
+    _no_verdict(ctx, "TESTWP-50", "codex-01", 55)
+    _no_verdict(ctx, "TESTWP-50", "codex-01", 50)
+    assert ("TESTWP-50", "verify") not in _offered(client, node1, "codex-01")
+
+    _insert_run(ctx, "TESTWP-50", "dev", "opencode-01", "done", pr_url=PR, minutes_ago=40,
+                details={"local_gate": {"status": "green"}})
+
+    assert ("TESTWP-50", "verify") in _offered(client, node1, "codex-01")
+    assert ("TESTWP-50", "verify") in _offered(client, cc, "claude-01")
+    assert verify_ticket_history(ctx.db, ["TESTWP-50"]) == {}
 
 
 def test_previous_verifier_can_retry_after_peer_waits_without_claiming(client, ctx):
@@ -148,6 +165,7 @@ def test_verify_ticket_history_groups_newest_first_markers_by_account():
         def all(self, query, params):
             assert "ORDER BY started_at DESC" in query
             assert "ended_at" in query
+            assert "step = 'dev' AND d.outcome = 'done'" in query
             assert params == (["TESTWP-50"],)
             return [
                 {"ticket_key": "TESTWP-50", "account_id": "codex-01", "no_verdict": True,
@@ -160,6 +178,16 @@ def test_verify_ticket_history_groups_newest_first_markers_by_account():
 
     assert verify_ticket_history(Database(), ["TESTWP-50"]) == {
         "TESTWP-50": VerifyTicketHistory({"codex-01": [True, False], "claude-01": [False]}, ended_at)}
+    assert "max(d.started_at)" in VERIFY_TICKET_HISTORY_SQL
+
+
+def test_verify_account_barred_needs_two_consecutive_no_verdict_results():
+    assert not _verify_account_barred([])
+    assert not _verify_account_barred([True])
+    assert not _verify_account_barred([True, False])
+    assert not _verify_account_barred([False, True])
+    assert _verify_account_barred([True, True])
+    assert _verify_account_barred([True, True, False])
 
 
 def test_verify_retry_blocks_a_tried_account_when_an_untried_eligible_peer_exists(monkeypatch):

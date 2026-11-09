@@ -397,10 +397,12 @@ def save_probe(ctx, node: str, project: str, signature: str, results: list[dict[
                " results=EXCLUDED.results", (project, node, signature, J(results)))
 
 
-def probe_report(ctx, project_keys: list[str] | None = None) -> dict[str, dict[str, Any]]:
+def probe_report(ctx, project_keys: list[str] | None = None, *, repo=None,
+                 probe_rows: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     """Per project and machine: which check commands cannot run (Projects screen)."""
-    repo = ctx.repo()
-    rows = ctx.db.all("SELECT project, node, signature, checked_at, results FROM project_check_probes ORDER BY node")
+    repo = repo if repo is not None else ctx.repo()
+    rows = (probe_rows if probe_rows is not None else ctx.db.all(
+        "SELECT project, node, signature, checked_at, results FROM project_check_probes ORDER BY node"))
     report: dict[str, dict[str, Any]] = {}
     for key, project in repo.projects.items():
         if project_keys is not None and key not in project_keys:
@@ -413,7 +415,12 @@ def probe_report(ctx, project_keys: list[str] | None = None) -> dict[str, dict[s
         if not entry:
             continue
         blocked = [x for x in r["results"] if x.get("status") == "cannot_run"]
-        entry["machines"].append({"node": r["node"], "checked_at": r["checked_at"].isoformat(),
+        checked_at = r["checked_at"]
+        if isinstance(r["checked_at"], str):
+            checked_at = datetime.fromisoformat(checked_at).isoformat()
+        else:
+            checked_at = checked_at.isoformat()
+        entry["machines"].append({"node": r["node"], "checked_at": checked_at,
                                   "current": r["signature"] == entry["signature"], "cannot_run": blocked,
                                   "ran": sum(1 for x in r["results"] if x.get("status") == "ran")})
         entry["cannot_run"] += len(blocked)

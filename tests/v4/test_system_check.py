@@ -242,16 +242,22 @@ def test_projects_screen_batches_node_readiness_query(client, ctx, monkeypatch):
     monkeypatch.setattr(system_check_api, "schedule_join_readiness", lambda *_args: None)
     join_node(client, "cc")
     join_node(client, "node1")
-    repo = ctx.repo()
     original_all = ctx.db.all
+    original_one = ctx.db.one
     node_queries = []
 
     def recording_all(sql, params=()):
-        if "SELECT name,readiness,projects,dynamic FROM nodes" in sql:
+        if "FROM nodes" in sql and "readiness" in sql:
             node_queries.append(sql)
         return original_all(sql, params)
 
+    def recording_one(sql, params=None):
+        if "FROM nodes" in sql and "readiness" in sql and "project_check_probes" in sql:
+            node_queries.append(sql)
+        return original_one(sql, params)
+
     ctx.db.all = recording_all
+    ctx.db.one = recording_one
     response = client.get("/v1/projects")
 
     assert response.status_code == 200
@@ -360,7 +366,7 @@ def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition
 def test_hourly_system_check_revalidates_repository_branch_and_jira_access(client, ctx, monkeypatch):
     notifications = []
     monkeypatch.setattr(notify, "send", lambda *args, **kwargs: notifications.append((args, kwargs)) or [])
-    joined = join_node(client, "cc").json()
+    join_node(client, "cc").json()
     ctx.github.available_branches[("test-aiflow-wp", "develop")] = False
     branch_result = system_check.refresh_node(ctx, "cc", "hourly")
     branch = next(item for item in branch_result["projects"]["TESTWP"]

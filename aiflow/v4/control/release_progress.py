@@ -45,40 +45,54 @@ def _step(name: str, state: str = "pending", **extra: Any) -> dict[str, Any]:
 
 def release_steps(db, tracker: str, status: str) -> list[dict[str, Any]]:
     """The release flow steps for one tracker ticket: state is done | failed | running | pending."""
-    audits = {}
-    for row in db.all("SELECT id, ts, action, run_id, result, payload FROM write_audit WHERE ticket=%s"
-                      " AND action = ANY(%s) ORDER BY id", (tracker, ["github-release-files", "github-merge",
-                                                                      "github-tag", "github-release"])):
-        audits[row["action"]] = row  # the latest of each action wins
-    checks = db.all("SELECT ts, run_id, outcome, reason FROM events WHERE ticket=%s AND type='version_release.check'"
-                    " ORDER BY id DESC LIMIT 1", (tracker,))
-    run_ids = {r["run_id"] for r in audits.values() if r["run_id"]} | {c["run_id"] for c in checks if c["run_id"]}
-    nodes = {str(r["id"]): r["node"] for r in db.all(
-        "SELECT id, node FROM runs WHERE id::text = ANY(%s)", (list(run_ids),))} if run_ids else {}
+    return _release_steps_many(db, [(tracker, status)])[(tracker, status)]
 
-    def fill(name: str, state: str, row: dict | None, detail: str = "") -> dict[str, Any]:
-        run_id = (row or {}).get("run_id") or ""
-        return _step(name, state, run_id=run_id, node=nodes.get(run_id, ""), detail=detail,
-                     at=_iso((row or {}).get("ts")))
 
+def _release_step_rows(db, trackers: list[str]) -> tuple[dict, dict, dict]:
+    actions = ("github-release-files", "github-merge", "github-tag", "github-release")
+    audits_by_tracker: dict[str, dict] = {}
+    for row in db.all("SELECT ticket, id, ts, action, run_id, result, payload FROM write_audit"
+                      " WHERE ticket=ANY(%s) AND action=ANY(%s) ORDER BY id", (trackers, list(actions))):
+        audits_by_tracker.setdefault(row["ticket"], {})[row["action"]] = row
+    checks_by_tracker = {}
+    for row in db.all("SELECT ticket, ts, run_id, outcome, reason FROM events"
+                      " WHERE ticket=ANY(%s) AND type='version_release.check' ORDER BY id DESC", (trackers,)):
+        checks_by_tracker.setdefault(row["ticket"], row)
+    run_ids = {row["run_id"] for audits in audits_by_tracker.values() for row in audits.values() if row["run_id"]}
+    run_ids.update(row["run_id"] for row in checks_by_tracker.values() if row["run_id"])
+    nodes = {str(row["id"]): row["node"] for row in db.all(
+        "SELECT id, node FROM runs WHERE id::text=ANY(%s)", (list(run_ids),))} if run_ids else {}
+    return audits_by_tracker, checks_by_tracker, nodes
+
+
+def _release_step(name: str, state: str, row: dict | None, nodes: dict, detail: str = "") -> dict[str, Any]:
+    run_id = (row or {}).get("run_id") or ""
+    return _step(name, state, run_id=run_id, node=nodes.get(run_id, ""), detail=detail,
+                 at=_iso((row or {}).get("ts")))
+
+
+def _steps_for_tracker(status: str, audits: dict, check: dict | None, nodes: dict) -> list[dict[str, Any]]:
     files, merge = audits.get("github-release-files"), audits.get("github-merge")
     tag, release = audits.get("github-tag"), audits.get("github-release")
     payload = (merge or {}).get("payload") or {}
     steps = []
-    check = checks[0] if checks else None
     if files or merge:
-        steps.append(fill("check", "done", files or merge, "release checks passed"))
+        steps.append(_release_step("check", "done", files or merge, nodes, "release checks passed"))
     elif check and check["outcome"] in ("failed", "blocked", "stale"):
-        steps.append(fill("check", "failed", check, check["reason"][:300]))
+        steps.append(_release_step("check", "failed", check, nodes, check["reason"][:300]))
     else:
         steps.append(_step("check", "running" if status == "checking" else "pending"))
-    steps.append(fill("changelog", "done", files, ", ".join((files or {}).get("payload", {}).get("files") or []))
+    steps.append(_release_step("changelog", "done", files, nodes,
+                               ", ".join((files or {}).get("payload", {}).get("files") or []))
                  if files else _step("changelog"))
     pr_label = f"#{payload['pr_number']}" if payload.get("pr_number") else ""
-    steps.append({**fill("pr", "done", merge, pr_label), "url": payload.get("pr_url", "")} if merge else _step("pr"))
-    steps.append(fill("merge", "done", merge, (merge["result"] or "")[:12]) if merge else _step("merge"))
-    steps.append(fill("tag", "done", tag, (tag["payload"] or {}).get("tag", "")) if tag else _step("tag"))
-    steps.append({**fill("release", "done", release, ""), "url": release["result"]
+    steps.append({**_release_step("pr", "done", merge, nodes, pr_label), "url": payload.get("pr_url", "")}
+                 if merge else _step("pr"))
+    steps.append(_release_step("merge", "done", merge, nodes, (merge["result"] or "")[:12])
+                 if merge else _step("merge"))
+    steps.append(_release_step("tag", "done", tag, nodes, (tag["payload"] or {}).get("tag", ""))
+                 if tag else _step("tag"))
+    steps.append({**_release_step("release", "done", release, nodes, ""), "url": release["result"]
                   if release and str(release["result"]).startswith("http") else ""} if release else _step("release"))
     if status == "failed":
         # the first step that has not finished is where the flow stopped
@@ -95,14 +109,23 @@ def release_steps(db, tracker: str, status: str) -> list[dict[str, Any]]:
     return steps
 
 
-def _release(db, row: dict | None, version: dict) -> dict[str, Any]:
+def _release_steps_many(db, tracked_releases: list[tuple[str, str]]) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    trackers = list(dict.fromkeys(tracker for tracker, _ in tracked_releases))
+    if not trackers:
+        return {}
+    audits, checks, nodes = _release_step_rows(db, trackers)
+    return {(tracker, status): _steps_for_tracker(status, audits.get(tracker, {}), checks.get(tracker), nodes)
+            for tracker, status in dict.fromkeys(tracked_releases)}
+
+
+def _release(row: dict | None, version: dict, steps_by_release: dict) -> dict[str, Any]:
     if not row:
         return {"status": "released" if version["released"] else "none", "tracker": "", "tag": "",
                 "github_release_url": "", "detail": "", "steps": []}
     status = "released" if version["released"] and row["status"] == "released" else row["status"]
     return {"status": status, "tracker": row["tracker_key"], "tag": row["tag"],
             "github_release_url": row["github_release_url"], "detail": row["gate_detail"],
-            "steps": release_steps(db, row["tracker_key"], row["status"]) if row["tracker_key"] else []}
+            "steps": steps_by_release.get((row["tracker_key"], row["status"]), []) if row["tracker_key"] else []}
 
 
 def _extra_reasons(version: dict, release: dict, proof: dict | None = None) -> list[dict[str, Any]]:
@@ -143,6 +166,8 @@ def _load(db, versions: list[dict]) -> list[dict[str, Any]]:
         "SELECT ticket_key, version_id, added_at FROM ticket_version_added WHERE version_id = ANY(%s)", (ids,))}
     releases = {(r["project"], r["version_id"]): r for r in db.all(
         "SELECT * FROM version_releases WHERE version_id = ANY(%s)", (ids,))}
+    steps_by_release = _release_steps_many(
+        db, [(row["tracker_key"], row["status"]) for row in releases.values() if row["tracker_key"]])
     proofs = scale_proof.attached(db, [v["name"] for v in versions])  # scale-proof run attached to the version
     members: dict[str, list[dict]] = {}
     for link in links:
@@ -154,7 +179,7 @@ def _load(db, versions: list[dict]) -> list[dict[str, Any]]:
         started = min((t["first_in_progress_at"] for t in mine if t.get("first_in_progress_at")), default=None)
         tickets = mark_late(mine, {t["key"]: added.get((t["key"], v["id"])) for t in mine}, started)
         readiness = release_readiness.evaluate(mine, by_key, latest_verify)
-        release = _release(db, releases.get((v["project"], v["id"])), v)
+        release = _release(releases.get((v["project"], v["id"])), v, steps_by_release)
         proof = proofs.get(v["name"])
         reasons = [] if v["released"] else readiness["reasons"] + _extra_reasons(v, release, proof)
         out.append({"project": v["project"], "version_id": v["id"], "version": v["name"],

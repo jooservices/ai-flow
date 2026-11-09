@@ -50,7 +50,7 @@
 {"method":"PATCH","path":"/v1/console/users/{email}/disabled","auth":"console-session","response":"dict"}
 {"method":"POST","path":"/v1/console/view-as","auth":"console-session","response":"JSONResponse"}
 {"method":"POST","path":"/v1/console/view-as/stop","auth":"console-session","response":"JSONResponse"}
-{"method":"GET","path":"/v1/cpu-overview","auth":"public","response":"dict"}
+{"method":"GET","path":"/v1/cpu-overview","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/dashboard/assumptions","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/dashboard/disagreements","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/dashboard/flow-failures","auth":"console-session","response":"dict"}

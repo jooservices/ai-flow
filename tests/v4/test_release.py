@@ -541,7 +541,8 @@ def _autodeploy(tmp_path, current, image_present=True, build_present=True):
 
 def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, requested=None, healthy=True,
                        canary_settings=None, pending_builds=(), install_timeout_override=None,
-                       minimum_age_override=None):
+                       minimum_age_override=None,
+                       canary_environment=None):
     """active: the canary installed the candidate at `now`; requested: the candidate was requested at that time
     and the canary node still reports the previous release."""
     root = tmp_path / "srv"
@@ -599,6 +600,7 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, reque
     secrets.mkdir(exist_ok=True)
     env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret",
            "AIFLOW4_SECRETS_DIR": str(secrets)}
+    env.update(canary_environment or {})
     if install_timeout_override is not None:
         env["AIFLOW4_CANARY_INSTALL_TIMEOUT_S"] = str(install_timeout_override)
     if minimum_age_override is not None:
@@ -653,6 +655,21 @@ def test_autodeploy_preserves_install_timeout_override_after_settings_load(tmp_p
     assert "within 60s" not in result.stdout
     assert state is not None
     assert not (releases / "CANARY_REJECTED").exists()
+
+
+def test_autodeploy_passes_environment_thresholds_over_control_plane_settings(tmp_path):
+    decision = {"action": "promote", "cause": "too_few_runs", "reason": "too few runs",
+                "canary": {"runs": 2, "infra_failures": 0, "failure_rate": 0.0},
+                "baseline": {"runs": 10, "infra_failures": 0, "failure_rate": 0.0}}
+    result, calls, _, _, _ = _canary_autodeploy(
+        tmp_path, active=True, decision=decision,
+        canary_settings={"minimum_age_s": 60, "minimum_runs": 2, "maximum_age_s": 600},
+        canary_environment={"AIFLOW4_CANARY_MAX_AGE_S": "1800", "AIFLOW4_CANARY_MIN_RUNS": "8"})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "-e AIFLOW4_CANARY_MAX_AGE_S=1800 -e AIFLOW4_CANARY_MIN_RUNS=8" in calls
+    assert "canary record-promotion --node canary --target v4.3.0" in calls
+    assert "--minimum-runs 8" in calls
 
 
 def test_autodeploy_keeps_waiting_while_the_canary_install_is_within_its_timeout(tmp_path):
@@ -745,7 +762,8 @@ def test_autodeploy_marks_pending_ancestors_live_with_the_promoted_build(tmp_pat
 
 def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, ci="ok", api_port=None,
                         canary_settings=None, pending_builds=(), install_timeout_override=None, requested=None,
-                        minimum_age_override=None):
+                        minimum_age_override=None,
+                        canary_environment=None):
     """api_port: forward the /v1/deploy/ requests to a control API listening there; else answer them from fixtures."""
     root = tmp_path / "srv"
     releases = root / "control" / "releases"
@@ -813,6 +831,7 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
     secrets.mkdir(exist_ok=True)
     env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret",
            "AIFLOW4_SECRETS_DIR": str(secrets)}
+    env.update(canary_environment or {})
     if install_timeout_override is not None:
         env["AIFLOW4_CANARY_INSTALL_TIMEOUT_S"] = str(install_timeout_override)
     if minimum_age_override is not None:
@@ -848,6 +867,21 @@ def test_develop_autodeploy_preserves_install_timeout_override_after_settings_lo
     assert "within 60s" not in result.stdout
     assert canary is not None
     assert not (releases / "CANARY_REJECTED").exists()
+
+
+def test_develop_autodeploy_passes_environment_thresholds_over_control_plane_settings(tmp_path):
+    decision = {"action": "promote", "cause": "too_few_runs", "reason": "too few runs",
+                "canary": {"runs": 2, "infra_failures": 0, "failure_rate": 0.0},
+                "baseline": {"runs": 10, "infra_failures": 0, "failure_rate": 0.0}}
+    result, calls, _, _, _, _ = _develop_autodeploy(
+        tmp_path, active=True, decision=decision,
+        canary_settings={"minimum_age_s": 60, "minimum_runs": 2, "maximum_age_s": 600},
+        canary_environment={"AIFLOW4_CANARY_MAX_AGE_S": "1800", "AIFLOW4_CANARY_MIN_RUNS": "8"})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "-e AIFLOW4_CANARY_MAX_AGE_S=1800 -e AIFLOW4_CANARY_MIN_RUNS=8" in calls
+    assert "canary record-promotion --node canary --target abcdef0123" in calls
+    assert "--minimum-runs 8" in calls
 
 
 def test_develop_autodeploy_rolls_back_canary_only_when_fake_two_release_registry_exceeds_threshold(tmp_path):

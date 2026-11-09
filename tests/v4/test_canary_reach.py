@@ -83,7 +83,13 @@ def test_settings_keep_cli_failure_thresholds(ctx):
     assert policy.minimum_infra_failures == 2
 
 
-def test_evaluate_passes_cli_failure_thresholds_alongside_settings(monkeypatch, capsys):
+@pytest.mark.parametrize(("environment_name", "environment_value", "expected_thresholds"), [
+    (None, None, (180, 2, 600)),
+    ("AIFLOW4_CANARY_MAX_AGE_S", "1800", (180, 2, 1800)),
+    ("AIFLOW4_CANARY_MIN_RUNS", "8", (180, 8, 600)),
+])
+def test_evaluate_passes_cli_failure_thresholds_alongside_settings(
+        monkeypatch, capsys, environment_name, environment_value, expected_thresholds):
     from aiflow.v4.control import canary
 
     class FakeDB:
@@ -106,6 +112,10 @@ def test_evaluate_passes_cli_failure_thresholds_alongside_settings(monkeypatch, 
     monkeypatch.setattr(canary, "decide", decide_with_thresholds)
     monkeypatch.setattr(canary, "work_available_on_node", lambda *_args: False)
     monkeypatch.setattr(canary, "node_is_healthy", lambda *_args: True)
+    monkeypatch.delenv("AIFLOW4_CANARY_MAX_AGE_S", raising=False)
+    monkeypatch.delenv("AIFLOW4_CANARY_MIN_RUNS", raising=False)
+    if environment_name:
+        monkeypatch.setenv(environment_name, environment_value)
     args = SimpleNamespace(canary_action="evaluate", database_url="postgresql://unused", node="node-a",
                            target="candidate", previous="previous", started_at="2026-01-02T03:04:05+00:00",
                            from_settings=True, failure_ratio="0.5", minimum_infra_failures=2)
@@ -114,6 +124,8 @@ def test_evaluate_passes_cli_failure_thresholds_alongside_settings(monkeypatch, 
 
     assert captured["thresholds"].minimum_age_s == 180
     assert captured["thresholds"].failure_ratio == 0.5
+    assert (captured["thresholds"].minimum_age_s, captured["thresholds"].minimum_runs,
+            captured["thresholds"].maximum_age_s) == expected_thresholds
     assert captured["thresholds"].minimum_infra_failures == 2
     assert '"action":"wait"' in capsys.readouterr().out
 

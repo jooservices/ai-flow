@@ -20,4 +20,7 @@ exclude = [
   'docs/guide/topics/scale-proof\.md',
   'docs/guide/topics/load-aware-scheduling\.md',
   'docs/screens/machines\.md',
+  # README status badges (Codecov may 404 until the first upload; Scorecard mirrors the published card).
+  'https://codecov\.io/',
+  'https://api\.securityscorecards\.dev/',
 ]

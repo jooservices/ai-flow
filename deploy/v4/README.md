@@ -79,6 +79,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Mechanical returns](../../docs/v4/mechanical-returns.md): refresh stale branches and fix named documentation gaps before verification; track daily returns and merged-ticket yield on the Dashboard
 - [Git hooks](../../docs/v4/git-hooks.md): fast checks when a commit is made (whitespace, lint, secrets, project guards) and the affected v4 tests with a smoke test when a push is made; no AI tokens
 - [Parallel CI](../../docs/v4/parallel-ci.md): the v4 suite on parallel shards, the required `Test (v4)` check and the scale proof job.
+- [Coverage gate, Codecov and README badges](../../docs/v4/coverage-gate.md): parallel Coverage job with 85% diff-cover, Codecov upload and status badges
 - [Epics and verification without a verdict](../../docs/v4/verify-no-verdict.md): an epic is never offered as work; the status, retry and Dashboard parts of JAIF-271 follow in slices
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
 - [Merge-held decision structure](../../docs/v4/merge-held-structure.md): ordered named checks preserve each hold reason and its message while the merge lease is held

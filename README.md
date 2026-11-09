@@ -1,5 +1,13 @@
 # ai-flow
 
+[![CI](https://github.com/jooservices/ai-flow/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/jooservices/ai-flow/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/jooservices/ai-flow/branch/develop/graph/badge.svg)](https://codecov.io/gh/jooservices/ai-flow/branch/develop)
+[![CodeQL](https://github.com/jooservices/ai-flow/actions/workflows/codeql.yml/badge.svg?branch=develop)](https://github.com/jooservices/ai-flow/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/jooservices/ai-flow/badge)](https://securityscorecards.dev/viewer/?uri=github.com/jooservices/ai-flow)
+[![Python Version](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![GitHub Release](https://img.shields.io/github/v/release/jooservices/ai-flow?display_name=tag)](https://github.com/jooservices/ai-flow/releases)
+[![License](https://img.shields.io/github/license/jooservices/ai-flow)](https://github.com/jooservices/ai-flow)
+
 > New to this project (person or AI)? Read [docs/CONTEXT.md](docs/CONTEXT.md) first: purpose, rules, the journey of a ticket and how to work with the owner, without technical detail.
 
 Jira-driven multi-AI delivery flow for Workspaces (Jira project `JAIF`). Supervisors on the Mac and the WSL workstation poll Jira, run a developer AI for each ready ticket, a reviewer AI, then drive the pull request through CI, feedback and QA, merge it and move the ticket to Done. The owner works only in Backlog.

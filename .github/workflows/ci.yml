@@ -420,6 +420,115 @@ jobs:
           test "$SHARDS" = success
           if [ "$BROWSER_NEEDED" = true ]; then test "$BROWSER" = success; else test "$BROWSER" = skipped; fi
 
+  # Coverage gate (JAIF-574): parallel with the test jobs, path-filtered, under seven minutes. Uploads to Codecov
+  # (free for public repositories) and fails a pull request when changed lines are under 85% covered.
+  coverage:
+    name: Coverage
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    services:
+      redis:
+        image: redis:8.2.10-bookworm
+        ports: ["6379:6379"]
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg18-trixie
+        env:
+          POSTGRES_USER: aiflow
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aiflow4
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U aiflow -d aiflow4"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Does this change need a coverage run?
+        id: touched
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "base=origin/develop" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${BASE:-}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="origin/develop"
+          fi
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin develop:refs/remotes/origin/develop
+            base="origin/develop"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          if git diff --name-only "$base" HEAD | grep -E '^(aiflow/|tests/|pyproject\.toml|uv\.lock|\.github/workflows/ci\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "no Python or test change: coverage is skipped"
+          fi
+
+      - name: Cache uv downloads
+        if: steps.touched.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: uv-${{ runner.os }}-
+
+      - name: Install
+        if: steps.touched.outputs.run == 'true'
+        run: |  # zizmor: ignore[adhoc-packages]  pytest-cov and diff-cover are CI-only tools, not project runtime dependencies.
+          pip install uv==0.13.4
+          uv sync --frozen --group dev
+          uv pip install pytest-cov==7.1.0 diff-cover==11.0.1
+
+      - name: Tests with coverage
+        if: steps.touched.outputs.run == 'true'
+        env:
+          AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
+          AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+          BASE: ${{ steps.touched.outputs.base }}
+        run: |
+          set -euo pipefail
+          plan="$(uv run --frozen python -m aiflow.v4.core.affected_tests --base "$BASE" --plan-only)"
+          printf '%s\n' "$plan"
+          if printf '%s\n' "$plan" | grep -q '^FULL SUITE:'; then
+            # Keep the job under seven minutes when the map falls back to the full suite.
+            files="$(BASE="$BASE" python3 deploy/v4/ci/coverage_select_tests.py)"
+          else
+            files="$(printf '%s\n' "$plan" | sed -n 's/^Run: uv run --frozen pytest //p')"
+          fi
+          test -n "$files"
+          # shellcheck disable=SC2086 # selected paths are space-separated; splitting them is intended
+          uv run --frozen pytest $files -p no:warnings --cov=aiflow --cov-report=xml:coverage.xml --cov-report=term
+          if git diff --name-only --diff-filter=ACDMRT "$BASE" HEAD | grep -E '^aiflow/[^/]+\.py$|^aiflow/(bin|memory)/' >/dev/null; then
+            uv run --frozen coverage run --append --source=aiflow -m unittest discover -s tests -q
+            uv run --frozen coverage xml -o coverage.xml
+          fi
+
+      - name: Diff coverage of changed lines at least 85 percent
+        if: steps.touched.outputs.run == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+        env:
+          BASE: ${{ steps.touched.outputs.base }}
+        run: uv run --frozen diff-cover coverage.xml --compare-branch="$BASE" --fail-under=85
+
+      - name: Upload coverage to Codecov
+        if: steps.touched.outputs.run == 'true'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: true
+          verbose: true
+
   # Clean-install acceptance test (docs/v4/clean-install-acceptance.md): the fast version on every pull request
   # that touches install, deploy, control or node code ...
   acceptance-fast:

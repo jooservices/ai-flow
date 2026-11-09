@@ -143,20 +143,42 @@ def _server_installer_source(extract_dir: Path) -> Path:
     return candidates[0].parent.parent
 
 
+def _keep_installer_backup(backup_dir: Path, install_dir: Path) -> Path:
+    """Keep a backup at a reserved unique sibling path without replacing an older backup."""
+    kept_dir = Path(tempfile.mkdtemp(prefix=f"{install_dir.name}.previous-", dir=install_dir.parent))
+    try:
+        os.replace(backup_dir, kept_dir)
+    except OSError:
+        copied_dir = kept_dir / install_dir.name
+        shutil.copytree(backup_dir, copied_dir, symlinks=True)
+        return copied_dir
+    return kept_dir
+
+
+def _preserve_installer_backup(backup_dir: Path, install_dir: Path) -> Path:
+    """Prefer the documented .previous path, then use a reserved unique sibling path."""
+    kept_dir = install_dir.with_name(f"{install_dir.name}.previous")
+    try:
+        kept_dir.mkdir()
+        try:
+            os.replace(backup_dir, kept_dir)
+        except OSError:
+            kept_dir.rmdir()
+            raise
+    except OSError:
+        return _keep_installer_backup(backup_dir, install_dir)
+    return kept_dir
+
+
 def _restore_previous_installer(backup_dir: Path, install_dir: Path, replace_error: OSError) -> None:
-    """Move the previous installer back after a failed replacement, or keep it beside the install directory."""
+    """Restore the previous installer, or preserve it beside the install directory."""
     try:
         os.replace(backup_dir, install_dir)
     except OSError as restore_error:
-        # Outside the staging folder, so the staging cleanup cannot delete the only copy of the previous installer.
-        kept_dir = install_dir.with_name(f"{install_dir.name}.previous")
         failure = (f"server-installer replacement failed ({type(replace_error).__name__}) and restoring "
                    f"the previous installer failed ({type(restore_error).__name__})")
-        try:
-            os.replace(backup_dir, kept_dir)
-        except OSError as keep_error:
-            raise OperationError(f"{failure}; the previous installer could not be preserved") from keep_error
-        raise OperationError(f"{failure}; the previous installer is kept at {kept_dir}") from restore_error
+        kept_dir = _preserve_installer_backup(backup_dir, install_dir)
+        raise OperationError(f"{failure}; the previous installer is preserved at {kept_dir}") from restore_error
 
 
 def _replace_server_installer(install_dir: Path, source_dir: Path, staging: Path) -> None:

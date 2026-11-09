@@ -98,11 +98,11 @@ the full declared list through the server-installer's distro-aware package manag
 RHEL-family hosts.
 
 An unavailable or invalid pinned installer archive fails the operation. When replacing the installer fails and the
-rollback fails too, the previous installer is kept next to the install directory with the suffix `.previous`, and
-the error names it. Other artifact downloads use fixed vendor
-URLs, locked versions (or the vendor's latest stable release when no supporting-tool pin is present), and a
-checksum before writing to `/usr/local/bin`. Arbitrary commands and arbitrary artifact URLs are never accepted
-from the API or control repo.
+rollback fails too, the previous installer is preserved beside the install directory. See [installer rollback
+recovery](node-installer-rollback.md) for the possible backup paths and recovery steps. Other artifact downloads
+use fixed vendor URLs, locked versions (or the vendor's latest stable release when no supporting-tool pin is
+present), and a checksum before writing to `/usr/local/bin`. Arbitrary commands and arbitrary artifact URLs are
+never accepted from the API or control repo.
 
 `GET /v1/nodes/{name}/operations/next` is node-token protected. The agent claims one queued operation and posts
 its verified result to `/result`. The Command Center log is `GET /v1/nodes/{name}/operations`, available only

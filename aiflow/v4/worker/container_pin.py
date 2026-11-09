@@ -6,9 +6,20 @@ from __future__ import annotations
 import os
 import stat
 import threading
+from contextlib import suppress
 from pathlib import Path
 
 from .container_policy import ContainerPolicyError
+
+
+def _require_descendant_kind(info: os.stat_result, *, is_last: bool) -> None:
+    """Reject symlinks and components whose kind does not fit their position in the path."""
+    if stat.S_ISLNK(info.st_mode):
+        raise ContainerPolicyError("container paths cannot traverse worktree symlinks")
+    if not is_last and not stat.S_ISDIR(info.st_mode):
+        raise ContainerPolicyError("container path parent is not a directory")
+    if is_last and not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+        raise ContainerPolicyError("container paths must be regular files or directories")
 
 
 class _WorktreePin:
@@ -71,13 +82,7 @@ class _WorktreePin:
                     flags |= os.O_DIRECTORY
                 child_fd = os.open(part, flags, dir_fd=parent_fd)
                 opened.append(child_fd)
-                info = os.fstat(child_fd)
-                if stat.S_ISLNK(info.st_mode):
-                    raise ContainerPolicyError("container paths cannot traverse worktree symlinks")
-                if index < len(relative.parts) - 1 and not stat.S_ISDIR(info.st_mode):
-                    raise ContainerPolicyError("container path parent is not a directory")
-                if index == len(relative.parts) - 1 and not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
-                    raise ContainerPolicyError("container paths must be regular files or directories")
+                _require_descendant_kind(os.fstat(child_fd), is_last=index == len(relative.parts) - 1)
                 parent_fd = child_fd
             with self._fd_lock:
                 self._descendant_fds.update(opened)
@@ -86,7 +91,7 @@ class _WorktreePin:
             for fd in opened:
                 os.close(fd)
             raise ContainerPolicyError("container descendant changed or is unavailable") from exc
-        except BaseException:
+        except BaseException:  # noqa: BLE001 - any exit, even KeyboardInterrupt, must close the descriptors
             for fd in opened:
                 os.close(fd)
             raise
@@ -133,10 +138,8 @@ class _WorktreePin:
     def close(self) -> None:
         with self._fd_lock:
             for fd in self._descendant_fds:
-                try:
+                with suppress(OSError):
                     os.close(fd)
-                except OSError:
-                    pass
             self._descendant_fds.clear()
         if self.fd >= 0:
             os.close(self.fd)
@@ -151,7 +154,5 @@ class _WorktreePin:
             new_fds = self._descendant_fds - snapshot
             self._descendant_fds.difference_update(new_fds)
             for fd in new_fds:
-                try:
+                with suppress(OSError):
                     os.close(fd)
-                except OSError:
-                    pass

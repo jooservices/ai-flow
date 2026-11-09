@@ -357,6 +357,9 @@ def _write_test_suite_slots(value: object, directory: Path | None = None) -> Non
         raise OSError("aiflow-worker account is missing") from exc
     os.chown(shared, 0, worker_gid)
     os.chmod(shared, 0o3770)
+    _ensure_test_suite_lock(shared / "acquire.lock", worker_gid)
+    for index in range(MAX_TEST_SLOTS):
+        _ensure_test_suite_lock(shared / f"slot-{index}.lock", worker_gid)
     target = shared / "limit"
     content = f"{slots}\n"
     try:
@@ -375,6 +378,22 @@ def _write_test_suite_slots(value: object, directory: Path | None = None) -> Non
         os.replace(temporary, target)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def _ensure_test_suite_lock(path: Path, worker_gid: int) -> None:
+    """Keep each shared flock inode root-owned and inaccessible to project replacement."""
+    flags = os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o660)
+    except OSError as exc:
+        raise OSError(f"cannot prepare test-suite lock file {path}: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"test-suite lock path is not a regular file: {path}")
+        os.fchown(descriptor, 0, worker_gid)
+        os.fchmod(descriptor, 0o660)
+    finally:
+        os.close(descriptor)
 
 
 def _credential_conditions(states: list[dict]) -> dict[str, dict]:

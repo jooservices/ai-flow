@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -50,7 +51,9 @@ def run(wt: Path, project: dict, title: str, env: dict[str, str] | None = None, 
     ctx = Context(wt, project.get("base") or "develop", title,
                   tuple(suite_slots.nice_prefix(run_as or [])))
     with suite_slots.suite_slot():
-        return local_gate.run(ctx, plan(project), gate_env(env), log=log)
+        with tempfile.TemporaryDirectory(prefix="aiflow4-gate-test-slots-") as slot_directory:
+            nested_env = {**gate_env(env), "AIFLOW4_TEST_SLOT_DIR": slot_directory}
+            return local_gate.run(ctx, plan(project), nested_env, log=log)
 
 
 def keep_failed_work(git, wt: Path, base: Path, commits: list[str] | None = None) -> str:

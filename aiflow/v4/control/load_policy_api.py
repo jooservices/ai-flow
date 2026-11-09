@@ -8,22 +8,13 @@ from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 
 from . import load_policy
 from . import licensing, rollout
+from .features.fleet.bodies import MachineLoadLimitsBody
 from .features.fleet.events import MachineLoadLimitsSaved
 from .platform.events.wiring import publish_for
 from .repositories import nodes as node_repository
-
-
-class MachineLoadLimitsBody(BaseModel):
-    model_config = {"extra": "forbid"}
-    cpu_load_per_cpu: float = Field(gt=0, le=8)
-    memory_used_pct: float = Field(gt=0, le=100)
-    disk_free_pct: float = Field(ge=0, lt=100)
-    host_cpu_load_per_cpu: float | None = Field(default=None, gt=0, le=8)
-    test_suite_slots: int | None = Field(default=None, ge=1, le=load_policy.MAX_TEST_SUITE_SLOTS)
 
 
 def register_machine_load_limits(app: FastAPI, ctx: Any, console_user: Callable, audit: Callable) -> None:
@@ -47,7 +38,8 @@ def register_machine_load_limits(app: FastAPI, ctx: Any, console_user: Callable,
                        " cpu_load_per_cpu=EXCLUDED.cpu_load_per_cpu,state='{}'::jsonb,updated_at=now()",
                        (hostname, body.host_cpu_load_per_cpu))
         load_policy.record_heartbeat(ctx, name)
-        publish_for(ctx, MachineLoadLimitsSaved(node=name, actor=user.subject, machine=machine_limits, host=hostname,
+        event_machine = {**machine_limits, "test_suite_slots": configured_slots}
+        publish_for(ctx, MachineLoadLimitsSaved(node=name, actor=user.subject, machine=event_machine, host=hostname,
                                                host_cpu_load_per_cpu=body.host_cpu_load_per_cpu))
         host_limit = (body.host_cpu_load_per_cpu if body.host_cpu_load_per_cpu is not None else
                       load_policy.DEFAULT_HOST_LIMITS["cpu_load_per_cpu"])

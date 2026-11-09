@@ -330,6 +330,8 @@ class MachineLoadLimitsSaved(DomainEvent):
     host_cpu_load_per_cpu: float | None
 
     def audit(self) -> Audit:
-        return Audit("machine-load", "limits", self.node, self.actor, "load limits saved",
-                     {"machine": self.machine, "host": self.host,
-                      "host_cpu_load_per_cpu": self.host_cpu_load_per_cpu})
+        payload = {"machine": self.machine, "host": self.host,
+                   "host_cpu_load_per_cpu": self.host_cpu_load_per_cpu}
+        if "test_suite_slots" in self.machine:
+            payload["test_suite_slots"] = self.machine["test_suite_slots"]
+        return Audit("machine-load", "limits", self.node, self.actor, "load limits saved", payload)

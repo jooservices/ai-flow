@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 from ..core import work_limits
 from ..adapters.base import RunSpec
@@ -14,6 +15,7 @@ from .client import ControlClient
 from .dev import Claimed, Heartbeat, LeaseLost
 from .gitops import Git
 from .notes import project_env
+from .process_checks import communicate as _communicate
 
 
 def _redact(text: str, env: dict[str, str], secret_names: set[str] | None = None) -> str:
@@ -59,22 +61,8 @@ def run_post_merge(api: ControlClient, c: Claimed, srv_root: str, heartbeat_s: i
                 raise LeaseLost()
             hb.progress = {"phase": "post-merge-check", "ticket": c.ticket["key"],
                            "check": index, "checks_total": len(commands)}
-            with suite_slots.suite_slot():
-                check_as = suite_slots.nice_prefix(run_as)
-                if project.get("containers"):
-                    from .containers import ContainerRuntime
-                    spec = RunSpec(prompt="", cwd=str(worktree), account_home=command_env["HOME"], extra_env=command_env)
-                    with ContainerRuntime(spec, run_as) as runtime:
-                        proc = subprocess.Popen(check_as + ["bash", "-c", command], cwd=worktree,
-                                                env={**command_env, **spec.extra_env}, stdout=subprocess.PIPE,
-                                                stderr=subprocess.STDOUT, text=True, start_new_session=True)
-                        runtime.bind_process(proc.pid)
-                        output, exit_code = _communicate(proc, timeout_s)
-                else:
-                    proc = subprocess.Popen(check_as + ["bash", "-lc", command], cwd=worktree, env=command_env,
-                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                            start_new_session=True)
-                    output, exit_code = _communicate(proc, timeout_s)
+            output, exit_code = _run_check(command, project, worktree, run_as, command_env, timeout_s,
+                                           hb.lost.is_set)
             report["checks"].append({"command": command, "passed": exit_code == 0, "exit_code": exit_code,
                                      "output": _redact(output[-12_000:], env, secret_names)})
         if hb.lost.is_set():
@@ -101,11 +89,29 @@ def run_post_merge(api: ControlClient, c: Claimed, srv_root: str, heartbeat_s: i
             hb.join(timeout=heartbeat_s + 1)
 
 
-def _communicate(proc: subprocess.Popen, timeout_s: int) -> tuple[str, int]:
+def _run_check(command: str, project: dict, worktree: Path, run_as: list[str], command_env: dict,
+               timeout_s: int, cancel: Callable[[], bool]) -> tuple[str, int]:
     try:
-        output, _ = proc.communicate(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        output, _ = proc.communicate()
-        output = (output or "") + f"\nCheck exceeded {timeout_s} seconds."
-    return output or "", int(proc.returncode or 0)
+        with suite_slots.suite_slot(cancel=cancel):
+            if cancel():
+                raise LeaseLost()
+            check_as = suite_slots.nice_prefix(run_as)
+            if project.get("containers"):
+                from .containers import ContainerRuntime
+                spec = RunSpec(prompt="", cwd=str(worktree), account_home=command_env["HOME"], extra_env=command_env)
+                with ContainerRuntime(spec, run_as) as runtime:
+                    if cancel():
+                        raise LeaseLost()
+                    proc = subprocess.Popen(check_as + ["bash", "-c", command], cwd=worktree,
+                                            env={**command_env, **spec.extra_env}, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                    runtime.bind_process(proc.pid)
+                    return _communicate(proc, timeout_s)
+            if cancel():
+                raise LeaseLost()
+            proc = subprocess.Popen(check_as + ["bash", "-lc", command], cwd=worktree, env=command_env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                    start_new_session=True)
+            return _communicate(proc, timeout_s)
+    except suite_slots.SlotWaitCancelled as exc:
+        raise LeaseLost() from exc

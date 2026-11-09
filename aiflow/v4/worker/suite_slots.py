@@ -1,18 +1,24 @@
 """Node-local coordination and process priority for worker-run project checks."""
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
+import stat
 import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, TextIO
+from typing import Callable, Iterator, TextIO
 
 DEFAULT_TEST_SLOTS = 2
 MAX_TEST_SLOTS = 32
 TEST_NICE_VALUE = 10
 SLOT_DIRECTORY = Path("/run/aiflow4-test-slots")
+
+
+class SlotWaitCancelled(RuntimeError):
+    """Raised when a worker lease is lost while waiting for a test-suite slot."""
 
 
 def slot_limit(directory: Path) -> int:
@@ -40,7 +46,7 @@ def _effective_directory() -> Path:
 def _available_slot(directory: Path) -> tuple[int, TextIO | None]:
     occupied, available = 0, None
     for index in range(MAX_TEST_SLOTS):
-        handle = (directory / f"slot-{index}.lock").open("a+")
+        handle = _open_lock(directory / f"slot-{index}.lock")
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -55,14 +61,40 @@ def _available_slot(directory: Path) -> tuple[int, TextIO | None]:
     return occupied, available
 
 
-def _acquire_slot(directory: Path) -> TextIO:
+def _open_lock(path: Path) -> TextIO:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None and not stat.S_ISREG(info.st_mode):
+        raise RuntimeError(f"test suite slot lock path is not a regular file: {path}")
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o660)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR}:
+            raise RuntimeError(f"test suite slot lock path is not a regular file: {path}") from exc
+        raise
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise RuntimeError(f"test suite slot lock path is not a regular file: {path}")
+    return os.fdopen(descriptor, "r+")
+
+
+def _acquire_slot(directory: Path, cancel: Callable[[], bool] | None = None) -> TextIO:
     guard_path = directory / "acquire.lock"
-    with guard_path.open("a+") as guard:
+    with _open_lock(guard_path) as guard:
         while True:
+            if cancel is not None and cancel():
+                raise SlotWaitCancelled("test-suite slot wait cancelled")
             fcntl.flock(guard, fcntl.LOCK_EX)
             occupied, available = _available_slot(directory)
             if available is not None and occupied < slot_limit(directory):
                 fcntl.flock(guard, fcntl.LOCK_UN)
+                if cancel is not None and cancel():
+                    fcntl.flock(available, fcntl.LOCK_UN)
+                    available.close()
+                    raise SlotWaitCancelled("test-suite slot wait cancelled")
                 return available
             if available is not None:
                 fcntl.flock(available, fcntl.LOCK_UN)
@@ -72,11 +104,11 @@ def _acquire_slot(directory: Path) -> TextIO:
 
 
 @contextmanager
-def suite_slot(directory: Path | None = None) -> Iterator[None]:
+def suite_slot(directory: Path | None = None, *, cancel: Callable[[], bool] | None = None) -> Iterator[None]:
     """Wait for one of this node's configured suite slots and hold it until the check exits."""
     shared = directory or _effective_directory()
     shared.mkdir(parents=True, exist_ok=True, mode=0o700)
-    handle = _acquire_slot(shared)
+    handle = _acquire_slot(shared, cancel)
     try:
         yield
     finally:

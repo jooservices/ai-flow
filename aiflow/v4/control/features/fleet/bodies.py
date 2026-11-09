@@ -5,6 +5,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from ... import load_policy
+
+
+class MachineLoadLimitsBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    cpu_load_per_cpu: float = Field(gt=0, le=8)
+    memory_used_pct: float = Field(gt=0, le=100)
+    disk_free_pct: float = Field(ge=0, lt=100)
+    host_cpu_load_per_cpu: float | None = Field(default=None, gt=0, le=8)
+    test_suite_slots: int | None = Field(default=None, ge=1, le=load_policy.MAX_TEST_SUITE_SLOTS)
+
 
 class CheckProbeBody(BaseModel):
     project: str

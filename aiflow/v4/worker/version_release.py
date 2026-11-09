@@ -42,7 +42,7 @@ def _run_check(command: str, project: dict, wt: Path, run_as: list[str], command
                 from .containers import ContainerRuntime
                 spec = RunSpec(prompt="", cwd=str(wt), account_home=str(Path(srv_root) / "cache"),
                                extra_env=dict(command_env))
-                with ContainerRuntime(spec, run_as) as runtime:
+                with ContainerRuntime(spec, run_as, process_prefix=suite_slots.nice_prefix([])) as runtime:
                     if cancel is not None and cancel():
                         raise LeaseLost()
                     proc = subprocess.Popen(check_as + ["bash", "-c", command], cwd=wt,

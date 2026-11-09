@@ -356,8 +356,8 @@ def test_version_release_check_inside_a_container_runtime_holds_a_slot(monkeypat
         yield
 
     class Runtime:
-        def __init__(self, spec, run_as):
-            events.append(("runtime", spec.cwd))
+        def __init__(self, spec, run_as, *, process_prefix=None):
+            events.append(("runtime", spec.cwd, process_prefix))
 
         def __enter__(self):
             return self
@@ -375,7 +375,7 @@ def test_version_release_check_inside_a_container_runtime_holds_a_slot(monkeypat
                                                    str(tmp_path), 10)
 
     assert exit_code == 0 and output.strip() == "contained"
-    assert events == ["slot", ("runtime", str(tmp_path)), "bound"]
+    assert events == ["slot", ("runtime", str(tmp_path), suite_slots.nice_prefix([])), "bound"]
 
 
 def test_version_release_timeout_kills_descendants_and_releases_the_slot(monkeypatch, tmp_path):
@@ -486,7 +486,7 @@ def test_version_release_container_rechecks_lease_before_process_start(monkeypat
         yield
 
     class Runtime:
-        def __init__(self, *_args):
+        def __init__(self, *_args, **_kwargs):
             pass
 
         def __enter__(self):
@@ -515,6 +515,7 @@ def test_post_merge_container_check_holds_slot_and_rechecks_lease(monkeypatch, t
 
     events = []
     checks = iter((False, lose_during_runtime))
+    runtime_prefixes = []
 
     @contextmanager
     def slot(*, cancel=None):
@@ -522,8 +523,8 @@ def test_post_merge_container_check_holds_slot_and_rechecks_lease(monkeypatch, t
         yield
 
     class Runtime:
-        def __init__(self, *_args):
-            pass
+        def __init__(self, *_args, process_prefix=None):
+            runtime_prefixes.append(process_prefix)
 
         def __enter__(self):
             events.append("runtime")
@@ -551,6 +552,7 @@ def test_post_merge_container_check_holds_slot_and_rechecks_lease(monkeypatch, t
     monkeypatch.setattr(containers, "ContainerRuntime", Runtime)
     monkeypatch.setattr(post_merge.subprocess, "Popen", popen)
 
+    assert runtime_prefixes == []
     if lose_during_runtime:
         with pytest.raises(LeaseLost):
             post_merge._run_check("true", {"containers": True}, tmp_path, [], {"HOME": str(tmp_path)}, 10,
@@ -561,6 +563,7 @@ def test_post_merge_container_check_holds_slot_and_rechecks_lease(monkeypatch, t
                                                   {"HOME": str(tmp_path)}, 10, cancel=lambda: next(checks))
         assert (output, exit_code) == ("ok", 0)
         assert events == ["slot", "runtime", "started", "bound", "collected"]
+    assert runtime_prefixes == [suite_slots.nice_prefix([])]
 
 
 def test_post_merge_timeout_kills_descendants_that_hold_stdout(tmp_path):

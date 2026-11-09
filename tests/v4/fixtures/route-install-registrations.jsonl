@@ -35,6 +35,13 @@
 {"feature":"console","method":"PUT","path":"/v1/licensing/limits","handler":"update_license_limits","signature":"(body: aiflow.v4.control.features.console.bodies.PlanLimitsBody, request: starlette.requests.Request) -> dict","options":{}}
 {"feature":"console","method":"GET","path":"/v1/licensing/usage","handler":"licensing_usage","signature":"(request: starlette.requests.Request) -> dict","options":{}}
 {"feature":"console","method":"GET","path":"/v1/licensing/usage.csv","handler":"licensing_usage_csv","signature":"(request: starlette.requests.Request) -> starlette.responses.PlainTextResponse","options":{}}
+{"feature":"console_login","method":"GET","path":"/login","handler":"login_page","signature":"(request: 'Request') -> 'HTMLResponse'","options":{"include_in_schema":false}}
+{"feature":"console_login","method":"POST","path":"/v1/auth/login","handler":"login","signature":"(request: 'Request') -> 'JSONResponse'","options":{}}
+{"feature":"console_login","method":"POST","path":"/v1/auth/logout","handler":"logout","signature":"(request: 'Request') -> 'JSONResponse'","options":{}}
+{"feature":"console_login","method":"POST","path":"/logout","handler":"logout_page","signature":"(request: 'Request') -> 'RedirectResponse'","options":{"include_in_schema":false}}
+{"feature":"console_login","method":"GET","path":"/v1/auth/me","handler":"me","signature":"(request: 'Request') -> 'JSONResponse'","options":{}}
+{"feature":"console_login","method":"GET","path":"/v1/auth/users","handler":"console_users","signature":"(request: 'Request') -> 'JSONResponse'","options":{}}
+{"feature":"console_login","method":"POST","path":"/v1/auth/users","handler":"create_console_user","signature":"(request: 'Request') -> 'JSONResponse'","options":{}}
 {"feature":"fleet","method":"POST","path":"/v1/nodes/join-tokens","handler":"issue_join_token","signature":"(body: aiflow.v4.control.features.fleet.bodies.JoinTokenBody) -> dict","options":{}}
 {"feature":"fleet","method":"POST","path":"/v1/nodes/join-tokens/inspect","handler":"inspect_join_token","signature":"(body: aiflow.v4.control.features.fleet.bodies.JoinInspectBody) -> dict","options":{}}
 {"feature":"fleet","method":"POST","path":"/v1/nodes/join","handler":"join","signature":"(body: aiflow.v4.control.features.fleet.bodies.JoinBody) -> dict","options":{}}

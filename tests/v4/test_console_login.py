@@ -107,6 +107,12 @@ def test_users_screen_creates_accounts_and_shows_the_licence_limit_refusal(ctx, 
 
 
 # --- AC1: endpoints --------------------------------------------------------------------------------------------------
+def test_login_page_serves_the_setup_wizard_before_the_first_user_exists(ctx):
+    response = make_client(ctx).get("/login")
+    assert response.status_code == 200
+    assert "Set up AI Flow" in response.text and "Create Administrator" in response.text
+
+
 def test_sign_in_sets_a_signed_strict_http_only_cookie_and_me_logout_work(ctx, seeded):
     client = make_client(ctx)
     assert "Sign in" in client.get("/login").text
@@ -124,6 +130,22 @@ def test_sign_in_sets_a_signed_strict_http_only_cookie_and_me_logout_work(ctx, s
     assert out.status_code == 200 and COOKIE_NAME in out.headers["set-cookie"] and "max-age=0" in out.headers["set-cookie"].lower()
     assert COOKIE_NAME not in client.cookies
     assert client.get("/v1/auth/me").status_code == 401
+
+
+def test_browser_logout_revokes_the_session_and_redirects_to_login(ctx, seeded):
+    client = make_client(ctx)
+    assert sign_in(client, seeded).status_code == 200
+    response = client.post("/logout")
+    assert response.status_code == 303 and response.headers["location"] == "/login"
+    assert "max-age=0" in response.headers["set-cookie"].lower()
+    assert client.get("/v1/auth/me").status_code == 401
+
+
+def test_user_management_routes_refuse_a_signed_in_non_owner(ctx):
+    client = make_client(ctx)
+    client.cookies.set(COOKIE_NAME, issue_session("lead@example.test", "lead", EXP, SECRET))
+    assert client.get("/v1/auth/users").status_code == 403
+    assert client.post("/v1/auth/users", json={"email": "new@example.test", "role": "lead"}).status_code == 403
 
 
 def test_secure_cookie_when_the_public_url_is_https(ctx, seeded):

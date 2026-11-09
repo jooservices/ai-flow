@@ -7,9 +7,10 @@ shrink. This change explains nine handlers and pins their behaviour with tests w
 ## Explained handlers
 
 The nine explained handlers are in these modules (all under `aiflow/v4/control`): `memory.py`, `routes/support.py`,
-`login_sessions.py`, `flow_doctor.py`, `features/runs/master_actions.py`, `features/version_release/claim_steps.py`,
-`features/projects/routes_project_listing.py`, `features/projects/routes_project_environment.py` and
-`features/console/routes_console_user_create.py`. Each keeps its behaviour; only the reason of the broad catch is written down.
+`features/console_login/service.py`, `flow_doctor.py`, `features/runs/master_actions.py`,
+`features/version_release/claim_steps.py`, `features/projects/routes_project_listing.py`,
+`features/projects/routes_project_environment.py` and `features/console/routes_console_user_create.py`. Each keeps its
+behaviour; only the reason of the broad catch is written down.
 
 ## Routes
 

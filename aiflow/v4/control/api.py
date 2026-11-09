@@ -38,6 +38,7 @@ from .features.knowledge import routes as knowledge_module
 from .features.backups import routes as backups_module
 from .features.project_report import routes as project_report_module
 from .features.console import routes as console_module
+from .features.console_login import routes as console_login_module
 from .features.release import routes as release_module
 from .features.version_release import routes as version_release_module
 from .features.fleet import routes as fleet_module
@@ -264,6 +265,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     runtime_settings.install(app, ctx, console_user, audit)
     app.state.control_api_auth = {"node_auth": node_auth, "console_user": console_user, "audit": audit,
                                   "mark_machine_auth_failure": mark_machine_auth_failure}
+    console_login_module.install(app, ctx)
     from .login import install_login
     install_login(app, ctx)
     eligibility.install(ctx, RELEASES, lambda *a, **k: work_routes.eligible(*a, **k), quota_forecast_at_risk, quota_peer_accounts)

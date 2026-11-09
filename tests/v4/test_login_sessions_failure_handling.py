@@ -5,7 +5,7 @@ import logging
 
 import pytest
 
-from aiflow.v4.control.login_sessions import session_revoked
+from aiflow.v4.control.features.console_login.service import session_revoked
 
 
 def test_session_revoked_fails_closed_when_database_lookup_raises(

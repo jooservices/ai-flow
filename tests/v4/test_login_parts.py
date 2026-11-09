@@ -9,7 +9,7 @@ from starlette.requests import Request
 
 from aiflow.v4.control.login_gate import (api_permission, checks_token, login_redirect_target, project_for_path,
                                           route_checks_token)
-from aiflow.v4.control.login_signin import rate_limit_digest, rate_limit_key
+from aiflow.v4.control.features.console_login.service import rate_limit_digest, rate_limit_key
 
 
 class _Database:

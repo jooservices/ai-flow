@@ -41,7 +41,6 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 
 from .application_context import ApplicationContext
 from . import audit as audit_log
@@ -52,7 +51,8 @@ from .console_auth import (COOKIE_NAME, PAGE_VIEWS, ROLE_LABELS, ROLE_PERMISSION
 from .db import J
 from .emails import EMAIL, normalize_email  # noqa: F401 - re-exported for callers of login.normalize_email
 from .ui import CONSOLE_PAGE_PATHS
-from .login_sessions import (CSRF_COOKIE as CSRF_COOKIE, SESSION_TTL_MAX_S, SESSION_TTL_MIN_S, SESSION_TTL_S)
+from .features.console_login.session_cookies import (CSRF_COOKIE as CSRF_COOKIE, SESSION_TTL_MAX_S, SESSION_TTL_MIN_S,
+                                                     SESSION_TTL_S)
 
 MFA_ROLES = ("administrator",)  # two-factor sign-in is mandatory for anyone holding one of these roles
 
@@ -336,31 +336,13 @@ else{m.textContent=x[1].detail||"Sign-in failed";b.disabled=false;if(x[1].mfa_re
 """
 
 
-def register_login_endpoint(app: FastAPI, ctx: ApplicationContext) -> None:
-    from .login_signin import SignInParts
-
-    parts = SignInParts(ctx, ctx.settings)
-
-    @app.post("/v1/auth/login")
-    async def login(request: Request) -> JSONResponse:
-        from .login_signin import login_response
-
-        return await login_response(parts.ctx, request)
-
-
 def install_login(app: FastAPI, ctx: ApplicationContext) -> None:
+    from .features.console_login.service import register_session_revocation
     from .login_gate import install_gate
-    from .login_sessions import install_sessions, register_session_revocation
-    from .login_signin import install_signin
-    from .login_users import install_users
     from .route_registry import mount_discovered_routers
     from .security import install_security
 
     register_session_revocation(ctx)
-    install_signin(app, ctx)
-    register_login_endpoint(app, ctx)
-    install_sessions(app, ctx)
-    install_users(app, ctx)
     mount_discovered_routers(app)
     if ctx.settings.console_login:
         install_gate(app, ctx)

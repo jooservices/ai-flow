@@ -140,6 +140,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Canary auto-deploy](../../docs/v4/canary-autodeploy.md): signed releases and develop commits are measured on one node before fleet promotion, with automatic rollback on elevated infrastructure failures
 - [Upgrade host layout and promotion failures](../../docs/v4/upgrade-layout.md): create missing host files before services start, alert on failed promotions, and stop same-cause retries after two failures
 - [Canary minimum age override](../../docs/v4/canary-min-age-override.md): host environment age takes precedence over the control-plane minimum age setting
+- [Canary threshold overrides](../../docs/v4/canary-threshold-overrides.md): environment values for maximum age and minimum runs override matching control-plane settings on both deploy channels
 - [Log sources routes](../../docs/v4/route-module-log_sources.md): the log sources routes are served from their own router module
 - [SA system health](../../docs/v4/sa-health.md): node and account health, capacity recommendations, credential expiry, blocked AI and network diagnostics
 - [Shared route helpers](../../docs/v4/route-dependencies.md): audit, console and node authentication and fencing as functions of the application context, usable by any router

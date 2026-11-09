@@ -25,8 +25,8 @@ load_canary_settings() {
   IFS=$'\t' read -r runs max < <(python3 -c 'import json,sys
 d=json.load(sys.stdin).get("control_canary",{}).get("settings") or {}
 print(d.get("minimum_runs") if d.get("minimum_runs") is not None else "", d.get("maximum_age_s") or "", sep="\t")' <<<"$state") || return 0
-  [ -n "$runs" ] && CANARY_MIN_RUNS=$runs
-  [ -n "$max" ] && CANARY_MAX_AGE_S=$max
+  [ -n "$runs" ] && [ -z "${AIFLOW4_CANARY_MIN_RUNS:-}" ] && CANARY_MIN_RUNS=$runs
+  [ -n "$max" ] && [ -z "${AIFLOW4_CANARY_MAX_AGE_S:-}" ] && CANARY_MAX_AGE_S=$max
   if [ -z "${AIFLOW4_CANARY_INSTALL_TIMEOUT_S:-}" ]; then
     CANARY_INSTALL_TIMEOUT_S=$(( CANARY_MAX_AGE_S < 1800 ? CANARY_MAX_AGE_S : 1800 ))
   fi
@@ -92,12 +92,14 @@ upgrade_blocked() {
   exit 1
 }
 canary_cli() {
-  # docker exec does not inherit the deployer's environment, so forward the optional override explicitly.
-  if [ "${1:-}" = evaluate ] && [ -n "${AIFLOW4_CANARY_MIN_AGE_S:-}" ]; then
-    docker exec aiflow4-control-api-a aiflow4 canary "$@" --minimum-age-s "$AIFLOW4_CANARY_MIN_AGE_S"
-  else
-    docker exec aiflow4-control-api-a aiflow4 canary "$@"
+  # docker exec does not inherit the deployer's environment, so forward the optional overrides explicitly.
+  local -a threshold_env=() threshold_args=()
+  if [ "${1:-}" = evaluate ]; then
+    threshold_env=(-e "AIFLOW4_CANARY_MAX_AGE_S=${AIFLOW4_CANARY_MAX_AGE_S:-}"
+      -e "AIFLOW4_CANARY_MIN_RUNS=${AIFLOW4_CANARY_MIN_RUNS:-}")
+    [ -n "${AIFLOW4_CANARY_MIN_AGE_S:-}" ] && threshold_args=(--minimum-age-s "$AIFLOW4_CANARY_MIN_AGE_S")
   fi
+  docker exec "${threshold_env[@]}" aiflow4-control-api-a aiflow4 canary "$@" "${threshold_args[@]}"
 }
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
 # Promotion helpers live in the ai-flow checkout (docs/v4/upgrade-layout.md).

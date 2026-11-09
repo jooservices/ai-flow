@@ -118,6 +118,10 @@ def test_worker_records_and_refuses_red_or_incomplete_runs(monkeypatch, tmp_path
         response=RunResult(), summary="Original work",
         srv_root=str(tmp_path), key="JAIF-1", failed_work_commits=[],
     )
+    monkeypatch.setattr(dev.gate_step, "snapshot_worktree", lambda *_args: "pre-repair-tree")
+    monkeypatch.setattr(dev.gate_step, "changes_since_snapshot", lambda git, _wt, _before: git.changed(_wt))
+    monkeypatch.setattr(dev.gate_step, "commit_repair", lambda git, wt, _paths, message, identity:
+                        git.commit_all(wt, message, identity))
     monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs: gate_calls.append("gate") or gate_result)
     if gate_result.failed:
         monkeypatch.setattr(dev, "brief", lambda _run: SimpleNamespace(

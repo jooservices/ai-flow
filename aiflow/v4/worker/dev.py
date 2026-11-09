@@ -839,17 +839,19 @@ def repair_gate_failure(run: DevRun, failed_step: str, reason: str, docs_only: b
                 "with RESULT: DONE and a short summary."),
         log_append=True,
     )
+    repair_snapshot = gate_step.snapshot_worktree(run.git, run.worktree)
     run_ai_once(run, prepared)
     repair_response = run.response
     record_gate_repair_response(run, original_response, repair_response)
     repaired_head = run.git.run("rev-parse", "HEAD", cwd=run.worktree).strip()
     if repaired_head != original_head:
-        run.failed_work_repair_base = original_head
+        common_base = run.git.run("merge-base", repaired_head, original_head, cwd=run.worktree, check=False).strip()
+        run.failed_work_repair_base = repaired_head if common_base == repaired_head else original_head
         return False
     if repair_response.error_kind or repair_response.exit_code != 0 or repair_response.verdict != "DONE":
         run.failed_work_repair_base = original_head
         return False
-    changed = run.git.changed(run.worktree)
+    changed = gate_step.changes_since_snapshot(run.git, run.worktree, repair_snapshot)
     if not changed or (docs_only and any(not _documentation_repair_path(path) for path in changed)):
         run.failed_work_repair_base = original_head
         return False
@@ -857,7 +859,8 @@ def repair_gate_failure(run: DevRun, failed_step: str, reason: str, docs_only: b
         run.failed_work_repair_base = original_head
         return False
     try:
-        repair_sha = run.git.commit_all(run.worktree, commit_message(run.claim, run.summary), run.claim.identity)
+        repair_sha = gate_step.commit_repair(
+            run.git, run.worktree, changed, commit_message(run.claim, run.summary), run.claim.identity)
     except GitError:
         return False
     run.failed_work_commits.append(repair_sha)
@@ -914,7 +917,9 @@ def report_gate_failure(run: DevRun, reason: str, error_kind: str) -> dict:
     saved = gate_step.keep_failed_work(
         run.git, run.worktree, Path(run.srv_root) / "logs" / "runs" / f"{run.key}-{run.claim.run_id}",
         commits=run.failed_work_commits, repair_base=run.failed_work_repair_base)
-    run.git.run("reset", "--soft", "HEAD~1", cwd=run.worktree)
+    parent = run.git.run("rev-parse", "--verify", "HEAD^", cwd=run.worktree, check=False).strip()
+    if parent:
+        run.git.run("reset", "--soft", parent, cwd=run.worktree)
     run.result.update(outcome="failed", error_kind=error_kind, summary=reason[:1000])
     run.reporter.comment(body=note(
         run.claim, "local gate failed", what="The CI checks fail on the local commit",

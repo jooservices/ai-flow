@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import json
 import subprocess
 import sys
 import io
@@ -161,6 +162,44 @@ def test_the_pre_commit_checks_run_cheapest_first_and_the_guards_read_a_snapshot
     assert snapshot != git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
+def _ruff_json(findings):
+    return json.dumps([{"code": code, "message": message, "location": {"row": row, "column": 1}}
+                       for row, code, message in findings])
+
+
+def test_only_findings_on_changed_lines_refuse_a_commit(tmp_path, monkeypatch):
+    repo = repo_on_develop(tmp_path)
+    module = repo / "aiflow/v4/core/old.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("import os\nVALUE = 1\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "chore: Add old module with a finding")
+    module.write_text("import os\nVALUE = 2\n")  # changes line 2 only; the old finding is on line 1
+    git(repo, "add", "aiflow/v4/core/old.py")
+    ctx = Context(repo, "develop")
+    lint = next(step for step in git_hooks._commit_checks(ctx) if step.name == "lint")
+    original_run = subprocess.run
+    reported = []
+
+    def fake_run(argv, *args, **kwargs):
+        if argv[:3] == ["uv", "run", "--frozen"]:
+            return subprocess.CompletedProcess(argv, 1, _ruff_json(reported), "")
+        return original_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(git_hooks.subprocess, "run", fake_run)
+    reported[:] = [(1, "F401", "unused import")]
+    assert lint.check(ctx) == []  # old finding on an untouched line
+    reported[:] = [(1, "F401", "unused import"), (2, "E501", "line too long")]
+    problems = lint.check(ctx)
+    assert problems and "E501" in problems[0] and "F401" not in problems[0]
+    git(repo, "reset", "-q")
+    new = repo / "aiflow/v4/core/new.py"
+    new.write_text("import sys\n")
+    git(repo, "add", "aiflow/v4/core/new.py")
+    reported[:] = [(1, "F401", "unused import")]
+    assert lint.check(ctx) and "new.py" in lint.check(ctx)[0]  # a new file counts every line
+
+
 def test_ruff_lints_the_staged_blob_instead_of_the_working_tree(tmp_path, monkeypatch):
     repo = repo_on_develop(tmp_path)
     module = repo / "aiflow/v4/core/x.py"
@@ -178,7 +217,7 @@ def test_ruff_lints_the_staged_blob_instead_of_the_working_tree(tmp_path, monkey
             source = kwargs["input"]
             checked_sources.append((argv, source))
             failing = "import os" in source
-            return subprocess.CompletedProcess(argv, int(failing), "x.py:1:8: F401 unused import\n" if failing else "", "")
+            return subprocess.CompletedProcess(argv, int(failing), _ruff_json([(1, "F401", "unused import")]) if failing else "[]", "")
         return original_run(argv, *args, **kwargs)
 
     monkeypatch.setattr(git_hooks.subprocess, "run", fake_run)

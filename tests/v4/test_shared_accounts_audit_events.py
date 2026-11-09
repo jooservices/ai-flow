@@ -125,17 +125,19 @@ def test_save_machine_load_limits_publishes_event_and_matching_audit(client, ctx
     owner_session(client, ctx)
     joined = join_node(client, "load-node")
     assert joined.status_code == 200, joined.text
-    machine = {"cpu_load_per_cpu": 0.9, "memory_used_pct": 90.0, "disk_free_pct": 8.0}
+    machine = {"cpu_load_per_cpu": 0.85, "memory_used_pct": 85.0, "disk_free_pct": 10.0,
+               "test_suite_slots": 4}
 
     response = client.put("/v1/machines/load-node/load-limits", json={
-        "cpu_load_per_cpu": 0.9, "memory_used_pct": 90, "disk_free_pct": 8,
-        "host_cpu_load_per_cpu": 0.75,
+        "cpu_load_per_cpu": 0.85, "memory_used_pct": 85, "disk_free_pct": 10,
+        "test_suite_slots": 4,
     })
 
     assert response.status_code == 200, response.text
     event_payload = {"node": "load-node", "actor": ACTOR, "machine": machine, "host": "load-node",
-                     "host_cpu_load_per_cpu": 0.75}
-    audit_payload = {"machine": machine, "host": "load-node", "host_cpu_load_per_cpu": 0.75}
+                     "host_cpu_load_per_cpu": None}
+    audit_payload = {"machine": machine, "host": "load-node", "host_cpu_load_per_cpu": None,
+                     "test_suite_slots": 4}
     assert_event_and_audit(ctx, "node.load_limits_saved", aggregate="node", aggregate_id="load-node",
                            event_payload=event_payload, target="machine-load", action="limits", ticket="load-node",
                            actor=ACTOR, result="load limits saved", audit_payload=audit_payload)

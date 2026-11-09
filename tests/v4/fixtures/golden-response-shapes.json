@@ -298,7 +298,8 @@
      "load_limits": {
       "cpu_load_per_cpu": "float",
       "disk_free_pct": "float",
-      "memory_used_pct": "float"
+      "memory_used_pct": "float",
+      "test_suite_slots": "int"
      },
      "load_state": {
       "mode": "str",
@@ -804,7 +805,8 @@
      "load_limits": {
       "cpu_load_per_cpu": "float",
       "disk_free_pct": "float",
-      "memory_used_pct": "float"
+      "memory_used_pct": "float",
+      "test_suite_slots": "int"
      },
      "load_state": {
       "mode": "str",

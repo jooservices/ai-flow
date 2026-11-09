@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
-from aiflow.v4.control import api, environment as environment_reports, scale_proof, system_check_api, version_release
+from aiflow.v4.control import environment as environment_reports, scale_proof, system_check_api, version_release
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.control.github_connections import GitHubConnections
@@ -592,7 +591,7 @@ def test_failed_release_checks_create_one_bug_per_failed_command_linked_as_block
                                            "output": "test failed"}]})
 
     assert replay["bugs"] == [{"key": bug["key"], "command": command}
-                              for bug, command in zip(bugs, ("composer test", "npm test"))]
+                              for bug, command in zip(bugs, ("composer test", "npm test"), strict=True)]
     assert len([item for item in ctx.jira.created if item["issuetype"] == "Bug"]) == 2
     assert len(ctx.jira.comments) == comments_before
 

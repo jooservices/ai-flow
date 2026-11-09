@@ -17,6 +17,7 @@ function loadPolicyDetails(node) {
   if (!node) return '';
   var metrics = node.metrics || {}, loadState = node.load_state || {}, hostLoadState = node.host_load_state || {};
   var machineLimits = node.load_limits || { cpu_load_per_cpu: 0.85, memory_used_pct: 85, disk_free_pct: 10 };
+  var testSuiteSlots = machineLimits.test_suite_slots || 2;
   var hostLimits = node.host_load_limits || { cpu_load_per_cpu: 0.85 };
   var html = '<div class="dsec"><h4>Load-aware offers</h4><div class="small">Held-back offers resume below the limit by a fixed recovery margin: 0.05 load per CPU or 5 percentage points. Existing runs continue.</div>';
   if (loadState.mode === 'held') html += '<div class="offnote" style="color:var(--crit);margin-top:6px">' + esc(loadState.reason || 'Machine held back') + ' · observed ' + esc(when(loadState.measured_at)) + '</div>';
@@ -26,6 +27,7 @@ function loadPolicyDetails(node) {
     html += '<div class="flexrow" style="margin-top:8px"><label>CPU load / CPU <input id="load-cpu-limit" type="number" min="0.01" max="8" step="0.01" value="' + esc(machineLimits.cpu_load_per_cpu) + '" style="width:92px"></label>';
     html += '<label>Memory used % <input id="load-memory-limit" type="number" min="0.01" max="100" step="0.1" value="' + esc(machineLimits.memory_used_pct) + '" style="width:92px"></label>';
     html += '<label>Free disk % <input id="load-disk-limit" type="number" min="0" max="99.9" step="0.1" value="' + esc(machineLimits.disk_free_pct) + '" style="width:92px"></label>';
+    html += '<label>Test suites at once <input id="load-test-suite-slots" type="number" min="1" max="32" step="1" value="' + esc(testSuiteSlots) + '" style="width:92px"></label>';
     html += '<label>Host CPU load / CPU <input id="load-host-cpu-limit" type="number" min="0.01" max="8" step="0.01" value="' + esc(hostLimits.cpu_load_per_cpu) + '"' + (metrics.hostname ? '' : ' disabled title="Set after this machine reports its hostname"') + ' style="width:92px"></label>';
     html += '<button class="btn sm primary" data-act="node-load-save" data-node="' + esc(node.name) + '">Save load limits</button></div>';
     if (!metrics.hostname) html += '<div class="small">Host limits become editable after the next machine heartbeat reports its hostname.</div>';
@@ -45,6 +47,7 @@ drawerNode = function (name) {
 function saveMachineLoadLimits(name) {
   var payload = { cpu_load_per_cpu: Number($('#load-cpu-limit').value),
     memory_used_pct: Number($('#load-memory-limit').value), disk_free_pct: Number($('#load-disk-limit').value),
+    test_suite_slots: Number($('#load-test-suite-slots').value),
     host_cpu_load_per_cpu: $('#load-host-cpu-limit').value === '' ? null : Number($('#load-host-cpu-limit').value) };
   machineRequest('/v1/machines/' + encodeURIComponent(name) + '/load-limits', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)

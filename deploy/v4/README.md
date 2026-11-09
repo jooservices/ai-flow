@@ -222,6 +222,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Account awareness structure](../../docs/v4/account_awareness-structure.md): named steps for assembling account usage, quota windows and forecasts
 - [Load-aware scheduling](../../docs/v4/load-aware-scheduling.md): set machine and shared-host load limits, hold or reduce offers by heartbeat measurements, and chart throttling beside throughput
 - [CPU use by machine on the Dashboard](../../docs/v4/dashboard-cpu.md): node heartbeats report CPU split into AI tools, tests, browsers and databases, shown on the Dashboard without signing in
+- [Test-suite slots on each machine](../../docs/v4/test-suite-slots.md): set per-machine test concurrency in Machines and AI; worker checks wait for a slot and run at a lower process priority
 - [Scheduled account quota refresh](../../docs/v4/quota-refresh.md): database-configured, account-leased provider CLI quota snapshots with a 15-minute default and no prompt-based refresh
 - [Ticket estimates and AI capacity planning](../../docs/v4/capacity-planning.md): estimate tokens, time and rework ranges from completed work, route by quota headroom, and show next-week capacity and estimate error
 - [Backup and restore](../../docs/v4/backup-restore.md): encrypted daily or weekly backups of the database, stored secrets, control repository settings and knowledge, with a one-time key and isolated weekly restore tests

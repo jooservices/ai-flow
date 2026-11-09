@@ -58,6 +58,19 @@ def tools_and_metrics(db, node: str) -> dict:
     return db.one("SELECT tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
 
 
+def machine_load_settings(db, node: str) -> dict | None:
+    return db.one("SELECT metrics,test_suite_slots FROM nodes WHERE name=%s AND removed_at IS NULL", (node,))
+
+
+def save_machine_load_settings(db, node: str, limits: dict, test_suite_slots: int) -> None:
+    db.run("UPDATE nodes SET test_suite_slots=%s,load_limits=%s,load_state='{}'::jsonb WHERE name=%s",
+           (test_suite_slots, J(limits), node))
+
+
+def heartbeat_settings(db, node: str) -> dict:
+    return db.one("SELECT projects,dynamic,test_suite_slots FROM nodes WHERE name=%s", (node,)) or {}
+
+
 def record_heartbeat_sample(db, node: str, metrics_json) -> None:
     """Append one bounded resource sample of a node heartbeat."""
     db.run("INSERT INTO node_heartbeat_samples (node,heartbeat_at,metrics) VALUES (%s,now(),%s)", (node, metrics_json))

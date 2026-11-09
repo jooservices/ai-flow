@@ -846,8 +846,10 @@ class ContainerRuntime(AbstractContextManager):
     The broker runs as the separate engine account. The run keeps `aiflow-worker`, which can reach only the shims
     and the broker socket, never Podman, its storage, or the broker's private directory.
     """
-    def __init__(self, spec: RunSpec, run_as: list[str]):
+    def __init__(self, spec: RunSpec, run_as: list[str], *, process_prefix: list[str] | None = None):
+        """Prepare a per-run broker, optionally under the check's process priority prefix."""
         self.spec, self.run_as = spec, run_as
+        self.process_prefix = list(process_prefix or ())
         run_id = secrets.token_hex(16)
         self.public_dir = scratch_root(spec) / "containers" / run_id
         self.socket_path = self.public_dir / "sock" / "broker.sock"
@@ -942,7 +944,7 @@ class ContainerRuntime(AbstractContextManager):
                             "--worktree-device", str(root_identity[0]), "--worktree-inode", str(root_identity[1]),
                             "--runtime-dir", str(self.runtime_dir), "--project", self.project_name,
                             "--token", self.token])
-        self.process = subprocess.Popen(engine_prefix() + broker_argv, cwd=broker_cwd, env=env,
+        self.process = subprocess.Popen([*self.process_prefix, *engine_prefix(), *broker_argv], cwd=broker_cwd, env=env,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL, start_new_session=True)
         for _ in range(100):

@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import os
 import shlex
+import tempfile
 from pathlib import Path
 from typing import Callable
 
 from ..core import local_gate
 from ..core.local_gate import Context, GateResult, Step
+from . import suite_slots
 
 CUSTOM_TIMEOUT_S = 1800
 
@@ -46,8 +48,12 @@ def gate_env(env: dict[str, str] | None) -> dict[str, str]:
 
 def run(wt: Path, project: dict, title: str, env: dict[str, str] | None = None, run_as: list[str] | None = None,
         log: Callable[[str], None] = lambda line: None) -> GateResult:
-    ctx = Context(wt, project.get("base") or "develop", title, tuple(run_as or ()))
-    return local_gate.run(ctx, plan(project), gate_env(env), log=log)
+    ctx = Context(wt, project.get("base") or "develop", title,
+                  tuple(suite_slots.nice_prefix(run_as or [])))
+    with suite_slots.suite_slot():
+        with tempfile.TemporaryDirectory(prefix="aiflow4-gate-test-slots-") as slot_directory:
+            nested_env = {**gate_env(env), "AIFLOW4_TEST_SLOT_DIR": slot_directory}
+            return local_gate.run(ctx, plan(project), nested_env, log=log)
 
 
 def keep_failed_work(git, wt: Path, base: Path, commits: list[str] | None = None) -> str:

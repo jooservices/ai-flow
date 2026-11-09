@@ -888,21 +888,24 @@ def test_runtime_setup_failure_revokes_the_worktree_grant_and_removes_run_direct
     monkeypatch.setattr(containers, "_clear_project_quota",
                         lambda *args, **kwargs: cleared_quotas.append(args))
     calls: list[list[str]] = []
+    broker_commands = []
 
     def fake_run(argv, **kwargs):
         calls.append(list(argv))
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
-    def broker_fails(*args, **kwargs):
+    def broker_fails(argv, **kwargs):
+        broker_commands.append(list(argv))
         raise OSError("cannot start broker")
 
     monkeypatch.setattr(containers.subprocess, "run", fake_run)
     monkeypatch.setattr(containers.subprocess, "Popen", broker_fails)
-    runtime = containers.ContainerRuntime(spec, ["setpriv"])
+    runtime = containers.ContainerRuntime(spec, ["setpriv"], process_prefix=["nice", "-n", "10"])
     with pytest.raises(OSError):
         runtime.__enter__()
     assert any(call[:4] == ["setfacl", "-R", "-P", "-m"] for call in calls)
     assert any(call[:4] == ["setfacl", "-R", "-P", "-x"] for call in calls)
+    assert broker_commands and broker_commands[0][:3] == ["nice", "-n", "10"]
     assert any(path == runtime.runtime_dir and limit == containers.RUNTIME_DIRECTORY_STORAGE_LIMIT
                for path, _, limit in quotas)
     assert any(path == worktree and limit == containers.WORKTREE_STORAGE_LIMIT

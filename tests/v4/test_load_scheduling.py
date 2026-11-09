@@ -50,12 +50,13 @@ def test_default_machine_limits_and_owner_can_save_machine_and_host_limits(clien
 
     machine = next(row for row in client.get("/v1/state").json()["nodes"] if row["name"] == "node1")
     assert machine["load_limits"] == {
-        "cpu_load_per_cpu": 0.85, "memory_used_pct": 85.0, "disk_free_pct": 10.0}
+        "cpu_load_per_cpu": 0.85, "memory_used_pct": 85.0, "disk_free_pct": 10.0,
+        "test_suite_slots": 2}
     assert machine["host_load_limits"] == {"cpu_load_per_cpu": 0.85}
 
     response = client.put("/v1/machines/node1/load-limits", json={
         "cpu_load_per_cpu": 0.9, "memory_used_pct": 90, "disk_free_pct": 8,
-        "host_cpu_load_per_cpu": 0.75,
+        "host_cpu_load_per_cpu": 0.75, "test_suite_slots": 4,
     })
     assert response.status_code == 200, response.text
     assert response.json()["load_limits"] == {
@@ -63,10 +64,24 @@ def test_default_machine_limits_and_owner_can_save_machine_and_host_limits(clien
     state = client.get("/v1/state").json()
     machine = next(row for row in state["nodes"] if row["name"] == "node1")
     assert machine["load_limits"]["cpu_load_per_cpu"] == 0.9
+    assert machine["load_limits"]["test_suite_slots"] == 4
     assert machine["host_load_limits"] == {"cpu_load_per_cpu": 0.75}
+    preserved = client.put("/v1/machines/node1/load-limits", json={
+        "cpu_load_per_cpu": 0.9, "memory_used_pct": 90, "disk_free_pct": 8,
+    })
+    assert preserved.status_code == 200
+    machine = next(row for row in client.get("/v1/state").json()["nodes"] if row["name"] == "node1")
+    assert machine["load_limits"]["test_suite_slots"] == 4
+    heartbeat_response = client.post("/v1/nodes/node1/heartbeat", headers=headers, json={"slots_total": 4})
+    assert heartbeat_response.status_code == 200
+    assert heartbeat_response.json()["desired"]["test_suite_slots"] == 4
     assert client.put("/v1/machines/node1/load-limits", json={
         "cpu_load_per_cpu": 0, "memory_used_pct": 90, "disk_free_pct": 8,
         "host_cpu_load_per_cpu": 0.75,
+    }).status_code == 422
+    assert client.put("/v1/machines/node1/load-limits", json={
+        "cpu_load_per_cpu": 0.9, "memory_used_pct": 90, "disk_free_pct": 8,
+        "test_suite_slots": 33,
     }).status_code == 422
     audit = ctx.db.one("SELECT actor,accepted FROM write_audit WHERE target='machine-load' AND action='limits'")
     assert audit == {"actor": "owner@example.test", "accepted": True}
@@ -298,6 +313,7 @@ def test_machine_screen_and_openobserve_dashboard_surface_load_policy_and_teleme
     from aiflow.v4.control.ui import build_console_page
     page = build_console_page()
     assert "Load-aware offers" in page
+    assert "Test suites at once" in page
     assert 'data-act="node-load-save"' in page
     assert "loadState.reason" in page and "loadState.measured_at" in page
     assert "hostLoadState.reason" in page

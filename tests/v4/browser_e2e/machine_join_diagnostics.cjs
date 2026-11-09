@@ -19,6 +19,17 @@ function parseRequestBody(postData) {
   }
 }
 
+function isMachineJoinSubmissionResponse(response, origin) {
+  const request = response.request();
+  return request.method() === 'POST' && new URL(request.url()).origin === origin;
+}
+
+function waitForMachineJoinResponse({ page, mode, expected, form }) {
+  assertMachineJoinDiagnostics({ mode, expected, form });
+  const origin = new URL(page.url()).origin;
+  return page.waitForResponse((response) => isMachineJoinSubmissionResponse(response, origin));
+}
+
 function assertMachineJoinDiagnostics({ mode, status, expected, form, pathname, postData }) {
   const failures = [];
   if (form) appendFieldFailures(failures, 'form', form, expected);
@@ -37,4 +48,8 @@ function assertMachineJoinDiagnostics({ mode, status, expected, form, pathname, 
   }
 }
 
-module.exports = { assertMachineJoinDiagnostics };
+module.exports = {
+  assertMachineJoinDiagnostics,
+  isMachineJoinSubmissionResponse,
+  waitForMachineJoinResponse,
+};

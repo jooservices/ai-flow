@@ -1,6 +1,10 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { assertMachineJoinDiagnostics } = require('./machine_join_diagnostics.cjs');
+const {
+  assertMachineJoinDiagnostics,
+  isMachineJoinSubmissionResponse,
+  waitForMachineJoinResponse,
+} = require('./machine_join_diagnostics.cjs');
 
 const mode = 'light';
 const expected = { name: 'jaif559-light-machine', role: 'worker', project: 'TESTWP' };
@@ -91,4 +95,73 @@ test('pre-submit form diagnostics say status is unavailable when no request was 
     assert.match(error.message, /form project/);
     return true;
   });
+});
+
+test('a form mismatch fails before starting the machine join response waiter', () => {
+  let waiterStarted = false;
+  const page = {
+    url: () => 'http://console.test/machines',
+    waitForResponse: () => {
+      waiterStarted = true;
+      return Promise.resolve();
+    },
+  };
+
+  assert.throws(() => waitForMachineJoinResponse({
+    page,
+    mode,
+    expected,
+    form: { ...expected, name: '' },
+  }), (error) => {
+    assert.match(error.message, /mode light/);
+    assert.match(error.message, /status unavailable/);
+    assert.match(error.message, /form name/);
+    return true;
+  });
+  assert.equal(waiterStarted, false);
+});
+
+test('the response capture accepts a same-origin POST with a wrong suffix for diagnosis', async () => {
+  const origin = 'http://console.test';
+  const response = {
+    status: () => 404,
+    request: () => ({
+      method: () => 'POST',
+      url: () => `${origin}/v1/nodes/${encodeURIComponent(expected.name)}/join-commands`,
+      postData: () => JSON.stringify(expected),
+    }),
+  };
+  let responsePredicate;
+  const page = {
+    url: () => `${origin}/machines`,
+    waitForResponse: (predicate) => {
+      responsePredicate = predicate;
+      return Promise.resolve(predicate(response) ? response : null);
+    },
+  };
+
+  assert.equal(isMachineJoinSubmissionResponse(response, origin), true);
+  const capturedResponse = await waitForMachineJoinResponse({ page, mode, expected, form: { ...expected } });
+  assert.equal(capturedResponse, response);
+  assert.equal(responsePredicate(response), true);
+  assert.throws(() => assertMachineJoinDiagnostics({
+    mode,
+    status: response.status(),
+    expected,
+    pathname: new URL(response.request().url()).pathname,
+    postData: response.request().postData(),
+  }), (error) => {
+    assert.match(error.message, /mode light/);
+    assert.match(error.message, /status 404/);
+    assert.match(error.message, /HTTP status/);
+    assert.match(error.message, /request pathname/);
+    return true;
+  });
+});
+
+test('the response capture ignores GET and cross-origin requests', () => {
+  const origin = 'http://console.test';
+  const requestResponse = (method, url) => ({ request: () => ({ method: () => method, url: () => url }) });
+  assert.equal(isMachineJoinSubmissionResponse(requestResponse('GET', `${origin}/v1/nodes/x/join-command`), origin), false);
+  assert.equal(isMachineJoinSubmissionResponse(requestResponse('POST', 'http://api.test/v1/nodes/x/join-command'), origin), false);
 });

@@ -4,7 +4,10 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require(process.env.AIFLOW4_CONSOLE_BROWSER_MODULE);
-const { assertMachineJoinDiagnostics } = require('./browser_e2e/machine_join_diagnostics.cjs');
+const {
+  assertMachineJoinDiagnostics,
+  waitForMachineJoinResponse,
+} = require('./browser_e2e/machine_join_diagnostics.cjs');
 
 const config = JSON.parse(fs.readFileSync(process.env.AIFLOW4_CONSOLE_BROWSER_CONFIG, 'utf8'));
 const runInboxMessages = Object.create(null);
@@ -488,16 +491,21 @@ async function exerciseMachineAndUserAdministration(page, mode) {
   await machineName.fill(expectedJoin.name);
   await machineRole.selectOption(expectedJoin.role);
   await machineProject.selectOption(expectedJoin.project);
-  const joinResponse = page.waitForResponse((item) => item.request().method() === 'POST' &&
-    new URL(item.url()).pathname.endsWith('/join-command'));
   const submittedForm = {
     name: await machineName.inputValue(),
     role: await machineRole.inputValue(),
     project: await machineProject.inputValue(),
   };
-  assertMachineJoinDiagnostics({ mode, expected: expectedJoin, form: submittedForm });
-  await page.getByRole('button', { name: 'Show one-time command', exact: true }).click();
-  const joinResult = await joinResponse;
+  const joinResponse = waitForMachineJoinResponse({
+    page,
+    mode,
+    expected: expectedJoin,
+    form: submittedForm,
+  });
+  const [joinResult] = await Promise.all([
+    joinResponse,
+    page.getByRole('button', { name: 'Show one-time command', exact: true }).click(),
+  ]);
   const joinRequest = joinResult.request();
   assertMachineJoinDiagnostics({
     mode,

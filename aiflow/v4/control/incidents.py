@@ -248,6 +248,9 @@ def workable_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
 def idle_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
     """Old queue items that still need work, including items gated by a wait, backoff or project pause."""
     held = set(ctx.leases.held_keys())
+    # Tickets already covered by verify exhaustion must not also raise flow_idle (JAIF-443).
+    verify_incidents = {row["subject"] for row in ctx.db.all(
+        "SELECT subject FROM incidents WHERE kind='verify_no_verdict' AND closed_at IS NULL")}
     done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status='Done'")}
     out = []
     for ticket in ctx.db.all(
@@ -255,6 +258,8 @@ def idle_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
             " AND type <> 'Epic' AND ((status='To Do' AND 'aiflow-ready'=ANY(labels)) OR status='In Verify')"
             " AND coalesce(jira_updated,synced_at) <= now() - %s * interval '1 minute'", (older_than_min,)):
         if ticket["key"] in held:
+            continue
+        if ticket["status"] == "In Verify" and ticket["key"] in verify_incidents:
             continue
         if ticket["status"] == "To Do" and any(blocker not in done for blocker in ticket["blocked_by"]):
             continue

@@ -207,7 +207,7 @@ def test_a_failing_check_does_not_stop_later_checks(caplog):
     assert any("quota_observed_at" in sql for sql in sql_text(db))
 
 
-def test_the_loop_runs_all_fourteen_checks_in_order_and_continues_after_one_raises(monkeypatch, caplog):
+def test_the_loop_runs_all_checks_in_order_and_continues_after_one_raises(monkeypatch, caplog):
     import aiflow.v4.control.watchdog as watchdog
 
     names = [check.__name__ for check in watchdog.CHECKS]
@@ -220,6 +220,7 @@ def test_the_loop_runs_all_fourteen_checks_in_order_and_continues_after_one_rais
         "nodes_without_accounts",
         "orphaned_tickets",
         "stuck_tickets",
+        "verify_no_verdict",
         "retry_and_deadline_passes",
         "lost_leases_and_run_clocks",
         "account_cooldowns",

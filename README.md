@@ -7,6 +7,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![GitHub Release](https://img.shields.io/github/v/release/jooservices/ai-flow?display_name=tag)](https://github.com/jooservices/ai-flow/releases)
 [![License](https://img.shields.io/github/license/jooservices/ai-flow)](https://github.com/jooservices/ai-flow)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=jooservices_ai-flow&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=jooservices_ai-flow)
 
 > New to this project (person or AI)? Read [docs/CONTEXT.md](docs/CONTEXT.md) first: purpose, rules, the journey of a ticket and how to work with the owner, without technical detail.
 

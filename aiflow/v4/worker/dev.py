@@ -748,6 +748,7 @@ def run_gate_steps(run: DevRun) -> local_gate.GateResult:
     builtin_gate = run.project.get("local_gate") == "ai-flow"  # a project's own commands are run as configured
     tests = covering_tests(changed_since_base(run), run.worktree) if builtin_gate else None
     if tests is None:
+        run.result.get("details", {}).pop("focused_tests", None)  # a repeated gate runs the full suite
         return gate_step.run(run.worktree, run.project, title, run.env, run.run_as)
     run.result.setdefault("details", {})["focused_tests"] = list(tests)
     plan = focused_gate_plan(run.project.get("base") or "develop", tests)

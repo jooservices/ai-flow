@@ -328,8 +328,7 @@ def collect_verification(state: VerifyRun, workspace: VerifyWorkspace,
         findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
                     "Map each deferred criterion to a configured check, or verify it before merge.")
         return rework_verify(state, findings, "deferred criterion has no configured check")
-    green_jobs = green_pipeline_jobs(fetch_ci_checks(
-        state.api, state.claim, state.pr.get("head_sha") or workspace.head))
+    green_jobs = green_pipeline_jobs(fetch_ci_checks(state.api, state.claim, workspace.head))
     gate_result = run_verify_gate(state, workspace, green_jobs)
     if isinstance(gate_result, dict):
         return gate_result

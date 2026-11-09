@@ -160,3 +160,27 @@ def test_ci_status_that_cannot_be_read_reuses_nothing():
     api = SimpleNamespace(call=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("down")))
     claim = SimpleNamespace(run_id="r", fence=1)
     assert verify.fetch_ci_checks(api, claim, "sha") == []
+
+
+def test_full_gate_fallback_clears_the_focused_selection(monkeypatch):
+    run = _run({"local_gate": "ai-flow"}, _Git(error=True))
+    run.result = {"details": {"focused_tests": ["tests/v4/test_intake.py"]}}
+    monkeypatch.setattr(dev.gate_step, "run", lambda *_args: local_gate.GateResult())
+
+    dev.run_gate_steps(run)
+
+    assert "focused_tests" not in run.result["details"]
+
+
+def test_verification_reads_the_checks_of_the_verified_commit(monkeypatch):
+    fetched = []
+    monkeypatch.setattr(verify, "fetch_ci_checks", lambda _api, _claim, sha: fetched.append(sha) or [])
+    monkeypatch.setattr(verify, "run_verify_gate", lambda _state, _workspace, jobs: None)
+    monkeypatch.setattr(verify, "collect_ci", lambda *_args: verify.CollectedVerify("ok"))
+    state = SimpleNamespace(api=None, claim=SimpleNamespace(project={"checks": []}), pr={"head_sha": "older-sha"},
+                            result={})
+    review = SimpleNamespace(verdict="PASS", findings="", post_merge=[])
+
+    verify.collect_verification(state, SimpleNamespace(head="verified-sha"), review)
+
+    assert fetched == ["verified-sha"]

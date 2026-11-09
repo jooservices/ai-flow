@@ -21,8 +21,9 @@ def test_interrupt_after_descendant_open_closes_its_descriptor_and_propagates(
     target = worktree / "src" / "marker"
     target.write_text("worktree data")
     pin = container_pin._WorktreePin(worktree)
-    real_open, real_fstat = os.open, os.fstat
+    real_open, real_fstat, real_close = os.open, os.fstat, os.close
     opened: list[int] = []
+    closed: list[int] = []
 
     def recording_open(path: str, flags: int, *, dir_fd: int) -> int:
         """Record and return a descriptor opened by the mapping."""
@@ -36,15 +37,19 @@ def test_interrupt_after_descendant_open_closes_its_descriptor_and_propagates(
             return real_fstat(descriptor)
         raise KeyboardInterrupt
 
+    def recording_close(descriptor: int) -> None:
+        """Record descriptors only after the operating system closes them."""
+        real_close(descriptor)
+        closed.append(descriptor)
+
     try:
         monkeypatch.setattr(container_pin.os, "open", recording_open)
         monkeypatch.setattr(container_pin.os, "fstat", interrupted_fstat)
+        monkeypatch.setattr(container_pin.os, "close", recording_close)
         with pytest.raises(KeyboardInterrupt):
             pin.map_path(target)
         assert opened, "the descendant descriptor must have been opened before the interrupt"
-        for descriptor in opened:
-            with pytest.raises(OSError):
-                real_fstat(descriptor)
+        assert set(opened) <= set(closed), "every descriptor opened by the interrupted mapping must be closed"
     finally:
         monkeypatch.undo()
         pin.close()

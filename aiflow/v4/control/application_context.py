@@ -11,6 +11,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from .db import DB
 from .events import Events
+from .features.tickets.repository import FakeTicketRepository, TicketRepository
 from .github import GitHubApp
 from .jira import Jira
 
@@ -64,6 +65,7 @@ class ApplicationContext:
     event_registry: object | None = None  # platform.events.Registry of this application
     github_registry: object | None = None  # GitHubConnections
     github_connection_for_repository: Callable[[str], object] | None = None
+    ticket_repository: TicketRepository | FakeTicketRepository | None = None
 
     def __post_init__(self) -> None:
         if not callable(self.repo):
@@ -72,6 +74,8 @@ class ApplicationContext:
             raise TypeError("clock must provide now()")
         if not self.repo_configuration:
             self.repo_configuration = self.settings.control_repo
+        if self.ticket_repository is None:
+            self.ticket_repository = TicketRepository(self.db)
 
     @property
     def database(self) -> DB:

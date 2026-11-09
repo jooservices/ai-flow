@@ -11,6 +11,14 @@ from fastapi import FastAPI, HTTPException, Query, Request  # noqa: F401 - kept 
 
 from . import review_metrics
 from .repositories.owner_decisions import business_decision_ticket_keys
+from .features.tickets.repository import TicketRepository
+from aiflow.v4.control.features.tickets import ticket_repository_of
+
+
+def _human_review_thread_filters(project: str, scope: tuple[str, ...] | None
+                                ) -> tuple[str, tuple, str, tuple]:
+    """Keep the pre-repository import available for existing callers."""
+    return TicketRepository.human_review_thread_filters_for(project, scope)
 
 
 @dataclass
@@ -30,16 +38,6 @@ class HumanReviewThreads:
     data: dict[str, list[dict]]
     tickets: dict[str, dict]
     recent_keys: list[str]
-
-
-def _human_review_thread_filters(project: str, scope: tuple[str, ...] | None) -> tuple[str, tuple, str, tuple]:
-    if project:
-        return (" AND ticket IN (SELECT key FROM tickets WHERE project=%s)", (project,),
-                " AND project=%s", (project,))
-    if scope is not None:
-        return (" AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))", (list(scope),),
-                " AND project=ANY(%s)", (list(scope),))
-    return "", (), "", ()
 
 
 def _human_review_actions(kind: str, match: Any, ticket: dict) -> list[str]:
@@ -74,19 +72,17 @@ def _human_review_preview_url(ticket: dict, project_config: Any, epics: dict[str
 
 
 def _load_human_review_tickets(ctx: Any, selected_keys: list[str]) -> tuple[list[dict], list[str], dict[str, str], dict[str, str]]:
-    tickets = ctx.db.all(
-        "SELECT key, project, type, summary, description, labels, parent_key, status, blocked_by"
-        " FROM tickets WHERE key=ANY(%s) ORDER BY project,key", (selected_keys,))
+    tickets = ticket_repository_of(ctx).list_human_review_ticket_rows((selected_keys,))
     business_keys = business_decision_ticket_keys(ctx.db)
     needs_owner_keys = [str(ticket["key"]) for ticket in tickets
                         if ticket["status"] == "Needs owner" and ticket["key"] in business_keys]
     blocker_keys = sorted({str(key) for ticket in tickets for key in ticket.get("blocked_by") or []})
-    blocker_statuses = {row["key"]: row["status"] for row in ctx.db.all(
-        "SELECT key,status FROM tickets WHERE key=ANY(%s)", (blocker_keys,))} if blocker_keys else {}
+    blocker_statuses = {row["key"]: row["status"] for row in
+                        ticket_repository_of(ctx).list_statuses_for_keys(
+                            (blocker_keys,))} if blocker_keys else {}
     epic_key = ctx.settings.review_preview_epic
-    epic_rows = (ctx.db.all("SELECT key, status FROM tickets WHERE key=%s AND type='Epic'", (epic_key,))
-                 if epic_key else [])
-    epics = {row["key"]: row["status"] for row in epic_rows}
+    epics = {row["key"]: row["status"] for row in
+             ticket_repository_of(ctx).get_epic_status_by_key((epic_key,))} if epic_key else {}
     return tickets, needs_owner_keys, blocker_statuses, epics
 
 
@@ -125,7 +121,8 @@ def _load_human_review_rows(ctx: Any, selected_keys: list[str]) -> HumanReviewRo
 
 def _load_human_review_threads(queue: Any, ctx: Any, tickets: list[dict], selected_keys: list[str],
                                project: str, scope: tuple[str, ...] | None) -> HumanReviewThreads:
-    event_filter, event_params, run_filter, run_params = _human_review_thread_filters(project, scope)
+    event_filter, event_params, run_filter, run_params = ticket_repository_of(ctx).human_review_thread_filters(
+        project, scope)
     thread_dates: dict[str, Any] = {}
     event_rows = ctx.db.all("SELECT ticket,max(ts) AS latest FROM events WHERE type='review.action'"
                             " AND data->>'action'='ask-ai'" + event_filter + " GROUP BY ticket", event_params)
@@ -143,8 +140,7 @@ def _load_human_review_threads(queue: Any, ctx: Any, tickets: list[dict], select
     thread_tickets = {str(ticket["key"]): ticket for ticket in tickets}
     missing_keys = [key for key in recent_keys if key not in thread_tickets]
     if missing_keys:
-        thread_tickets.update({str(ticket["key"]): ticket for ticket in ctx.db.all(
-            "SELECT key,project,summary,status FROM tickets WHERE key=ANY(%s)", (missing_keys,))})
+        thread_tickets.update({str(ticket["key"]): ticket for ticket in ticket_repository_of(ctx).list_ticket_summaries_for_keys((missing_keys,))})
     return HumanReviewThreads(thread_data, thread_tickets, recent_keys)
 
 
@@ -265,8 +261,9 @@ class ReviewQueueAPI:
     def current_item_kind(self, ticket: dict) -> str:
         """Classify a waiting ticket with the same live blocker check used by the review queue."""
         blockers = [str(blocker) for blocker in (ticket.get("blocked_by") or [])]
-        statuses = {row["key"]: row["status"] for row in self.ctx.db.all(
-            "SELECT key,status FROM tickets WHERE key=ANY(%s)", (blockers,))} if blockers else {}
+        statuses = {row["key"]: row["status"] for row in
+                    ticket_repository_of(self.ctx).list_statuses_for_keys(
+                        (blockers,))} if blockers else {}
         has_open_blocker = any(statuses.get(blocker) not in ("Done", "Closed") for blocker in blockers)
         latest = self.ctx.db.one("SELECT step,outcome FROM runs WHERE ticket_key=%s"
                                  " ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
@@ -324,30 +321,25 @@ class ReviewQueueAPI:
             raise HTTPException(400, "unknown project filter")
         if project_filter:
             project_where, project_params = " AND project=%s", (project_filter,)
-            ticket_filter, ticket_params = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)", (project_filter,)
         elif project_scope is not None:
             project_where, project_params = " AND project=ANY(%s)", (list(project_scope),)
-            ticket_filter, ticket_params = (" AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))",
-                                            (list(project_scope),))
         else:
             project_where, project_params = "", ()
-            ticket_filter, ticket_params = "", ()
+        ticket_filter, ticket_params = ticket_repository_of(self.ctx).ticket_scope_filter(project_filter, project_scope)
         # Keep old run history only for the recent cohort, current waiters and their blockers.
         now = datetime.now(timezone.utc)
         cohort_start = (now - timedelta(days=now.weekday())).replace(
             hour=0, minute=0, second=0, microsecond=0) - timedelta(weeks=8)
         current_keys = (selected_keys if selected_keys is not None
                         else self.queue_keys(project_filter, project_scope))
-        metric_where = (" WHERE (coalesce(done_at,jira_updated,synced_at)>=%s"
-                        " OR status IN ('Human review','Needs owner') OR cardinality(blocked_by)>0)" + project_where)
-        metrics_tickets = self.ctx.db.all(
-            "SELECT key, project, status, labels, blocked_by, done_at, jira_updated, synced_at FROM tickets"
-            + metric_where, (cohort_start,) + project_params)
+        metrics_tickets = ticket_repository_of(self.ctx).review_metric_tickets(
+            cohort_start, project_where, project_params)
         metric_keys = {str(ticket["key"]) for ticket in metrics_tickets}
         blocker_keys = sorted({str(key) for ticket in metrics_tickets for key in ticket.get("blocked_by") or []}
                               - metric_keys)
-        blocker_statuses = {str(row["key"]): str(row["status"]) for row in self.ctx.db.all(
-            "SELECT key,status FROM tickets WHERE key=ANY(%s)", (blocker_keys,))} if blocker_keys else {}
+        blocker_statuses = {str(row["key"]): str(row["status"]) for row in
+                            ticket_repository_of(self.ctx).list_statuses_for_keys(
+                                (blocker_keys,))} if blocker_keys else {}
         events = self.ctx.db.all("SELECT ts,type,ticket,project,outcome,reason,data FROM events"
                                  " WHERE type IN ('jira.transition','review.action') AND (ts >= %s OR ticket=ANY(%s))"
                                  + ticket_filter + " ORDER BY ts", (cohort_start, current_keys) + ticket_params)
@@ -367,19 +359,11 @@ class ReviewQueueAPI:
 
     def queue_keys(self, project_filter: str = "", project_scope: tuple[str, ...] | None = None) -> list[str]:
         """Return review keys and unresolved dependency tickets in the requested project scope."""
-        if project_filter:
-            where, params = " AND project=%s", (project_filter,)
-        elif project_scope is not None:
-            where, params = " AND project=ANY(%s)", (list(project_scope),)
-        else:
-            where, params = "", ()
-        candidates = self.ctx.db.all(
-            "SELECT key, status, blocked_by FROM tickets WHERE (status IN ('Human review','Needs owner') OR"
-            " (cardinality(blocked_by)>0 AND status NOT IN ('Done','Closed')))" + where + " ORDER BY project,key",
-            params)
+        candidates = ticket_repository_of(self.ctx).review_queue_candidates(project_filter, project_scope)
         blocker_keys = sorted({str(key) for ticket in candidates for key in ticket.get("blocked_by") or []})
-        blocker_statuses = {row["key"]: row["status"] for row in self.ctx.db.all(
-            "SELECT key,status FROM tickets WHERE key=ANY(%s)", (blocker_keys,))} if blocker_keys else {}
+        blocker_statuses = {row["key"]: row["status"] for row in
+                            ticket_repository_of(self.ctx).list_statuses_for_keys(
+                                (blocker_keys,))} if blocker_keys else {}
         business_keys = business_decision_ticket_keys(self.ctx.db)
         keys = []
         for ticket in candidates:

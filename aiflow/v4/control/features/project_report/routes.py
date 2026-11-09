@@ -9,6 +9,7 @@ from fastapi import HTTPException, Query
 from fastapi.responses import (HTMLResponse, PlainTextResponse)
 from ... import projects as project_lifecycle
 from ...report import ReportNotFound, build_report, render_csv, render_html, render_markdown
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
@@ -17,18 +18,9 @@ def install(app, ctx, deps) -> SimpleNamespace:
     def project_versions(key: str) -> dict:
         if key not in ctx.repo().projects:
             raise HTTPException(404, f"unknown project {key}")
-        versions = ctx.db.all(
-            "SELECT v.id, v.name, v.released, v.release_date, count(t.key)::int AS ticket_count,"
-            " count(t.key) FILTER (WHERE t.status='Done')::int AS done_count"
-            " FROM versions v LEFT JOIN ticket_versions tv ON tv.version_id=v.id"
-            " LEFT JOIN tickets t ON t.key=tv.ticket_key WHERE v.project=%s"
-            " GROUP BY v.id, v.name, v.released, v.release_date ORDER BY v.name, v.id", (key,))
+        versions = ticket_repository_of(ctx).list_version_ticket_counts((key,))
         for version in versions:
-            version["open_tickets"] = ctx.db.all(
-                "SELECT t.key, t.summary, t.status FROM ticket_versions tv"
-                " JOIN tickets t ON t.key=tv.ticket_key"
-                " WHERE tv.version_id=%s AND t.project=%s AND t.status <> 'Done' ORDER BY t.key",
-                (version["id"], key))
+            version["open_tickets"] = ticket_repository_of(ctx).list_open_tickets_for_version((version['id'], key))
         return {"project": key, "versions": versions}
 
     @app.get("/v1/projects/{key}/report")

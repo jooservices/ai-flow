@@ -19,6 +19,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from ..console_auth import COOKIE_NAME, resolve_session_user, role_satisfies, verify_session
+from ..features.tickets.repository import TicketRepository
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 HERE = Path(__file__).parent
 
@@ -230,12 +232,13 @@ def mount_settings_page(app: FastAPI, ctx) -> None:
         return console()
 
 
-def ticket_ancestors(db, ticket: dict) -> list:
+def ticket_ancestors(db, ticket: dict, ticket_repository=None) -> list:
     """The ticket plus at most seven parents. The walk stops when a parent row is missing."""
+    ticket_repository = ticket_repository or TicketRepository(db)
     ancestors = [ticket]
     parent = str(ticket.get("parent_key") or "")
     while parent and len(ancestors) < 8:
-        ancestor = db.one("SELECT key,type,parent_key FROM tickets WHERE key=%s", (parent,))
+        ancestor = ticket_repository.ticket_ancestor(parent)
         if not ancestor:
             break
         ancestors.append(ancestor)
@@ -263,12 +266,12 @@ def capacity_view(decision: dict | None) -> dict | None:
 
 def ticket_detail(ctx, key: str) -> dict:
     """Ticket drawer payload: the row, its epic, runs, events, writes, timeline and merge facts."""
-    t = ctx.db.one("SELECT * FROM tickets WHERE key=%s", (key,))
+    t = ticket_repository_of(ctx).ticket_detail(key)
     if not t:
         raise HTTPException(404, "unknown ticket")
     from ...core.controlrepo import epic_for_ticket
     project = ctx.repo().projects.get(t["project"])
-    ancestors = ticket_ancestors(ctx.db, t)
+    ancestors = ticket_ancestors(ctx.db, t, ticket_repository_of(ctx))
     t["epic"] = epic_for_ticket(t, {item["key"]: item for item in ancestors})
     t["repository"] = project.repo_for(t) if project else ""
     runs = ctx.db.all("SELECT id, step, account_id, provider, model, node, fence, status, outcome, error_kind,"
@@ -288,7 +291,8 @@ def ticket_detail(ctx, key: str) -> dict:
     from .. import merge_flow
     decided = capacity_view(decision)
     return {"ticket": t, "repository": t["repository"], "runs": runs, "events": events,
-            "writes": writes, "timeline": timeline(ctx.db, key), "capacity_decision": decided,
+            "writes": writes, "timeline": timeline(ctx.db, key, ticket_repository=ticket_repository_of(ctx)),
+            "capacity_decision": decided,
             "merge": merge_flow.facts(t), "moves": merge_flow.moves(ctx.db, key),
             "jira_url": f"{ctx.settings.jira_site}/browse/{key}"}
 

@@ -36,6 +36,7 @@ from ...github import GitHubApp
 from ...github_connect import GitHubSecretStore, app_metadata
 from ...github_connections import DEFAULT_ID, Connection, verify_token
 from ... import inventory
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 # Keep the original module-level import surface available to callers and tests.
@@ -514,7 +515,7 @@ def _ticket_epic(runtime, ticket: dict[str, Any]) -> str:
     seen: set[str] = set()
     while parent and parent not in seen:
         seen.add(parent)
-        ancestor = runtime.ctx.db.one("SELECT key,type,parent_key FROM tickets WHERE key=%s", (parent,))
+        ancestor = ticket_repository_of(runtime.ctx).ticket_ancestor(parent)
         if not ancestor:
             return parent
         if ancestor["type"] == "Epic":

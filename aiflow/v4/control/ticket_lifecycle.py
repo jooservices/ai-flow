@@ -4,8 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from .features.tickets.repository import TicketRepository
 from .repositories import triage_claim as claim_repository
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,7 @@ def transition(ctx, ticket: dict, name: str) -> str:
             raise RuntimeError(f"{ticket['key']} did not transition to {rule.target}")
     else:
         status = rule.target
-    TicketRepository(ctx.db).update_status(ticket["key"], status)
+    ticket_repository_of(ctx).update_status(ticket["key"], status)
     ctx.events.emit("jira.transition", ticket=ticket["key"], project=ticket["project"], account="control",
                     node="control", outcome=status, reason=rule.reason)
     return status

@@ -8,6 +8,7 @@ from ... import licensing
 from . import routes as console_routes
 from .bodies import LicenseKeyBody, OfflineLicenseBody, PlanLimitsBody
 from .events import LicenceActivated, LicenceLimitsUpdated
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def install_licensing_routes(app, ctx, deps) -> SimpleNamespace:
@@ -60,12 +61,12 @@ def install_licensing_routes(app, ctx, deps) -> SimpleNamespace:
     @app.get("/v1/licensing/usage")
     def licensing_usage(request: Request) -> dict:
         console_user(request, "console.read")
-        return {"rows": licensing.usage_report(ctx.db)}
+        return {"rows": licensing.usage_report(ctx.db, ticket_repository_of(ctx))}
 
     @app.get("/v1/licensing/usage.csv")
     def licensing_usage_csv(request: Request) -> PlainTextResponse:
         console_user(request, "console.read")
-        content = licensing.usage_csv(licensing.usage_report(ctx.db))
+        content = licensing.usage_csv(licensing.usage_report(ctx.db, ticket_repository_of(ctx)))
         return PlainTextResponse(content, media_type="text/csv; charset=utf-8",
                                  headers={"Content-Disposition": "attachment; filename=ai-flow-usage.csv"})
 

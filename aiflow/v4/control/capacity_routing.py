@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from . import capacity, shared_accounts
 from .repositories.accounts import AccountRepository
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 class CapacityRoutingService:
@@ -38,7 +39,7 @@ class CapacityRoutingService:
         development: list[dict[str, Any]],
         candidates: dict[tuple[str, str], dict[str, dict[str, Any]]],
     ) -> dict[tuple[str, str], set[str]]:
-        samples = capacity.history(self.ctx.db)
+        samples = capacity.history(self.ctx.db, ticket_repository=ticket_repository_of(self.ctx))
         routing = self.ctx.provider_eligibility.state(persist=False)
         selected: dict[tuple[str, str], set[str]] = {}
         for ticket in development:

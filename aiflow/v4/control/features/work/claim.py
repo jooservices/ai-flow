@@ -5,11 +5,13 @@ from typing import Any
 
 from .repository import WorkRepository
 from . import claim_extras, claim_steps
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 def claim(ctx, deps, body, node: str) -> Any:
     """Run the claim gates, acquisitions, registration and response builders in their fixed order."""
-    work = claim_steps.Claim(ctx=ctx, deps=deps, body=body, node=node, store=WorkRepository(ctx.db))
+    work = claim_steps.Claim(ctx=ctx, deps=deps, body=body, node=node,
+                             store=WorkRepository(ctx.db, ticket_repository_of(ctx)))
     # Each gate is called by name: the documentation check follows these calls statically to the routes they affect.
     refusal = (claim_steps.refuse_early(work) or claim_steps.select_ticket(work)
                or claim_steps.acquire_probation(work) or claim_steps.acquire_lease(work)

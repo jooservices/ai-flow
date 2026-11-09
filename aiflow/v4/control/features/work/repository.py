@@ -4,12 +4,14 @@ from __future__ import annotations
 from typing import Any
 
 from ...db import DB, J
+from ..tickets import TicketRepository
 from .models import AccountForecast, BoardTicket, NodeTools, RunNote
 
 
 class WorkRepository:
-    def __init__(self, db: DB) -> None:
+    def __init__(self, db: DB, tickets: TicketRepository | None = None) -> None:
         self.db = db
+        self.tickets = tickets or TicketRepository(db)
 
     def account_forecast(self, account_id: str) -> AccountForecast | None:
         row = self.db.one("SELECT id,quota_forecast FROM accounts WHERE id=%s", (account_id,))
@@ -90,8 +92,7 @@ class WorkRepository:
         return (row or {}).get("summary") or ""
 
     def open_project_tickets(self, project: str, exclude: str) -> list[BoardTicket]:
-        rows = self.db.all("SELECT key, type, status, summary, parent_key FROM tickets WHERE project=%s AND status<>'Done'"
-                           " AND key<>%s ORDER BY type<>'Epic', key LIMIT 300", (project, exclude))
+        rows = self.tickets.open_project_tickets(project, exclude)
         return [BoardTicket(key=r["key"], type=r["type"], status=r["status"], summary=r["summary"],
                             parent_key=r["parent_key"]) for r in rows]
 

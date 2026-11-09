@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from .. import capacity, quota as quota_reporting, route_deps
 from ..console_auth import has_permission
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 router = APIRouter()
 
@@ -26,6 +27,6 @@ def capacity_plan(request: Request) -> dict:
     missing = [row for row in accounts if not forecasts[str(row["id"])] and row.get("quota")]
     forecasts.update(quota_reporting.assessments(ctx.db, missing) if missing else {})
     project_keys = user.project_keys if user and user.project_keys is not None else None
-    return capacity.dashboard(ctx.db, accounts, forecasts, project_keys)
+    return capacity.dashboard(ctx.db, accounts, forecasts, project_keys, ticket_repository=ticket_repository_of(ctx))
 
 

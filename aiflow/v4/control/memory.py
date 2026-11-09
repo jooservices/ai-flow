@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from .db import DB
+from .features.tickets.repository import TicketRepository
 
 log = logging.getLogger("aiflow4.memory")
 MAX_TEXT = 20_000
@@ -26,32 +27,6 @@ EMBEDDER_RETRY_SECONDS = 600
 HEADLINE = 'StartSel=**, StopSel=**, MaxWords=35, MinWords=12, MaxFragments=2, FragmentDelimiter=" ... "'
 RRF_K = 60
 CANDIDATE_LIMIT = 100
-
-INDEX_TICKETS = f"""
-SELECT project, 'ticket' AS kind, key AS ref, key AS ticket,
-       left(key || ': ' || summary || E'\\n\\n' || description, {MAX_TEXT}) AS text,
-       coalesce(jira_created, synced_at) AS created_at
-FROM tickets
-"""
-
-INDEX_RUN_SUMMARIES = f"""
-SELECT r.project, 'run_summary' AS kind, r.id::text AS ref, r.ticket_key AS ticket,
-       left(r.ticket_key || ': ' || coalesce(t.summary, '') || E'\\n' || r.step || ' '
-            || coalesce(nullif(r.outcome, ''), 'finished') || ': ' || r.summary, {MAX_TEXT}) AS text,
-       coalesce(r.ended_at, r.started_at) AS created_at
-FROM runs r LEFT JOIN tickets t ON t.key = r.ticket_key
-WHERE r.status = 'finished' AND r.summary <> ''
-"""
-
-INDEX_FINDINGS = f"""
-SELECT r.project, 'finding' AS kind, r.id::text AS ref, r.ticket_key AS ticket,
-       left(r.ticket_key || ': ' || coalesce(t.summary, '') || E'\\nverify findings:\\n'
-            || coalesce(nullif(r.details->>'findings', ''), r.summary), {MAX_TEXT}) AS text,
-       coalesce(r.ended_at, r.started_at) AS created_at
-FROM runs r LEFT JOIN tickets t ON t.key = r.ticket_key
-WHERE r.step = 'verify' AND r.status = 'finished' AND r.outcome = 'rework'
-  AND coalesce(nullif(r.details->>'findings', ''), r.summary) <> ''
-"""
 
 UPSERT = """
 INSERT INTO memory (project, kind, ref, ticket, text, created_at, embedding)
@@ -179,8 +154,7 @@ def _vector_literal(vector: list[float]) -> str:
     return "[" + ",".join(repr(float(value)) for value in vector) + "]"
 
 
-def _index_kind(db: DB, sql: str, kind: str) -> int:
-    entries = db.all(sql)
+def _index_kind(db: DB, entries: list[dict], kind: str) -> int:
     old_rows = db.all("SELECT ref, project, ticket, text, embedding IS NOT NULL AS embedded FROM memory WHERE kind=%s",
                       (kind,))
     old = {row["ref"]: row for row in old_rows}
@@ -221,11 +195,12 @@ def _index_kind(db: DB, sql: str, kind: str) -> int:
     return written
 
 
-def index(db: DB) -> dict[str, int]:
+def index(db: DB, ticket_repository: TicketRepository | None = None) -> dict[str, int]:
     """Index tickets, finished run summaries and verify findings, embedding changed text locally."""
-    return {"ticket": _index_kind(db, INDEX_TICKETS, "ticket"),
-            "run_summary": _index_kind(db, INDEX_RUN_SUMMARIES, "run_summary"),
-            "finding": _index_kind(db, INDEX_FINDINGS, "finding")}
+    tickets = ticket_repository or TicketRepository(db)
+    return {"ticket": _index_kind(db, tickets.memory_index_tickets(MAX_TEXT), "ticket"),
+            "run_summary": _index_kind(db, tickets.memory_index_run_summaries(MAX_TEXT), "run_summary"),
+            "finding": _index_kind(db, tickets.memory_index_findings(MAX_TEXT), "finding")}
 
 
 def _normalize_hits(rows: list[dict]) -> list[dict]:

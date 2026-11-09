@@ -15,6 +15,7 @@ from ...features.work.constants import utcnow
 from .bodies import MasterActionBody
 from .events import MasterEscalationNotified, MasterEscalationRequested
 from ...platform.events.wiring import publish_for
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 
 @dataclass(frozen=True)
@@ -211,7 +212,7 @@ def escalate(ctx, audit, state: MasterActionState, decision, log) -> dict:
     reason = (body.why or f"The policy requires a person to decide: {decision.reason}").strip()[:1500]
     ticket_updated = None
     if not body.observation_key.strip() and not (body.kind and body.subject) and state.ticket:
-        ticket_updated = ctx.db.one("SELECT jira_updated FROM tickets WHERE key=%s", (state.ticket,))
+        ticket_updated = ticket_repository_of(ctx).get_ticket_jira_updated((state.ticket,))
     observation_key = observation_key_for(body, state.ticket, ticket_updated)
     record = record_escalation(ctx, state, reason, options, observation_key)
     delivery = deliver_escalation(ctx, state, record, state.policy_project, log)
@@ -225,7 +226,7 @@ def escalate(ctx, audit, state: MasterActionState, decision, log) -> dict:
 def validate_ticket_action(ctx, audit, state: MasterActionState):
     if state.body.action not in {"retry", "move_to_todo", "restart_run"}:
         return None
-    ticket_row = ctx.db.one("SELECT key, project, status FROM tickets WHERE key=%s", (state.ticket,)) \
+    ticket_row = ticket_repository_of(ctx).get_ticket_key_project_status((state.ticket,)) \
         if state.ticket else None
     if not ticket_row:
         reason = "a valid Jira ticket is required for this master action"
@@ -255,7 +256,7 @@ def retry_or_move(ctx, audit, state: MasterActionState, ticket_row: dict[str, An
         status = ctx.jira.transition_to(state.ticket, "To Do")
     except Exception as exc:  # noqa: BLE001 - preserve the refusal without exposing Jira internals
         refuse(ctx, audit, state, f"Jira could not move {state.ticket} to To Do ({type(exc).__name__})", 502)
-    ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, state.ticket))
+    ticket_repository_of(ctx).update_status(state.ticket, status)
     return f"ticket moved to {status}"
 
 
@@ -316,7 +317,7 @@ def restart_run(ctx, audit, state: MasterActionState, ticket_row: dict[str, Any]
               {"intent": body.intent[:1000], "why": body.why[:1000], "target_run_id": body.target_run_id})
         master_action_event(ctx, state, "partial", reason)
         raise HTTPException(502, reason) from exc
-    ctx.db.run("UPDATE tickets SET status=%s,synced_at=now() WHERE key=%s", (status, state.ticket))
+    ticket_repository_of(ctx).set_ticket_status_synced((status, state.ticket))
     ticket_row["project"] = target["project"]
     return f"stuck run {body.target_run_id} stopped; ticket moved to {status}"
 

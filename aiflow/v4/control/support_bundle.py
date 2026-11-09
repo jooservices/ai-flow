@@ -22,6 +22,7 @@ from typing import Any
 
 from .. import VERSION
 from ..core.toolchains import STACK_TOOLS, tools_for_stacks
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 MAX_LOG_BYTES = 5 * 1024 * 1024
 RETENTION = timedelta(hours=24)
@@ -644,7 +645,7 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
     files["logs/control-service.log"] = safe_log.encode("utf-8")
 
     if ticket_key:
-        ticket = ctx.db.one("SELECT key,project,status,type,summary FROM tickets WHERE key=%s", (ticket_key,))
+        ticket = ticket_repository_of(ctx).get_ticket_bundle_fields((ticket_key,))
         if not ticket:
             raise KeyError(ticket_key)
         ticket_data = dict(ticket)

@@ -43,6 +43,7 @@ from .features.version_release import routes as version_release_module
 from .features.fleet import routes as fleet_module
 from .features.projects import routes as projects_module
 from .features.projects.bodies import ProjectPreflightBody
+from aiflow.v4.control.features.tickets import ticket_repository_of
 
 log = logging.getLogger("aiflow4.api")
 
@@ -95,7 +96,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         with capacity_history_lock:
             now = time.monotonic()
             if now - float(capacity_history_cache["at"]) >= 1.0:
-                capacity_history_cache["samples"] = capacity.history(ctx.db)
+                capacity_history_cache["samples"] = capacity.history(ctx.db, ticket_repository=ticket_repository_of(ctx))
                 capacity_history_cache["at"] = now
             return capacity_history_cache["samples"]
 

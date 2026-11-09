@@ -4,8 +4,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import pytest
-
 from aiflow.v4.control import api, rest_audit as audit
 
 ROOT = Path(__file__).resolve().parents[2]

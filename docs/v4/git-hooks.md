@@ -16,7 +16,7 @@ Steps, cheapest first; the first failure stops the run:
 | Step | Checks | Tool |
 | --- | --- | --- |
 | `whitespace` | trailing whitespace, conflict markers in the staged change | `git diff --cached --check` |
-| `lint` | staged modules under `aiflow/v4` (only when one is staged), read from the Git index | `ruff check --stdin-filename` with the project rules |
+| `lint` | staged modules under `aiflow/v4` (only when one is staged), read from the Git index | `ruff check --stdin-filename` with the project rules; only findings on lines the commit adds or changes (every line of a new file) refuse it |
 | `secrets` | secrets in the staged change; fake test credentials are allowed in `deploy/v4/ci/gitleaks.toml` | `gitleaks` |
 | `giant-files`, `duplicate-blocks`, `broad-except`, `sql-boundary` | the project guards, as in CI | `aiflow.v4.core.*` |
 

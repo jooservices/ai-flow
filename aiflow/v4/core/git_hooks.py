@@ -3,7 +3,7 @@
     python3 -m aiflow.v4.core.git_hooks pre-commit [--base develop]
     python3 -m aiflow.v4.core.git_hooks pre-push [--base develop]
 
-``pre-commit`` checks the staged change: whitespace errors, ruff lint of the staged v4 modules, gitleaks, and the
+``pre-commit`` checks the staged change: whitespace errors, ruff lint of the staged v4 modules (findings on added or changed lines only), gitleaks, and the
 project guards (giant files, duplicate blocks, broad except, SQL boundary). The guards that compare commits see the
 staged change through a snapshot commit that no branch points at. The commit-message rules stay in the
 ``commit-msg`` hook.
@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -57,8 +59,31 @@ def staged_python_modules(root: Path) -> list[str]:
     return [name for name in names if name.startswith("aiflow/v4/") and name.endswith(".py")]
 
 
+def _changed_lines(root: Path, name: str) -> set[int] | None:
+    """Line numbers a staged file adds or changes; ``None`` when the file is new (every line counts)."""
+    if _git(root, "diff", "--cached", "--name-only", "--diff-filter=A", "--", name):
+        return None
+    lines: set[int] = set()
+    for hunk in re.finditer(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", _git(root, "diff", "--cached", "-U0", "--", name),
+                            re.M):
+        first, count = int(hunk.group(1)), int(hunk.group(2) or 1)
+        lines.update(range(first, first + count))
+    return lines
+
+
+def _new_findings(output: str, changed: set[int] | None) -> list[str]:
+    """Ruff findings (JSON output) on changed lines; output that is not JSON is reported whole."""
+    try:
+        findings = json.loads(output)
+    except ValueError:
+        return [output.strip()] if output.strip() else []
+    return [f"{item['location']['row']}:{item['location']['column']}: {item['code']} {item['message']}"
+            for item in findings if changed is None or item["location"]["row"] in changed]
+
+
 def _lint_staged(ctx: Context) -> list[str]:
-    """Run Ruff on each Python module's staged blob, with its repository path for configuration."""
+    """Run Ruff on each Python module's staged blob, with its repository path for configuration. Only findings on
+    lines the commit adds or changes refuse it, so a file with old findings can still be committed (JAIF-589)."""
     problems = []
     for name in staged_python_modules(ctx.path):
         shown = subprocess.run(["git", "show", f":{name}"], cwd=ctx.path, capture_output=True, text=True)
@@ -67,7 +92,7 @@ def _lint_staged(ctx: Context) -> list[str]:
             continue
         try:
             checked = subprocess.run(
-                ["uv", "run", "--frozen", "ruff", "check", "--force-exclude", "--no-cache",
+                ["uv", "run", "--frozen", "ruff", "check", "--force-exclude", "--no-cache", "--output-format", "json",
                  "--stdin-filename", name, "-"],
                 cwd=ctx.path, input=shown.stdout, capture_output=True, text=True, timeout=120,
             )
@@ -75,8 +100,10 @@ def _lint_staged(ctx: Context) -> list[str]:
             problems.append(f"ruff timed out while checking staged {name}")
             continue
         if checked.returncode:
-            detail = (checked.stdout + checked.stderr).strip()
-            problems.append(f"ruff check failed for staged {name}:\n{detail[-4000:]}")
+            found = _new_findings(checked.stdout, _changed_lines(ctx.path, name))
+            if found or not checked.stdout.strip():
+                detail = "\n".join(found) or checked.stderr.strip()
+                problems.append(f"ruff check failed for staged {name}:\n{detail[-4000:]}")
     return problems
 
 

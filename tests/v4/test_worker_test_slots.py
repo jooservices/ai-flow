@@ -210,3 +210,58 @@ def test_post_merge_check_waits_for_a_slot_and_runs_at_lower_priority(monkeypatc
         "process collected",
         "slot released",
     ]
+
+
+def test_version_release_check_inside_a_container_runtime_holds_a_slot(monkeypatch, tmp_path):
+    import aiflow.v4.worker.containers as containers
+
+    events = []
+
+    @contextmanager
+    def slot():
+        events.append("slot")
+        yield
+
+    class Runtime:
+        def __init__(self, spec, run_as):
+            events.append(("runtime", spec.cwd))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def bind_process(self, pid):
+            events.append("bound")
+
+    monkeypatch.setattr(suite_slots, "suite_slot", slot)
+    monkeypatch.setattr(containers, "ContainerRuntime", Runtime)
+
+    exit_code, output = version_release._run_check("echo contained", {"containers": True}, tmp_path, [], {},
+                                                   str(tmp_path), 10)
+
+    assert exit_code == 0 and output.strip() == "contained"
+    assert events == ["slot", ("runtime", str(tmp_path)), "bound"]
+
+
+def test_version_release_check_that_exceeds_its_timeout_is_killed_and_reported(monkeypatch, tmp_path):
+    monkeypatch.setenv("AIFLOW4_TEST_SLOT_DIR", str(tmp_path / "slots"))
+
+    exit_code, output = version_release._run_check("sleep 30", {}, tmp_path, [], {"PATH": "/usr/bin:/bin"},
+                                                   str(tmp_path), 1)
+
+    assert exit_code != 0 and "Check exceeded 1 seconds." in output
+
+
+def test_node_agent_reports_a_missing_worker_account_when_publishing_the_slot_limit(monkeypatch, tmp_path):
+    import pytest
+    from aiflow.v4.node import agent
+
+    def missing(_name):
+        raise KeyError("aiflow-worker")
+
+    monkeypatch.setattr(agent.pwd, "getpwnam", missing)
+
+    with pytest.raises(OSError, match="aiflow-worker account is missing"):
+        agent._write_test_suite_slots(3, tmp_path / "slots")

@@ -393,12 +393,18 @@ def test_version_release_timeout_kills_descendants_and_releases_the_slot(monkeyp
     child_pid = int(child_pid_path.read_text())
     child_stat = Path(f"/proc/{child_pid}/stat")
     deadline = time.monotonic() + 2
-    while child_stat.exists() and time.monotonic() < deadline:
-        if child_stat.read_text().split(") ", 1)[1].split()[0] == "Z":
+    child_stopped = False
+    while time.monotonic() < deadline:
+        try:
+            process_state = child_stat.read_text().split(") ", 1)[1].split()[0]
+        except FileNotFoundError:
+            child_stopped = True
+            break
+        if process_state == "Z":
+            child_stopped = True
             break
         time.sleep(0.01)
-    else:
-        assert not child_stat.exists(), "timed-out check left its child running"
+    assert child_stopped, "timed-out check left its child running"
     with suite_slots.suite_slot(slot_directory):
         pass
 

@@ -1,0 +1,1 @@
+- [SonarCloud analysis](../../../docs/v4/sonarcloud.md): Quality Gate on every pull request via the organization SonarCloud token, run in parallel with the tests

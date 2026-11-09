@@ -1,6 +1,6 @@
 """The control watchdog runs independent checks in a fixed order (JAIF-308).
 
-Each check is a function in `watchdog_checks`. `CHECKS` lists all fifteen.
+Each check is a function in `watchdog_checks` or a control lifecycle module. `CHECKS` lists all sixteen.
 `run` calls the two groups below, and each group runs its part of `CHECKS`.
 A check that raises is logged and the later checks still run. Add a check by
 importing it and inserting it into `CHECKS`.
@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from .application_context import ApplicationContext
+from .epic_lifecycle import reconcile_from_watchdog
 from .watchdog_checks.account_cooldowns import account_cooldowns
 from .watchdog_checks.lost_leases_and_run_clocks import lost_leases_and_run_clocks
 from .watchdog_checks.node_heartbeats import node_heartbeats
@@ -46,6 +47,7 @@ CHECKS = (
     role_coverage,
     quota_windows,
     quota_forecasts,
+    reconcile_from_watchdog,
 )
 
 

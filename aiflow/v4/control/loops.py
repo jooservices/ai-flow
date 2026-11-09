@@ -22,14 +22,13 @@ import os
 import socket
 import threading
 import time
-from datetime import datetime, timezone
-from urllib.parse import quote
 
 from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, owner_notifications
 from . import flow_doctor
+from . import epic_lifecycle
 from . import system_check
-from . import projects as project_lifecycle
 from . import rollout
+from . import projects as project_lifecycle
 from . import version_release
 from .application_context import ApplicationContext
 from .db import J
@@ -39,87 +38,10 @@ log = logging.getLogger("aiflow4.loops")
 OWNER = f"{socket.gethostname()}:{os.getpid()}"
 
 
-def _is_under_epic(ticket: dict, epic_key: str, by_key: dict[str, dict]) -> bool:
-    parent = ticket.get("parent_key")
-    seen: set[str] = set()
-    while parent and parent not in seen:
-        if parent == epic_key:
-            return True
-        seen.add(parent)
-        parent_ticket = by_key.get(parent)
-        parent = parent_ticket.get("parent_key") if parent_ticket else None
-    return False
-
-
 def _reconcile_epics(ctx: ApplicationContext, projects: list[str], changed_ticket_keys: set[str],
                      first_seen_ticket_keys: set[str], preexisting_ticket_keys: set[str]) -> None:
-    """Close epics whose mirrored children are all Done, and reopen on newly active child work."""
-    for project in projects:
-        rows = ticket_repository_of(ctx).list_project_tickets_for_epic_reconcile((project,))
-        by_key = {row["key"]: row for row in rows}
-        epics = [row for row in rows if row["type"] == "Epic"]
-        for epic in epics:
-            children = [row for row in rows if row["type"] != "Epic" and _is_under_epic(row, epic["key"], by_key)]
-            if not children:
-                continue
-            all_done = all(child["status"] == "Done" for child in children)
-            if all_done:
-                target = "Done"
-            elif epic["status"] == "Done" and any(
-                    child["key"] in changed_ticket_keys and child["status"] != "Done" and
-                    (child["key"] not in first_seen_ticket_keys or epic["key"] in preexisting_ticket_keys)
-                    for child in children):
-                target = "To Do"
-            else:
-                continue
-            if epic["status"] == target:
-                continue
-            try:
-                previous_status = epic["status"]
-                current = ctx.jira.status(epic["key"])
-                moved_by_flow = current != target
-                status = ctx.jira.transition_to(epic["key"], target) if moved_by_flow else current
-                if status != target:
-                    continue
-                now = datetime.now(timezone.utc)
-                ticket_repository_of(ctx).update_status_with_done_timestamp((status, status, now, epic['key']))
-                epic["status"] = status
-                ready = "aiflow-ready" in (epic.get("labels") or [])
-                ctx.events.emit("ticket.status", ticket=epic["key"], project=project, outcome=status,
-                                reason=f"from {previous_status}", from_status=previous_status, ready=ready,
-                                source="jira_sync")
-                if target == "Done":
-                    try:
-                        project_lifecycle.report_done_epic(ctx, project, epic["key"])
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("could not generate completion report for epic %s: %s", epic["key"], e)
-                if not moved_by_flow:
-                    continue
-                reason = (f"all {len(children)} child tickets are Done" if target == "Done"
-                          else f"{len(children)} child tickets are not all Done")
-                ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
-                           " VALUES ('jira','transition',%s,'control',true,%s,%s)",
-                           (epic["key"], status, J({"source": "jira_sync", "reason": reason,
-                                                    "child_count": len(children)})))
-                ctx.events.emit("jira.transition", ticket=epic["key"], account="control", outcome=status,
-                                reason=reason)
-                if target == "Done":
-                    report = (ctx.settings.public_url.rstrip("/") + f"/v1/projects/{quote(project, safe='')}/report"
-                              f"?epic={quote(epic['key'], safe='')}&format=html")
-                    comment = ("AI Flow · epic completed\n"
-                               f"Child tickets: {len(children)} (all Done)\n"
-                               f"Completed at: {now.isoformat(timespec='seconds')}\n"
-                               f"Report: {report}")
-                    project_done = bool(epics) and all(
-                        row["status"] == "Done" or row["key"] == epic["key"] for row in epics)
-                    if project_done:
-                        project_report = (ctx.settings.public_url.rstrip("/") +
-                                          f"/v1/projects/{quote(project, safe='')}/report?format=html")
-                        comment += (f"\nProject suggestion: all {len(epics)} epics are Done; "
-                                    f"consider closing project {project}. Report: {project_report}")
-                    ctx.jira.comment(epic["key"], comment)
-            except Exception as e:  # noqa: BLE001
-                log.warning("could not reconcile epic %s: %s", epic["key"], e)
+    """Reconcile child-driven epic changes through the shared lifecycle module."""
+    epic_lifecycle.reconcile(ctx, projects, changed_ticket_keys, first_seen_ticket_keys, preexisting_ticket_keys)
 
 
 def _mirror_versions(ctx: ApplicationContext, keys: list[str]) -> None:
@@ -135,7 +57,9 @@ def _mirror_versions(ctx: ApplicationContext, keys: list[str]) -> None:
 
 def _mirror_ticket(ctx: ApplicationContext, t: dict, done_at) -> None:
     """Upsert a ticket read from Jira, replace its Fix versions and record when they were attached."""
-    ticket_repository_of(ctx).upsert_mirrored_ticket_row({**t, 'done_at': done_at, 'fields': J({'assignee': t.get('assignee')})})
+    ticket_repository_of(ctx).upsert_mirrored_ticket_row({**t, 'done_at': done_at,
+        'fields': J({'assignee': t.get('assignee'),
+                     'parent_changed_at': t['parent_changed_at'].isoformat() if t.get('parent_changed_at') else None})})
     # Replace the complete relationship for each ticket received from Jira, so removals are mirrored too.
     ticket_repository_of(ctx).replace_ticket_version_links((t['key'], t['key'], t['fix_versions']))
     # Jira change history: when each Fix version was attached, and the first move to In Progress.
@@ -145,7 +69,52 @@ def _mirror_ticket(ctx: ApplicationContext, t: dict, done_at) -> None:
         ticket_repository_of(ctx).earliest_first_in_progress_at((t['first_in_progress'], t['key']))
 
 
+def _report_newly_mirrored_epic(ctx: ApplicationContext, ticket: dict, old: dict | None) -> None:
+    """Report an epic imported already Done, preserving the Jira-sync side effect."""
+    if ticket["type"] != "Epic" or ticket["status"] != "Done" or old:
+        return
+    try:
+        project_lifecycle.report_done_epic(ctx, ticket["project"], ticket["key"])
+    except Exception as error:  # noqa: BLE001 - reporting must not stop Jira mirroring
+        log.warning("could not generate completion report for epic %s: %s", ticket["key"], error)
+
+
+def _sync_jira_issue(ctx: ApplicationContext, issue: dict, jira_flow_actor: str,
+                     changed_ticket_keys: set[str], first_seen_ticket_keys: set[str]) -> None:
+    """Mirror one Jira issue and record its status, hierarchy and operator changes."""
+    ticket = ctx.jira.normalize(issue)
+    old = ticket_repository_of(ctx).get_ticket_sync_fields((ticket['key'],))
+    if old and jira_flow_actor:
+        for change in ctx.jira.operator_changes(issue, old.get("jira_updated"), jira_flow_actor):
+            flow_doctor.record_operator_intervention(
+                ctx, source_key=change["source_key"], source="jira", actor=change["actor"], action="edit",
+                target=change["target"], happened_at=change["happened_at"],
+                reason="Jira history records a change by an account outside AI Flow",
+                details={"fields": change["fields"]})
+    if not old:
+        first_seen_ticket_keys.add(ticket["key"])
+    if (not old or old["parent_key"] != ticket["parent_key"] or
+            (old["status"] == "Done" and ticket["status"] != "Done")):
+        changed_ticket_keys.add(ticket["key"])
+    done_at = ticket.get("done_at")
+    if ticket["status"] == "Done" and done_at is None:
+        done_at = ticket["jira_updated"]
+    _mirror_ticket(ctx, ticket, done_at)
+    if not old:
+        project_lifecycle.reopen_for_new_ticket(ctx, ticket["project"], ticket["key"])
+    _report_newly_mirrored_epic(ctx, ticket, old)
+    if old and old["status"] != ticket["status"]:
+        merge_flow.record_move(ctx, ticket["key"], old["status"], ticket["status"], merge_flow.PERSON,
+                               "moved in Jira", at=ticket.get("status_changed_at"))
+    ready = "aiflow-ready" in ticket["labels"]
+    if not old or old["status"] != ticket["status"] or ("aiflow-ready" in old["labels"]) != ready:
+        ctx.events.emit("ticket.status", ticket=ticket["key"], project=ticket["project"],
+                        outcome=ticket["status"], reason=f"from {old['status']}" if old else "first seen",
+                        from_status=old["status"] if old else "", ready=ready, source="jira_sync")
+
+
 def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
+    """Mirror recently changed Jira issues and reconcile their epic state."""
     configured = ctx.repo().projects
     # The control repo is authoritative: paused or removed projects must stop being queried on the next pass.
     keys = sorted(key for key, project in configured.items() if not project.paused)
@@ -170,39 +139,7 @@ def jira_sync(ctx: ApplicationContext, full: bool = False) -> int:
     except Exception:  # noqa: BLE001 - no authenticated identity means external history cannot be classified safely
         jira_flow_actor = ""
     for issue in search(jql + " ORDER BY updated DESC"):
-        t = ctx.jira.normalize(issue)
-        old = ticket_repository_of(ctx).get_ticket_sync_fields((t['key'],))
-        if old and jira_flow_actor:
-            for change in ctx.jira.operator_changes(issue, old.get("jira_updated"), jira_flow_actor):
-                flow_doctor.record_operator_intervention(
-                    ctx, source_key=change["source_key"], source="jira", actor=change["actor"],
-                    action="edit", target=change["target"], happened_at=change["happened_at"],
-                    reason="Jira history records a change by an account outside AI Flow",
-                    details={"fields": change["fields"]})
-        if not old:
-            first_seen_ticket_keys.add(t["key"])
-        if (not old or old["parent_key"] != t["parent_key"] or
-                (old["status"] == "Done" and t["status"] != "Done")):
-            changed_ticket_keys.add(t["key"])
-        done_at = t.get("done_at")
-        if t["status"] == "Done" and done_at is None:
-            done_at = t["jira_updated"]
-        _mirror_ticket(ctx, t, done_at)
-        if not old:
-            project_lifecycle.reopen_for_new_ticket(ctx, t["project"], t["key"])
-        if t["type"] == "Epic" and t["status"] == "Done" and not old:  # a moved epic is reported by its listener
-            try:
-                project_lifecycle.report_done_epic(ctx, t["project"], t["key"])
-            except Exception as e:  # noqa: BLE001
-                log.warning("could not generate completion report for epic %s: %s", t["key"], e)
-        if old and old["status"] != t["status"]:  # the flow writes its own moves to the mirror first: this one is a person's
-            merge_flow.record_move(ctx, t["key"], old["status"], t["status"], merge_flow.PERSON, "moved in Jira")
-        ready = "aiflow-ready" in t["labels"]
-        if not old or old["status"] != t["status"] or ("aiflow-ready" in old["labels"]) != ready:
-            # a move or a ready label made outside the control API (people, Jira automation): the ticket timeline
-            ctx.events.emit("ticket.status", ticket=t["key"], project=t["project"], outcome=t["status"],
-                            reason=f"from {old['status']}" if old else "first seen", from_status=old["status"] if old else "",
-                            ready=ready, source="jira_sync")
+        _sync_jira_issue(ctx, issue, jira_flow_actor, changed_ticket_keys, first_seen_ticket_keys)
         n += 1
     _reconcile_epics(ctx, keys, changed_ticket_keys, first_seen_ticket_keys, preexisting_ticket_keys)
     try:

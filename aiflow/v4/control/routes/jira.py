@@ -29,6 +29,7 @@ class JiraWrite(BaseModel):
 
 @router.post("/v1/jira/{key}/transition")
 def jira_transition(request: Request, key: str, body: JiraWrite, node: str = Depends(route_deps.node_auth_dependency)) -> dict:
+    """Apply an accepted fenced Jira transition and record its timeline event."""
     ctx = route_deps.context(request)
     run = route_deps.fenced(ctx, body.run_id, body.fence, "jira", "transition", {"to": body.to})
     if run["ticket_key"] != key:

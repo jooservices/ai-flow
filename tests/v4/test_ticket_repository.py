@@ -1,6 +1,7 @@
 """JAIF-299: the ticket repository owns ticket queries and supports an application-context fake."""
 import ast
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 from types import SimpleNamespace
@@ -9,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aiflow.v4.control import api
-from aiflow.v4.control.features.tickets.models import Ticket
+from aiflow.v4.control.features.tickets.models import Ticket, TicketMove
 from aiflow.v4.control.features.tickets.repository import FakeTicketRepository, TicketRepository, ticket_repository_of
 
 from tests.v4.conftest import add_ticket
@@ -96,6 +97,8 @@ QUERY_ARGUMENTS = {
     "scale_wave_tickets": (None, []),
     "scale_mark_done": ("TESTWP-1",),
     "scale_restore_todo": ("TESTWP-1",),
+    "list_project_tickets_for_epic_reconcile": ("TESTWP",),
+    "latest_project_ticket_moves": ("TESTWP",),
     "verify_candidates": ([],),
     "triage_candidates": ([],),
     "intake_candidates": ([],),
@@ -120,6 +123,9 @@ QUERY_ARGUMENTS = {
 
 @pytest.mark.parametrize("name", TicketRepository.NAMED_QUERIES)
 def test_fake_repository_matches_every_named_ticket_query(name):
+    ticket_row = {"key": "TESTWP-1", "project": "TESTWP", "status": "To Do"}
+    move_row = {"ticket": "TESTWP-1", "ts": datetime.now(timezone.utc)}
+
     class RecordingDatabase:
         def __init__(self):
             self.calls = []
@@ -130,6 +136,10 @@ def test_fake_repository_matches_every_named_ticket_query(name):
 
         def all(self, sql, params=()):
             self.calls.append(("all", sql, params))
+            if "WITH RECURSIVE epic_tree" in sql:
+                return [ticket_row]
+            if "SELECT t.key AS ticket, latest_move.ts" in sql:
+                return [move_row]
             return [{"query": "all"}]
 
         def run(self, sql, params=()):
@@ -149,13 +159,36 @@ def test_fake_repository_matches_every_named_ticket_query(name):
     database = RecordingDatabase()
     expected = getattr(TicketRepository(database), name)(*args)
     operation = database.calls[-1][0] if database.calls else "execute"
-    ticket_row = {"key": "TESTWP-1", "project": "TESTWP", "status": "To Do"}
     response_by_operation = {"one": ticket_row, "all": [{"query": "all"}], "run": 1}
+    if name == "list_project_tickets_for_epic_reconcile":
+        response_by_operation["all"] = [ticket_row]
+    elif name == "latest_project_ticket_moves":
+        response_by_operation["all"] = [move_row]
     responses = {name: response_by_operation[operation]} if operation in response_by_operation else {}
     fake = FakeTicketRepository(tickets=[ticket_row], responses=responses)
 
     assert getattr(fake, name)(*args) == expected
     assert fake.calls[-1][0] == name
+
+
+def test_epic_reconcile_repository_returns_frozen_tickets_and_moves(db):
+    add_ticket(db, "TESTWP-710", status="In Progress")
+    add_ticket(db, "OTHER-711", status="To Do")
+    db.run("UPDATE tickets SET type='Epic' WHERE key=%s", ("TESTWP-710",))
+    db.run("UPDATE tickets SET parent_key=%s WHERE key=%s", ("TESTWP-710", "OTHER-711"))
+    db.run("INSERT INTO ticket_moves (ticket,from_status,to_status,cause) VALUES (%s,%s,%s,%s)",
+           ("OTHER-711", "To Do", "In Progress", "person"))
+    repository = TicketRepository(db)
+
+    tickets = repository.list_project_tickets_for_epic_reconcile(("TESTWP",))
+    moves = repository.latest_project_ticket_moves("OTHER")
+
+    by_key = {ticket.key: ticket for ticket in tickets}
+    assert isinstance(by_key["TESTWP-710"], Ticket)
+    assert (by_key["TESTWP-710"].project, by_key["TESTWP-710"].status,
+            by_key["TESTWP-710"].type) == ("TESTWP", "In Progress", "Epic")
+    assert by_key["OTHER-711"].parent_key == "TESTWP-710"
+    assert moves == [TicketMove(ticket="OTHER-711", ts=moves[0].ts)]
 
 
 def test_route_uses_fake_repository_injected_through_application_context(ctx):

@@ -144,21 +144,28 @@ class Jira:
 
     @staticmethod
     def history(issue: dict) -> dict[str, Any]:
-        """From an issue read with expand=changelog: when each Fix version was last attached and when the ticket
-        first moved to In Progress. Empty values when the issue carries no changelog."""
+        """Read Fix-version, status-change and parent-change times from an expanded Jira changelog."""
         added: dict[str, datetime] = {}
         first_in_progress: datetime | None = None
+        status_changed_at: datetime | None = None
+        parent_changed_at: datetime | None = None
         floor = datetime.min.replace(tzinfo=timezone.utc)
         histories = sorted(((_ts(h.get("created")), h) for h in (issue.get("changelog") or {}).get("histories") or []),
                            key=lambda pair: pair[0] or floor)
         for at, h in histories:
             for item in h.get("items") or []:
-                field = str(item.get("field") or "").lower()
+                field = str(item.get("field") or "").strip().lower()
+                field_id = str(item.get("fieldId") or "").strip().lower()
                 if field in ("fix version", "fixversions") and item.get("to") and at:
                     added[str(item["to"])] = at
-                elif field == "status" and item.get("toString") == "In Progress" and at and not first_in_progress:
-                    first_in_progress = at
-        return {"fix_version_added": added, "first_in_progress": first_in_progress}
+                elif field == "status" and at:
+                    status_changed_at = at
+                    if item.get("toString") == "In Progress" and first_in_progress is None:
+                        first_in_progress = at
+                elif (field in {"parent", "epic link", "parent link"} or field_id == "parent") and at:
+                    parent_changed_at = at
+        return {"fix_version_added": added, "first_in_progress": first_in_progress,
+                "status_changed_at": status_changed_at, "parent_changed_at": parent_changed_at}
 
     @staticmethod
     def operator_changes(issue: dict, since: datetime | None, flow_account_id: str) -> list[dict[str, Any]]:

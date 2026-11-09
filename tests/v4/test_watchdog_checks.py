@@ -227,6 +227,7 @@ def test_the_loop_runs_all_checks_in_order_and_continues_after_one_raises(monkey
         "role_coverage",
         "quota_windows",
         "quota_forecasts",
+        "reconcile_from_watchdog",
     ]
     order = []
     failing = "node_services"
@@ -454,10 +455,13 @@ def test_orphaned_tickets_skips_a_ticket_someone_still_holds():
 
 
 def test_orphaned_tickets_requeues_an_in_progress_ticket_with_no_run(monkeypatch):
+    from aiflow.v4.control.repositories.watchdog import ORPHAN_TICKETS
+
+    assert "lower(btrim(t.type)) <> 'epic'" in ORPHAN_TICKETS
     moves = []
     monkeypatch.setattr(
         "aiflow.v4.control.merge_flow.record_move",
-        lambda ctx, key, old, new, cause, detail: moves.append((key, old, new, cause, detail)),
+        lambda ctx, key, old, new, cause, detail, **kwargs: moves.append((key, old, new, cause, detail)),
     )
     jira = Jira(status="In Progress")
     db = ScriptedDB().all_when("interval '10 minutes'", [{"key": "T-1"}])

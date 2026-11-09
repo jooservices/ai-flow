@@ -4,7 +4,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from .models import Ticket
+from ...db import J
+from .models import Ticket, TicketMove
 
 
 def ticket_repository_of(ctx: Any = None, *, db: Any = None, fallback: bool = True
@@ -910,7 +911,7 @@ class TicketRepository:
         """Insert or update a full mirrored ticket row from Jira."""
         return self._run(
             "upsert_mirrored_ticket_row",
-            "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by, jira_created, jira_updated, done_at, fields, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s, %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s,%(fields)s, now()) ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority, labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description, parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, fields=EXCLUDED.fields, done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at ELSE tickets.done_at END, synced_at=now()",
+            "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by, jira_created, jira_updated, done_at, fields, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s, %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s,%(fields)s, now()) ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority, labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description, parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, fields=CASE WHEN EXCLUDED.fields->>'parent_changed_at' IS NULL THEN jsonb_set(EXCLUDED.fields, '{parent_changed_at}', COALESCE(tickets.fields->'parent_changed_at','null'::jsonb), true) ELSE EXCLUDED.fields END, done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at ELSE tickets.done_at END, synced_at=now()",
             params,
         )
 
@@ -922,13 +923,35 @@ class TicketRepository:
             params,
         )
 
-    def list_project_tickets_for_epic_reconcile(self, params: Any = ()) -> Any:
-        """List project tickets with type and parent for epic reconciliation."""
-        return self._all(
+    def list_project_tickets_for_epic_reconcile(self, params: Any = ()) -> list[Ticket]:
+        """Load project epics and their full descendant trees, including cross-project children."""
+        rows = self._all(
             "list_project_tickets_for_epic_reconcile",
-            'SELECT key, project, status, type, parent_key, labels FROM tickets WHERE project=%s ORDER BY key',
+            "WITH RECURSIVE epic_tree AS ("
+            " SELECT key,project,status,type,parent_key,labels,jira_created,jira_updated,done_at,"
+            " NULLIF(fields->>'parent_changed_at','')::timestamptz AS parent_changed_at"
+            " FROM tickets WHERE project=%s AND lower(btrim(type))='epic'"
+            " UNION"
+            " SELECT child.key,child.project,child.status,child.type,child.parent_key,child.labels,"
+            " child.jira_created,child.jira_updated,child.done_at,"
+            " NULLIF(child.fields->>'parent_changed_at','')::timestamptz AS parent_changed_at"
+            " FROM tickets child JOIN epic_tree parent ON child.parent_key=parent.key"
+            ") SELECT key,project,status,type,parent_key,labels,jira_created,jira_updated,done_at,parent_changed_at"
+            " FROM epic_tree ORDER BY key",
             params,
         )
+        return [Ticket.from_row(row) for row in rows]
+
+    def latest_project_ticket_moves(self, project: str) -> list[TicketMove]:
+        """Return each project's last status change for watchdog retries of child reopen transitions."""
+        rows = self._all(
+            "latest_project_ticket_moves",
+            "SELECT t.key AS ticket, latest_move.ts FROM tickets t"
+            " JOIN LATERAL (SELECT ts FROM ticket_moves WHERE ticket=t.key ORDER BY ts DESC,id DESC LIMIT 1) latest_move ON true"
+            " WHERE t.project=%s",
+            (project,),
+        )
+        return [TicketMove.from_row(row) for row in rows]
 
     def update_status_with_done_timestamp(self, params: Any = ()) -> Any:
         """Update status and set done_at when newly reaching Done."""
@@ -936,6 +959,15 @@ class TicketRepository:
             "update_status_with_done_timestamp",
             "UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done' THEN %s ELSE done_at END, synced_at=now() WHERE key=%s",
             params,
+        )
+
+    def record_epic_transition(self, key: str, status: str, source: str, reason: str, child_count: int) -> None:
+        """Record a control-owned Jira transition caused by the epic's child tickets."""
+        self._run(
+            "record_epic_transition",
+            "INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
+            " VALUES ('jira','transition',%s,'control',true,%s,%s)",
+            (key, status, J({"source": source, "reason": reason, "child_count": child_count})),
         )
 
     def set_merge_note_checks_running(self, params: Any = ()) -> Any:

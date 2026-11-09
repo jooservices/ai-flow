@@ -1,7 +1,8 @@
-"""AC1/AC2 of JAIF-595 (control and Dashboard): CPU overview is open and the console renders the split."""
+"""AC1/AC2 of JAIF-595 (control and Dashboard): CPU overview needs sign-in and the console renders the split."""
 from __future__ import annotations
 
 from aiflow.v4.control import cpu_overview
+from aiflow.v4.control.console_auth import issue_session
 from aiflow.v4.control.ui import build_console_page
 from aiflow.v4.node import agent
 from conftest import join_node
@@ -39,15 +40,19 @@ def beat(client, name, headers, **metrics):
         "disk_total": 100 * 1024 ** 3, "disk_free": 50 * 1024 ** 3, "disk_free_pct": 50, **metrics}})
 
 
-def test_anyone_can_read_the_overview_without_signing_in(client, ctx):
-    """AC1: Dashboard data is visible without signing in."""
+def test_the_overview_needs_sign_in_and_returns_the_split_to_an_authorized_user(client, ctx):
+    """Machine names and load are infrastructure data: no session, no overview."""
+    secret = "test-cpu-overview-secret-with-at-least-32-bytes"
     ctx.settings.console_login = True
+    ctx.settings.console_session_secret = secret
     headers = node_headers(client, "node1")
     breakdown = {"tests": 30, "ai_tools": 1, "browsers": 5, "databases": 8}
     assert beat(client, "node1", headers, cpu_pct=50, cpu_breakdown=breakdown).status_code == 200
     client.cookies.clear()
+    assert client.get("/v1/cpu-overview").status_code == 401
+    client.cookies.set("aiflow4_session", issue_session("person@example.test", "business", 2_000_000_000, secret))
     response = client.get("/v1/cpu-overview")
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     node = next(item for item in response.json()["nodes"] if item["node"] == "node1")
     assert node["breakdown"] == {"ai_tools": 1.0, "tests": 30.0, "browsers": 5.0, "databases": 8.0}
     assert node["online"] is True and node["cpu_pct"] == 50.0

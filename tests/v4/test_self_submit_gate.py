@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from aiflow.v4.adapters import RunResult, RunSpec
 from aiflow.v4.control.features.work.eligibility_candidates import (
     _green_dev_submission,
     _verify_candidate_ready,
@@ -106,20 +107,37 @@ def test_worker_records_a_green_result_before_it_can_publish(monkeypatch, tmp_pa
     ],
 )
 def test_worker_records_and_refuses_red_or_incomplete_runs(monkeypatch, tmp_path, gate_result, status):
-    calls = []
+    calls, gate_calls = [], []
     run = SimpleNamespace(
         heartbeat=SimpleNamespace(progress={}), project={"checks": ["pytest"]}, worktree=tmp_path,
-        claim=SimpleNamespace(ticket={"key": "JAIF-1", "summary": "Gate result"}), env={}, run_as=[],
-        result={"details": {}},
+        claim=SimpleNamespace(ticket={"key": "JAIF-1", "summary": "Gate result", "type": "Story"},
+                              identity=("AI Flow", "aiflow@example.test")), env={}, run_as=[],
+        result={"details": {}}, git=SimpleNamespace(run=lambda *_args, **_kwargs: "head",
+                                                     changed=lambda _path: [],
+                                                     commit_all=lambda *_args: "repair-head"),
+        response=RunResult(), summary="Original work",
+        srv_root=str(tmp_path), key="JAIF-1", failed_work_commits=[],
     )
-    monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs: gate_result)
+    monkeypatch.setattr(dev.gate_step, "snapshot_worktree", lambda *_args: "pre-repair-tree")
+    monkeypatch.setattr(dev.gate_step, "changes_since_snapshot", lambda git, _wt, _before: git.changed(_wt))
+    monkeypatch.setattr(dev.gate_step, "commit_repair", lambda git, wt, _paths, message, identity:
+                        git.commit_all(wt, message, identity))
+    monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs: gate_calls.append("gate") or gate_result)
+    if gate_result.failed:
+        monkeypatch.setattr(dev, "brief", lambda _run: SimpleNamespace(
+            spec=RunSpec(prompt="instructions", cwd=str(tmp_path), account_home=str(tmp_path))))
+        monkeypatch.setattr(dev, "run_ai_once", lambda target, _prepared: setattr(
+            target, "response", RunResult(final_text="RESULT: FAIL", verdict="FAIL")) or calls.append("repair"))
     monkeypatch.setattr(dev, "report_gate_failure", lambda *_args: calls.append(_args[1:]) or "refused")
 
     outcome = dev.run_local_gate(run)
 
     assert outcome == "refused"
     assert run.result["details"]["local_gate"]["status"] == status
-    assert calls and calls[0][1] == "gate_failed"
+    assert gate_calls == ["gate"]
+    assert ("repair" in calls) is bool(gate_result.failed)
+    report = next(value for value in calls if isinstance(value, tuple))
+    assert report[1] == "gate_failed"
 
 
 def test_unconfigured_checks_are_recorded_as_missing_and_refused(monkeypatch):

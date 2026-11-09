@@ -16,10 +16,14 @@ def _existing_pr(api: ControlClient, claimed, repo: str, branch: str) -> dict | 
     return found if found and found.get("found") else None
 
 
-def _publish_head(api: ControlClient, git: Git, claimed, worktree: Path, repo: str, branch: str) -> str:
+def _publish_head(api: ControlClient, git: Git, claimed, worktree: Path, repo: str, branch: str,
+                  expected_head: str | None = None) -> str:
     credential = api.call("POST", "/v1/github/token", {"run_id": claimed.run_id, "fence": claimed.fence,
                                                          "repo": repo, "branch": branch})
-    git.push(worktree, branch, credential["token"])
+    if expected_head is None:
+        git.push(worktree, branch, credential["token"])
+    else:
+        git.push(worktree, branch, credential["token"], expected_head=expected_head)
     return git.run("rev-parse", "HEAD", cwd=worktree).strip()
 
 
@@ -48,7 +52,7 @@ def _open_or_reuse_pr(api: ControlClient, claimed, repo: str, branch: str, exist
 
 def try_handover(api: ControlClient, claimed, git: Git, worktree: Path, branch: str, repo: str,
                  summary: str, handed: dict, result: dict, started: float, jira: Callable[..., Any],
-                 branch_commit_count: int, tests: str = "") -> bool:
+                 branch_commit_count: int, tests: str = "", expected_head: str | None = None) -> bool:
     """Commit available work and send the ticket to In Verify. Return False when there is nothing to keep."""
     from .dev import api_node, commit_message
     changed = git.changed(worktree)
@@ -58,9 +62,9 @@ def try_handover(api: ControlClient, claimed, git: Git, worktree: Path, branch: 
     if changed:
         git.commit_all(worktree, commit_message(claimed, (summary or "Developer run reached its hard time limit")[:500]),
                        claimed.identity)
-        sha = _publish_head(api, git, claimed, worktree, repo, branch)
+        sha = _publish_head(api, git, claimed, worktree, repo, branch, expected_head)
     elif branch_commit_count:
-        sha = _publish_head(api, git, claimed, worktree, repo, branch)
+        sha = _publish_head(api, git, claimed, worktree, repo, branch, expected_head)
     else:
         sha = existing.get("head_sha") or git.run("rev-parse", "HEAD", cwd=worktree).strip()
     pr = _open_or_reuse_pr(api, claimed, repo, branch, existing, _pr_body(claimed, handed, changed, tests))

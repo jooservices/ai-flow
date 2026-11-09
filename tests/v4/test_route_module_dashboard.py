@@ -9,7 +9,7 @@ from aiflow.v4.control.routes import dashboard
 
 PATHS = {("GET", "/v1/dashboard/waiting"), ("GET", "/v1/dashboard/disagreements"),
          ("GET", "/v1/dashboard/quota"), ("GET", "/v1/dashboard/review-rounds"),
-         ("GET", "/v1/dashboard/flow-failures"),
+         ("GET", "/v1/dashboard/flow-failures"), ("GET", "/v1/dashboard/yield"),
          ("GET", "/v1/dashboard/pipeline-failures"),
          ("GET", "/v1/dashboard/assumptions")}
 
@@ -42,7 +42,7 @@ def test_the_routes_answer(client):
 def test_flow_failure_dashboard_summarizes_signatures_and_bug_state(client, ctx):
     summary = "git fetch failed for TESTWP-200: branch unavailable"
     run_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
-    for run_id, ticket in zip(run_ids, ("TESTWP-200", "TESTWP-201")):
+    for run_id, ticket in zip(run_ids, ("TESTWP-200", "TESTWP-201"), strict=True):
         ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
                    "error_kind,summary,tokens_in,tokens_out,cost_usd) VALUES (%s,%s,'TESTWP','verify','codex-01',"
                    "'codex','node1',1,'finished','failed','infra',%s,2,3,0.25)", (run_id, ticket, summary))

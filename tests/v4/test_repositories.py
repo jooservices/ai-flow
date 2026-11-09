@@ -1,7 +1,6 @@
 """Repository selection passed from project configuration into each worker checkout."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 from aiflow.v4.core.local_gate import GateResult, StepResult
@@ -229,13 +228,22 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
             calls["worktrees"].append((mirror, str(path), branch, base))
             return "origin/" + base
 
+        def merge_base_resolving(self, *_args, **_kwargs):
+            return []
+
+        def behind(self, *_args, **_kwargs):
+            return 0
+
+        def run(self, *_args, **_kwargs):
+            return "a" * 40
+
         def changed(self, _path):
             return ["README.md"]
 
         def commit_all(self, *_args):
             return "a" * 40
 
-        def push(self, _path, branch, token):
+        def push(self, _path, branch, token, **_kwargs):
             calls["pushes"].append((branch, token))
 
     api = _API({"/v1/github/token": {"token": "github-token"},
@@ -255,7 +263,7 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
 
     assert result["outcome"] == "done"
     assert result["details"]["local_gate"]["status"] == "green"
-    assert calls["mirrors"] == [("jooservices/wordpress-core", "github-token")]
+    assert calls["mirrors"] == [("jooservices/wordpress-core", "github-token")] * 2
     assert calls["worktrees"][0][3] == "main"
     assert calls["prs"][0]["repo"] == "jooservices/wordpress-core"
     assert calls["prs"][0]["base"] == "main"
@@ -288,7 +296,7 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
         def detached(self, _mirror, _path, ref):
             return ref
 
-        def merge_base_in(self, _path, base, _identity, commit=False):
+        def merge_base_resolving(self, _path, base, _identity, commit=False):
             calls["bases"].append((base, commit))
             return []
 
@@ -344,7 +352,7 @@ def test_verify_reworks_instead_of_merging_a_pass_with_an_unmapped_deferred_crit
         def detached(self, _mirror, _path, ref):
             return ref
 
-        def merge_base_in(self, *_args, **_kwargs):
+        def merge_base_resolving(self, *_args, **_kwargs):
             return []
 
         def behind(self, *_args, **_kwargs):

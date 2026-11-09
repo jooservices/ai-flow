@@ -135,6 +135,16 @@ def test_a_finished_dev_run_waits_for_verification():
     assert role_health.classify({"step": "dev", "outcome": "done", "error_kind": "", "summary": ""}) is None
 
 
+def test_stale_branch_verification_failure_is_excluded_from_quality_scoring():
+    failure = {"step": "verify", "outcome": "failed", "error_kind": "stale_branch",
+               "summary": "branch is behind develop", "details": {"reason": "stale_branch"}}
+
+    scored = role_health.classify(failure)
+
+    assert scored is not None and (scored.label, scored.failure) == ("excluded", None)
+    assert failure["details"]["reason"] == "stale_branch"
+
+
 def test_a_failing_follow_up_run_with_inherited_pr_is_still_a_failure():
     scored = role_health.classify({"step": "dev", "outcome": "failed", "error_kind": "",
                                    "summary": "follow-up failed", "pr_url": "https://example.test/pr/1",

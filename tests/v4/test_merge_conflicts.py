@@ -282,7 +282,7 @@ class FakeGit:
             return 0 if self.fetches > self.appears_after else self.behind_count
         return self.behind_count
 
-    def merge_base_in(self, _path, base, _identity, commit=False):
+    def merge_base_resolving(self, _path, base, _identity, commit=False):
         return [] if self.updated else list(self.conflicts)
 
     def abort_merge(self, _path):
@@ -342,14 +342,14 @@ def test_real_conflict_goes_back_to_a_developer(monkeypatch, tmp_path):
     assert not any(p == "/v1/github/update-branch" for _, p, _, _ in api.calls)  # a conflict is not auto-updated
 
 
-def test_refused_update_without_conflict_still_verifies_the_merged_tree(monkeypatch, tmp_path):
-    git = FakeGit()
+def test_refused_update_keeps_a_stale_branch_out_of_verification(monkeypatch, tmp_path):
+    git = FakeGit(appears_after=99)
     monkeypatch.setattr(verify, "Git", git)
-    monkeypatch.setattr(verify, "get_adapter", lambda _p: _adapter("VERDICT: PASS\nCHECKS: ok"))
     api = _API({"/v1/github/token": {"token": "t"}, "/v1/github/update-branch": {"ok": False, "message": "403"},
                 "/v1/github/checks": {"checks": []}, "/v1/github/merge": {"merged": True, "sha": "c" * 40}})
     result = verify.run_verify(api, _claim(project()), pr_info(), str(tmp_path), "https://control", 3600, [])
-    assert result["outcome"] == "merged" and result["details"]["auto_updated"] is False
+    assert result["outcome"] == "failed" and result["error_kind"] == "stale_branch"
+    assert not any(path in ("/v1/github/checks", "/v1/github/merge") for _, path, _, _ in api.calls)
 
 
 def test_github_update_endpoint_updates_a_verify_branch(client, ctx):

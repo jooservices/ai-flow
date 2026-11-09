@@ -118,6 +118,9 @@ def test_conflicting_guidance_keeps_policy_precedence_and_is_reported_to_the_own
             Path(worktree).mkdir(parents=True, exist_ok=True)
             return f"origin/{base}"
 
+        def run(self, *_args, **_kwargs):
+            return "checkout-head"
+
     class API:
         node_name = "cc"
 

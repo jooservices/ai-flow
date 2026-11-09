@@ -62,6 +62,13 @@ class RecordingGit:
         self.events.append("git:mirror")
         return "mirror"
 
+    def merge_base_resolving(self, *_args, **_kwargs):
+        self.events.append("git:refresh-base")
+        return []
+
+    def behind(self, *_args, **_kwargs):
+        return 0
+
     def foreign_worktree(self, *_args):
         self.events.append("git:foreign_worktree")
         return None
@@ -78,8 +85,11 @@ class RecordingGit:
         self.events.append("git:commit_all")
         return "a" * 40
 
-    def push(self, _wt, _branch, _token):
+    def push(self, _wt, _branch, _token, **_kwargs):
         self.events.append("git:push")
+
+    def run(self, *_args, **_kwargs):
+        return "a" * 40
 
 
 class RecordingAdapter:
@@ -127,7 +137,8 @@ def test_summary_helpers_extract_worker_summary_and_test_progress():
     ("result", "changed", "expected_outcome", "tail"),
     [
         (RunResult(final_text="SUMMARY: Implemented it\nTESTS: pytest -q", duration_s=1),
-         ["src/change.py"], "done", ["git:changed", "git:commit_all", "gate:run", "api:POST /v1/github/token",
+         ["src/change.py"], "done", ["git:changed", "git:commit_all", "api:POST /v1/github/token",
+                                     "git:mirror", "git:refresh-base", "gate:run", "api:POST /v1/github/token",
                                      "git:push", "api:POST /v1/github/pr",
                                      "api:POST /v1/jira/JAIF-312/comment",
                                      "api:POST /v1/jira/JAIF-312/transition", "heartbeat:stop"]),
@@ -172,7 +183,7 @@ def test_verify_uses_the_shared_fenced_setup_and_reporting(monkeypatch, tmp_path
             events.append("git:detached")
             return "abc123456789"
 
-        def merge_base_in(self, *_args, **_kwargs):
+        def merge_base_resolving(self, *_args, **_kwargs):
             return []
 
         def behind(self, *_args):

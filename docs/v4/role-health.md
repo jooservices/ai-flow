@@ -19,7 +19,7 @@ The role of a run follows its step: `dev` → dev, `verify` → verify, `triage`
 | `failed`; `blocked` (the AI stopped without changing code) | failure |
 | `timeout` or `lost` (stopped by the time limit or a lost lease) | a quarter of a failure (`stopped`) |
 | a finished dev run not yet judged by verification | not counted yet |
-| `quota`, or an error kind of quota, sign-in, infrastructure, network or tool problems | **excluded** |
+| `quota`, or an error kind of quota, sign-in, stale-branch, infrastructure, network or tool problems | **excluded** |
 
 The dev worker classifies a result as `tool_missing` only when the AI uses the explicit `MISSING-TOOL(S)` or
 `MISSING-SERVICE(S)` marker, or an adapter records a failed command execution whose invoked catalogue tool matches

@@ -41,6 +41,7 @@
     "GET /v1/dashboard/silent-runs",
     "GET /v1/dashboard/timeouts",
     "GET /v1/dashboard/waiting",
+    "GET /v1/dashboard/yield",
     "GET /v1/deploy/ci-state",
     "GET /v1/deploy/state",
     "GET /v1/environment/missing",

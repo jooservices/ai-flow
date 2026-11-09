@@ -10,8 +10,6 @@ CANARY_FILE=$RELEASES/CANARY.json
 REJECTED_FILE=$RELEASES/CANARY_REJECTED
 FAILURES_FILE=$RELEASES/PROMOTION_FAILURES.json
 CUR=$(cat "$CURRENT_FILE" 2>/dev/null || true)
-# shellcheck disable=SC2034 # assigned from the settings but not read in this script; the control plane judges the age
-CANARY_MIN_AGE_S=${AIFLOW4_CANARY_MIN_AGE_S:-300}
 CANARY_MIN_RUNS=${AIFLOW4_CANARY_MIN_RUNS:-3}
 CANARY_MAX_AGE_S=${AIFLOW4_CANARY_MAX_AGE_S:-900}
 CANARY_FAILURE_RATIO=${AIFLOW4_CANARY_FAILURE_RATIO:-2}
@@ -20,13 +18,11 @@ CANARY_INSTALL_TIMEOUT_S=${AIFLOW4_CANARY_INSTALL_TIMEOUT_S:-$(( CANARY_MAX_AGE_
 AIFLOW4_CANARY_NODE=${AIFLOW4_CANARY_NODE:-}
 load_canary_settings() {
   # Prefer the settings screen values carried on /v1/deploy/state; keep env values as a fallback.
-  local state age runs max
+  local state runs max
   state=$(control_state 2>/dev/null) || return 0
-  IFS=$'\t' read -r age runs max < <(python3 -c 'import json,sys
+  IFS=$'\t' read -r runs max < <(python3 -c 'import json,sys
 d=json.load(sys.stdin).get("control_canary",{}).get("settings") or {}
-print(d.get("minimum_age_s") or "", d.get("minimum_runs") if d.get("minimum_runs") is not None else "", d.get("maximum_age_s") or "", sep="\t")' <<<"$state") || return 0
-  # shellcheck disable=SC2034 # see the default above
-  [ -n "$age" ] && CANARY_MIN_AGE_S=$age
+print(d.get("minimum_runs") if d.get("minimum_runs") is not None else "", d.get("maximum_age_s") or "", sep="\t")' <<<"$state") || return 0
   [ -n "$runs" ] && CANARY_MIN_RUNS=$runs
   [ -n "$max" ] && CANARY_MAX_AGE_S=$max
   if [ -z "${AIFLOW4_CANARY_INSTALL_TIMEOUT_S:-}" ]; then
@@ -83,7 +79,14 @@ owner_token() {
 }
 control_get() { printf 'Authorization: Bearer %s\n' "$(owner_token)" | curl -fsS -H @- "${CONTROL_URL}$1"; }
 control_state() { control_get /v1/deploy/state; }
-canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
+canary_cli() {
+  # docker exec does not inherit the deployer's environment, so forward the optional override explicitly.
+  if [ "${1:-}" = evaluate ] && [ -n "${AIFLOW4_CANARY_MIN_AGE_S:-}" ]; then
+    docker exec aiflow4-control-api-a aiflow4 canary "$@" --minimum-age-s "$AIFLOW4_CANARY_MIN_AGE_S"
+  else
+    docker exec aiflow4-control-api-a aiflow4 canary "$@"
+  fi
+}
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
 promotion_py() {
   local src=$R

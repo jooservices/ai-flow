@@ -206,6 +206,42 @@ def test_console_view_endpoints_work_with_a_small_local_fleet(tmp_path):
     assert set(report["measurements"]["console_page_load"]["views"]) == set(scale_harness.PAGES)
 
 
+def test_an_extra_query_in_a_page_is_included_in_its_measurement(ctx):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    original_pool = ctx.db.pool
+    scale_harness._instrument_database_pool(ctx.db)
+
+    @app.middleware("http")
+    async def count_queries_and_inject_one(request, call_next):
+        async def inject(request):
+            if request.url.path == "/cc":
+                ctx.db.one("SELECT 1 AS injected_query")
+            return await call_next(request)
+
+        return await scale_harness._count_request_queries(request, inject)
+
+    @app.get("/cc")
+    def page():
+        ctx.db.one("SELECT 1 AS page_query")
+        return {"view": "cc"}
+
+    @app.get("/{path:path}")
+    def other(path):
+        return {"path": path}
+
+    try:
+        with TestClient(app) as measured_client:
+            result = scale_harness._sample_page(measured_client, "/cc", (), 1)
+    finally:
+        ctx.db.pool = original_pool
+
+    assert result["errors"] == []
+    assert result["query_counts"] == [2]
+
+
 def test_every_top_level_console_tab_has_a_scale_measurement():
     import re
 
@@ -222,18 +258,28 @@ def test_full_run_report_is_bound_to_the_declared_plan(proof):
     report, _ = proof
     assert report["scenario"] == scale_harness.plan(FULL)["scenario"]
     assert report["plan_digest"] == scale_harness.plan(FULL)["digest"]
-    assert report["environment"]["simulated_external_integrations"] == ["GitHub App", "Jira"]
+    assert report["environment"]["simulated_external_integrations"] == ["GitHub App", "Jira", "Gatus"]
 
 
 # --- AC2: the budgets are written down in one place and enforced ----------------------------------------------
 def test_budgets_are_written_down_once_with_their_statistic():
     assert {b.key: (b.limit, b.unit, b.statistic) for b in BUDGETS} == {
-        "console_page_load": (2.0, "s", "p95 per view, worst view"),
+        "console_page_queries": (200.0, "queries", "p95 per view, worst view"),
+        "console_page_bytes": (4_000_000.0, "bytes", "p95 per view, worst view"),
         "project_picker": (200.0, "ms", "p95"),
         "ticket_pickup": (30.0, "s", "p95")}
     doc = (ROOT / "docs/v4/scale-proof.md").read_text(encoding="utf-8")
     for b in BUDGETS:
         assert b.key in doc and b.statistic in doc and f"{b.limit:g} {b.unit}" in doc
+
+
+def test_console_elapsed_seconds_are_reported_but_do_not_fail_the_run():
+    report_input = synthetic()
+    report_input["measurements"]["console_page_load"]["value"] = 50.0
+    report = finalize(report_input)
+    assert report["measurements"]["console_page_load"]["value"] == 50.0
+    assert "console_page_load" not in {budget["key"] for budget in report["budgets"]}
+    assert report["passed"] is True
 
 
 def test_the_100_50_200_run_is_within_every_budget(proof):
@@ -242,17 +288,23 @@ def test_the_100_50_200_run_is_within_every_budget(proof):
     failures = [b["message"] for b in report["budgets"] if not b["passed"]]
     assert failures == [], json.dumps({"failures": failures,
                                        "console_page_load": report["measurements"].get("console_page_load"),
+                                       "console_page_queries": report["measurements"].get("console_page_queries"),
+                                       "console_page_bytes": report["measurements"].get("console_page_bytes"),
                                        "project_picker": report["measurements"].get("project_picker"),
                                        "ticket_pickup": report["measurements"].get("ticket_pickup"),
                                        "counts": report["counts"], "observed": report["observed"]}, indent=2)
     assert report["passed"] is True and report["failures"] == []
-    # the limits are the written ones scaled by the speed of the machine (1 on the reference machine)
+    # Time remains diagnostic; only the two console work measures and the existing non-console budgets are judged.
     limits = {b["key"]: (b["measured"], b["effective_limit"]) for b in report["budgets"]}
     assert all(measured < limit for measured, limit in limits.values()), limits
     assert 1.0 <= report["calibration"]["factor"] <= scale_proof.MAX_SPEED_FACTOR
     # every console view was measured while real worker claims were in flight
     assert set(report["measurements"]["console_page_load"]["views"]) == set(scale_harness.PAGES)
+    assert set(report["measurements"]["console_page_queries"]["views"]) == set(scale_harness.PAGES)
+    assert set(report["measurements"]["console_page_bytes"]["views"]) == set(scale_harness.PAGES)
     assert report["observed"]["peak_active_runs"] >= 150
+    assert report["measurements"]["console_page_queries"]["value"] <= 200 * 0.75
+    assert report["measurements"]["console_page_bytes"]["value"] <= 4_000_000 * 0.75
 
 
 def test_percentile_is_nearest_rank():
@@ -264,15 +316,31 @@ def test_percentile_is_nearest_rank():
 
 def test_a_budget_over_its_limit_fails_the_run_and_the_report_names_budget_and_value():
     slow = synthetic()
-    slow["measurements"]["console_page_load"]["value"] = 3.2
+    slow["measurements"]["console_page_queries"]["value"] = 201
     verdict = finalize(slow)
     assert verdict["passed"] is False
     [exceeded] = [b for b in verdict["budgets"] if not b["passed"]]
-    assert (exceeded["key"], exceeded["measured"], exceeded["limit"], exceeded["unit"]) == ("console_page_load", 3.2, 2.0, "s")
-    assert exceeded["message"] == ("Console views load: console_page_load p95 per view, worst view 3.200 s "
-                                   "exceeds the budget of 2 s")
+    assert (exceeded["key"], exceeded["measured"], exceeded["limit"], exceeded["unit"]) == (
+        "console_page_queries", 201.0, 200.0, "queries")
+    assert exceeded["message"] == ("Console page database queries: console_page_queries p95 per view, worst view "
+                                   "201.000 queries exceeds the budget of 200 queries")
     assert verdict["failures"] == [exceeded["message"]]
-    assert [f["signature"] for f in verdict["findings"]] == ["budget:console_page_load"]
+    assert [f["signature"] for f in verdict["findings"]] == ["budget:console_page_queries"]
+
+
+def test_a_response_byte_budget_over_its_limit_fails_the_run():
+    over = finalize(synthetic(response_bytes=4_000_001))
+    assert over["passed"] is False
+    [exceeded] = [budget for budget in over["budgets"] if not budget["passed"]]
+    assert (exceeded["key"], exceeded["measured"], exceeded["limit"], exceeded["unit"]) == (
+        "console_page_bytes", 4_000_001.0, 4_000_000.0, "bytes")
+    assert [finding["signature"] for finding in over["findings"]] == ["budget:console_page_bytes"]
+
+
+def test_query_and_byte_values_at_their_limits_pass():
+    report = finalize(synthetic(queries=200, response_bytes=4_000_000))
+    assert report["passed"] is True
+    assert all(budget["passed"] for budget in report["budgets"])
 
 
 def test_a_tightened_budget_fails_the_measured_run():
@@ -284,8 +352,9 @@ def test_a_tightened_budget_fails_the_measured_run():
 
 
 def test_an_unmeasured_budget_and_a_failed_check_both_fail_the_run():
-    assert [b["passed"] for b in evaluate({"project_picker": 5.0})] == [False, True, False]
-    broken = finalize({"measurements": {"console_page_load": {"value": 0.5}, "project_picker": {"value": 5},
+    assert [b["passed"] for b in evaluate({"project_picker": 5.0})] == [False, False, True, False]
+    broken = finalize({"measurements": {"console_page_queries": {"value": 1},
+                                        "console_page_bytes": {"value": 1}, "project_picker": {"value": 5},
                                         "ticket_pickup": {"value": 1}},
                        "checks": [{"name": "every_ready_ticket_picked_once", "ok": False, "detail": "3 not picked"}]})
     assert broken["passed"] is False
@@ -293,10 +362,13 @@ def test_an_unmeasured_budget_and_a_failed_check_both_fail_the_run():
 
 
 # --- AC3: the result is attached to a release; a regression blocks it ------------------------------------------
-def synthetic(console=0.5, picker=10.0, pickup=4.0, ok=True):
+def synthetic(queries=100, response_bytes=1_000_000, picker=10.0, pickup=4.0, ok=True):
     return {"scenario": {"projects": 100, "machines": 50, "sessions": 200, "seed": 236}, "plan_digest": "d" * 64,
             "counts": {"projects": 100}, "duration_s": 70.0,
-            "measurements": {"console_page_load": {"value": console}, "project_picker": {"value": picker},
+            "measurements": {"console_page_load": {"value": 0.5, "unit": "s"},
+                             "console_page_queries": {"value": queries, "unit": "queries"},
+                             "console_page_bytes": {"value": response_bytes, "unit": "bytes"},
+                             "project_picker": {"value": picker},
                              "ticket_pickup": {"value": pickup}},
             "checks": [{"name": "lease_exclusive", "ok": ok, "detail": "a second claim was " + ("refused" if ok else "granted")}]}
 
@@ -305,15 +377,15 @@ def test_a_passing_run_is_attached_to_its_release_and_does_not_block(ctx):
     run_id = scale_proof.record(ctx, synthetic(), "v4.7.0", "ci")
     row = ctx.db.one("SELECT release, passed, source, report FROM scale_proof_runs WHERE id=%s", (run_id,))
     assert (row["release"], row["passed"], row["source"]) == ("v4.7.0", True, "ci")
-    assert row["report"]["budgets"][0]["key"] == "console_page_load"
+    assert row["report"]["budgets"][0]["key"] == "console_page_queries"
     assert scale_proof.blocker(ctx.db, "v4.7.0") == ""
     assert scale_proof.blocker(ctx.db, "v4.8.0").startswith("scale proof is missing")
 
 
 def test_a_regression_blocks_its_release_until_a_later_run_passes(ctx):
-    scale_proof.record(ctx, synthetic(console=3.4), "v4.7.0", "ci")
+    scale_proof.record(ctx, synthetic(queries=201), "v4.7.0", "ci")
     reason = scale_proof.blocker(ctx.db, "v4.7.0")
-    assert reason.startswith("scale proof run #") and "console_page_load" in reason and "3.400 s" in reason
+    assert reason.startswith("scale proof run #") and "console_page_queries" in reason and "201.000 queries" in reason
     assert scale_proof.blocker(ctx.db, "v4.6.0").startswith("scale proof is missing")
     scale_proof.record(ctx, synthetic(), "v4.7.0", "ci")
     assert scale_proof.blocker(ctx.db, "v4.7.0") == ""
@@ -370,9 +442,9 @@ def test_ci_submits_a_run_to_the_control_plane_which_judges_it_itself(client, ct
     assert client.post("/v1/scale-proof/results", json={"release": "v4.7.0", "report": {"x": 1}},
                        headers=OWNER).status_code == 422
     # a report that claims to have passed cannot hide a measurement over its budget
-    lying = {**synthetic(console=5.0), "passed": True, "failures": [], "budgets": []}
+    lying = {**synthetic(queries=201), "passed": True, "failures": [], "budgets": []}
     r = client.post("/v1/scale-proof/results", json={"release": "v4.7.0", "report": lying}, headers=OWNER).json()
-    assert r["passed"] is False and r["blocked"] is True and "console_page_load" in r["failures"][0]
+    assert r["passed"] is False and r["blocked"] is True and "console_page_queries" in r["failures"][0]
     ok = client.post("/v1/scale-proof/results", json={"release": "v4.7.1", "report": synthetic()}, headers=OWNER).json()
     assert ok["passed"] is True and ok["blocked"] is False and ok["tickets"] == []
     listed = client.get("/v1/scale-proof").json()
@@ -383,14 +455,14 @@ def test_ci_submits_a_run_to_the_control_plane_which_judges_it_itself(client, ct
 
 # --- AC4: findings become tickets automatically -----------------------------------------------------------------
 def test_each_finding_becomes_one_bug_ticket_without_a_manual_step(client, ctx):
-    r = client.post("/v1/scale-proof/results", json={"release": "v4.7.0", "report": synthetic(console=3.2, ok=False)},
+    r = client.post("/v1/scale-proof/results", json={"release": "v4.7.0", "report": synthetic(queries=201, ok=False)},
                     headers=OWNER).json()
-    assert {t["signature"] for t in r["tickets"]} == {"budget:console_page_load", "correctness:lease_exclusive"}
+    assert {t["signature"] for t in r["tickets"]} == {"budget:console_page_queries", "correctness:lease_exclusive"}
     assert all(t["created"] and t["ticket"] for t in r["tickets"])
     created = ctx.jira.created
     assert len(created) == 2 and {c["issuetype"] for c in created} == {"Bug"} and {c["project"] for c in created} == {"TESTFLOW"}
-    budget = next(c for c in created if "console_page_load" in c["summary"])
-    assert "3.200 s" in budget["summary"] and "2 s" in budget["summary"]
+    budget = next(c for c in created if "console_page_queries" in c["summary"])
+    assert "201.000 queries" in budget["summary"] and "200 queries" in budget["summary"]
     assert "flow-bug" in budget["labels"] and "scale-proof" in budget["labels"]
     assert "v4.7.0" in budget["description"] and "100 projects, 50 machines, 200 simulated AI sessions" in budget["description"]
     assert ctx.db.one("SELECT count(*) AS n FROM tickets WHERE key = ANY(%s)", ([t["ticket"] for t in r["tickets"]],))["n"] == 2
@@ -502,13 +574,14 @@ def test_the_real_run_has_nothing_to_report(proof, ctx):
 def test_command_center_lists_runs_budgets_and_tickets(client, ctx):
     from test_console import run_script
     from test_business import DOM
-    client.post("/v1/scale-proof/results", json={"release": "v4.7.0", "report": synthetic(console=3.2)}, headers=OWNER)
+    client.post("/v1/scale-proof/results", json={"release": "v4.7.0", "report": synthetic(queries=201)}, headers=OWNER)
     client.post("/v1/scale-proof/results", json={"release": "v4.7.1", "report": synthetic()}, headers=OWNER)
     summary = client.get("/v1/state").json()["scale_proof"]
     html = run_script(DOM + f"console.log(scaleProofPanel({json.dumps(summary)}));")
     assert 'data-passed="no"' in html and 'data-passed="yes"' in html
     assert "v4.7.0" in html and "v4.7.1" in html and "Regression" in html and "Within budget" in html
-    assert 'data-budget="console_page_load" data-state="exceeded"' in html and "3.2 s" in html and "2 s" in html
+    assert 'data-budget="console_page_queries" data-state="exceeded"' in html
+    assert "201 queries" in html and "200 queries" in html
     assert 'data-ticket="TESTFLOW-900"' in html
     empty = run_script(DOM + "console.log(scaleProofPanel({runs: [], budgets: [], findings: []}));")
     assert "No scale proof run is attached" in empty
@@ -526,13 +599,13 @@ def _no_scratch(*_args):
 def test_cli_exits_non_zero_on_a_regression_and_writes_the_report(tmp_path, monkeypatch, capsys):
     from aiflow.v4 import cli
     monkeypatch.setattr(scale_harness, "scratch", _no_scratch)
-    monkeypatch.setattr(scale_harness, "run", lambda *a, release="", **k: (finalize({**synthetic(console=4.0), "release": release}), None))
+    monkeypatch.setattr(scale_harness, "run", lambda *a, release="", **k: (finalize({**synthetic(queries=201), "release": release}), None))
     out = tmp_path / "scale.json"
     assert cli.main(["scale-proof", "--release", "v4.9.0", "--out", str(out), "--database-url", "postgresql://x",
                      "--redis-url", "redis://x"]) == 1
     saved = json.loads(out.read_text())
     assert saved["release"] == "v4.9.0" and saved["passed"] is False
-    assert "EXCEEDED Console views load: console_page_load" in capsys.readouterr().out
+    assert "EXCEEDED Console page database queries: console_page_queries" in capsys.readouterr().out
 
 
 def test_cli_attaches_the_result_to_the_control_plane_and_a_pass_exits_zero(monkeypatch, capsys):

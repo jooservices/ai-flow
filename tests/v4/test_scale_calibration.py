@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from aiflow.v4.control import scale_proof
 
-MEASURED = {"console_page_load": {"value": 3.2}, "project_picker": {"value": 150.0},
-            "ticket_pickup": {"value": 35.3}}
+MEASURED = {"console_page_queries": {"value": 100}, "console_page_bytes": {"value": 1_000_000},
+            "project_picker": {"value": 150.0}, "ticket_pickup": {"value": 35.3}}
 
 
 def verdicts(calibration=None):
@@ -22,9 +22,11 @@ def test_the_reference_machine_keeps_the_written_limits():
 def test_a_slower_runner_scales_every_time_budget_and_says_so():
     result = verdicts({"factor": 2.0})
     assert result["ticket_pickup"]["passed"] and result["ticket_pickup"]["effective_limit"] == 60.0
-    assert result["project_picker"]["effective_limit"] == 400.0 and result["console_page_load"]["effective_limit"] == 4.0
+    assert result["project_picker"]["effective_limit"] == 400.0
+    assert result["console_page_queries"]["effective_limit"] == 200.0
+    assert result["console_page_bytes"]["effective_limit"] == 4_000_000.0
+    assert result["console_page_queries"]["passed"] and result["console_page_bytes"]["passed"]
     assert "30 s x 2 for this machine = 60 s" in result["ticket_pickup"]["message"]
-    assert result["console_page_load"]["passed"]
 
 
 def test_the_factor_is_capped_so_a_regression_is_still_caught_on_a_slow_runner():
@@ -55,4 +57,4 @@ def test_the_probe_measures_a_positive_duration():
 def test_a_report_with_a_calibration_that_is_not_a_mapping_is_not_scaled():
     for bad in (["fast"], "fast", 3, True):
         report = {"measurements": MEASURED, "calibration": bad}
-        assert scale_proof.finalize(report)["budgets"][2]["effective_limit"] == 30.0
+        assert scale_proof.finalize(report)["budgets"][3]["effective_limit"] == 30.0

@@ -219,7 +219,8 @@ def add_canary_commands(sub: argparse._SubParsersAction) -> None:
     pe.add_argument("--target", required=True)
     pe.add_argument("--previous", required=True)
     pe.add_argument("--started-at", required=True)
-    pe.add_argument("--minimum-age-s", type=int, default=300)
+    pe.add_argument("--minimum-age-s", type=int, default=None,
+                    help="minimum canary age in seconds; overrides the setting with --from-settings")
     pe.add_argument("--minimum-runs", type=int, default=3)
     pe.add_argument("--maximum-age-s", type=int, default=900)
     pe.add_argument("--failure-ratio", default="2")
@@ -488,10 +489,19 @@ def run_canary(a: argparse.Namespace, s: Settings) -> None:
             started = datetime.fromisoformat(a.started_at)
             installed = db.one("SELECT release_version FROM nodes WHERE name=%s", (a.node,))
             measurements = measure_registry(db, a.node, started, a.previous)
+            minimum_age_override = getattr(a, "minimum_age_s", None)
             if a.from_settings:
                 thresholds = thresholds_from_settings(db, a.failure_ratio, a.minimum_infra_failures)
+                if minimum_age_override is not None:
+                    # A minimum age above the maximum age (the documented 1200 s against the default 900 s) raises the
+                    # maximum to match instead of failing every evaluation.
+                    thresholds = Thresholds.from_values(minimum_age_override, thresholds.minimum_runs,
+                                                        max(thresholds.maximum_age_s, minimum_age_override),
+                                                        thresholds.failure_ratio, thresholds.minimum_infra_failures)
             else:
-                thresholds = Thresholds.from_values(a.minimum_age_s, a.minimum_runs, a.maximum_age_s,
+                minimum_age_s = (minimum_age_override if minimum_age_override is not None
+                                 else Thresholds().minimum_age_s)
+                thresholds = Thresholds.from_values(minimum_age_s, a.minimum_runs, max(a.maximum_age_s, minimum_age_s),
                                                     a.failure_ratio, a.minimum_infra_failures)
             elapsed = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
             result = decide(measurements, elapsed, thresholds,

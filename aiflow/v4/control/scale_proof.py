@@ -45,10 +45,14 @@ class Budget:
 
 
 BUDGETS: tuple[Budget, ...] = (
-    Budget("console_page_load", "Console views load", 2.0, "s", "p95 per view, worst view",
-           "All 18 console views are each loaded 3 times while 20 bounded worker claim requests and up to 12 "
-           "console API requests (two views, up to six calls each) run concurrently; the 95th percentile of every "
-           "view is compared."),
+    Budget("console_page_queries", "Console page database queries", 200.0, "queries",
+           "p95 per view, worst view",
+           "All 20 console views are each loaded 3 times during the worker burst; each sample counts SQL statements "
+           "for the page route, common bootstrap calls and view-specific data calls."),
+    Budget("console_page_bytes", "Console page response bytes", 4_000_000.0, "bytes",
+           "p95 per view, worst view",
+           "All 20 console views are each loaded 3 times during the worker burst; each sample sums response bytes "
+           "for the page route, common bootstrap calls and view-specific data calls."),
     Budget("project_picker", "Project picker answers", 200.0, "ms", "p95",
            "GET /v1/projects (the list behind the project picker) is called 5 times during the concurrent worker "
            "burst; the 95th percentile of those calls is compared."),

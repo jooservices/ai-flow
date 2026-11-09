@@ -83,7 +83,9 @@
      "release": "4.1.0",
      "metrics": {},
      "tools": [],
-     "load_limits": {},
+     "load_limits": {
+      "test_suite_slots": 2
+     },
      "load_state": {
       "mode": "normal",
       "reason": ""
@@ -134,7 +136,9 @@
      "release": "4.1.0",
      "metrics": {},
      "tools": [],
-     "load_limits": {},
+     "load_limits": {
+      "test_suite_slots": 2
+     },
      "load_state": {
       "mode": "normal",
       "reason": ""
@@ -185,7 +189,9 @@
      "release": "4.1.0",
      "metrics": {},
      "tools": [],
-     "load_limits": {},
+     "load_limits": {
+      "test_suite_slots": 2
+     },
      "load_state": {
       "mode": "normal",
       "reason": ""
@@ -236,7 +242,9 @@
      "release": "4.1.0",
      "metrics": {},
      "tools": [],
-     "load_limits": {},
+     "load_limits": {
+      "test_suite_slots": 2
+     },
      "load_state": {
       "mode": "normal",
       "reason": ""
@@ -287,7 +295,9 @@
      "release": "4.1.0",
      "metrics": {},
      "tools": [],
-     "load_limits": {},
+     "load_limits": {
+      "test_suite_slots": 2
+     },
      "load_state": {
       "mode": "normal",
       "reason": ""
@@ -410,7 +420,9 @@
       }
      },
      "tools": [],
-     "load_limits": {},
+     "load_limits": {
+      "test_suite_slots": 2
+     },
      "load_state": {
       "mode": "normal",
       "reason": ""

@@ -9,10 +9,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pwd
 import re
 import shutil
 import socket
+import stat
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -27,6 +30,7 @@ from ..core.toolchains import (BROKEN_PREFIX, CONTAINER_RUNTIME_TOOL, PLAYWRIGHT
 from ..install.secrets import read_env_timestamps, update_env
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
+from ..worker.suite_slots import DEFAULT_TEST_SLOTS, MAX_TEST_SLOTS, SLOT_DIRECTORY
 from .policy_relay import PolicyRelay
 from . import cleanup as _cleanup
 from . import cpu_breakdown
@@ -342,6 +346,37 @@ def _worker_can_access_directory(path: Path, worker_uid: int) -> bool:
     return result.returncode == 0
 
 
+def _write_test_suite_slots(value: object, directory: Path | None = None) -> None:
+    """Publish the control plane's checked slot limit for all local worker processes."""
+    slots = value if type(value) is int and 1 <= value <= MAX_TEST_SLOTS else DEFAULT_TEST_SLOTS
+    shared = directory or SLOT_DIRECTORY
+    shared.mkdir(parents=True, exist_ok=True, mode=0o3770)
+    try:
+        worker_gid = pwd.getpwnam("aiflow-worker").pw_gid
+    except KeyError as exc:
+        raise OSError("aiflow-worker account is missing") from exc
+    os.chown(shared, 0, worker_gid)
+    os.chmod(shared, 0o3770)
+    target = shared / "limit"
+    content = f"{slots}\n"
+    try:
+        info = target.lstat()
+        if (stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_gid == worker_gid
+                and stat.S_IMODE(info.st_mode) == 0o640 and target.read_text(encoding="ascii") == content):
+            return
+    except FileNotFoundError:
+        pass
+    descriptor, temporary = tempfile.mkstemp(prefix=".limit-", dir=shared)
+    try:
+        with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+            stream.write(content)
+        os.chown(temporary, 0, worker_gid)
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, target)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def _credential_conditions(states: list[dict]) -> dict[str, dict]:
     """Publish each account's primary worker probe, never provider output or display text.
 
@@ -388,10 +423,9 @@ def systemctl(*args: str) -> int:
 def reconcile(accounts: list[str]) -> None:
     """Start worker instances (account or account.N) whose account has signed-in credentials; stop the others."""
     for a in accounts:
-        if systemctl("is-active", "--quiet", f"aiflow4-worker@{a}") != 0:
-            if ensure_account_home(a):
-                systemctl("enable", "--now", f"aiflow4-worker@{a}")
-                log.info("started worker %s", a)
+        if systemctl("is-active", "--quiet", f"aiflow4-worker@{a}") != 0 and ensure_account_home(a):
+            systemctl("enable", "--now", f"aiflow4-worker@{a}")
+            log.info("started worker %s", a)
     p = subprocess.run(["systemctl", "list-units", "--plain", "--no-legend", "aiflow4-worker@*"],
                        capture_output=True, text=True)
     for line in p.stdout.splitlines():
@@ -602,7 +636,7 @@ def _apply_services(desired: dict, state: _AgentLoopState, name: str) -> None:
         return
     from .services import prepare_services
 
-    def check_services(names=list(wanted)):
+    def check_services(names=list(wanted)):  # noqa: B006 - capture this heartbeat's desired services for the thread.
         result = prepare_services(names)
         with state.service_lock:
             state.service_state.update(result)
@@ -670,6 +704,10 @@ def _apply_worker_state(api: ControlClient, name: str, desired: dict, state: _Ag
 def apply_heartbeat(api: ControlClient, name: str, desired: dict, state: _AgentLoopState,
                     manage_workers: bool, stop: threading.Event, every_s: int) -> bool:
     """Apply control's settings, sign-ins, repairs, checks, worker assignments and release instruction."""
+    try:
+        _write_test_suite_slots(desired.get("test_suite_slots"))
+    except OSError as exc:
+        log.warning("cannot update test-suite slot limit (%s)", type(exc).__name__)
     if not _apply_runtime_settings_bootstrap(name, desired, stop, every_s):
         return False
     state.project_environment = desired.get("project_environment", {})

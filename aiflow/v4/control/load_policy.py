@@ -12,6 +12,8 @@ from typing import Any
 
 DEFAULT_MACHINE_LIMITS = {"cpu_load_per_cpu": 0.85, "memory_used_pct": 85.0, "disk_free_pct": 10.0}
 DEFAULT_HOST_LIMITS = {"cpu_load_per_cpu": 0.85}
+DEFAULT_TEST_SUITE_SLOTS = 2
+MAX_TEST_SUITE_SLOTS = 32
 CPU_MARGIN = 0.05
 PERCENT_MARGIN = 5.0
 THROTTLE_BAND = 0.70
@@ -43,6 +45,13 @@ def machine_limits(raw: Any) -> dict[str, float]:
 def host_limits(raw: Any) -> dict[str, float]:
     value = _number(raw.get("cpu_load_per_cpu")) if isinstance(raw, dict) else None
     return {"cpu_load_per_cpu": value if value is not None else DEFAULT_HOST_LIMITS["cpu_load_per_cpu"]}
+
+
+def configured_test_suite_slots(value: Any) -> int:
+    """Return a valid per-node test-suite limit, including the default for legacy node records."""
+    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= MAX_TEST_SUITE_SLOTS:
+        return value
+    return DEFAULT_TEST_SUITE_SLOTS
 
 
 def measured(metrics: Any) -> dict[str, float | None]:

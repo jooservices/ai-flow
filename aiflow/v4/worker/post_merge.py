@@ -1,14 +1,15 @@
 """Run each criterion's configured check after its ticket is merged (docs/v4/environment.md)."""
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
-import time
 from pathlib import Path
 
 from ..core import work_limits
 from ..adapters.base import RunSpec
+from . import suite_slots
 from .client import ControlClient
 from .dev import Claimed, Heartbeat, LeaseLost
 from .gitops import Git
@@ -58,20 +59,22 @@ def run_post_merge(api: ControlClient, c: Claimed, srv_root: str, heartbeat_s: i
                 raise LeaseLost()
             hb.progress = {"phase": "post-merge-check", "ticket": c.ticket["key"],
                            "check": index, "checks_total": len(commands)}
-            if project.get("containers"):
-                from .containers import ContainerRuntime
-                spec = RunSpec(prompt="", cwd=str(worktree), account_home=command_env["HOME"], extra_env=command_env)
-                with ContainerRuntime(spec, run_as) as runtime:
-                    proc = subprocess.Popen(run_as + ["bash", "-c", command], cwd=worktree,
-                                            env={**command_env, **spec.extra_env}, stdout=subprocess.PIPE,
-                                            stderr=subprocess.STDOUT, text=True, start_new_session=True)
-                    runtime.bind_process(proc.pid)
+            with suite_slots.suite_slot():
+                check_as = suite_slots.nice_prefix(run_as)
+                if project.get("containers"):
+                    from .containers import ContainerRuntime
+                    spec = RunSpec(prompt="", cwd=str(worktree), account_home=command_env["HOME"], extra_env=command_env)
+                    with ContainerRuntime(spec, run_as) as runtime:
+                        proc = subprocess.Popen(check_as + ["bash", "-c", command], cwd=worktree,
+                                                env={**command_env, **spec.extra_env}, stdout=subprocess.PIPE,
+                                                stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                        runtime.bind_process(proc.pid)
+                        output, exit_code = _communicate(proc, timeout_s)
+                else:
+                    proc = subprocess.Popen(check_as + ["bash", "-lc", command], cwd=worktree, env=command_env,
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                            start_new_session=True)
                     output, exit_code = _communicate(proc, timeout_s)
-            else:
-                proc = subprocess.Popen(run_as + ["bash", "-lc", command], cwd=worktree, env=command_env,
-                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                        start_new_session=True)
-                output, exit_code = _communicate(proc, timeout_s)
             report["checks"].append({"command": command, "passed": exit_code == 0, "exit_code": exit_code,
                                      "output": _redact(output[-12_000:], env, secret_names)})
         if hb.lost.is_set():
@@ -87,11 +90,9 @@ def run_post_merge(api: ControlClient, c: Claimed, srv_root: str, heartbeat_s: i
         return {"fence": c.fence, "outcome": "lost", "summary": "post-merge lease lost; stopped without recording"}
     except Exception as exc:  # noqa: BLE001
         report["error"] = _redact(f"{type(exc).__name__}: {exc}", env, secret_names)[:1000]
-        try:
+        with contextlib.suppress(Exception):  # the primary result remains authoritative if its report retry fails
             api.call("POST", "/v1/environment/post-merge/complete",
                      {"run_id": c.run_id, "fence": c.fence, **report})
-        except Exception:
-            pass
         return {"fence": c.fence, "outcome": "failed", "summary": f"post-merge check failed: {report['error']}"[:1000],
                 "head_sha": report["head_sha"], "details": {"checks": report["checks"]}}
     finally:

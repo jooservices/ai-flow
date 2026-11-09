@@ -14,6 +14,7 @@ from .client import ControlClient
 from .dev import Claimed, Heartbeat, LeaseLost
 from .gitops import Git
 from .notes import project_env
+from . import suite_slots
 
 log = logging.getLogger("aiflow4.version_release")
 
@@ -29,31 +30,33 @@ def _redact(text: str, env: dict[str, str], secret_names: set[str] | None = None
 
 def _run_check(command: str, project: dict, wt: Path, run_as: list[str], command_env: dict, srv_root: str, timeout_s: int) -> tuple[int, str]:
     """Run one project check in the release worktree (inside the container runtime when the project uses it)."""
-    if project.get("containers"):
-        from .containers import ContainerRuntime
-        spec = RunSpec(prompt="", cwd=str(wt), account_home=str(Path(srv_root) / "cache"),
-                       extra_env=dict(command_env))
-        with ContainerRuntime(spec, run_as) as runtime:
-            proc = subprocess.Popen(run_as + ["bash", "-c", command], cwd=wt,
-                                    env={**command_env, **spec.extra_env}, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True, start_new_session=True)
-            runtime.bind_process(proc.pid)
+    with suite_slots.suite_slot():
+        check_as = suite_slots.nice_prefix(run_as)
+        if project.get("containers"):
+            from .containers import ContainerRuntime
+            spec = RunSpec(prompt="", cwd=str(wt), account_home=str(Path(srv_root) / "cache"),
+                           extra_env=dict(command_env))
+            with ContainerRuntime(spec, run_as) as runtime:
+                proc = subprocess.Popen(check_as + ["bash", "-c", command], cwd=wt,
+                                        env={**command_env, **spec.extra_env}, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                runtime.bind_process(proc.pid)
+                try:
+                    output, _ = proc.communicate(timeout=timeout_s)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    output, _ = proc.communicate()
+                    output = (output or "") + f"\nCheck exceeded {timeout_s} seconds."
+        else:
+            proc = subprocess.Popen(check_as + ["bash", "-lc", command], cwd=wt, env=command_env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                    start_new_session=True)
             try:
                 output, _ = proc.communicate(timeout=timeout_s)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 output, _ = proc.communicate()
                 output = (output or "") + f"\nCheck exceeded {timeout_s} seconds."
-    else:
-        proc = subprocess.Popen(run_as + ["bash", "-lc", command], cwd=wt, env=command_env,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                start_new_session=True)
-        try:
-            output, _ = proc.communicate(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            output, _ = proc.communicate()
-            output = (output or "") + f"\nCheck exceeded {timeout_s} seconds."
     return proc.returncode, output
 
 

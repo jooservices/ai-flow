@@ -7,10 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from aiflow.v4.core import local_gate as gate
-from aiflow.v4.core import pipeline_checks
 from aiflow.v4.core.local_gate import Context, Step
 from aiflow.v4.worker import gate_step
 

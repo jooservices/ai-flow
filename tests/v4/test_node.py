@@ -214,11 +214,15 @@ def test_send_heartbeat_posts_collected_body_and_returns_desired():
     assert agent.send_heartbeat(FakeApi(), "node-test", heartbeat) is desired
 
 
-def test_apply_heartbeat_reconciles_desired_worker_units_and_signins(monkeypatch):
+def test_apply_heartbeat_reconciles_desired_worker_units_and_signins(monkeypatch, tmp_path):
     state = agent._AgentLoopState(tools={}, tools_at=0)
-    desired = {"workers": ["codex-new"], "accounts": ["ignored"],
+    desired = {"workers": ["codex-new"], "accounts": ["ignored"], "test_suite_slots": 5,
                "project_environment": {"DEMO": ["API_KEY"]},
                "sign_ins": [{"request_id": "one"}], "signin": [{"request_id": "two"}]}
+    slots_directory = tmp_path / "slots"
+    monkeypatch.setattr(agent, "SLOT_DIRECTORY", slots_directory)
+    monkeypatch.setattr(pwd, "getpwnam", lambda _name: SimpleNamespace(pw_gid=os.getgid()))
+    monkeypatch.setattr(agent.os, "chown", lambda *_args: None)
     calls = []
     sync_requests = []
 
@@ -243,6 +247,9 @@ def test_apply_heartbeat_reconciles_desired_worker_units_and_signins(monkeypatch
 
     assert agent.apply_heartbeat(object(), "node-test", desired, state, True, threading.Event(), 15)
 
+    assert (slots_directory / "limit").read_text() == "5\n"
+    assert stat.S_IMODE(slots_directory.stat().st_mode) == 0o3770
+    assert stat.S_IMODE((slots_directory / "limit").stat().st_mode) == 0o640
     assert state.project_environment == {"DEMO": ["API_KEY"]}
     assert sync_requests == [{"request_id": "one"}, {"request_id": "two"}]
     assert calls == [
@@ -512,7 +519,8 @@ def test_self_update_reports_unavailable_manifest_or_signature_as_verification_f
                     "signature": f"/v1/releases/{version}.tar.gz.sigstore.json"}
 
         class FakeHTTP:
-            def get(self, url, timeout):
+            def get(self, url, timeout, version=version, missing_asset=missing_asset, manifest=manifest,
+                    tarball=tarball):
                 if url == f"/v1/releases/{version}/manifest":
                     if missing_asset == "manifest":
                         return _ReleaseResponse(b"", status_code=404)

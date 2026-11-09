@@ -1,6 +1,7 @@
 """Named phases used by the fleet node heartbeat route."""
 import math
 
+from ... import load_policy
 from ...repositories import nodes as node_repository
 
 
@@ -110,7 +111,7 @@ def desired_heartbeat_state(ctx, node, body, previous, reported_release, invento
                                    "shared_account": True})
     # Legacy agents stay off automatic release targets until a trusted verifier has been bootstrapped.
     release = fleet_release(node, body.release_version) if body.release_protocol >= 1 else ""
-    joined_node = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (node,)) or {}
+    joined_node = node_repository.heartbeat_settings(ctx.db, node)
     node_projects = repo.projects_for_node(node, joined_node.get("projects") or [], joined_node.get("dynamic", False))
     project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
                             else repo.projects[key].stack)
@@ -123,6 +124,7 @@ def desired_heartbeat_state(ctx, node, body, previous, reported_release, invento
                                        "request_id": row["sign_in_request_id"], "status": row["sign_in_status"]}
                                       for row in sign_in_requests], "signin": shared_signins,
                          "release": release, "projects": node_projects, "project_stacks": project_stacks,
+                         "test_suite_slots": load_policy.configured_test_suite_slots(joined_node.get("test_suite_slots")),
                          "project_environment": {key: [item.name for item in repo.projects[key].environment_items
                                                         if item.secret]
                                                  for key in node_projects if key in repo.projects},

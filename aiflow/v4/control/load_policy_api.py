@@ -12,9 +12,9 @@ from pydantic import BaseModel, Field
 
 from . import load_policy
 from . import licensing, rollout
-from .db import J
 from .features.fleet.events import MachineLoadLimitsSaved
 from .platform.events.wiring import publish_for
+from .repositories import nodes as node_repository
 
 
 class MachineLoadLimitsBody(BaseModel):
@@ -23,6 +23,7 @@ class MachineLoadLimitsBody(BaseModel):
     memory_used_pct: float = Field(gt=0, le=100)
     disk_free_pct: float = Field(ge=0, lt=100)
     host_cpu_load_per_cpu: float | None = Field(default=None, gt=0, le=8)
+    test_suite_slots: int | None = Field(default=None, ge=1, le=load_policy.MAX_TEST_SUITE_SLOTS)
 
 
 def register_machine_load_limits(app: FastAPI, ctx: Any, console_user: Callable, audit: Callable) -> None:
@@ -31,24 +32,26 @@ def register_machine_load_limits(app: FastAPI, ctx: Any, console_user: Callable,
     @app.put("/v1/machines/{name}/load-limits")
     def set_machine_load_limits(name: str, body: MachineLoadLimitsBody, request: Request) -> dict:
         user = console_user(request, {"nodes.manage"}, target="machine-load", action="limits", node=name)
-        row = ctx.db.one("SELECT metrics FROM nodes WHERE name=%s AND removed_at IS NULL", (name,))
+        row = node_repository.machine_load_settings(ctx.db, name)
         if not row:
             raise HTTPException(404, "machine is not registered")
         hostname = load_policy.host_name(row.get("metrics"))
-        limits = {"cpu_load_per_cpu": body.cpu_load_per_cpu,
-                  "memory_used_pct": body.memory_used_pct, "disk_free_pct": body.disk_free_pct}
-        ctx.db.run("UPDATE nodes SET load_limits=%s,load_state='{}'::jsonb WHERE name=%s", (J(limits), name))
+        machine_limits = {"cpu_load_per_cpu": body.cpu_load_per_cpu,
+                          "memory_used_pct": body.memory_used_pct, "disk_free_pct": body.disk_free_pct}
+        configured_slots = (body.test_suite_slots if body.test_suite_slots is not None else
+                            load_policy.configured_test_suite_slots(row.get("test_suite_slots")))
+        node_repository.save_machine_load_settings(ctx.db, name, machine_limits, configured_slots)
         if hostname and body.host_cpu_load_per_cpu is not None:
             ctx.db.run("INSERT INTO machine_host_load_limits (hostname,cpu_load_per_cpu,state,updated_at)"
                        " VALUES (%s,%s,'{}'::jsonb,now()) ON CONFLICT (hostname) DO UPDATE SET"
                        " cpu_load_per_cpu=EXCLUDED.cpu_load_per_cpu,state='{}'::jsonb,updated_at=now()",
                        (hostname, body.host_cpu_load_per_cpu))
         load_policy.record_heartbeat(ctx, name)
-        publish_for(ctx, MachineLoadLimitsSaved(node=name, actor=user.subject, machine=limits, host=hostname,
+        publish_for(ctx, MachineLoadLimitsSaved(node=name, actor=user.subject, machine=machine_limits, host=hostname,
                                                host_cpu_load_per_cpu=body.host_cpu_load_per_cpu))
         host_limit = (body.host_cpu_load_per_cpu if body.host_cpu_load_per_cpu is not None else
                       load_policy.DEFAULT_HOST_LIMITS["cpu_load_per_cpu"])
-        return {"machine": name, "hostname": hostname, "load_limits": limits,
+        return {"machine": name, "hostname": hostname, "load_limits": machine_limits,
                 "host_load_limits": {"cpu_load_per_cpu": host_limit}}
 
 

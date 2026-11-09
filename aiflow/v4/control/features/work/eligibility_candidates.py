@@ -70,6 +70,11 @@ def _verify_candidate(scope: Scope, ticket: dict, cooling: set[str],
     return {**ticket, "step": "verify", "probation": scope.probation("verify")}
 
 
+def _verify_account_barred(attempts: list[bool]) -> bool:
+    """Two consecutive no-verdict results (newest first) bar the account from this ticket's current round."""
+    return len(attempts) >= 2 and bool(attempts[0] and attempts[1])
+
+
 def _verify_retry_fallback_due(scope: Scope, history: VerifyTicketHistory) -> bool:
     """Allow a prior no-verdict verifier back after peers had time to claim the retry."""
     attempts = history.by_account.get(scope.account.id, [])
@@ -80,7 +85,7 @@ def _verify_retry_fallback_due(scope: Scope, history: VerifyTicketHistory) -> bo
 def _verify_retry_blocked(scope: Scope, ticket: dict, dev_account: str, history: VerifyTicketHistory,
                           peer_eligibility_cache: dict[tuple[str, str], set[str]] | None = None) -> bool:
     attempts = history.by_account.get(scope.account.id, [])
-    if len(attempts) >= 2 and attempts[0] and attempts[1]:
+    if _verify_account_barred(attempts):
         return True
     if not any(attempts):
         return False

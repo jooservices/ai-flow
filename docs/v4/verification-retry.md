@@ -25,4 +25,4 @@ The retry path has three named steps:
 
 To change this policy, update the repository queries and candidate rule together, then keep the account-ordering,
 streak, and ordinary-failure tests in `tests/v4/test_verify_no_verdict.py` aligned. The retry history is scoped to the
-ticket and account and includes earlier development rounds.
+current development round of the ticket and account; see [Bar a verifier after two missing verdicts](verify-account-bar.md).

@@ -50,12 +50,21 @@ def run(wt: Path, project: dict, title: str, env: dict[str, str] | None = None, 
     return local_gate.run(ctx, plan(project), gate_env(env), log=log)
 
 
-def keep_failed_work(git, wt: Path, base: Path) -> str:
-    """Save the commit that failed the gate as a patch next to the run log, because the next claim cleans the worktree."""
+def keep_failed_work(git, wt: Path, base: Path, commits: list[str] | None = None) -> str:
+    """Save run-authored commits and remaining edits without copying a base-refresh merge into the patch."""
     path = base.with_suffix(".gate-failed.patch")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(git.run("diff", "--binary", "HEAD~1", "HEAD", cwd=wt), encoding="utf-8")
+        patches = []
+        for commit in dict.fromkeys(commits or ()):
+            parent = git.run("rev-parse", f"{commit}^", cwd=wt).strip()
+            patches.append(git.run("diff", "--binary", parent, commit, cwd=wt))
+        working = git.run("diff", "--binary", "HEAD", cwd=wt)
+        if working:
+            patches.append(working)
+        if not any(patches):
+            patches.append(git.run("diff", "--binary", "HEAD~1", "HEAD", cwd=wt))
+        path.write_text("\n".join(patch for patch in patches if patch), encoding="utf-8")
     except Exception:  # noqa: BLE001 - saving is best effort; the gate result is what matters
         return "(not saved)"
     return str(path)

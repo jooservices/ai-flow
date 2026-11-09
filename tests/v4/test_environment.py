@@ -354,6 +354,9 @@ class _Git:
     def worktree(self, _m, _p, _b, base):
         return "origin/" + base
 
+    def run(self, *_args, **_kwargs):
+        return "checkout-head"
+
     def changed(self, _path):
         return []
 

@@ -78,9 +78,10 @@ def build_console_page() -> str:
     timeouts = (HERE / "dashboard-timeouts.js").read_text(encoding="utf-8")
     silent_runs = (HERE / "dashboard-silent-runs.js").read_text(encoding="utf-8")
     attention = (HERE / "dashboard_attention.js").read_text(encoding="utf-8")
+    yield_metrics = (HERE / "dashboard-yield.js").read_text(encoding="utf-8")
     extension = (HERE / "system-check.js").read_text(encoding="utf-8")
     html = html.replace(boot_marker, policy + "\n" + timeouts + "\n" + silent_runs + "\n" + attention
-                        + "\n" + boot_marker, 1)
+                        + "\n" + yield_metrics + "\n" + boot_marker, 1)
     return html.replace(script_marker, extension + "\n" + script_marker, 1)
 
 

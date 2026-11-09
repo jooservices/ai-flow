@@ -23,12 +23,12 @@ from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
                                parse_missing_requirements)
-from . import timeout_handover
+from . import mechanical, timeout_handover
 from .client import Conflict, ControlClient
 from . import gate_step
 from .gitops import Git
 from .run_steps import (REPO_ROOT as REPO_ROOT, RunProgress, RunReporter, adapter_for_run, api_node,
-                        build_prompt as _build_prompt, classify_question, commit_message, environment_notes,
+                        build_prompt as _build_prompt, classify_question, commit_message,
                         environment_status, fetch_ci_log, machine_block as machine_block, make_run_spec,
                         merge_response, note, pr_title, project_env, project_environment, run_result_metadata,
                         related_block as related_block,
@@ -191,6 +191,9 @@ class DevRun:
     result: dict
     worktree: Path | None = None
     branch_commit_count: int = 0
+    checkout_head: str = ""
+    branch_lease: str | None = None
+    failed_work_commits: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     ci_log: str = ""
@@ -222,6 +225,9 @@ def prepare(run: DevRun) -> None:
     if moved:
         report_foreign_worktree(run, moved, wt)
     start = run.git.worktree(mirror, wt, run.branch, project["base"])
+    git_run = getattr(run.git, "run", None)
+    run.checkout_head = git_run("rev-parse", "HEAD", cwd=wt).strip() if git_run else ""
+    run.branch_lease = run.checkout_head if start == f"origin/{run.branch}" else ""
     run.branch_commit_count = (run.git.commits_ahead(wt, project["base"])
                                if start == f"origin/{run.branch}" else 0)
     if start != f"origin/{project['base']}":
@@ -367,7 +373,8 @@ def collect(run: DevRun) -> dict | None:
         run.result.setdefault("details", {}).setdefault("local_gate", {"status": "incomplete", "steps": []})
     if response.error_kind == "timeout" and timeout_handover.try_handover(
             run.api, run.claim, run.git, run.worktree, run.branch, run.repo, run.summary, run.handed,
-            run.result, run.started_at, run.reporter.jira, run.branch_commit_count, run.tests):
+            run.result, run.started_at, run.reporter.jira, run.branch_commit_count, run.tests,
+            expected_head=getattr(run, "branch_lease", None)):
         return run.result
     mark_unresolved_conflicts(run)
     return None
@@ -586,22 +593,21 @@ def publish_no_changes(run: DevRun) -> dict:
     existing_pr = found if found and found.get("found") else None
     if not existing_pr and not run.branch_commit_count:
         return publish_no_work(run)
-    gate_note = run_local_gate(run)
-    if isinstance(gate_note, dict):
-        return gate_note
     return publish_existing_work(run, existing_pr)
 
 
 def publish_existing_work(run: DevRun, existing_pr: dict | None) -> dict:
     c, wt = run.claim, run.worktree
-    pushed = False
-    if run.branch_commit_count:
-        credential = run.api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
-                                                                  "repo": run.repo, "branch": run.branch})
-        run.git.push(wt, run.branch, credential["token"])
-        pushed = True
-    sha = (run.git.run("rev-parse", "HEAD", cwd=wt).strip() if pushed or not existing_pr
-           else existing_pr.get("head_sha") or run.git.run("rev-parse", "HEAD", cwd=wt).strip())
+    refused = mechanical.refresh_base(run)
+    if refused is not None:
+        return refused
+    gate_note = run_local_gate(run)
+    if isinstance(gate_note, dict):
+        return gate_note
+    credential = run.api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                              "repo": run.repo, "branch": run.branch})
+    run.git.push(wt, run.branch, credential["token"], expected_head=getattr(run, "branch_lease", None))
+    sha = run.git.run("rev-parse", "HEAD", cwd=wt).strip()
     pr = existing_pr or open_existing_work_pr(run)
     note_text = (f"The existing pull request already contains the ticket work: {pr['url']}" if existing_pr else
                  f"The ticket branch already contains {run.branch_commit_count} committed change(s); "
@@ -680,13 +686,18 @@ def publish_changes(run: DevRun) -> dict:
     set_run_progress(run.heartbeat, "commit", files=len(run.changed))
     message = commit_message(run.claim, run.summary)
     sha = run.git.commit_all(run.worktree, message, run.claim.identity)
+    run.failed_work_commits.append(sha)
+    refused = mechanical.refresh_base(run)
+    if refused is not None:
+        return refused
     gate_note = run_local_gate(run)
     if isinstance(gate_note, dict):
         return gate_note
+    sha = run.git.run("rev-parse", "HEAD", cwd=run.worktree).strip()
     credential = run.api.call("POST", "/v1/github/token", {"run_id": run.claim.run_id,
                                                               "fence": run.claim.fence, "repo": run.repo,
                                                               "branch": run.branch})
-    run.git.push(run.worktree, run.branch, credential["token"])
+    run.git.push(run.worktree, run.branch, credential["token"], expected_head=getattr(run, "branch_lease", None))
     pr = open_changes_pr(run, gate_note)
     report_published(run, sha, pr)
     run.result.update(outcome="done", pr_url=pr["url"], head_sha=sha)
@@ -699,6 +710,17 @@ def run_local_gate(run: DevRun) -> str | dict:
     if not plan:
         run.result.setdefault("details", {})["local_gate"] = {"status": "missing", "steps": []}
         return report_gate_failure(run, "no local checks are configured for this project", "gate_failed")
+    gate, reason, error_kind = execute_local_gate(run)
+    if (gate is not None and gate.exit_code and mechanical.documentation_gap(gate)
+            and repair_documentation_gap(run, reason)):
+        gate, reason, error_kind = execute_local_gate(run)
+    if gate is None or gate.exit_code:
+        return report_gate_failure(run, reason, error_kind)
+    return ""
+
+
+def execute_local_gate(run: DevRun):
+    """Run the configured pipeline gate and record its dispatch status."""
     try:
         gate = gate_step.run(run.worktree, run.project, pr_title(run.claim.ticket), run.env, run.run_as)
         run.result.setdefault("details", {})["local_gate"] = gate_step.result_record(gate)
@@ -707,14 +729,61 @@ def run_local_gate(run: DevRun) -> str | dict:
     except Exception as exc:  # noqa: BLE001 - a gate that cannot run must not leave an unpushed commit behind
         gate, reason, error_kind = None, f"the gate could not run: {type(exc).__name__}: {exc}", "gate_error"
         run.result.setdefault("details", {})["local_gate"] = {"status": "error", "steps": []}
-    if gate is None or gate.exit_code:
-        return report_gate_failure(run, reason, error_kind)
-    return ""
+    return gate, reason, error_kind
+
+
+def repair_documentation_gap(run: DevRun, reason: str) -> bool:
+    """Ask the developer to add only the named documentation, then commit that repair for a second gate run."""
+    original_head = run.git.run("rev-parse", "HEAD", cwd=run.worktree).strip()
+    original_response = run.response
+    prepared = brief(run)
+    prepared.spec = replace(
+        prepared.spec,
+        prompt=(prepared.spec.prompt + "\n\nThe committed docs-check failed before hand-over and named this missing "
+                "documentation: \n" + reason + "\nAdd or update only the required docs/v4 topic Markdown page "
+                "and deploy/v4/README.md topic index. Preserve the implementation and project behavior. Run the "
+                "documentation check again, "
+                "then finish with RESULT: DONE and a short summary."),
+        log_append=True,
+    )
+    run_ai(run, prepared)
+    repair_response = run.response
+    run.response = merge_response(original_response, repair_response)
+    run.result.update(run_result_metadata(run.response))
+    run.result.setdefault("details", {}).update(
+        permission_denials=run.response.permission_denials,
+        token_usage_reported=bool(getattr(run.response, "token_usage_reported", False)),
+        duration_s=int(run.response.duration_s), verdict=run.response.verdict,
+        verdict_reason=(run.response.verdict_reason or "")[:2000])
+    repaired_head = run.git.run("rev-parse", "HEAD", cwd=run.worktree).strip()
+    if repaired_head != original_head:
+        if repaired_head:
+            run.failed_work_commits.append(repaired_head)
+        return False
+    if run.response.error_kind or run.response.verdict != "DONE":
+        return False
+    changed = run.git.changed(run.worktree)
+    if not changed or any(not _documentation_repair_path(path) for path in changed):
+        return False
+    if not any(path.startswith("docs/v4/") for path in changed):
+        return False
+    repair_sha = run.git.commit_all(run.worktree, commit_message(run.claim, run.summary), run.claim.identity)
+    run.failed_work_commits.append(repair_sha)
+    run.result.setdefault("details", {})["documentation_repaired"] = changed[:100]
+    return True
+
+
+def _documentation_repair_path(path: str) -> bool:
+    """Allow topic Markdown and its one required documentation index only."""
+    parts = Path(path).parts
+    return (len(parts) == 3 and parts[:2] == ("docs", "v4") and parts[2].endswith(".md")) or \
+        path == "deploy/v4/README.md"
 
 
 def report_gate_failure(run: DevRun, reason: str, error_kind: str) -> dict:
     saved = gate_step.keep_failed_work(
-        run.git, run.worktree, Path(run.srv_root) / "logs" / "runs" / f"{run.key}-{run.claim.run_id}")
+        run.git, run.worktree, Path(run.srv_root) / "logs" / "runs" / f"{run.key}-{run.claim.run_id}",
+        commits=run.failed_work_commits)
     run.git.run("reset", "--soft", "HEAD~1", cwd=run.worktree)
     run.result.update(outcome="failed", error_kind=error_kind, summary=reason[:1000])
     run.reporter.comment(body=note(

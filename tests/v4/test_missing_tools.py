@@ -135,8 +135,8 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_te
         def merge_base_in(self, *_a):
             return []
 
-        def push(self, _path, branch, token):
-            git_calls.append(("push", branch, token))
+        def push(self, _path, branch, token, **_kwargs):
+            git_calls.append(("push", branch, token, _kwargs.get("expected_head")))
 
         def run(self, *args, **kwargs):
             git_calls.append(("run", args, kwargs))
@@ -155,6 +155,7 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_te
                                    command_results=command_results or [])
 
     monkeypatch.setattr(dev, "Git", Git)
+    monkeypatch.setattr(dev.mechanical, "refresh_base", lambda _run: None)
     monkeypatch.setattr(dev, "get_adapter", lambda _p: Adapter())
     monkeypatch.setattr(dev.gate_step, "run", lambda *_args, **_kwargs:
                         GateResult([StepResult("check-1", "passed")]))
@@ -215,7 +216,8 @@ def test_clean_no_changes_with_branch_commits_opens_a_pull_request_and_verifies(
 
     assert result["outcome"] == "done" and result["pr_url"].endswith("/pull/9")
     assert result["details"]["already_done"] is True and result["details"]["branch_commits"] == 2
-    assert api.git_calls[0] == ("push", "TESTWP-1-s", "github-token")
+    assert next(call for call in api.git_calls if call[0] == "push") == (
+        "push", "TESTWP-1-s", "github-token", "head-sha")
     assert any(call[1] == "/v1/github/pr" and call[0] == "POST" for call in api.calls)
     assert [call[2]["to"] for call in api.calls if call[1].endswith("/transition")][-1] == "In Verify"
 

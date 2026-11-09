@@ -124,6 +124,9 @@ def test_failed_verdict_whose_reason_mentions_silent_is_not_counted_as_silent(mo
         def worktree(self, _mirror, _wt, _branch, base) -> str:
             return f"origin/{base}"
 
+        def run(self, *_args, **_kwargs) -> str:
+            return "checkout-head"
+
         def changed(self, _wt) -> list[str]:
             return ["file.py"]
 
@@ -209,6 +212,9 @@ def test_dev_worker_publishes_failure_with_clear_reason_when_run_goes_silent_twi
 
         def worktree(self, _mirror, _wt, _branch, base) -> str:
             return f"origin/{base}"
+
+        def run(self, *_args, **_kwargs) -> str:
+            return "checkout-head"
 
         def changed(self, _wt) -> list[str]:
             return ["file.py"]

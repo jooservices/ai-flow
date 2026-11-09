@@ -5,6 +5,7 @@ GIT_ASKPASS and the environment of that one process; it is never written to disk
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -33,10 +34,8 @@ class Git:
         for d in reversed(missing):
             d.mkdir(exist_ok=True)
             if self.run_as:
-                try:
+                with contextlib.suppress(LookupError, PermissionError):
                     shutil.chown(d, "aiflow-worker", "aiflow-worker")
-                except (LookupError, PermissionError):
-                    pass
 
     def _ensure_askpass(self) -> None:
         if not self.askpass.exists():
@@ -192,6 +191,47 @@ class Git:
         out = self.run("diff", "--name-only", "--diff-filter=U", cwd=path, check=False)
         return [x for x in out.splitlines() if x.strip()]
 
+    def unmerged_stages(self, path: Path, name: str) -> dict[int, tuple[str, str]]:
+        """Return each unmerged index stage as (file mode, blob id), keyed by stage number."""
+        stages: dict[int, tuple[str, str]] = {}
+        for record in self.run("ls-files", "-u", "-z", "--", name, cwd=path, check=False).split("\0"):
+            if not record:
+                continue
+            metadata, _, filename = record.partition("\t")
+            parts = metadata.split()
+            if filename == name and len(parts) == 3 and parts[2].isdigit():
+                stages[int(parts[2])] = (parts[0], parts[1])
+        return stages
+
+    def resolve_trivial_conflicts(self, path: Path) -> list[str]:
+        """Resolve only paths whose file mode and blob are identical on both merged sides."""
+        conflicts = [name for name in self.run("diff", "--name-only", "-z", "--diff-filter=U", cwd=path,
+                                               check=False).split("\0") if name]
+        remaining = []
+        for name in conflicts:
+            stages = self.unmerged_stages(path, name)
+            if stages.get(2) != stages.get(3) or stages.get(2) is None:
+                remaining.append(name)
+                continue
+            mode, blob = stages[3]
+            self.run("checkout-index", "-f", "--stage=3", "--", name, cwd=path)
+            self.run("update-index", "--force-remove", "--", name, cwd=path)
+            self.run("update-index", "--add", "--cacheinfo", f"{mode},{blob},{name}", cwd=path)
+        return remaining
+
+    def merge_base_resolving(self, path: Path, base: str, identity: tuple[str, str],
+                             commit: bool = True) -> list[str]:
+        """Merge origin/<base>, resolve identical-sided paths, and return conflicts needing a developer."""
+        conflicts = self.merge_base_in(path, base, identity, commit=commit)
+        if not conflicts:
+            return []
+        remaining = self.resolve_trivial_conflicts(path)
+        if remaining:
+            return remaining
+        if commit:
+            self.run("commit", "--no-edit", "-q", cwd=path, identity=identity)
+        return []
+
     def behind(self, path: Path, base: str, ref: str = "HEAD") -> int:
         """Commits of origin/<base> that `ref` does not have (0: up to date). Works in a worktree or a mirror."""
         out = self.run("rev-list", "--count", f"{ref}..origin/{base}", cwd=path, check=False).strip()
@@ -223,5 +263,7 @@ class Git:
             raise GitError(f"git commit: {p.stderr.strip()[-400:]}")
         return self.run("rev-parse", "HEAD", cwd=path).strip()
 
-    def push(self, path: Path, branch: str, token: str) -> None:
-        self.run("push", "--quiet", "--force-with-lease", "origin", f"HEAD:refs/heads/{branch}", cwd=path, token=token)
+    def push(self, path: Path, branch: str, token: str, expected_head: str | None = None) -> None:
+        lease = (f"--force-with-lease=refs/heads/{branch}:{expected_head}"
+                 if expected_head is not None else "--force-with-lease")
+        self.run("push", "--quiet", lease, "origin", f"HEAD:refs/heads/{branch}", cwd=path, token=token)

@@ -270,11 +270,11 @@ def test_real_postgres_tools_backup_restore_share_snapshot(ctx, db, test_databas
         pytest.skip(f"pg_dump {client_major} cannot dump PostgreSQL {server_major}")
 
     source_roots = configure_paths(ctx, tmp_path / "real-source", control_repo)
-    ctx.settings.database_url = test_database_url
+    ctx.settings.database_url = db.url
     token = secrets.token_hex(8)
     resource_id = f"snapshot-{token}"
     memory_ref = f"snapshot-{token}"
-    with psycopg.connect(test_database_url) as source:
+    with psycopg.connect(db.url) as source:
         source.execute("INSERT INTO managed_resources (resource_type,resource_id,title,content,path,version,updated_by)"
                        " VALUES ('knowledge',%s,'Snapshot resource','before dump','knowledge/snapshot.md',1,'test')",
                        (resource_id,))
@@ -296,7 +296,7 @@ def test_real_postgres_tools_backup_restore_share_snapshot(ctx, db, test_databas
         actual_run_db_command(command, label, timeout=timeout, env=env)
         if label == "database backup" and not changed_after_dump:
             assert "--snapshot" in command
-            with psycopg.connect(test_database_url) as writer:
+            with psycopg.connect(db.url) as writer:
                 writer.execute("UPDATE managed_resources SET content='after dump' WHERE resource_id=%s", (resource_id,))
                 writer.execute("UPDATE memory SET text='after dump' WHERE ref=%s", (memory_ref,))
             changed_after_dump = True
@@ -304,7 +304,7 @@ def test_real_postgres_tools_backup_restore_share_snapshot(ctx, db, test_databas
     monkeypatch.setattr(backups, "_run_db_command", mutate_live_knowledge_after_dump)
     destination = tmp_path / "real-backups"
     config = {"destination_kind": "local", "destination_path": str(destination), "retention_days": 30}
-    made = backups.create_backup(test_database_url, control_repo, ctx.settings, config, key)
+    made = backups.create_backup(db.url, control_repo, ctx.settings, config, key)
     archive = destination / made["name"]
     assert changed_after_dump is True
     assert archive.is_file()

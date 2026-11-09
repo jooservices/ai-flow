@@ -19,6 +19,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Watchdog loop structure](../../docs/v4/watchdog-loop.md): each watchdog check is its own module and the loop calls the checks in order
 - [Authorize an AI account from the console](../../docs/v4/ai-authorize.md): owners start a provider login on a machine, see its link and code, and expired links are refused
 - [Node heartbeat providers](../../docs/v4/node-heartbeat-providers.md): named field providers collect and validate heartbeat values; the control schema declares accepted fields
+- [Node heartbeat provider registration](../../docs/v4/node-heartbeat-registration.md): each field registers beside its collector with explicit payload and preparation order
 - [Server wording check](../../docs/v4/server-wording-check.md): refuse instructions to use a particular system, quote the sentence and stop retrying after two refusals
 - [Fleet route installation structure](../../docs/v4/fleet-install-structure.md): named route groups preserve the fleet API registration order and helper return values
 - [Project keys](../../docs/v4/project-keys.md): one maintenance project setting, a configurable review preview epic, and the pull-request check for retired keys

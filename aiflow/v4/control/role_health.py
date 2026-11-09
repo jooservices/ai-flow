@@ -1,8 +1,9 @@
 """Role health: quality by AI account and role (docs/v4/role-health.md).
 
 Completed pull requests and clean no-change results are successes; failures, timeouts and real tool-missing stops
-are scored (a timeout or a lost lease at a quarter of a failure, since the machine and the size of the ticket are often the cause), while quota, sign-in and machine problems are excluded. A role can be switched off on only a subset of
-its ready accounts: never the last two, and never more than half. When every such account scores
+are scored (a timeout or a lost lease at a quarter of a failure, since the machine and the size of the ticket are often
+the cause), while quota, sign-in, stale-branch and machine problems are excluded. A role can be switched off on only a
+subset of its ready accounts: never the last two, and never more than half. When every such account scores
 badly, all remain on and one role-level incident reports the common cause. Disabled roles return as soon as their
 history no longer exceeds the threshold or the recorded missing tool is available; otherwise successful probation
 runs can restore them without a calendar-day delay.
@@ -39,7 +40,7 @@ STEP_ROLE = {"dev": "dev", "verify": "verify", "triage": "master", "master": "ma
              "intake": "intake_refiner", "impact": "intake_refiner", "post_merge": "release"}
 # error kinds that mean the account or its machine could not work, not that the AI did bad work
 UNSCORED_KINDS = {"quota", "auth", "infra", "network", "machine", "node", "tool", "tools", "missing_tool",
-                  "missing-tool", "offline", "toolchain", "services", "machine_load"}
+                  "missing-tool", "offline", "toolchain", "services", "machine_load", "stale_branch"}
 SUCCESS_OUTCOMES = {"merged", "human", "refined", "split_plan", "questions", "assessed", "answered", "escalated"}
 STOPPED_OUTCOMES = {"timeout", "lost"}
 STOPPED_KINDS = {"timeout", "lost"}  # a timed-out run is stored as outcome failed with this error kind

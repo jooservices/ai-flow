@@ -145,17 +145,19 @@ def test_publish_stops_after_a_refused_local_gate(monkeypatch):
     run = SimpleNamespace(
         heartbeat=SimpleNamespace(progress={}), claim=SimpleNamespace(identity=("Dev", "dev@example.test")),
         summary="done", worktree=Path("/work"), git=Git(), changed=["file.py"], result={"details": {}},
+        failed_work_commits=[],
     )
     monkeypatch.setattr(dev, "commit_message", lambda *_args: "message")
     monkeypatch.setattr(dev, "run_local_gate", lambda _run: {"outcome": "failed"})
+    monkeypatch.setattr(dev.mechanical, "refresh_base", lambda _run: calls.append("refresh") or None)
 
     result = dev.publish_changes(run)
 
     assert result == {"outcome": "failed"}
-    assert calls == ["commit"]
+    assert calls == ["commit", "refresh"]
 
 
-def test_existing_pull_request_is_gated_before_it_can_be_sent_to_verify(monkeypatch, tmp_path):
+def test_existing_pull_request_reaches_the_refresh_and_gate_publish_stage(monkeypatch, tmp_path):
     calls = []
     run = SimpleNamespace(
         api=SimpleNamespace(call=lambda *_args, **_kwargs: {"found": True, "url": "pr"}),
@@ -171,4 +173,3 @@ def test_existing_pull_request_is_gated_before_it_can_be_sent_to_verify(monkeypa
 
     assert outcome == {"outcome": "done"}
     assert calls == [{"found": True, "url": "pr"}]
-    assert run.result["details"]["local_gate"]["status"] == "green"

@@ -59,6 +59,7 @@
 {"method":"GET","path":"/v1/dashboard/silent-runs","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/dashboard/timeouts","auth":"console-session","response":"dict"}
 {"method":"GET","path":"/v1/dashboard/waiting","auth":"console-session","response":"dict"}
+{"method":"GET","path":"/v1/dashboard/yield","auth":"console-session","response":"dict"}
 {"method":"POST","path":"/v1/decisions","auth":"console-session","response":"dict"}
 {"method":"POST","path":"/v1/decisions/{decision_id}/answer","auth":"console-session","response":"dict"}
 {"method":"POST","path":"/v1/decisions/{decision_id}/retire","auth":"console-session","response":"dict"}

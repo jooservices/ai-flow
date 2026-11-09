@@ -65,6 +65,19 @@ def test_mirror_uses_command_center_transport_url_without_putting_token_in_remot
     assert calls[1][1]["token"] == "opaque-capability"
 
 
+def test_push_uses_the_ticket_branch_head_recorded_at_checkout(tmp_path):
+    g = Git(str(tmp_path / "srv"))
+    calls = []
+    g.run = lambda *args, **kwargs: calls.append((args, kwargs)) or ""
+
+    g.push(tmp_path, "TESTWP-1-work", "branch-capability", expected_head="checkout-sha")
+
+    args, kwargs = calls[0]
+    assert args == ("push", "--quiet", "--force-with-lease=refs/heads/TESTWP-1-work:checkout-sha",
+                    "origin", "HEAD:refs/heads/TESTWP-1-work")
+    assert kwargs["token"] == "branch-capability"
+
+
 def test_triage_checkout_is_detached_from_base_and_read_only(tmp_path):
     o = make_origin(tmp_path)
     g = Git(str(tmp_path / "srv"))

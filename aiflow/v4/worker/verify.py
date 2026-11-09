@@ -189,25 +189,43 @@ def prepare_verify(state: VerifyRun) -> VerifyWorkspace | dict:
         raise RuntimeError(f"branch {pr['branch']} is gone")
     wt = worktree_path(state.srv_root, project["key"], pr["branch"], "--verify")
     head = state.git.detached(mirror, wt, f"origin/{pr['branch']}")
-    conflicts = state.git.merge_base_in(wt, project["base"], c.identity, commit=False)
+    conflicts = state.git.merge_base_resolving(wt, project["base"], c.identity, commit=False)
+    if conflicts:
+        state.git.abort_merge(wt)
+        return report_verify_conflict(state, conflicts)
     auto_updated = False
-    if not conflicts and state.git.behind(wt, project["base"]):
+    if state.git.behind(wt, project["base"]):
         state.git.abort_merge(wt)
         auto_updated = bring_up_to_date(state.api, c, state.git, mirror, wt, pr, project["base"], credential["token"],
                                          credential.get("transport_url", ""))
         if auto_updated:
             head = pr["head_sha"]
             state.result["head_sha"] = head
-        conflicts = state.git.merge_base_in(wt, project["base"], c.identity, commit=False)
+        else:
+            state.git.mirror(project["repo"], credential["token"], credential.get("transport_url", ""))
+            branch_ref = f"origin/{pr['branch']}"
+            if state.git.behind(mirror, project["base"], branch_ref):
+                return report_stale_verification(state)
+            previous_head = head
+            head = state.git.detached(mirror, wt, branch_ref)
+            pr["head_sha"] = head
+            state.result["head_sha"] = head
+            auto_updated = head != previous_head
     set_run_progress(state.heartbeat, "verify", head=head[:10])
     workspace = VerifyWorkspace(mirror, wt, head, auto_updated)
-    if conflicts:
-        state.git.abort_merge(wt)
-        return report_verify_conflict(state, conflicts)
     report_verify_started(state, head)
     logs = Path(state.srv_root) / "logs" / "runs"
     logs.mkdir(parents=True, exist_ok=True)
     return workspace
+
+
+def report_stale_verification(state: VerifyRun) -> dict:
+    """Leave an unrefreshed ticket in verification without starting an AI review on a stale head."""
+    base = state.claim.project["base"]
+    reason = f"branch {state.pr['branch']} is still behind {base}; verification did not start"
+    state.result.update(outcome="failed", error_kind="stale_branch", summary=reason[:1000])
+    state.result.setdefault("details", {})["reason"] = "stale_branch"
+    return state.result
 
 
 def report_verify_conflict(state: VerifyRun, conflicts: list[str]) -> dict:

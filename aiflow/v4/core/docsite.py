@@ -62,7 +62,8 @@ UI_EXTENSION_VIEWS = {"system-check.js": {"system-check", "projects"},
                       "dashboard-timeouts.js": {"cc"},
                       "dashboard-silent-runs.js": {"cc"},
                       "dashboard_attention.js": {"cc", "delivery", "work"},
-                      "canary_settings.js": {"settings"}}
+                      "canary_settings.js": {"settings"},
+                      "dashboard-yield.js": {"cc"}}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
@@ -85,6 +86,9 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "slowVerificationsContent": ("cc",),
     "slowVerificationsPanel": ("cc",),
     "addForTicket": ("delivery", "work"),
+    "loadDashboardYield": ("cc",),
+    "dashboardYieldPanel": ("cc",),
+    "injectDashboardYieldPanel": ("cc",),
     "loadDashboardReviewRounds": ("cc",),
     "pollDashboardReviewRounds": ("cc",),
     "reviewRoundsPanel": ("cc",),

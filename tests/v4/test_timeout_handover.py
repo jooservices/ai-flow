@@ -58,8 +58,8 @@ def _run_timeout(monkeypatch, tmp_path, *, dirty=False, branch_commits=0, existi
         def merge_base_in(self, *_a):
             return []
 
-        def push(self, _path, branch, token):
-            git_calls.append(("push", branch, token))
+        def push(self, _path, branch, token, **kwargs):
+            git_calls.append(("push", branch, token, kwargs.get("expected_head")))
 
         def run(self, *args, **kwargs):
             git_calls.append(("run", args))
@@ -104,8 +104,9 @@ def test_timeout_with_dirty_tree_commits_and_opens_a_draft_pr(monkeypatch, tmp_p
     assert result["head_sha"] == "head-sha"
     assert result["details"]["full_suite"]["status"] == "unfinished"
     assert result["details"]["handed_to_pipeline"] is True
-    assert ("commit",) == (api.git_calls[0][0],)
-    assert ("push", "TESTWP-1-s", "github-token") in api.git_calls
+    assert api.git_calls[0] == ("run", ("rev-parse", "HEAD"))
+    assert any(call[0] == "commit" for call in api.git_calls)
+    assert ("push", "TESTWP-1-s", "github-token", "") in api.git_calls
     assert any(call[0] == "POST" and call[1] == "/v1/github/pr" for call in api.calls)
     assert _last_transition(api) == "In Verify"
     assert "no usable change" not in _comments(api)
@@ -126,7 +127,7 @@ def test_timeout_with_existing_pr_reuses_it(monkeypatch, tmp_path):
 def test_timeout_with_branch_commits_opens_pr_and_verifies(monkeypatch, tmp_path):
     result, api = _run_timeout(monkeypatch, tmp_path, branch_commits=2)
     assert result["outcome"] == "timeout" and result["pr_url"].endswith("/pull/9")
-    assert ("push", "TESTWP-1-s", "github-token") in api.git_calls
+    assert ("push", "TESTWP-1-s", "github-token", "head-sha") in api.git_calls
     assert any(call[0] == "POST" and call[1] == "/v1/github/pr" for call in api.calls)
     assert _last_transition(api) == "In Verify"
 

@@ -58,6 +58,8 @@ The Dashboard block `flow-failures` ("Repeated failures", full width by default)
 and links each tracked signature to its root-cause bug; see [Repeated failure root causes](flow-failure-roots.md).
 The Dashboard block `pipeline-failures` ("First pipeline run failures", full width by default) shows first observed CI
 failures and check gaps by UTC day; see [Pipeline checks](pipeline-checks.md).
+The Dashboard block `yield` ("Delivery yield") compares completed developer runs, verification returns, merged tickets,
+and tokens per merged ticket by UTC day.
 
 ## Role defaults
 

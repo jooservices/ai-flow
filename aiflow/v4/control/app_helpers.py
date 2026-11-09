@@ -29,11 +29,28 @@ from .route_deps import h
 from .features.work.constants import utcnow
 from .features.work.listeners import run_finished
 from .features.tickets import ticket_repository_of
+from .ticket_helpers import ticket_epic
 from .features.github_fenced.events import (GitHubMergeCompleted, ReviewerActionAccepted,
                                             ReviewerGitHubCommentPosted, ReviewerJiraCommentPosted,
                                             ReviewerLabelsUpdated, ReviewerTicketTransitioned)
 from .features.runs.events import FlowBugCreated, FlowBugIntakeMoved, FlowBugRepeated
 from .platform.events.wiring import publish_for
+
+
+def repository_for_run(ctx, run: dict[str, Any], project=None) -> str:
+    """Select a run's saved repository or resolve it from the project's ticket settings."""
+    saved = str(((run.get("details") or {}).get("repository") or ""))
+    if saved:
+        return saved
+    project = project or ctx.repo().projects.get(run.get("project"))
+    if not project:
+        return ""
+    ticket = ticket_repository_of(ctx).get_ticket_type_and_parent((run.get("ticket_key"),)) or {}
+    ticket["epic"] = ticket_epic(ctx, ticket)
+    return project.repo_for(ticket)
+
+
+_repository_for_run = repository_for_run
 
 
 def _flow_bug_description(candidate: dict, occurrence_count: int, breaker_active: bool = False) -> str:
@@ -484,15 +501,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
 
     def repository_for_run(run: dict[str, Any], project=None) -> str:
         """Use the repository captured when the run was claimed, with a legacy settings fallback."""
-        saved = str(((run.get("details") or {}).get("repository") or ""))
-        if saved:
-            return saved
-        project = project or ctx.repo().projects.get(run.get("project"))
-        if not project:
-            return ""
-        ticket = ticket_repository_of(ctx).get_ticket_type_and_parent((run.get("ticket_key"),)) or {}
-        ticket["epic"] = deps.late.projects_routes.ticket_epic(ticket)
-        return project.repo_for(ticket)
+        return _repository_for_run(ctx, run, project)
 
     def settings_for_run(run: dict[str, Any], project) -> dict[str, Any]:
         settings = (run.get("details") or {}).get("repository_settings")

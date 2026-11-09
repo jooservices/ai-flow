@@ -22,10 +22,10 @@ from typing import Any
 from ..adapters import RunSpec, get_adapter
 from ..core import assumptions, review_findings
 from ..core.environment import redact
-from ..core import pipeline_checks
+from ..core import local_gate, pipeline_checks
 from . import gate_step
 from .client import Conflict, ControlClient
-from .dev import Claimed, Heartbeat, LeaseLost
+from .dev import Claimed, Heartbeat, LeaseLost, run_gate_plan
 from .gitops import Git
 from .run_steps import (REPO_ROOT, RunProgress, RunReporter, adapter_for_run, api_node, environment_notes,
                         make_run_spec, note, pr_title, project_env, project_environment, related_block,
@@ -37,6 +37,7 @@ log = logging.getLogger("aiflow4.verify")
 VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL|BLOCKED)\b", re.M)
 CHECKS = re.compile(r"^CHECKS:\s*(.+)$", re.M)
 QUEUE_POLL_S = 15
+PASSING_CI_STATES = ("success", "neutral", "skipped")  # a skipped check passes QC but is never reused as a green job
 POST_MERGE_CHECKS = re.compile(r"^POST-MERGE CHECKS:\s*\n((?:\s*[-*].*\n?)+)", re.M | re.I)
 
 
@@ -327,7 +328,9 @@ def collect_verification(state: VerifyRun, workspace: VerifyWorkspace,
         findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
                     "Map each deferred criterion to a configured check, or verify it before merge.")
         return rework_verify(state, findings, "deferred criterion has no configured check")
-    gate_result = run_verify_gate(state, workspace)
+    green_jobs = (green_pipeline_jobs(fetch_ci_checks(state.api, state.claim, workspace.head))
+                  if gate_step.enabled(project) else [])
+    gate_result = run_verify_gate(state, workspace, green_jobs)
     if isinstance(gate_result, dict):
         return gate_result
     return collect_ci(state, workspace, review)
@@ -342,14 +345,40 @@ def deferred_ids(criteria: list[dict]) -> str:
     return ", ".join(str(criterion.get("id") or "deferred criterion") for criterion in criteria[:8])
 
 
-def run_verify_gate(state: VerifyRun, workspace: VerifyWorkspace) -> dict | None:
-    """Run the configured local pipeline gate on the verified PR worktree before checking GitHub CI."""
+def green_pipeline_jobs(ci: list[dict]) -> list[str]:
+    """Keys of pipeline jobs whose checks actually passed; a job without a check is not green."""
+    green = []
+    for job in pipeline_checks.PIPELINE_JOBS:
+        conclusions = [item.get("conclusion", item["state"]) for item in ci
+                       if pipeline_checks._matches_job_name(item["name"], job)]
+        if conclusions and all(conclusion == "success" for conclusion in conclusions):
+            green.append(job.key)
+    return green
+
+
+def split_reused_steps(steps: list[local_gate.Step], green_jobs: list[str]) -> tuple[list[local_gate.Step], list[str]]:
+    """The steps still to run and the names of those skipped because their pipeline job is green."""
+    plan = [step for step in steps if step.name == "docs-check" or
+            not (step.ci_job and step.ci_job in green_jobs)]
+    return plan, [step.name for step in steps if step not in plan]
+
+
+def run_verify_gate(state: VerifyRun, workspace: VerifyWorkspace, green_jobs: list[str] | None = None) -> dict | None:
+    """Run the configured local pipeline gate on the verified PR worktree before checking GitHub CI.
+
+    A step whose pipeline job already passed on this commit is not repeated; its CI result is used."""
     project = state.claim.project
     if not gate_step.enabled(project):
         return None
     try:
         env = project_environment(project["key"], project, "verify", project_env)
-        result = gate_step.run(workspace.worktree, project, pr_title(state.claim.ticket), env, state.run_as)
+        title = pr_title(state.claim.ticket)
+        plan, reused = split_reused_steps(gate_step.plan(project), green_jobs or [])
+        if reused:
+            state.result.setdefault("details", {})["reused_pipeline_checks"] = reused
+            result = run_gate_plan(workspace.worktree, project, title, env, state.run_as, plan)
+        else:
+            result = gate_step.run(workspace.worktree, project, title, env, state.run_as)
     except Exception as error:  # noqa: BLE001 - a configured local gate failure must return the PR for rework
         log.exception("verification local gate could not run")
         return rework_verify(state, f"- local pipeline gate could not run ({type(error).__name__})", "local gate failed")
@@ -375,7 +404,7 @@ def collect_ci(state: VerifyRun, workspace: VerifyWorkspace, review: VerifyRevie
     ci = wait_for_ci(state.api, state.claim, state.pr.get("head_sha") or workspace.head, state.heartbeat)
     failed = [item for item in ci if item["state"] == "failure"]
     state.result["details"].update(ci=ci, qc_passed=bool(ci) and all(
-        item["state"] in ("success", "neutral") for item in ci))
+        item["state"] in PASSING_CI_STATES for item in ci))
     if failed:
         findings = "\n".join(f"- CI {item['name']}: failed ({item['url']})" for item in failed[:10])
         gaps = pipeline_checks.failure_gaps([item["name"] for item in failed],
@@ -511,17 +540,22 @@ def _split_for_planning(c, api, jira, pr_comment, result: dict, findings: str, w
     return result
 
 
+def fetch_ci_checks(api: ControlClient, c: Claimed, sha: str) -> list[dict]:
+    """The checks on a commit right now. [] when the repo has no CI or its status is unavailable."""
+    try:
+        return api.call("GET", "/v1/github/checks", params={"run_id": c.run_id, "fence": c.fence, "sha": sha})["checks"]
+    except Conflict:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.warning("CI status unavailable: %s", e)
+        return []
+
+
 def wait_for_ci(api: ControlClient, c: Claimed, sha: str, hb: Heartbeat, max_wait_s: int = 900) -> list[dict]:
     """Checks on the PR head; waits while any is pending (heartbeats keep the lease). [] when the repo has no CI."""
     t_end = time.time() + max_wait_s
     while True:
-        try:
-            ci = api.call("GET", "/v1/github/checks", params={"run_id": c.run_id, "fence": c.fence, "sha": sha})["checks"]
-        except Conflict:
-            raise
-        except Exception as e:  # noqa: BLE001
-            log.warning("CI status unavailable: %s", e)
-            return []
+        ci = fetch_ci_checks(api, c, sha)
         if not any(x["state"] == "pending" for x in ci) or time.time() > t_end or hb.lost.is_set():
             return ci
         set_run_progress(hb, "waiting for CI", pending=[x["name"] for x in ci if x["state"] == "pending"])

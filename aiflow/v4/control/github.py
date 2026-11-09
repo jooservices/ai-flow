@@ -405,13 +405,16 @@ class GitHubApp:
                 "message": f"{r.status_code}: {message}"}
 
     def checks(self, repo: str, sha: str) -> list[dict]:
-        """Check runs and commit statuses of a commit: name, state (pending|success|failure|neutral), url."""
+        """Check runs and commit statuses, preserving check-run conclusions so skipped jobs are not reused."""
         out = []
         runs = self.api("GET", f"/repos/{self.org}/{repo}/commits/{sha}/check-runs?per_page=100", repo=repo)
         for c in runs.get("check_runs", []):
+            conclusion = c.get("conclusion")
             state = "pending" if c["status"] != "completed" else (
-                "success" if c["conclusion"] in ("success", "skipped") else "neutral" if c["conclusion"] == "neutral" else "failure")
-            out.append({"name": c["name"], "state": state, "url": c.get("html_url", "")})
+                "success" if conclusion == "success" else "neutral" if conclusion == "neutral" else
+                "skipped" if conclusion == "skipped" else "failure")
+            out.append({"name": c["name"], "state": state, "conclusion": conclusion,
+                        "url": c.get("html_url", "")})
         st = self.api("GET", f"/repos/{self.org}/{repo}/commits/{sha}/status", repo=repo)
         for c in st.get("statuses", []):
             state = {"success": "success", "pending": "pending"}.get(c["state"], "failure")

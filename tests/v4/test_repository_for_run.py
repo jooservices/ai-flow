@@ -34,11 +34,7 @@ class RecordingTickets:
 
 
 def _legacy_helpers(ctx):
-    def ticket_epic(ticket: dict) -> str:
-        return _ticket_epic(SimpleNamespace(ctx=ctx), ticket)
-
-    deps = SimpleNamespace(late=SimpleNamespace(projects_routes=SimpleNamespace(ticket_epic=ticket_epic)))
-    return install_app_helpers(None, ctx, deps)
+    return install_app_helpers(None, ctx, SimpleNamespace())
 
 
 def _context(projects: dict[str, RecordingProject] | None = None, ticket: dict | None = None,

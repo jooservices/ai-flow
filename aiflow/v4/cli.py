@@ -493,13 +493,15 @@ def run_canary(a: argparse.Namespace, s: Settings) -> None:
             if a.from_settings:
                 thresholds = thresholds_from_settings(db, a.failure_ratio, a.minimum_infra_failures)
                 if minimum_age_override is not None:
+                    # A minimum age above the maximum age (the documented 1200 s against the default 900 s) raises the
+                    # maximum to match instead of failing every evaluation.
                     thresholds = Thresholds.from_values(minimum_age_override, thresholds.minimum_runs,
-                                                        thresholds.maximum_age_s, thresholds.failure_ratio,
-                                                        thresholds.minimum_infra_failures)
+                                                        max(thresholds.maximum_age_s, minimum_age_override),
+                                                        thresholds.failure_ratio, thresholds.minimum_infra_failures)
             else:
                 minimum_age_s = (minimum_age_override if minimum_age_override is not None
                                  else Thresholds().minimum_age_s)
-                thresholds = Thresholds.from_values(minimum_age_s, a.minimum_runs, a.maximum_age_s,
+                thresholds = Thresholds.from_values(minimum_age_s, a.minimum_runs, max(a.maximum_age_s, minimum_age_s),
                                                     a.failure_ratio, a.minimum_infra_failures)
             elapsed = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
             result = decide(measurements, elapsed, thresholds,

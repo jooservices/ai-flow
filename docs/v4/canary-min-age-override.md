@@ -14,3 +14,5 @@ nonnegative integer that does not exceed the maximum age in control-plane settin
 When adding another canary deployer, forward the environment value only when it is set, and add a test that gives the
 environment and control-plane settings different values. This keeps the settings path intact when no override is
 configured.
+
+If the override is larger than the maximum age (for example the guide's 1200 s against the default 900 s), the maximum age is raised to the override for that evaluation, so an existing configuration keeps working instead of failing every evaluation.

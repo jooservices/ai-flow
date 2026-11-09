@@ -154,6 +154,34 @@ def test_evaluate_minimum_age_cli_override_precedes_settings(monkeypatch, capsys
     assert '"action":"wait"' in capsys.readouterr().out
 
 
+def test_a_minimum_age_override_above_the_maximum_raises_the_maximum_instead_of_failing(monkeypatch, capsys):
+    from aiflow.v4.control import canary
+
+    class FakeDB:
+        def one(self, *_args):
+            return {"release_version": "candidate"}
+
+        def close(self):
+            pass
+
+    captured = {}
+    monkeypatch.setattr("aiflow.v4.control.db.DB", lambda _url: FakeDB())
+    monkeypatch.setattr(canary, "measure_registry", lambda *_args: {})
+    monkeypatch.setattr(canary, "thresholds_from_settings",
+                        lambda db, ratio, minimum: Thresholds.from_values(300, 3, 900, ratio, minimum))
+    monkeypatch.setattr(canary, "decide", lambda _m, _e, thresholds, **_k: captured.setdefault("t", thresholds) and {"action": "wait"})
+    monkeypatch.setattr(canary, "work_available_on_node", lambda *_args: False)
+    monkeypatch.setattr(canary, "node_is_healthy", lambda *_args: True)
+    for from_settings in (True, False):  # the documented value of the guide: 1200 s against a 900 s maximum
+        captured.clear()
+        args = SimpleNamespace(canary_action="evaluate", database_url="postgresql://unused", node="node-a",
+                               target="candidate", previous="previous", started_at="2026-01-02T03:04:05+00:00",
+                               minimum_age_s=1200, from_settings=from_settings, failure_ratio="2",
+                               minimum_infra_failures=3, minimum_runs=3, maximum_age_s=900)
+        cli.run_canary(args, SimpleNamespace(database_url="postgresql://unused"))
+        assert captured["t"].minimum_age_s == 1200 and captured["t"].maximum_age_s == 1200
+
+
 def test_note_pending_requires_a_timestamp_with_an_offset(ctx):
     with pytest.raises(ValueError, match="UTC offset"):
         note_pending_build(ctx.db, "build-without-offset", datetime(2026, 1, 2, 3, 4, 5))

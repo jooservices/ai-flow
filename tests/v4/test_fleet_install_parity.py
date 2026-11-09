@@ -104,7 +104,8 @@ class _RecordingApp:
 def test_fleet_install_route_registrations_match_unchanged_golden():
     app = _RecordingApp()
     deps = SimpleNamespace(
-        audit=None, audit_in=None, console_user=None, create_join_grant=None, current_release=None,
+        audit=None, audit_in=None, console_user=None, optional_console_user=None, create_join_grant=None,
+        current_release=None,
         fleet_release=None, node_auth=node_auth, release_assets=None, require_capacity=None,
     )
 

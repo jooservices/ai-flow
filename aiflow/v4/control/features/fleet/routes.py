@@ -34,6 +34,7 @@ from .routes_node_lifecycle import install_node_lifecycle_routes
 from .routes_operation_admin import install_node_operation_admin_routes
 from .routes_operations import install_node_operation_agent_routes
 from .routes_probes import install_check_probe_routes
+from .routes_system_check import install_system_check_routes
 
 @dataclass(frozen=True, slots=True)
 class FleetRouteHelpers:
@@ -208,6 +209,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
     operation_routes = install_node_operation_admin_routes(app, ctx, deps, helpers)
     probe_routes = install_check_probe_routes(app, ctx, deps, helpers)
     agent_routes = install_node_operation_agent_routes(app, ctx, deps)
+    install_system_check_routes(app, ctx, deps)
     return SimpleNamespace(
         issue_join_token=node_routes.issue_join_token,
         inspect_join_token=node_routes.inspect_join_token,

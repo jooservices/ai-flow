@@ -720,6 +720,8 @@ def focused_gate_plan(base: str, tests: tuple[str, ...]) -> list[local_gate.Step
             continue
         if step.name == "v4":
             focused = tuple(path for path in tests if path != SCALE_PROOF_TEST)
+            if not focused:
+                continue
             step = replace(step, argv=("uv", "run", "--frozen", "pytest", *focused, "-p", "no:warnings"))
         plan.append(step)
     return plan
@@ -734,7 +736,7 @@ def run_gate_plan(worktree: Path, project: dict, title: str, env: dict[str, str]
 def changed_since_base(run: DevRun) -> list[str]:
     base = run.project.get("base") or "develop"
     try:
-        diff = run.git.run("diff", "--name-only", f"origin/{base}...HEAD", cwd=run.worktree)
+        diff = run.git.run("diff", "--no-renames", "--name-only", f"origin/{base}...HEAD", cwd=run.worktree)
     except GitError:
         return []  # no changed-file list: the selection falls back to the full suite
     return [line for line in diff.splitlines() if line]

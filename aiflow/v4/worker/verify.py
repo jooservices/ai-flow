@@ -111,6 +111,7 @@ class VerifyWorkspace:
     worktree: Path
     head: str
     auto_updated: bool = False
+    ci_matches_worktree: bool = True
 
 
 @dataclass
@@ -195,6 +196,7 @@ def prepare_verify(state: VerifyRun) -> VerifyWorkspace | dict:
         state.git.abort_merge(wt)
         return report_verify_conflict(state, conflicts)
     auto_updated = False
+    ci_matches_worktree = True
     if state.git.behind(wt, project["base"]):
         state.git.abort_merge(wt)
         auto_updated = bring_up_to_date(state.api, c, state.git, mirror, wt, pr, project["base"], credential["token"],
@@ -213,7 +215,7 @@ def prepare_verify(state: VerifyRun) -> VerifyWorkspace | dict:
             state.result["head_sha"] = head
             auto_updated = head != previous_head
     set_run_progress(state.heartbeat, "verify", head=head[:10])
-    workspace = VerifyWorkspace(mirror, wt, head, auto_updated)
+    workspace = VerifyWorkspace(mirror, wt, head, auto_updated, ci_matches_worktree)
     report_verify_started(state, head)
     logs = Path(state.srv_root) / "logs" / "runs"
     logs.mkdir(parents=True, exist_ok=True)
@@ -328,8 +330,11 @@ def collect_verification(state: VerifyRun, workspace: VerifyWorkspace,
         findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
                     "Map each deferred criterion to a configured check, or verify it before merge.")
         return rework_verify(state, findings, "deferred criterion has no configured check")
-    gate_result = run_verify_gate(state, workspace, green_pipeline_jobs(fetch_ci_checks(
-        state.api, state.claim, state.pr.get("head_sha") or workspace.head)))
+    green_jobs = []
+    if workspace.ci_matches_worktree:
+        green_jobs = green_pipeline_jobs(fetch_ci_checks(
+            state.api, state.claim, state.pr.get("head_sha") or workspace.head))
+    gate_result = run_verify_gate(state, workspace, green_jobs)
     if isinstance(gate_result, dict):
         return gate_result
     return collect_ci(state, workspace, review)
@@ -345,18 +350,20 @@ def deferred_ids(criteria: list[dict]) -> str:
 
 
 def green_pipeline_jobs(ci: list[dict]) -> list[str]:
-    """Keys of the pipeline jobs whose checks on the commit all passed; a job without a check is not green."""
+    """Keys of pipeline jobs whose checks actually passed; a job without a check is not green."""
     green = []
     for job in pipeline_checks.PIPELINE_JOBS:
-        states = [item["state"] for item in ci if pipeline_checks._matches_job_name(item["name"], job)]
-        if states and all(state in PASSING_CI_STATES for state in states):
+        conclusions = [item.get("conclusion", item["state"]) for item in ci
+                       if pipeline_checks._matches_job_name(item["name"], job)]
+        if conclusions and all(conclusion == "success" for conclusion in conclusions):
             green.append(job.key)
     return green
 
 
 def split_reused_steps(steps: list[local_gate.Step], green_jobs: list[str]) -> tuple[list[local_gate.Step], list[str]]:
     """The steps still to run and the names of those skipped because their pipeline job is green."""
-    plan = [step for step in steps if not (step.ci_job and step.ci_job in green_jobs)]
+    plan = [step for step in steps if step.name == "docs-check" or
+            not (step.ci_job and step.ci_job in green_jobs)]
     return plan, [step.name for step in steps if step not in plan]
 
 

@@ -23,7 +23,6 @@
   "aiflow/v4/control/ui/__init__.py": 1,
   "aiflow/v4/core/backups.py": 5,
   "aiflow/v4/node/operations.py": 6,
-  "aiflow/v4/worker/container_pin.py": 1,
   "aiflow/v4/worker/containers.py": 2,
   "aiflow/v4/worker/dev.py": 5,
   "aiflow/v4/worker/intake.py": 1,

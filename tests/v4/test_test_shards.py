@@ -33,7 +33,7 @@ def test_ci_runs_every_shard_and_the_required_check_waits_for_all_jobs():
     assert f"--total {shards.SHARDS}" in str(shard_job["steps"])
     assert 'test -n "$files"' in str(shard_job["steps"])  # a failing selector must stop the shard, not run the whole suite
     required = CI["jobs"]["v4"]
-    assert required["name"] == "Test (v4)" and set(required["needs"]) == {"v4-shard", "v4-browser"}
+    assert required["name"] == "Test (v4)" and set(required["needs"]) == {"changes", "v4-shard", "v4-browser"}
     assert required["if"].startswith("always()")
 
 

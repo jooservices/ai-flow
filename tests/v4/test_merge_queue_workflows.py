@@ -25,6 +25,8 @@ def _allows_event(condition: str | bool, event_name: str) -> bool:
         lambda match: str((event_name == match.group(3)) == (match.group(1) == "==")),
         expression,
     )
+    # A job output decides at run time; the path filter's own decision is pinned by test_browser_path_filter.py.
+    expression = re.sub(r"needs\.[\w-]+\.outputs\.[\w-]+\s*==\s*'[^']*'", "True", expression)
     expression = re.sub(r"\balways\(\)", "True", expression)
     expression = re.sub(r"\bfailure\(\)", "False", expression)
     expression = expression.replace("&&", " and ").replace("||", " or ")

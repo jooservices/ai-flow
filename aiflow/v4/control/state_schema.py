@@ -110,6 +110,14 @@ _STATE_INCIDENT = _state_object({
     "severity": _STATE_STRING, "kind": _STATE_STRING, "subject": _STATE_STRING, "title": _STATE_STRING,
     "detail": _STATE_STRING,
 }, ("id", "opened_at", "severity", "kind", "subject", "title", "detail"))
+_STATE_SLOW_VERIFICATION = _state_object({
+    "key": _STATE_STRING, "project": _STATE_STRING, "summary": _STATE_STRING,
+    "waiting_minutes": _STATE_INTEGER,
+    "accounts": _state_array(_state_object({
+        "account": _STATE_STRING, "runs": _STATE_INTEGER, "no_verdict": _STATE_INTEGER,
+        "barred": _STATE_BOOLEAN,
+    }, ("account", "runs", "no_verdict", "barred"))),
+}, ("key", "project", "summary", "waiting_minutes", "accounts"))
 _STATE_READINESS_REASON = _state_object({"cause": _STATE_STRING, "ticket": _state_nullable(_STATE_STRING),
     "summary": _STATE_STRING, "status": _STATE_STRING, "bug": _STATE_STRING, "detail": _STATE_STRING},
     ("cause", "ticket", "summary"))
@@ -198,9 +206,11 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "done_at": _state_nullable(_STATE_DATETIME),
         "epic": _STATE_STRING, "repository": _STATE_STRING, "run": _state_nullable(_STATE_RUN),
         "last_run": _state_nullable(_STATE_RECENT_RUN), "updated_age_s": _state_nullable(_STATE_INTEGER),
+        "slow_verify": _state_nullable(_STATE_STRING),
         "already_done": _state_nullable(_state_object({"pr_url": _STATE_STRING, "run_id": _STATE_STRING}, ("pr_url", "run_id"))),
     }, ("key", "project", "status", "type", "priority", "labels", "summary", "parent_key", "blocked_by", "done_at", "epic",
-        "repository", "run", "last_run", "updated_age_s", "already_done"))),
+        "repository", "run", "last_run", "updated_age_s", "slow_verify", "already_done"))),
+    "slow_verifications": _state_array(_STATE_SLOW_VERIFICATION),
     "release_readiness": _state_array(_state_object({
         "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "ready": _STATE_BOOLEAN,
         "ticket_count": _STATE_INTEGER, "done_count": _STATE_INTEGER, "tickets": _STATE_STRING_ARRAY,

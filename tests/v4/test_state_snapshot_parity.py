@@ -38,6 +38,9 @@ class SnapshotDB:
         if "FROM canary_settings" in query:
             self.calls.append("canary_settings")
             return self.tables.get("canary_settings")
+        if "SELECT now() AS t" in query:
+            self.calls.append("clock")
+            return {"t": self.tables.get("clock", NOW)}
         self.calls.append("totals")
         return self.tables.get("totals", {
             "runs": 0, "cost": 0, "tin": 0, "tout": 0, "done": 0, "failed": 0,
@@ -55,6 +58,11 @@ def _run_query_label(query):
         return "recent_runs"
     if "SELECT DISTINCT ON (ticket_key)" in query:
         return "already_done"
+    if "Waiting more than" in query or ("status='In Verify'" in query and "aiflow-hold" in query
+                                        and "step='dev'" in query):
+        return "waiting_verifications"
+    if "SELECT now() AS t" in query:
+        return "clock"
     if "SELECT key, project" in query:
         return "tickets"
     return None
@@ -391,6 +399,7 @@ def test_snapshot_matches_pre_refactor_literal(case, monkeypatch):
     if case["tables"].get("tickets") and any(row["status"] == "In Verify" for row in case["tables"]["tickets"]):
         expected_calls.append("already_done")
     expected_calls.append("business_decisions")
+    expected_calls.extend(["clock", "waiting_verifications"])
     expected_calls.extend(["totals", "incidents_open", "incidents_recent", "events", "lifecycle",
                            "canary_pending", "canary_merge_live", "canary_settings"])
     assert ctx.db.calls == expected_calls
@@ -453,8 +462,9 @@ def test_ticket_and_project_builders_on_fakes(monkeypatch):
     base, counts = state._ticket_base_rows(ctx.db, repo)
     assert counts == {"PRJ": {"In Verify": 1}} and base[0]["repository"] == "example/project"
     assert state._verified_run_markers(ctx.db, base)["PRJ-1"]["run_id"] == "run-done"
-    rows, status_counts = state._ticket_section(SnapshotDB(tables), repo, [], [])
+    rows, status_counts, slow = state._ticket_section(SnapshotDB(tables), repo, [], [])
     assert rows[0]["already_done"]["run_id"] == "run-done" and status_counts == counts
+    assert slow == [] and rows[0]["slow_verify"] is None
     projects = state._project_section(repo, {"PRJ": {"Done": 1}}, {})
     assert projects[0]["close_suggested"] is True
     operational = state._operational_section(SnapshotDB({"projects": {"PRJ": project}}), repo, {})

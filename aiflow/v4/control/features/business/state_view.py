@@ -58,6 +58,7 @@ def totals_for_projects(ctx, visible: set[str]) -> dict[str, Any]:
 
 def restrict_to_projects(ctx, data: dict[str, Any], visible: set[str]) -> dict[str, Any]:
     """The snapshot of a person who may see only some projects (a copy; the cached snapshot is shared)."""
+    from ... import slow_verifications as slow_verify_mod
     data = copy.deepcopy(data)
     all_tickets = data["tickets"]
     data["projects"] = [project for project in data["projects"] if project["key"] in visible]
@@ -81,11 +82,13 @@ def restrict_to_projects(ctx, data: dict[str, Any], visible: set[str]) -> dict[s
                                  if item.get("subject") in visible or item.get("subject") in visible_nodes]
     data["sa"] = {}
     data["version_policy"] = {}
+    slow_verify_mod.scope_and_redact(data, visible, reveal_accounts=True)
     return data
 
 
 def hide_machines_and_detail(data: dict[str, Any]) -> None:
     """The snapshot of a person without machine access: no nodes, accounts or incidents, and only summary run fields."""
+    from ... import slow_verifications as slow_verify_mod
     data["nodes"] = []
     data["accounts"] = []
     data["sa"] = {}
@@ -104,3 +107,4 @@ def hide_machines_and_detail(data: dict[str, Any]) -> None:
                                                        "ended_age_s")}
                             for run in data["recent_runs"]]
     trim_ticket_runs(data)
+    slow_verify_mod.scope_and_redact(data, visible_projects=None, reveal_accounts=False)

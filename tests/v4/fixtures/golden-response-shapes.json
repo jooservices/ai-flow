@@ -428,6 +428,7 @@
     "findings": [],
     "runs": []
    },
+   "slow_verifications": [],
    "tickets": [],
    "tool_waits": [],
    "totals": {
@@ -933,6 +934,7 @@
     "findings": [],
     "runs": []
    },
+   "slow_verifications": [],
    "tickets": [],
    "tool_waits": [],
    "totals": {

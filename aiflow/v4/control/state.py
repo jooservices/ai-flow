@@ -284,6 +284,7 @@ def _verified_run_markers(db, tickets):
 
 
 def _ticket_section(db, repo, active, recent, ticket_repository=None):
+    from . import slow_verifications as slow_verify_mod
     ticket_repository = ticket_repository or ticket_repository_of(db=db)
     tickets, by_status = _ticket_base_rows(db, repo, ticket_repository)
     run_by_ticket = {run["ticket"]: run for run in active}
@@ -299,7 +300,8 @@ def _ticket_section(db, repo, active, recent, ticket_repository=None):
         ticket["last_run"] = last_by_ticket.get(ticket["key"])
         ticket["done_at"] = _iso(ticket["done_at"])
         ticket["updated_age_s"] = _age(ticket.pop("jira_updated"))
-    return tickets, by_status
+    slow = slow_verify_mod.attach_slow_verifications(db, tickets)
+    return tickets, by_status, slow
 
 
 def _project_section(repo, by_status, lifecycle):
@@ -349,7 +351,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                                 runs_per_account, running, include_signin)
     active = _active_runs_section(ctx, active_rows)
     recent = _recent_runs_section(db, ticket_repository_of(ctx))
-    tickets, by_status = _ticket_section(db, repo, active, recent, ticket_repository_of(ctx))
+    tickets, by_status, slow_verifications = _ticket_section(db, repo, active, recent, ticket_repository_of(ctx))
     today, incidents, incidents_recent, events, projects = _operational_section(db, repo, by_status)
     sa = dashboard_data(ctx, nodes, accounts)
     return {
@@ -360,7 +362,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "operator_interventions": flow_doctor.operator_intervention_summary(ctx),
         "tool_waits": tooling.waiting_summary(ctx),
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
-        "projects": projects, "tickets": tickets,
+        "projects": projects, "tickets": tickets, "slow_verifications": slow_verifications,
         "release_readiness": release_readiness.all_versions(db, repo.projects, ticket_repository_of(ctx)),
         "release_progress": release_progress.all_versions(db, repo.projects, ticket_repository_of(ctx)),
         "scale_proof": scale_proof.summary(db),

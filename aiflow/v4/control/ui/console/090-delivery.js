@@ -162,6 +162,10 @@ function renderDBody() {
   h += '<section class="panel" data-block="attention" id="d-att" aria-labelledby="h-att"><div class="panel-h"><h2 id="h-att">Needs attention</h2><span class="hint">Waiting on a person, over 30 minutes, or the last run did not finish</span></div><div class="att">';
   var att = [];
   work.forEach(function (t) {
+    if (window.AIFlowDashboardAttention) {
+      AIFlowDashboardAttention.addForTicket(att, t, wm, mmss);
+      return;
+    }
     var lr = t.last_run;
     if (t.status === 'Needs owner') att.push([t, 'crit', 'Needs owner', 'The master role triages the developer question; owner-escalated tickets need an owner decision']);
     else if (t.status === 'Human review') att.push([t, 'info', 'Human review', 'Require human = Yes; checks passed']);

@@ -62,6 +62,7 @@ UI_EXTENSION_VIEWS = {"system-check.js": {"system-check", "projects"},
                       "dashboard-timeouts.js": {"cc"},
                       "dashboard-silent-runs.js": {"cc"},
                       "dashboard_attention.js": {"cc", "delivery", "work"},
+                      "dashboard-cpu.js": {"cc"},
                       "canary_settings.js": {"settings"},
                       "dashboard-yield.js": {"cc"}}
 

@@ -61,6 +61,9 @@ failures and check gaps by UTC day; see [Pipeline checks](pipeline-checks.md).
 The Dashboard block `yield` ("Delivery yield") compares completed developer runs, verification returns, merged tickets,
 and tokens per merged ticket by UTC day.
 
+The Dashboard block `cpu-use` ("CPU use by machine") shows each node's total CPU and the AI tools, tests, browsers and
+databases split; see [CPU use by machine on the Dashboard](dashboard-cpu.md).
+
 ## Role defaults
 
 Without a saved layout a person gets the default of their role. `ROLE_PROFILE` maps the current role names in

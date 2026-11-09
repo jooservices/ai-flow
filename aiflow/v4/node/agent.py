@@ -29,6 +29,7 @@ from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
 from . import cleanup as _cleanup
+from . import cpu_breakdown
 from .operator_audit import (_audit_interventions as _audit_interventions,
                              forward_operator_audit as forward_operator_audit)
 from .provider_sign_in import (ensure_account_home as ensure_account_home,
@@ -183,7 +184,8 @@ def metrics(prev: tuple[int, int] | None) -> tuple[dict, tuple[int, int]]:
     load = os.getloadavg()
     m = {"cpu_pct": cpu, "load1": round(load[0], 2), "load5": round(load[1], 2), "cpus": os.cpu_count(),
          "mem_total": limit or mem.get("MemTotal"), "mem_used": used if used is not None else mem.get("MemTotal", 0) - mem.get("MemAvailable", 0),
-         "disk_total": du.total, "disk_free": du.free, "disk_free_pct": round(100.0 * du.free / du.total, 1)}
+         "disk_total": du.total, "disk_free": du.free, "disk_free_pct": round(100.0 * du.free / du.total, 1),
+         "cpu_breakdown": cpu_breakdown.measure()}
     return m, (total, idle)
 
 

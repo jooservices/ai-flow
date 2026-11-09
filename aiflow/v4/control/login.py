@@ -73,8 +73,8 @@ SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 REFUSED = "invalid email or password"
 
 PAGES = frozenset(CONSOLE_PAGE_PATHS) | frozenset(PAGE_VIEWS) | {"/setup"}
-OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/install.sh", "/v1/nodes/join", "/v1/nodes/join-tokens",
-              "/v1/nodes/join-tokens/inspect",
+OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/cpu-overview", "/v1/install.sh", "/v1/nodes/join",
+              "/v1/nodes/join-tokens", "/v1/nodes/join-tokens/inspect",
               # provider redirects arrive from another site without the Strict cookie; a one-use state protects them
               "/v1/integrations/jira/oauth/callback", "/v1/integrations/github/manifest/callback",
               "/v1/integrations/github/setup",

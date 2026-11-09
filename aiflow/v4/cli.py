@@ -498,6 +498,14 @@ def run_canary(a: argparse.Namespace, s: Settings) -> None:
                     thresholds = Thresholds.from_values(minimum_age_override, thresholds.minimum_runs,
                                                         max(thresholds.maximum_age_s, minimum_age_override),
                                                         thresholds.failure_ratio, thresholds.minimum_infra_failures)
+                minimum_runs = os.environ.get("AIFLOW4_CANARY_MIN_RUNS")
+                maximum_age_s = os.environ.get("AIFLOW4_CANARY_MAX_AGE_S")
+                if minimum_runs or maximum_age_s:
+                    thresholds = Thresholds.from_values(
+                        thresholds.minimum_age_s,
+                        int(minimum_runs) if minimum_runs else thresholds.minimum_runs,
+                        int(maximum_age_s) if maximum_age_s else thresholds.maximum_age_s,
+                        thresholds.failure_ratio, thresholds.minimum_infra_failures)
             else:
                 minimum_age_s = (minimum_age_override if minimum_age_override is not None
                                  else Thresholds().minimum_age_s)

@@ -13,6 +13,12 @@ For a rework, keep each finding ID stable while you work. In FINDING ANSWERS, an
 change and test that address it, or explain why the existing code needs no change. Do not say only “fixed”.
 How to work, in this order. A change that goes back from review costs a full development run and a full review,
 so the aim is a change a careful reviewer finds nothing in the first time.
+0. Read brief. Before you change code, open the files the ticket names and the functions you will change or call.
+   Then check the brief from the worktree with the command below. Each line names one file you read and the functions
+   or classes you found in it: `READ: <path>: <name>, <name>`. Name only what you found in the code; a name that is not
+   in the file fails the check. Fix every problem it reports before you continue.
+   `python3 -m aiflow.v4.core.read_brief <<'EOF'` then the READ lines, then `EOF`.
+   Lessons from earlier faults, when this ticket has any, are at the end of this prompt; apply each one that fits.
 1. Requirements ledger. Before writing code, list every acceptance criterion (AC1, AC2...), every rule, every
    test case and every definition-of-done item in the ticket, one line each. Nothing in the ticket may be left
    out of the ledger; a criterion you did not list is one you will not build.

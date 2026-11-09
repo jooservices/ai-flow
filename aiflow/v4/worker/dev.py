@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters import RunResult, RunSpec, get_adapter
-from ..core import commit_rules, handover, work_limits
+from ..core import commit_rules, handover, study_cases, work_limits
 from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
@@ -274,7 +274,8 @@ def brief(run: DevRun) -> DevBrief:
     logs = Path(run.srv_root) / "logs" / "runs"
     logs.mkdir(parents=True, exist_ok=True)
     run.env = project_environment(run.project["key"], run.project, "dev", project_env)
-    spec = make_run_spec(build_prompt(run.claim, run.branch, run.conflicts, run.ci_log, run.env),
+    lessons = study_cases.deliver_lessons(run.srv_root, run.claim.ticket, run.claim.run_id, run.claim.findings)
+    spec = make_run_spec(build_prompt(run.claim, run.branch, run.conflicts, run.ci_log, run.env) + lessons,
                          run.worktree, run.srv_root, run.claim, run.project, run.control_url,
                          logs / f"{run.key}-{run.claim.run_id}.jsonl", run.env)
     adapter = adapter_for_run(run.claim.provider, run.run_as, get_adapter)

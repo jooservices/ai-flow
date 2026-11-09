@@ -71,11 +71,21 @@ class _InstallerBackupPreservationError(OperationError):
                  replacement_error: OSError | None = None, restore_error: OSError | None = None):
         self.backup_path = backup_path
         self.failures = tuple(failures)
-        details = "; ".join(f"{action} failed ({type(error).__name__})" for action, error in failures)
-        message = f"preserving the previous installer failed ({details}); complete backup remains at {backup_path}"
+        labels = {
+            "creating the preferred backup path": "preferred path creation",
+            "moving the backup to the preferred path": "preferred move",
+            "removing the empty preferred backup path": "preferred path cleanup",
+            "creating a unique backup directory": "unique path creation",
+            "moving the backup to a unique path": "unique move",
+            "copying the backup to a unique path": "copy",
+        }
+        details = ", ".join(f"{labels.get(action, action)}={type(error).__name__}"
+                             for action, error in failures)
+        message = f"Installer backup retained at {backup_path}; preservation={details}"
         if replacement_error is not None and restore_error is not None:
-            message = (f"server-installer replacement failed ({type(replacement_error).__name__}) and restoring "
-                       f"the previous installer failed ({type(restore_error).__name__}); {message}")
+            message = (f"Installer backup retained at {backup_path}; "
+                       f"replacement={type(replacement_error).__name__}; "
+                       f"rollback={type(restore_error).__name__}; preservation={details}")
         super().__init__(message)
 
 
@@ -264,7 +274,11 @@ def _ensure_server_installer() -> None:
                              f"({type(exc).__name__})") from exc
     finally:
         if staging is not None and not retain_staging:
-            shutil.rmtree(staging, ignore_errors=True)
+            try:
+                shutil.rmtree(staging)
+            except OSError as exc:
+                raise OperationError(f"could not provision jooservices/server-installer {SERVER_INSTALLER_VERSION} "
+                                     f"({type(exc).__name__})") from exc
     if not SERVER_INSTALLER.is_file():
         raise OperationError(f"jooservices/server-installer {SERVER_INSTALLER_VERSION} was not installed")
 

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters import RunResult, RunSpec, get_adapter
-from ..core import commit_rules, handover, study_cases, work_limits
+from ..core import affected_tests, commit_rules, handover, local_gate, study_cases, work_limits
 from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
@@ -26,7 +26,7 @@ from ..core.toolchains import (has_missing_marker, parse_command_not_found_requi
 from . import mechanical, timeout_handover
 from .client import Conflict, ControlClient
 from . import gate_step
-from .gitops import Git
+from .gitops import Git, GitError
 from .run_steps import (REPO_ROOT as REPO_ROOT, RunProgress, RunReporter, adapter_for_run, api_node,
                         build_prompt as _build_prompt, classify_question, commit_message,
                         environment_status, fetch_ci_log, machine_block as machine_block, make_run_spec,
@@ -48,6 +48,7 @@ PROMISE_TO_REPORT = re.compile(
     re.IGNORECASE,
 )
 SILENT_TWICE_REASON = "the run went silent twice"
+SCALE_PROOF_TEST = "tests/v4/test_scale_proof.py"
 PROVIDER_NAME = {"claude": "Claude", "codex": "Codex", "grok": "Grok", "opencode": "OpenCode"}
 
 
@@ -705,6 +706,52 @@ def publish_changes(run: DevRun) -> dict:
     return run.result
 
 
+def covering_tests(changed: list[str], root: Path) -> tuple[str, ...] | None:
+    """The tests that cover the changed files; None when the full suite is needed."""
+    selection = affected_tests.select_tests(changed, root)
+    return None if selection.full_suite else selection.tests
+
+
+def focused_gate_plan(base: str, tests: tuple[str, ...]) -> list[local_gate.Step]:
+    """The built-in gate with the full v4 suite replaced by the covering tests (the pull request pipeline runs it all)."""
+    plan = []
+    for step in local_gate.steps(base):
+        if step.name == "scale-proof" and SCALE_PROOF_TEST not in tests:
+            continue
+        if step.name == "v4":
+            focused = tuple(path for path in tests if path != SCALE_PROOF_TEST)
+            step = replace(step, argv=("uv", "run", "--frozen", "pytest", *focused, "-p", "no:warnings"))
+        plan.append(step)
+    return plan
+
+
+def run_gate_plan(worktree: Path, project: dict, title: str, env: dict[str, str] | None, run_as: list[str] | None,
+                  plan: list[local_gate.Step]) -> local_gate.GateResult:
+    ctx = local_gate.Context(worktree, project.get("base") or "develop", title, tuple(run_as or ()))
+    return local_gate.run(ctx, plan, gate_step.gate_env(env))
+
+
+def changed_since_base(run: DevRun) -> list[str]:
+    base = run.project.get("base") or "develop"
+    try:
+        diff = run.git.run("diff", "--name-only", f"origin/{base}...HEAD", cwd=run.worktree)
+    except GitError:
+        return []  # no changed-file list: the selection falls back to the full suite
+    return [line for line in diff.splitlines() if line]
+
+
+def run_gate_steps(run: DevRun) -> local_gate.GateResult:
+    """Run the local gate; a developer run runs the tests covering its changes, the pipeline runs the full suite."""
+    title = pr_title(run.claim.ticket)
+    builtin_gate = run.project.get("local_gate") == "ai-flow"  # a project's own commands are run as configured
+    tests = covering_tests(changed_since_base(run), run.worktree) if builtin_gate else None
+    if tests is None:
+        return gate_step.run(run.worktree, run.project, title, run.env, run.run_as)
+    run.result.setdefault("details", {})["focused_tests"] = list(tests)
+    plan = focused_gate_plan(run.project.get("base") or "develop", tests)
+    return run_gate_plan(run.worktree, run.project, title, run.env, run.run_as, plan)
+
+
 def run_local_gate(run: DevRun) -> str | dict:
     set_run_progress(run.heartbeat, "gate")
     plan = gate_step.plan(run.project)
@@ -723,7 +770,7 @@ def run_local_gate(run: DevRun) -> str | dict:
 def execute_local_gate(run: DevRun):
     """Run the configured pipeline gate and record its dispatch status."""
     try:
-        gate = gate_step.run(run.worktree, run.project, pr_title(run.claim.ticket), run.env, run.run_as)
+        gate = run_gate_steps(run)
         run.result.setdefault("details", {})["local_gate"] = gate_step.result_record(gate)
         reason = gate_step.failure_text(gate) if gate.exit_code else ""
         error_kind = "gate_failed"

@@ -15,7 +15,7 @@ import re
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..adapters import RunResult, RunSpec, get_adapter
 from ..core import affected_tests, commit_rules, handover, local_gate, study_cases, work_limits
@@ -195,6 +195,7 @@ class DevRun:
     checkout_head: str = ""
     branch_lease: str | None = None
     failed_work_commits: list[str] = field(default_factory=list)
+    failed_work_repair_base: str = ""
     conflicts: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     ci_log: str = ""
@@ -338,6 +339,24 @@ def run_dev_turns(adapter: Any, spec: RunSpec, heartbeat: Any, on_progress: Any 
 
 def run_ai(run: DevRun, prepared: DevBrief) -> None:
     """Run the provider inside the configured runtime, starting WordPress first when requested."""
+    _run_ai_in_runtime(run, prepared, lambda: run_dev_turns(
+        prepared.adapter, prepared.spec, run.heartbeat, prepared.on_progress))
+
+
+def run_ai_once(run: DevRun, prepared: DevBrief) -> None:
+    """Run exactly one provider process for an automatic gate repair."""
+    def invoke_once():
+        if run.heartbeat.lost.is_set():
+            raise LeaseLost()
+        return prepared.adapter.run(prepared.spec, prepared.on_progress, stop=run.heartbeat.lost)
+
+    _run_ai_in_runtime(run, prepared, invoke_once)
+    if run.heartbeat.lost.is_set():
+        raise LeaseLost()
+
+
+def _run_ai_in_runtime(run: DevRun, prepared: DevBrief, invoke: Callable[[], RunResult]) -> None:
+    """Start the configured runtime and assign the result of one chosen provider invocation."""
     with prepared.runtime as containers:
         if prepared.wordpress:
             set_run_progress(run.heartbeat, "wordpress-site")
@@ -347,7 +366,7 @@ def run_ai(run: DevRun, prepared: DevBrief) -> None:
                 result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
                 next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
                 node=api_node(run.api)))
-        run.response = run_dev_turns(prepared.adapter, prepared.spec, run.heartbeat, prepared.on_progress)
+        run.response = invoke()
 
 
 def collect(run: DevRun) -> dict | None:
@@ -764,8 +783,20 @@ def run_local_gate(run: DevRun) -> str | dict:
     gate, reason, error_kind = execute_local_gate(run)
     if gate is not None and gate.failed:
         step_name = gate.failed.name
-        repaired = (repair_documentation_gap(run, reason) if mechanical.documentation_gap(gate)
-                    else repair_gate_failure(run, step_name, reason))
+        try:
+            repaired = (repair_documentation_gap(run, reason) if mechanical.documentation_gap(gate)
+                        else repair_gate_failure(run, step_name, reason))
+        except (LeaseLost, Conflict):
+            raise
+        except Exception as exc:  # noqa: BLE001 - a repair startup failure still has to preserve the ticket work
+            lost = getattr(getattr(run, "heartbeat", None), "lost", None)
+            if lost is not None and lost.is_set():
+                raise LeaseLost() from exc
+            repaired = False
+            error_kind = "gate_error"
+            reason = f"{reason}\nthe gate repair could not start ({type(exc).__name__})"
+            run.result.setdefault("details", {})["gate_repair"] = {"status": "error",
+                                                                    "error": type(exc).__name__}
         if repaired:
             gate, reason, error_kind = execute_local_gate(run)
     if gate is None or gate.exit_code:
@@ -794,6 +825,7 @@ def repair_documentation_gap(run: DevRun, reason: str) -> bool:
 def repair_gate_failure(run: DevRun, failed_step: str, reason: str, docs_only: bool = False) -> bool:
     """Give the developer one same-worktree repair turn, then commit accepted changes for one gate rerun."""
     original_head = run.git.run("rev-parse", "HEAD", cwd=run.worktree).strip()
+    run.failed_work_repair_base = original_head
     original_response = run.response
     prepared = brief(run)
     output = redact_gate_output(reason, run.env, run.project)
@@ -807,26 +839,29 @@ def repair_gate_failure(run: DevRun, failed_step: str, reason: str, docs_only: b
                 "with RESULT: DONE and a short summary."),
         log_append=True,
     )
-    run_ai(run, prepared)
+    run_ai_once(run, prepared)
     repair_response = run.response
     record_gate_repair_response(run, original_response, repair_response)
     repaired_head = run.git.run("rev-parse", "HEAD", cwd=run.worktree).strip()
     if repaired_head != original_head:
-        if repaired_head:
-            run.failed_work_commits.append(repaired_head)
+        run.failed_work_repair_base = original_head
         return False
-    if repair_response.error_kind or repair_response.verdict != "DONE":
+    if repair_response.error_kind or repair_response.exit_code != 0 or repair_response.verdict != "DONE":
+        run.failed_work_repair_base = original_head
         return False
     changed = run.git.changed(run.worktree)
     if not changed or (docs_only and any(not _documentation_repair_path(path) for path in changed)):
+        run.failed_work_repair_base = original_head
         return False
     if docs_only and not any(path.startswith("docs/v4/") for path in changed):
+        run.failed_work_repair_base = original_head
         return False
     try:
         repair_sha = run.git.commit_all(run.worktree, commit_message(run.claim, run.summary), run.claim.identity)
     except GitError:
         return False
     run.failed_work_commits.append(repair_sha)
+    run.failed_work_repair_base = ""
     repair_record = {"step": failed_step, "files": changed[:100]}
     detail_key = "documentation_repaired" if docs_only else "gate_repair"
     run.result.setdefault("details", {})[detail_key] = changed[:100] if docs_only else repair_record
@@ -851,8 +886,13 @@ def redact_gate_output(text: str, env: dict[str, str], project: dict) -> str:
     output = redact(text)
     for value in sorted(values, key=len, reverse=True):
         output = output.replace(value, "[redacted]")
-    output = re.sub(r"(?i)(token|password|secret|api[_-]?key)(\s*[=:]\s*)[^\s,;]+",
-                    r"\1\2[redacted]", output)
+    credential_name = (r"[A-Za-z0-9_-]*(?:access[_-]?(?:token|key)|refresh[_-]?token|token|password|passwd|pwd|"
+                       r"secret|api[_-]?key|authorization|private[_-]?key)")
+    credential = re.compile(
+        rf"(?i)(?P<prefix>[\"']?{credential_name}[\"']?\s*[:=]\s*)"
+        r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|(?:Bearer\s+)?[^,\s;}}\]]+)"
+    )
+    output = credential.sub(lambda match: match.group("prefix") + "[redacted]", output)
     return output[-12000:]
 
 
@@ -866,7 +906,7 @@ def _documentation_repair_path(path: str) -> bool:
 def report_gate_failure(run: DevRun, reason: str, error_kind: str) -> dict:
     saved = gate_step.keep_failed_work(
         run.git, run.worktree, Path(run.srv_root) / "logs" / "runs" / f"{run.key}-{run.claim.run_id}",
-        commits=run.failed_work_commits)
+        commits=run.failed_work_commits, repair_base=run.failed_work_repair_base)
     run.git.run("reset", "--soft", "HEAD~1", cwd=run.worktree)
     run.result.update(outcome="failed", error_kind=error_kind, summary=reason[:1000])
     run.reporter.comment(body=note(

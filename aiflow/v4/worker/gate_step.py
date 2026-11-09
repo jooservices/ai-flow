@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shlex
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Callable
 
@@ -56,8 +57,9 @@ def run(wt: Path, project: dict, title: str, env: dict[str, str] | None = None, 
             return local_gate.run(ctx, plan(project), nested_env, log=log)
 
 
-def keep_failed_work(git, wt: Path, base: Path, commits: list[str] | None = None) -> str:
-    """Save run-authored commits and remaining edits without copying a base-refresh merge into the patch."""
+def keep_failed_work(git, wt: Path, base: Path, commits: list[str] | None = None,
+                     repair_base: str = "") -> str:
+    """Save run-authored commits and the complete repair delta without copying a base refresh into the patch."""
     path = base.with_suffix(".gate-failed.patch")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,9 +67,25 @@ def keep_failed_work(git, wt: Path, base: Path, commits: list[str] | None = None
         for commit in dict.fromkeys(commits or ()):
             parent = git.run("rev-parse", f"{commit}^", cwd=wt).strip()
             patches.append(git.run("diff", "--binary", parent, commit, cwd=wt))
-        working = git.run("diff", "--binary", "HEAD", cwd=wt)
-        if working:
-            patches.append(working)
+        if repair_base:
+            index_path = git.run("rev-parse", "--git-path", "index", cwd=wt).strip()
+            index_path = Path(index_path)
+            if not index_path.is_absolute():
+                index_path = wt / index_path
+            repair_index = str(index_path.with_name(f"index.gate-failed-{uuid.uuid4().hex}"))
+            index_env = {"GIT_INDEX_FILE": repair_index}
+            try:
+                git.run("read-tree", "HEAD", cwd=wt, extra_env=index_env)
+                git.run("add", "-A", cwd=wt, extra_env=index_env)
+                repair = git.run("diff", "--binary", "--cached", repair_base, cwd=wt, extra_env=index_env)
+                if repair:
+                    patches.append(repair)
+            finally:
+                Path(repair_index).unlink(missing_ok=True)
+        else:
+            working = git.run("diff", "--binary", "HEAD", cwd=wt)
+            if working:
+                patches.append(working)
         if not any(patches):
             patches.append(git.run("diff", "--binary", "HEAD~1", "HEAD", cwd=wt))
         path.write_text("\n".join(patch for patch in patches if patch), encoding="utf-8")

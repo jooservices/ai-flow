@@ -122,7 +122,7 @@ def test_worker_records_and_refuses_red_or_incomplete_runs(monkeypatch, tmp_path
     if gate_result.failed:
         monkeypatch.setattr(dev, "brief", lambda _run: SimpleNamespace(
             spec=RunSpec(prompt="instructions", cwd=str(tmp_path), account_home=str(tmp_path))))
-        monkeypatch.setattr(dev, "run_ai", lambda target, _prepared: setattr(
+        monkeypatch.setattr(dev, "run_ai_once", lambda target, _prepared: setattr(
             target, "response", RunResult(final_text="RESULT: FAIL", verdict="FAIL")) or calls.append("repair"))
     monkeypatch.setattr(dev, "report_gate_failure", lambda *_args: calls.append(_args[1:]) or "refused")
 

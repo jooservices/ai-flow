@@ -5,8 +5,9 @@ test calls `aiflow.v4.control.canary.decide` directly; it does not change produc
 
 ## Recorded counts
 
-Candidate `c850e5419e` was tested on canary node `node1`, with previous release `b6a49908b1`. Over 24 hours, the
-canary had 4 infrastructure failures in 7 runs and the baseline had 3 in 16 runs. The suspected commit
+Candidate `c850e5419e` was tested on canary node `node1`, with previous release `b6a49908b1`. Since the canary
+started, it had 4 infrastructure failures in 7 runs. The baseline had 3 infrastructure failures in 16 runs during
+the 24 hours before the canary started. The suspected commit
 `c850e5419e8e8a04c0e3a5969768c92c6609fd8b` is not a proven cause of those failures.
 
 ## Explicit example policy

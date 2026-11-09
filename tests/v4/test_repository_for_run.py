@@ -61,18 +61,30 @@ def test_saved_repository_precedes_project_and_ticket_lookups():
     assert project.tickets == []
 
 
-def test_supplied_project_and_looked_up_project_keep_the_legacy_ticket_fallback():
-    for supplied in (True, False):
-        project = RecordingProject("org/project")
-        ctx, tickets = _context({"DEMO": project}, ticket=None)
-        selected = project if supplied else None
+def test_supplied_project_is_used_for_legacy_ticket_fallback():
+    supplied = RecordingProject("org/supplied")
+    looked_up = RecordingProject("org/looked-up")
+    ctx, tickets = _context({"DEMO": looked_up}, ticket=None)
 
-        repository = _legacy_helpers(ctx).repository_for_run(
-            {"project": "DEMO", "ticket_key": "DEMO-1", "details": {}}, selected)
+    repository = _legacy_helpers(ctx).repository_for_run(
+        {"project": "DEMO", "ticket_key": "DEMO-1", "details": {}}, supplied)
 
-        assert repository == "org/project:"
-        assert project.tickets == [{"epic": ""}]
-        assert tickets.lookups == ["DEMO-1"]
+    assert repository == "org/supplied:"
+    assert supplied.tickets == [{"epic": ""}]
+    assert looked_up.tickets == []
+    assert tickets.lookups == ["DEMO-1"]
+
+
+def test_looked_up_project_keeps_the_legacy_ticket_fallback():
+    project = RecordingProject("org/looked-up")
+    ctx, tickets = _context({"DEMO": project}, ticket=None)
+
+    repository = _legacy_helpers(ctx).repository_for_run(
+        {"project": "DEMO", "ticket_key": "DEMO-1", "details": {}})
+
+    assert repository == "org/looked-up:"
+    assert project.tickets == [{"epic": ""}]
+    assert tickets.lookups == ["DEMO-1"]
 
 
 def test_installed_helper_uses_resolved_epic_for_legacy_run_repository_selection():

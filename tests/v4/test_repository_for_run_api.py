@@ -72,12 +72,18 @@ def test_module_helper_accepts_context_and_external_router_resolves_epic():
 
 
 def test_module_helper_returns_saved_repository_and_uses_supplied_project():
-    project = RecordingProject("org/supplied")
-    ctx, tickets = _context(project, {"key": "DEMO-1", "type": "Story"}, {})
+    supplied = RecordingProject("org/supplied")
+    looked_up = RecordingProject("org/looked-up")
+    tickets = RecordingTickets({"key": "DEMO-1", "type": "Story"})
+    ctx = SimpleNamespace(
+        ticket_repository=tickets,
+        repo=lambda: SimpleNamespace(projects={"DEMO": looked_up}),
+    )
 
-    assert repository_for_run(ctx, {"details": {"repository": "saved/repo"}}, project) == "saved/repo"
+    assert repository_for_run(ctx, {"details": {"repository": "saved/repo"}}, supplied) == "saved/repo"
     assert repository_for_run(
-        ctx, {"project": "DEMO", "ticket_key": "DEMO-1", "details": {}}, project
+        ctx, {"project": "DEMO", "ticket_key": "DEMO-1", "details": {}}, supplied
     ) == "org/supplied:"
-    assert project.tickets == [{"key": "DEMO-1", "type": "Story", "epic": ""}]
+    assert supplied.tickets == [{"key": "DEMO-1", "type": "Story", "epic": ""}]
+    assert looked_up.tickets == []
     assert tickets.lookups == ["DEMO-1"]

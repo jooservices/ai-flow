@@ -4,11 +4,17 @@
 # Exclude all private, link-local, and loopback IPs/hosts
 exclude_all_private = true
 
+# Retry a failed external request before it counts as broken (JAIF-598)
+max_retries = 3
+retry_wait_time = 10
+
 # Exclude mail addresses
 include_mail = false
 
 # Exclude known false positives or pending legacy links
 exclude = [
+  # a very large external page that answers 504 for long periods (JAIF-598)
+  'https://github\.com/openai/codex/releases',
   'https://github\.com/jooservices/ai-flow/blob/master/\.github/SECURITY\.md',
   'docs/guide/reference/api\.md',
   'docs/guide/topics/scale-proof\.md',

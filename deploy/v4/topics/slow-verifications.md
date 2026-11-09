@@ -1,0 +1,1 @@
+- [Slow verifications on the Dashboard](../../../docs/v4/slow-verifications.md): tickets waiting for verification longer than 30 minutes with the accounts that tried

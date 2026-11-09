@@ -20,6 +20,13 @@ function incidentPreview(i) {
   if ((payload.notification || {}).configuration_gap) note += ' · ' + payload.notification.configuration_gap;
   return note;
 }
+function slowVerificationsPanel(items) {
+  if (window.AIFlowDashboardAttention) {
+    return AIFlowDashboardAttention.slowVerificationsPanel(items || [], esc);
+  }
+  return '<section class="panel" data-block="slow-verifications" aria-labelledby="dashboard-slow-verifications-title">'
+    + '<div class="empty">Slow verifications are unavailable.</div></section>';
+}
 function controlCanaryPanel(canary) {
   var pending = Number(canary.pending_merges || 0);
   var age = canary.oldest_pending_age_s;
@@ -260,6 +267,7 @@ function renderDashboard() {
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="waiting"><span class="label">Waiting for you</span><span class="kpi-main"><span class="value">' + (S.dashboardWaiting.keys === null && S.dashboardWaiting.loading ? '—' : waitingCount) + '</span>' + dashboardSpark(waitingTrend, 'var(--warn)') + '</span><span class="kpi-delta">' + (waitingCount ? 'Needs a person' : 'All clear') + '</span><span class="detail">Questions, decisions and reviews</span></button>';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="ai-usage"><span class="label">AI usage today</span><span class="kpi-main"><span class="value">' + tok(usage.tokensToday) + ' <small>tokens</small></span>' + dashboardSpark(days.map(function (day) { return usage.tokenDays[day] || 0; }), 'var(--provider-claude)') + '</span><span class="kpi-delta">' + (usage.costToday ? 'Approx. $' + usage.costToday.toFixed(4) : 'Approx. $0.0000') + '</span><span class="detail">Approximate cost today</span></button></div>';
   h += '<section class="panel" data-block="conflict-loss">' + conflictLossBlock() + '</section>';
+  h += slowVerificationsPanel(d.slow_verifications || []);
   h += controlCanaryPanel(d.control_canary || {});
   h += '<section class="panel" data-block="flow" aria-labelledby="dashboard-flow-title"><div class="panel-h"><h2 id="dashboard-flow-title">Flow at a glance</h2><span class="hint">Tickets across every project</span></div><div class="dash-flow">' + flow + '</div></section>';
   h += '<section class="panel" data-block="projects"><div class="panel-h"><h2>Projects</h2><span class="hint">' + projectRows.length + ' shown · choose a project to open its board</span></div>';

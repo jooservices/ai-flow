@@ -21,6 +21,7 @@
   "recent_runs": [],
   "projects": [],
   "tickets": [],
+  "slow_verifications": [],
   "release_readiness": [],
   "release_progress": [],
   "scale_proof": {},
@@ -1169,7 +1170,8 @@
       "already_done": false,
       "ended_age_s": 120
      },
-     "updated_age_s": 3600
+     "updated_age_s": 3600,
+     "slow_verify": null
     }
    ]
   },
@@ -1213,7 +1215,8 @@
      "already_done": null,
      "run": null,
      "last_run": null,
-     "updated_age_s": 3600
+     "updated_age_s": 3600,
+     "slow_verify": null
     }
    ]
   },
@@ -1257,7 +1260,8 @@
      "already_done": null,
      "run": null,
      "last_run": null,
-     "updated_age_s": 3600
+     "updated_age_s": 3600,
+     "slow_verify": null
     }
    ]
   }

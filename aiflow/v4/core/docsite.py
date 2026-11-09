@@ -61,6 +61,7 @@ UI_EXTENSION_VIEWS = {"system-check.js": {"system-check", "projects"},
                       "load-policy.js": {"cc", "machines"},
                       "dashboard-timeouts.js": {"cc"},
                       "dashboard-silent-runs.js": {"cc"},
+                      "dashboard_attention.js": {"cc", "delivery", "work"},
                       "canary_settings.js": {"settings"}}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
@@ -81,6 +82,9 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "dashboardUsageTotals": ("cc",),
     "dashboardUsageShare": ("cc",),
     "dashboardWaitingTickets": ("cc",),
+    "slowVerificationsContent": ("cc",),
+    "slowVerificationsPanel": ("cc",),
+    "addForTicket": ("delivery", "work"),
     "loadDashboardReviewRounds": ("cc",),
     "pollDashboardReviewRounds": ("cc",),
     "reviewRoundsPanel": ("cc",),

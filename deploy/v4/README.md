@@ -7,6 +7,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 ## Topics
 
+- [Post-merge verification](../../docs/v4/post-merge-workflow.md): a workflow re-runs the unit tests and the v4 shards after every push to develop and master and opens a bug ticket on failure
 - [Explained broad exception handlers, first batch](../../docs/v4/broad-except-explained.md): ten handlers carry their reason, one is narrowed; behaviour unchanged
 - [Browser journeys path filter](../../docs/v4/browser-path-filter.md): the browser journeys run only when a pull request changes the console or a browser test, and `Test (v4)` accepts their skip
 - [Focused developer runs and reused pipeline checks](../../docs/v4/focused-runs.md): a developer run runs the tests covering its changes and verification skips pipeline checks that are already green

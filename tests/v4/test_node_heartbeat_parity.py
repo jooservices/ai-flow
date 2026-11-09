@@ -175,7 +175,8 @@ def execute_case(case):
     }
     response = None
     error = None
-    deps = SimpleNamespace(audit=None, audit_in=None, console_user=None, create_join_grant=None,
+    deps = SimpleNamespace(audit=None, audit_in=None, console_user=None, optional_console_user=None,
+                           create_join_grant=None,
                            current_release=None, fleet_release=fleet_release, node_auth=lambda: "node-a",
                            release_assets=None, require_capacity=None)
     app = _App()

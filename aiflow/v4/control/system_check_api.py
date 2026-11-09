@@ -6,8 +6,7 @@ import threading
 from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import system_check
@@ -164,26 +163,3 @@ def require_project_ready(readiness: dict | None, project: str, account: str,
     reason = block_reason(readiness, project, account, assigned_accounts)
     if reason:
         raise HTTPException(409, reason)
-
-
-def register_routes(app: FastAPI, ctx, console_user, optional_console_user) -> None:
-    """Mount authenticated System check and support-bundle endpoints on the control API."""
-    @app.get("/v1/system-check")
-    def system_check_report(request: Request) -> dict:
-        user = (console_user(request, "node.operations.read") if ctx.settings.console_login
-                else optional_console_user(request))
-        return {"nodes": system_check.report_nodes(ctx, user.project_keys if user else None)}
-
-    @app.post("/v1/system-check/run")
-    def system_check_run(request: Request) -> dict:
-        console_user(request, "nodes.manage", target="system-check", action="run")
-        return {"nodes": system_check.refresh_all(ctx, "manual")}
-
-    @app.get("/v1/support-bundle")
-    def support_bundle(request: Request) -> JSONResponse:
-        user = (console_user(request, "node.operations.read") if ctx.settings.console_login
-                else optional_console_user(request))
-        return JSONResponse(system_check.support_bundle(ctx, user.project_keys if user else None), headers={
-            "Content-Disposition": 'attachment; filename="aiflow4-support.json"',
-            "Cache-Control": "no-store",
-        })

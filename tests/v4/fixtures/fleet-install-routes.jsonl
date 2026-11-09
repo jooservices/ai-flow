@@ -23,3 +23,6 @@
 ["get","/v1/nodes/{name}/operations/next","next_node_operation","(name: str, node: str = Depends(node_auth)) -> dict",{}]
 ["post","/v1/nodes/{name}/operations/{operation_id}/checkpoint","checkpoint_node_operation","(name: str, operation_id: str, body: NodeOperationCheckpointBody, node: str = Depends(node_auth)) -> dict",{}]
 ["post","/v1/nodes/{name}/operations/{operation_id}/result","finish_node_operation","(name: str, operation_id: str, body: NodeOperationResultBody, node: str = Depends(node_auth)) -> dict",{}]
+["get","/v1/system-check","system_check_report","(request: Request) -> dict",{}]
+["post","/v1/system-check/run","system_check_run","(request: Request) -> dict",{}]
+["get","/v1/support-bundle","support_bundle","(request: Request) -> JSONResponse",{}]

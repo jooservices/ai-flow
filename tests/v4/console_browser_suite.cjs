@@ -480,7 +480,7 @@ async function exerciseReviews(page, mode) {
   }
 }
 
-async function exerciseMachineAndUserAdministration(page, mode) {
+async function exerciseMachineJoin(page, mode) {
   await page.getByRole('tab', { name: 'Machines and AI', exact: true }).click();
   await page.getByRole('heading', { name: 'Machines and AI', exact: true }).waitFor({ state: 'visible' });
   await page.getByRole('button', { name: 'Add a machine', exact: true }).click();
@@ -516,7 +516,10 @@ async function exerciseMachineAndUserAdministration(page, mode) {
     postData: joinRequest.postData(),
   });
   await page.getByRole('button', { name: 'Copy command', exact: true }).waitFor({ state: 'visible' });
+}
 
+async function exerciseMachineAndUserAdministration(page, mode) {
+  await exerciseMachineJoin(page, mode);
   const addAccount = page.getByRole('button', { name: 'Add AI account', exact: true }).first();
   await addAccount.click();
   await page.getByLabel('AI provider', { exact: true }).selectOption('codex');

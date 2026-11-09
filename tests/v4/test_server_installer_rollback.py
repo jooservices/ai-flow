@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -151,6 +153,93 @@ def test_ensure_copies_backup_when_unique_preservation_move_fails(
     assert backup_path.name == "v1.1.0"
     assert (backup_path / "lib" / "previous-module.sh").read_text(encoding="utf-8") == "old installer files"
     assert not [path for path in installer_root.iterdir() if path.name.startswith(".v1.1.0-")]
+
+
+def test_ensure_retains_staging_backup_when_unique_destination_creation_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    install_dir, installer_root = _prepare_ensure_installers(tmp_path, monkeypatch)
+    replacement_error = OSError("private replacement detail")
+    rollback_error = PermissionError("private rollback detail")
+    destination_error = OSError("private destination detail")
+    _patch_replace(monkeypatch, {
+        REPLACE_STAGED_TO_INSTALL: replacement_error,
+        REPLACE_BACKUP_TO_INSTALL: rollback_error,
+        REPLACE_BACKUP_TO_PREFERRED: OSError("private preferred detail"),
+    })
+    real_mkdtemp = tempfile.mkdtemp
+
+    def fail_unique_destination(*args, **kwargs):
+        if str(kwargs.get("prefix", "")).startswith("v1.1.0.previous-"):
+            raise destination_error
+        return real_mkdtemp(*args, **kwargs)
+
+    monkeypatch.setattr(operations.tempfile, "mkdtemp", fail_unique_destination)
+
+    with pytest.raises(operations.OperationError) as error:
+        operations._ensure_server_installer()
+
+    message = str(error.value)
+    assert "replacement failed (OSError)" in message
+    assert "restoring the previous installer failed (PermissionError)" in message
+    assert "creating a unique backup directory failed (OSError)" in message
+    assert "private" not in message
+    assert isinstance(error.value, operations._InstallerBackupPreservationError)
+    backup_path = error.value.backup_path
+    assert str(backup_path) in message
+    assert backup_path.parent.parent == installer_root
+    assert backup_path.parent.name.startswith(".v1.1.0-")
+    assert backup_path.name == "previous"
+    assert (backup_path / "lib" / "previous-module.sh").read_text(encoding="utf-8") == "old installer files"
+    assert error.value.__cause__ is rollback_error
+    assert error.value.__context__.__cause__ is destination_error
+    assert rollback_error.__context__ is replacement_error
+    assert not install_dir.with_name("v1.1.0.previous").exists()
+
+
+def test_ensure_retains_staging_backup_when_unique_copy_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    install_dir, installer_root = _prepare_ensure_installers(tmp_path, monkeypatch)
+    replacement_error = OSError("private replacement detail")
+    rollback_error = PermissionError("private rollback detail")
+    copy_error = shutil.Error("private copy detail")
+    _patch_replace(monkeypatch, {
+        REPLACE_STAGED_TO_INSTALL: replacement_error,
+        REPLACE_BACKUP_TO_INSTALL: rollback_error,
+        REPLACE_BACKUP_TO_PREFERRED: OSError("private preferred detail"),
+        REPLACE_BACKUP_TO_UNIQUE: OSError("private unique detail"),
+    })
+
+    def fail_copy(source, destination, **kwargs):
+        destination = Path(destination)
+        destination.mkdir(parents=True)
+        (destination / "partial-copy").write_text("partial", encoding="utf-8")
+        raise copy_error
+
+    monkeypatch.setattr(operations.shutil, "copytree", fail_copy)
+
+    with pytest.raises(operations.OperationError) as error:
+        operations._ensure_server_installer()
+
+    message = str(error.value)
+    assert "replacement failed (OSError)" in message
+    assert "restoring the previous installer failed (PermissionError)" in message
+    assert "moving the backup to a unique path failed (OSError)" in message
+    assert "copying the backup to a unique path failed (Error)" in message
+    assert "private" not in message
+    assert isinstance(error.value, operations._InstallerBackupPreservationError)
+    backup_path = error.value.backup_path
+    assert str(backup_path) in message
+    assert backup_path.parent.parent == installer_root
+    assert backup_path.parent.name.startswith(".v1.1.0-")
+    assert backup_path.name == "previous"
+    assert (backup_path / "lib" / "previous-module.sh").read_text(encoding="utf-8") == "old installer files"
+    assert error.value.__cause__ is rollback_error
+    assert error.value.__context__.__cause__ is copy_error
+    assert rollback_error.__context__ is replacement_error
+    assert not [path for path in installer_root.iterdir() if path.name.startswith("v1.1.0.previous-")]
+    assert not install_dir.with_name("v1.1.0.previous").exists()
 
 
 def test_failed_replacement_restores_the_previous_installer_and_reraises_the_original_error(

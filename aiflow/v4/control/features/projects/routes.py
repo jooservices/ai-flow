@@ -36,7 +36,7 @@ from ...github import GitHubApp
 from ...github_connect import GitHubSecretStore, app_metadata
 from ...github_connections import DEFAULT_ID, Connection, verify_token
 from ... import inventory
-from aiflow.v4.control.features.tickets import ticket_repository_of
+from aiflow.v4.control.ticket_helpers import ticket_epic as _ticket_epic_for_context
 
 
 # Keep the original module-level import surface available to callers and tests.
@@ -509,19 +509,7 @@ def _github_catalog(runtime, actor: str, source: str) -> list[dict[str, Any]]:
 
 def _ticket_epic(runtime, ticket: dict[str, Any]) -> str:
     """Resolve a ticket's parent chain to its Jira epic key."""
-    if ticket.get("type") == "Epic":
-        return str(ticket.get("key") or "")
-    parent = str(ticket.get("parent_key") or "")
-    seen: set[str] = set()
-    while parent and parent not in seen:
-        seen.add(parent)
-        ancestor = ticket_repository_of(runtime.ctx).ticket_ancestor(parent)
-        if not ancestor:
-            return parent
-        if ancestor["type"] == "Epic":
-            return parent
-        parent = str(ancestor.get("parent_key") or "")
-    return ""
+    return _ticket_epic_for_context(runtime.ctx, ticket)
 
 def _jira_site(runtime) -> str:
     return str(getattr(runtime.ctx.jira, "site", "") or runtime.ctx.settings.jira_site).rstrip("/")

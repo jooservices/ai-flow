@@ -105,7 +105,9 @@ def context_pack(work: Claim, extra: dict[str, Any]) -> None:
         ticket_context = f"{ticket.get('summary', '')}\n{ticket.get('description', '')}"[:12_000]
         extra["context_pack"] = knowledge.context_pack(
             work.ctx.db, project=ticket.get("project", ""), ticket=ticket["key"],
-            epic=work.epic or "", query=ticket_context, run_id=work.run_id)
+            epic=work.epic or "", query=ticket_context, run_id=work.run_id,
+            exclude_completed_tickets=work.body.step in {"dev", "verify", "qa"},
+            exclude_quota_incidents=work.body.step in {"dev", "verify", "qa"})
     except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
         log.warning("knowledge context pack for %s failed: %s", ticket["key"], type(exc).__name__)
         extra["context_pack"] = {"project": ticket.get("project", ""), "ticket": ticket["key"], "items": []}

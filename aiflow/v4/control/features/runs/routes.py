@@ -178,7 +178,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
     from ...api import log  # noqa: PLC0415 - api imports this module
     runs = _install_run_routes(app, ctx, deps, log)
     master = _install_master_routes(app, ctx, deps, log)
-    return SimpleNamespace(run_heartbeat=runs.run_heartbeat, run_result=runs.run_result, run_release=runs.run_release,
+    return SimpleNamespace(run_result=runs.run_result, run_release=runs.run_release,
                            master_context=master.master_context, master_flow_bugs=master.master_flow_bugs,
                            master_plan_outcome=master.master_plan_outcome, autonomy_report=master.autonomy_report,
                            master_autonomy=master.master_autonomy, master_budget_update=master.master_budget_update,
@@ -192,10 +192,6 @@ def _install_run_routes(app, ctx, deps, log) -> SimpleNamespace:
     refresh_quota_forecast = deps.refresh_quota_forecast
     run_row = deps.run_row
     # --- runs -----------------------------------------------------------------------------------------------
-    @app.post("/v1/runs/{run_id}/heartbeat")
-    def run_heartbeat(run_id: str, body: FenceBody, node: str = Depends(node_auth)) -> dict:
-        return run_inbox_control.heartbeat(ctx, run_row(run_id), run_id, body, node)
-
     @app.post("/v1/runs/{run_id}/result")
     def run_result(run_id: str, body: ResultBody, node: str = Depends(node_auth)) -> dict:
         run = run_row(run_id)
@@ -233,7 +229,7 @@ def _install_run_routes(app, ctx, deps, log) -> SimpleNamespace:
                         account=run["account_id"], node=node, outcome="released" if released else "not_owner")
         return {"released": released}
 
-    return SimpleNamespace(run_heartbeat=run_heartbeat, run_result=run_result, run_release=run_release)
+    return SimpleNamespace(run_result=run_result, run_release=run_release)
 
 
 def _install_master_routes(app, ctx, deps, log) -> SimpleNamespace:

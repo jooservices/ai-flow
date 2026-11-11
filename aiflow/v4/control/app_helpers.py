@@ -265,6 +265,9 @@ def _api():
 
 
 def install(app, ctx, deps) -> SimpleNamespace:
+    from .run_repository_helpers import (matches_run_repository as shared_matches_run_repository,
+                                        settings_for_run as shared_settings_for_run)
+
     def _releases():
         from .api import RELEASES  # noqa: PLC0415 - read when a route runs, so tests may patch it
         return RELEASES
@@ -504,14 +507,10 @@ def install(app, ctx, deps) -> SimpleNamespace:
         return _repository_for_run(ctx, run, project)
 
     def settings_for_run(run: dict[str, Any], project) -> dict[str, Any]:
-        settings = (run.get("details") or {}).get("repository_settings")
-        if isinstance(settings, dict) and settings.get("repo"):
-            return settings
-        return project.settings_for_repo(repository_for_run(run, project))
+        return shared_settings_for_run(ctx, run, project)
 
     def matches_run_repository(repository: str, requested: str) -> bool:
-        requested = requested.strip().lower()
-        return requested in {repository.lower(), repository.split("/", 1)[-1].lower()}
+        return shared_matches_run_repository(repository, requested)
 
     def merge_command(run: dict, number: int, title: str = "", method: str = "squash", node: str = "") -> dict:
         project = ctx.repo().projects.get(run["project"])

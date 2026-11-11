@@ -6,9 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import add_ticket
 from aiflow.v4.control import knowledge
 from aiflow.v4.control.console_auth import issue_session
 from aiflow.v4.control.features.work import claim_extras
+from test_api import join
 
 _SESSION_SECRET = "completed-ticket-context-test-session-secret"
 
@@ -41,6 +43,22 @@ def test_authorized_knowledge_api_keeps_completed_ticket_notes_visible(client, c
 
     assert response.status_code == 200
     assert note["id"] in {item["id"] for item in response.json()["items"]}
+
+
+def test_knowledge_api_denies_unauthenticated_and_unprivileged_reads(client, ctx):
+    ctx.settings.console_session_secret = _SESSION_SECRET
+    note = _item(db=ctx.db, title="Completed ticket checkout note", content="Completed ticket checkout lesson.",
+                 source_type="ticket", source_ref="ALPHA-PRIVATE", ticket_key="ALPHA-PRIVATE")
+
+    client.cookies.clear()
+    unauthenticated = client.get("/v1/knowledge/items", params={"project": "ALPHA", "q": "checkout"})
+    assert unauthenticated.status_code == 401
+
+    client.cookies.set("aiflow4_session", issue_session("stakeholder@example.test", "stakeholder",
+                                                         2_000_000_000, _SESSION_SECRET))
+    unauthorized = client.get("/v1/knowledge/items", params={"project": "ALPHA", "q": "checkout"})
+    assert unauthorized.status_code == 403
+    assert note["id"] not in {item["id"] for item in unauthorized.json().get("items", [])}
 
 
 def _item(db, *, title, content, kind="study_case", source_type="event", source_ref="",
@@ -140,6 +158,52 @@ def test_excluded_notes_do_not_consume_the_eight_search_hits(db, monkeypatch, ve
     assert eligible["id"] not in {item["id"] for item in old_behavior}
     assert eligible["id"] in {item["id"] for item in filtered}
     assert all(not (item["kind"] == "study_case" and item["source_type"] == "ticket") for item in filtered)
+
+
+@pytest.mark.parametrize("vector_search", [False, True], ids=["lexical", "vector"])
+def test_context_pack_forwards_exclusion_before_eight_search_hits(db, monkeypatch, vector_search):
+    vector = "[" + ",".join(["1"] + ["0"] * 383) + "]"
+    monkeypatch.setattr(knowledge, "_embedding", lambda _text: vector if vector_search else None)
+    eligible = _item(db, title="Copper widget checkout case", content="Copper widget check at checkout.",
+                     source_ref="older-copper-pack")
+    db.run("UPDATE knowledge_items SET created_at=now()-interval '1 day' WHERE id=%s", (eligible["id"],))
+    for index in range(12):
+        _item(db, title=f"Copper widget checkout copper widget ticket pack {index}",
+              content="Copper widget checkout copper widget checkout validation lesson.", source_type="ticket",
+              source_ref=f"ALPHA-COPPER-PACK-{index}", ticket_key=f"ALPHA-COPPER-PACK-{index}")
+
+    pack = knowledge.context_pack(db, project="ALPHA", ticket="ALPHA-NO-HISTORY", query="copper widget checkout",
+                                  exclude_completed_tickets=True)
+    pack_ids = {item["id"] for item in pack["items"]}
+    ticket_history_ids = {item["id"] for item in pack["ticket_history"]}
+    epic_history_ids = {item["id"] for item in pack["epic_history"]}
+
+    assert eligible["id"] in pack_ids
+    assert not ticket_history_ids and not epic_history_ids
+    assert all(not (item["kind"] == "study_case" and item["source_type"] == "ticket")
+               for item in pack["items"])
+
+
+def test_claim_stays_fenced_when_knowledge_retrieval_fails(client, ctx, monkeypatch):
+    ticket_key = "TESTWP-CONTEXT-FAIL"
+    add_ticket(ctx.db, ticket_key)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(claim_extras.knowledge, "context_pack", fail)
+    response = client.post("/v1/work/claim", json={"ticket": ticket_key, "account": "claude-01", "step": "dev"},
+                          headers=join(client, "cc"))
+
+    assert response.status_code == 200, response.text
+    claimed = response.json()
+    assert claimed["claimed"] is True
+    assert claimed["context_pack"] == {"project": "TESTWP", "ticket": ticket_key, "items": []}
+    assert claimed["run_id"]
+    assert claimed["fence"] > 0
+    run = ctx.db.one("SELECT ticket_key,step,fence,status FROM runs WHERE id=%s", (claimed["run_id"],))
+    assert run == {"ticket_key": ticket_key, "step": "dev", "fence": claimed["fence"], "status": "running"}
+    assert ctx.leases.holder(ticket_key) == f"{claimed['run_id']}:{claimed['fence']}"
 
 
 def test_scope_approval_status_and_knowledge_visibility_are_preserved(db, monkeypatch):

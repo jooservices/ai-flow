@@ -71,6 +71,8 @@ class _InstallerBackupPreservationError(OperationError):
                  replacement_error: OSError | None = None, restore_error: OSError | None = None):
         self.backup_path = backup_path
         self.failures = tuple(failures)
+        self.replacement_error = replacement_error
+        self.restore_error = restore_error
         labels = {
             "creating the preferred backup path": "preferred path creation",
             "moving the backup to the preferred path": "preferred move",
@@ -79,13 +81,25 @@ class _InstallerBackupPreservationError(OperationError):
             "moving the backup to a unique path": "unique move",
             "copying the backup to a unique path": "copy",
         }
-        details = ", ".join(f"{labels.get(action, action)}={type(error).__name__}"
-                             for action, error in failures)
+        failure_details = [f"{labels.get(action, action)}={type(error).__name__}" for action, error in failures]
+        details = ", ".join(failure_details)
         message = f"Installer backup retained at {backup_path}; preservation={details}"
         if replacement_error is not None and restore_error is not None:
             message = (f"Installer backup retained at {backup_path}; "
                        f"replacement={type(replacement_error).__name__}; "
                        f"rollback={type(restore_error).__name__}; preservation={details}")
+        if len(message) > 300:
+            compact = f"backup={backup_path}"
+            if replacement_error is not None and restore_error is not None:
+                compact += (f"; replacement={type(replacement_error).__name__}; "
+                            f"rollback={type(restore_error).__name__}")
+            selected: list[str] = []
+            for detail in reversed(failure_details):
+                candidate = f"{compact}; {', '.join([detail, *selected])}"
+                if len(candidate) > 300:
+                    break
+                selected.insert(0, detail)
+            message = f"{compact}; {', '.join(selected)}" if selected else compact[:300]
         super().__init__(message)
 
 
@@ -105,6 +119,11 @@ class _InstallerRollbackError(OperationError):
                    f"rollback={type(self.restore_error).__name__}")
         if self.cleanup_error is not None:
             message += f"; staging cleanup={type(self.cleanup_error).__name__}"
+        if len(message) > 300:
+            message = (f"backup={self.backup_path}; replacement={type(self.replacement_error).__name__}; "
+                       f"rollback={type(self.restore_error).__name__}")
+            if self.cleanup_error is not None:
+                message += f"; staging cleanup={type(self.cleanup_error).__name__}"
         return message
 
     def note_cleanup_failure(self, error: OSError) -> None:

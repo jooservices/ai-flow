@@ -17,6 +17,8 @@ other checks. The job is path-filtered, times out at seven minutes, and is not a
    changed lines are under 85 percent covered.
 5. **Codecov upload** — `codecov/codecov-action` uploads `coverage.xml` (free for a public repository). The action is
    pinned to a commit SHA with a version comment, like the other workflows.
+   The upload is skipped for Dependabot pull requests: they cannot read the `CODECOV_TOKEN` Actions secret and Codecov
+   answers 400 for a protected branch. The 85 percent diff-cover gate still runs for them.
 
 ## README badges
 

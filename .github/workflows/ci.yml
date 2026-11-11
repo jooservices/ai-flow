@@ -520,8 +520,10 @@ jobs:
           BASE: ${{ steps.touched.outputs.base }}
         run: uv run --frozen diff-cover coverage.xml --compare-branch="$BASE" --fail-under=85
 
+      # Dependabot pull requests cannot read the CODECOV_TOKEN Actions secret (Codecov answers 400 on a protected branch), so the
+      # upload is skipped for them; the 85 percent diff-cover gate above still runs.
       - name: Upload coverage to Codecov
-        if: steps.touched.outputs.run == 'true'
+        if: steps.touched.outputs.run == 'true' && github.actor != 'dependabot[bot]'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

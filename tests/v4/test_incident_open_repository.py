@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 
-from aiflow.v4.control import incidents
+from aiflow.v4.control import incidents, notify
 from aiflow.v4.control.features.incidents import repository as incident_repository
 from aiflow.v4.control.platform.events import wiring
 
@@ -27,6 +27,95 @@ def test_opening_a_closed_incident_creates_a_fresh_open_row_and_event(ctx, db):
     assert rows[0]["title"] == "first" and rows[0]["detail"] == "initial"
     assert rows[1]["closed_at"] is None and rows[1]["title"] == "second" and rows[1]["detail"] == "reopened"
     assert db.one("SELECT count(*) AS n FROM domain_events WHERE type='incident.opened'")["n"] == 2
+
+
+def test_duplicate_open_preserves_original_incident_fields_and_publishes_no_event(ctx, db):
+    assert incidents.open_incident(ctx, "duplicate_case", "subject", "warning", "original", "first detail") is True
+
+    assert incidents.open_incident(ctx, "duplicate_case", "subject", "critical", "changed", "changed detail") is False
+
+    row = db.one("SELECT severity,title,detail FROM incidents WHERE kind=%s AND subject=%s",
+                 ("duplicate_case", "subject"))
+    assert row == {"severity": "warning", "title": "original", "detail": "first detail"}
+    assert db.one("SELECT count(*) AS n FROM domain_events WHERE type='incident.opened'")["n"] == 1
+
+
+def test_incident_without_a_configured_channel_is_not_marked_notified(ctx, db):
+    assert notify.configured_channels(ctx, "critical_incident") == []
+
+    assert incidents.open_incident(ctx, "no_channel_case", "subject", "critical", "title", "detail") is True
+
+    assert db.one("SELECT notified FROM incidents WHERE kind=%s", ("no_channel_case",))["notified"] is False
+    assert db.one("SELECT count(*) AS n FROM notification_deliveries")["n"] == 0
+
+
+def test_reopening_while_alert_delivery_is_pending_does_not_duplicate_event_or_alert(ctx, db, monkeypatch):
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) == 1:
+            raise RuntimeError("mail relay down")
+        return ["email"]
+
+    monkeypatch.setattr(notify, "send", flaky)
+
+    assert incidents.open_incident(ctx, "pending_alert_case", "subject", "critical", "title", "detail") is True
+    delivery = db.one("SELECT status,attempts FROM domain_event_deliveries WHERE listener='incidents.alert'")
+    assert delivery == {"status": "pending", "attempts": 1}
+
+    assert incidents.open_incident(ctx, "pending_alert_case", "subject", "critical", "title", "detail") is False
+
+    assert len(calls) == 1
+    assert db.one("SELECT count(*) AS n FROM domain_events WHERE type='incident.opened'")["n"] == 1
+    assert db.one("SELECT count(*) AS n FROM domain_event_deliveries WHERE listener='incidents.alert'")["n"] == 1
+
+    db.run("UPDATE domain_event_deliveries SET next_attempt_at=now() - interval '1 second'")
+    wiring.dispatcher_for(ctx).run_once()
+
+    assert len(calls) == 2
+    assert db.one("SELECT notified FROM incidents WHERE kind=%s", ("pending_alert_case",))["notified"] is True
+    assert db.one("SELECT count(*) AS n FROM domain_events WHERE type='incident.opened'")["n"] == 1
+
+
+def _fail_after_telemetry_write(ctx, monkeypatch):
+    original_emit = ctx.events.emit
+
+    def fail_after_emit(event_type, **fields):
+        original_emit(event_type, **fields)
+        raise RuntimeError("telemetry listener failed")
+
+    monkeypatch.setattr(ctx.events, "emit", fail_after_emit)
+
+
+def _assert_failed_publish_was_rolled_back(db):
+    assert db.one("SELECT count(*) AS n FROM domain_events WHERE type='incident.opened'")["n"] == 0
+    assert db.one("SELECT count(*) AS n FROM domain_event_deliveries")["n"] == 0
+    assert db.one("SELECT count(*) AS n FROM events WHERE type='incident.opened'")["n"] == 0
+    assert db.one("SELECT count(*) AS n FROM notification_deliveries")["n"] == 0
+    assert db.one("SELECT count(*) AS n FROM knowledge_items WHERE source_type='incident'")["n"] == 0
+
+
+def test_in_transaction_listener_failure_rolls_back_publish_but_keeps_incident_without_outer_tx(
+        ctx, db, monkeypatch):
+    _fail_after_telemetry_write(ctx, monkeypatch)
+
+    with pytest.raises(RuntimeError, match="telemetry listener failed"):
+        incidents.open_incident(ctx, "listener_error_case", "subject", "critical", "title", "detail")
+
+    _assert_failed_publish_was_rolled_back(db)
+    assert db.one("SELECT count(*) AS n FROM incidents WHERE kind=%s", ("listener_error_case",))["n"] == 1
+
+
+def test_in_transaction_listener_failure_rolls_back_incident_with_outer_tx(ctx, db, monkeypatch):
+    _fail_after_telemetry_write(ctx, monkeypatch)
+
+    with pytest.raises(RuntimeError, match="telemetry listener failed"):
+        with db.transaction():
+            incidents.open_incident(ctx, "outer_listener_error_case", "subject", "critical", "title", "detail")
+
+    _assert_failed_publish_was_rolled_back(db)
+    assert db.one("SELECT count(*) AS n FROM incidents WHERE kind=%s", ("outer_listener_error_case",))["n"] == 0
 
 
 def test_concurrent_open_attempts_insert_and_publish_only_once(ctx, db):

@@ -80,6 +80,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Release routes structure](../../docs/v4/release-install-structure.md): the release routes split into files on disk, downloads and node reports
 - [Route install registrations](../../docs/v4/route-install-registrations.md): a recorded list of what every feature's install function registers, kept identical when an install is split
 - [Console route install structure](../../docs/v4/console-install-structure.md): the console feature's session, people, view-as, layout, notification and licensing route groups
+- [Console page assembly](../../docs/v4/console-build.md): the console build module joins manifest fragments, inserts trusted extensions, and prepares raw and served HTML
 - [Business routes structure](../../docs/v4/business-install-structure.md): the business, stakeholder and state routes split into route groups and steps
 - [Runs routes structure](../../docs/v4/runs-install-structure.md): the runs routes split into run and master route groups, with the autonomy report and plan outcome moved out
 - [Version release routes structure](../../docs/v4/version-release-install-structure.md): the version release routes split into the offer and claim and the completion route groups, over step modules

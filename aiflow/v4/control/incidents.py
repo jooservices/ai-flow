@@ -13,6 +13,7 @@ from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, locked_version, normalize_stacks, toolchain_gaps
 from . import knowledge
 from . import notify
+from .features.incidents import repository as incident_repository
 from .repositories import flow_bugs as flow_bug_repository
 from .features.tickets import ticket_repository_of
 
@@ -167,15 +168,13 @@ def suggested_flow_fix(candidate: dict) -> str:
 
 def open_incident(ctx, kind: str, subject: str, severity: str, title: str, detail: str = "") -> bool:
     """True when a new incident was opened (so callers alert once, not every pass)."""
-    row = ctx.db.one("INSERT INTO incidents (kind, subject, severity, title, detail) VALUES (%s,%s,%s,%s,%s)"
-                     " ON CONFLICT (kind, subject) WHERE closed_at IS NULL DO NOTHING RETURNING id",
-                     (kind, subject, severity, title, detail))
-    if row:
+    incident_id = incident_repository.insert_open_incident(ctx.db, kind, subject, severity, title, detail)
+    if incident_id is not None:
         from .features.incidents.events import IncidentOpened
         from .platform.events.wiring import publish_for
-        publish_for(ctx, IncidentOpened(incident_id=row["id"], kind=kind, subject=subject, severity=severity, title=title,
+        publish_for(ctx, IncidentOpened(incident_id=incident_id, kind=kind, subject=subject, severity=severity, title=title,
                                         detail=detail), deliver_now=True)
-    return bool(row)
+    return incident_id is not None
 
 
 def close_incident(ctx, kind: str, subject: str, note: str = "") -> None:

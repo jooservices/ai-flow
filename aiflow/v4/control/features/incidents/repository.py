@@ -144,6 +144,16 @@ def mark_notified(db, incident_id: int, notified: bool) -> None:
     db.run("UPDATE incidents SET notified=%s WHERE id=%s", (notified, incident_id))
 
 
+def insert_open_incident(db, kind: str, subject: str, severity: str, title: str, detail: str) -> int | None:
+    """Insert an incident unless one with this open key already exists; return its id when inserted."""
+    row = db.one("INSERT INTO incidents (kind, subject, severity, title, detail) VALUES (%s,%s,%s,%s,%s)"
+                 " ON CONFLICT (kind, subject) WHERE closed_at IS NULL DO NOTHING RETURNING id",
+                 (kind, subject, severity, title, detail))
+    if row is None:
+        return None
+    return int(row["id"])
+
+
 def lock_ticket_handoff(db, ticket_key: str) -> None:
     """Serialize hand-off decisions of one ticket for the rest of the transaction."""
     db.one("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (f"ticket-handoff:{ticket_key}",))

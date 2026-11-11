@@ -179,6 +179,60 @@ def test_source_read_errors_propagate(tmp_path, monkeypatch, manifest, fragments
         assert (caught.value.encoding, caught.value.reason) == ("utf-8", "invalid start byte")
 
 
+def test_unreadable_manifest_fragment_propagates_without_returning_a_page(tmp_path, monkeypatch):
+    source_dir = _source_tree(tmp_path, monkeypatch)
+    fragment = source_dir / "page.html"
+    read_text = type(fragment).read_text
+
+    def read_with_permission_error(path, *args, **kwargs):
+        if path == fragment:
+            raise PermissionError(13, "Permission denied", str(path))
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(fragment), "read_text", read_with_permission_error)
+    result = None
+    with pytest.raises(PermissionError) as caught:
+        result = console_build.build_console_page()
+    assert result is None
+    assert (caught.value.errno, caught.value.strerror, caught.value.filename) == (
+        13, "Permission denied", str(fragment)
+    )
+
+
+def test_unreadable_extension_propagates_without_returning_a_page(tmp_path, monkeypatch):
+    _source_tree(tmp_path, monkeypatch)
+    _write_extensions(tmp_path)
+    extension = tmp_path / "security.js"
+    read_text = type(extension).read_text
+
+    def read_with_permission_error(path, *args, **kwargs):
+        if path == extension:
+            raise PermissionError(13, "Permission denied", str(path))
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(extension), "read_text", read_with_permission_error)
+    result = None
+    with pytest.raises(PermissionError) as caught:
+        result = console_build.build_console_page()
+    assert result is None
+    assert (caught.value.errno, caught.value.strerror, caught.value.filename) == (
+        13, "Permission denied", str(extension)
+    )
+
+
+def test_manifest_omission_does_not_change_the_assembled_page(tmp_path, monkeypatch):
+    source_dir = _source_tree(tmp_path, monkeypatch, fragments={"page.html": BASE_TEMPLATE})
+    _write_extensions(tmp_path)
+    expected_template = console_build.console_template()
+    expected_page = console_build.build_console_page()
+    (source_dir / "unlisted.html").write_text("UNLISTED CONTENT", encoding="utf-8")
+
+    assert console_build.console_source_names() == ["page.html"]
+    assert console_build.console_template() == expected_template == BASE_TEMPLATE
+    assert console_build.build_console_page() == expected_page
+    assert "UNLISTED CONTENT" not in expected_page
+
+
 def test_empty_manifest_is_empty_template_and_absent_manifest_propagates(tmp_path, monkeypatch):
     source_dir = _source_tree(tmp_path, monkeypatch, manifest="", fragments={})
     assert console_build.console_source_names() == []

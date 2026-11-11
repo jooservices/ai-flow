@@ -32,6 +32,7 @@ def test_coverage_job_is_parallel_path_filtered_and_under_seven_minutes():
     assert upload["uses"].startswith("codecov/codecov-action@")
     assert "codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1" in CI_TEXT
     assert upload["with"]["files"] == "coverage.xml"
+    assert "github.actor != 'dependabot[bot]'" in upload["if"]  # bots cannot read CODECOV_TOKEN; diff-cover still gates them
     diff = next(step for step in job["steps"] if step["name"].startswith("Diff coverage"))
     assert "--fail-under=85" in diff["run"]
     assert "pull_request" in diff["if"] and "merge_group" in diff["if"]

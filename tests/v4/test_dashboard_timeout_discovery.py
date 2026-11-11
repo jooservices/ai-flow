@@ -1,17 +1,26 @@
 """The timeout analytics endpoint belongs to the discovered dashboard router."""
 from __future__ import annotations
 
+import copy
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 
-from aiflow.v4.control import api, route_deps
+from aiflow.v4.control import api, login, route_deps
+from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.route_registry import concrete_routes
 from aiflow.v4.control.routes import dashboard
+from test_dashboard_timeouts import add_dev_run
 
 
 TIMEOUT = ("GET", "/v1/dashboard/timeouts")
 SILENT_RUNS = ("GET", "/v1/dashboard/silent-runs")
+SESSION_SECRET = "dashboard-timeout-discovery-session-secret"
+SESSION_EXPIRY = 2_000_000_000
 
 
 def _matches(routes, expected):
@@ -31,6 +40,62 @@ def test_timeout_route_is_discovered_once_and_silent_runs_stays_mounted(ctx):
     assert len(silent_runs) == 1
     assert silent_runs[0].endpoint.__module__ == "aiflow.v4.control.dashboard_silent_routes"
     assert not hasattr(api, "dashboard_timeout_routes")
+
+
+def test_timeout_route_default_window_and_query_validation(client):
+    response = client.get("/v1/dashboard/timeouts")
+
+    assert response.status_code == 200
+    assert response.json() == {"days": 30, "developer_runs": 0, "timeouts": 0, "timeout_share_pct": 0.0,
+                               "target_share_pct": 10.0, "daily": [], "tickets": []}
+    for days in (1, 90):
+        accepted = client.get("/v1/dashboard/timeouts", params={"days": days})
+        assert accepted.status_code == 200 and accepted.json()["days"] == days
+    for days in (0, 91, "not-an-integer", str(10**100)):
+        assert client.get("/v1/dashboard/timeouts", params={"days": days}).status_code == 422
+
+
+def test_http_scope_isolation_across_apps_and_login_modes(ctx):
+    contexts = [replace(ctx, settings=copy.copy(ctx.settings)) for _ in range(2)]
+    for app_ctx, login_enabled in zip(contexts, (False, True)):
+        app_ctx.settings.console_login = login_enabled
+        app_ctx.settings.console_session_secret = SESSION_SECRET
+    for project in ("TESTWP", "OTHER"):
+        add_dev_run(ctx.db, ticket=f"{project}-901", project=project, outcome="timeout")
+    users = (("timeout-first@example.test", "TESTWP"), ("timeout-second@example.test", "OTHER"))
+    for email, project in users:
+        login.seed_user(ctx.db, email, "business")
+        ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", ([project], email))
+
+    apps = [api.create_app(app_ctx) for app_ctx in contexts]
+    for app in apps:
+        app.state.sync_accounts()
+    assert all(app.state.ctx is app_ctx for app, app_ctx in zip(apps, contexts))
+    clients = [TestClient(app) for app in apps]
+    for client, (email, _project) in zip(clients, users):
+        client.cookies.set(COOKIE_NAME, issue_session(email, "business", SESSION_EXPIRY, SESSION_SECRET))
+    start = Barrier(2)
+
+    def request(client):
+        start.wait(timeout=10)
+        return client.get("/v1/dashboard/timeouts", params={"days": 1})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(request, clients))
+    assert [response.status_code for response in responses] == [200, 200]
+    for response, (_email, project) in zip(responses, users):
+        data = response.json()
+        assert data["days"] == 1 and (data["developer_runs"], data["timeouts"]) == (1, 1)
+        assert {row["project"] for row in data["tickets"]} == {project}
+        assert {row["ticket"] for row in data["tickets"]} == {f"{project}-901"}
+
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", ([], users[0][0]))
+    empty = clients[0].get("/v1/dashboard/timeouts", params={"days": 1}).json()
+    assert (empty["developer_runs"], empty["timeouts"], empty["tickets"]) == (0, 0, [])
+    ctx.db.run("UPDATE console_users SET project_keys=NULL WHERE email=%s", (users[0][0],))
+    unrestricted = clients[0].get("/v1/dashboard/timeouts", params={"days": 1}).json()
+    assert (unrestricted["developer_runs"], unrestricted["timeouts"]) == (2, 2)
+    assert {row["project"] for row in unrestricted["tickets"]} == {"TESTWP", "OTHER"}
 
 
 @pytest.mark.parametrize("console_login", [True, False])

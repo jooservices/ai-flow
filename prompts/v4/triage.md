@@ -57,17 +57,21 @@ Recent Jira comments (newest first):
 Repository: {repo}
 Read-only checkout: branch {base}
 
-End with exactly one of these formats and put no text after the final field:
+End with exactly one of these formats and put no text after the final field. Always include the final
+`KNOWLEDGE_USED_IDS` field after the format-specific fields. List only delivered knowledge item IDs you relied on; use
+`[]` when none were relied on or no knowledge pack was supplied.
 
 DECISION: ANSWER
 ANSWER: <the clear answer the developer needs; cite the register entry (D<id>) when one applies>
 WHY: <where the answer is supported by the ticket, spec, code or register>
 CLASS: <optional: missing_tool_or_environment | policy_message | ambiguity_repository | decision_already_taken>
+KNOWLEDGE_USED_IDS: [<numeric ids>]
 
 DECISION: AMEND
 CRITERION: <AC number, for example AC3, of an acceptance criterion that cannot be met in this environment>
 NARROWED: <the narrowed criterion that can be met here, or the single word REMOVED>
 WHY: <why it cannot be met here, for example the evidence needs a machine that does not exist>
+KNOWLEDGE_USED_IDS: [<numeric ids>]
 
 DECISION: ESCALATE
 CLASS: <new_business_decision | irreversible_or_production>
@@ -76,3 +80,4 @@ OPTIONS: <at least two options, one per line, each starting with "- ">
 RECOMMENDED: <the option you recommend as the default and why in a few words>
 TOPIC: <a short title of the decision, for example "Default plan for new installations">
 KEYWORDS: <two to five words that every future question about this same decision would contain, separated by commas>
+KNOWLEDGE_USED_IDS: [<numeric ids>]

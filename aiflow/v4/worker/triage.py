@@ -17,7 +17,10 @@ from .notes import note
 
 log = logging.getLogger("aiflow4.triage")
 DECISION = re.compile(r"^DECISION:\s*(ANSWER|ESCALATE|AMEND)\b", re.I | re.M)
-FIELD = re.compile(r"^(ANSWER|WHY|CLASS|OPTIONS|RECOMMENDED|TOPIC|KEYWORDS|CRITERION|NARROWED):[ \t]*", re.I | re.M)
+FIELD = re.compile(
+    r"^(ANSWER|WHY|CLASS|OPTIONS|RECOMMENDED|TOPIC|KEYWORDS|CRITERION|NARROWED|KNOWLEDGE_USED_IDS):[ \t]*",
+    re.I | re.M,
+)
 ESCALATION_CLASSES = ("missing_tool_or_environment", "policy_message", "unreachable_criterion", "ambiguity_repository",
                       "decision_already_taken", "new_business_decision", "irreversible_or_production")
 

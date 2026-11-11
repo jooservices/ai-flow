@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
+from threading import Barrier, Lock
 from types import SimpleNamespace
 
 import pytest
@@ -27,14 +27,17 @@ JIRA_PATHS = {
 
 
 class _Auth:
-    def __init__(self, status=STATUS):
+    def __init__(self, status=STATUS, status_barrier: Barrier | None = None):
         self.value = status
         self.calls = 0
         self.lock = Lock()
+        self.status_barrier = status_barrier
 
     def status(self):
         with self.lock:
             self.calls += 1
+        if self.status_barrier:
+            self.status_barrier.wait(timeout=5)
         return dict(self.value)
 
 
@@ -83,6 +86,28 @@ def test_isolated_router_uses_each_request_app_context_and_keeps_reads_independe
     assert second_auth.calls == 9
 
 
+def test_simultaneous_requests_use_their_own_app_contexts():
+    both_apps_in_status = Barrier(2)
+    first_auth = _Auth({"source": "first"}, both_apps_in_status)
+    second_auth = _Auth({"source": "second"}, both_apps_in_status)
+    first_client = TestClient(_simple_app("first-token", first_auth))
+    second_client = TestClient(_simple_app("second-token", second_auth))
+
+    def get_status(client, token):
+        response = client.get("/v1/integrations/jira", headers={"Authorization": f"Bearer {token}"})
+        return response.status_code, response.json()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(get_status, first_client, "first-token")
+        second = pool.submit(get_status, second_client, "second-token")
+        first_result, second_result = first.result(), second.result()
+
+    assert first_result == (200, {"source": "first"})
+    assert second_result == (200, {"source": "second"})
+    assert first_auth.calls == 1
+    assert second_auth.calls == 1
+
+
 @pytest.mark.parametrize("console_login", [False, True])
 def test_assembled_app_gate_preserves_owner_session_and_denial_behavior(ctx, monkeypatch, console_login):
     auth = _Auth()
@@ -102,6 +127,11 @@ def test_assembled_app_gate_preserves_owner_session_and_denial_behavior(ctx, mon
         else:
             assert missing.status_code == 401
             assert missing.headers["www-authenticate"] == "Bearer"
+
+        empty_bearer = client.get("/v1/integrations/jira", headers={"Authorization": "Bearer "})
+        assert empty_bearer.status_code == 401
+        assert empty_bearer.json() == {"detail": "owner authorization required"}
+        assert empty_bearer.headers["www-authenticate"] == "Bearer"
 
         wrong = client.get("/v1/integrations/jira", headers={"Authorization": "Bearer wrong"})
         assert wrong.status_code == 401

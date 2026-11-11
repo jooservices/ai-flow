@@ -70,3 +70,27 @@ def test_core_scanner_matches_legacy_scanner_for_every_pattern():
         assert type(core_caught.value) is type(legacy_caught.value) is guard.Rejected
         assert str(core_caught.value) == str(legacy_caught.value) == MESSAGE.format(name=name)
         assert sample not in str(core_caught.value)
+
+
+@pytest.mark.parametrize("field", ("tags", "source", "repo"))
+def test_legacy_entry_rejects_secret_metadata_without_echoing_value(field):
+    secret = "ghp_" + "m" * 30
+    metadata = {
+        "tags": {"tags": [secret]},
+        "source": {"source": {"note": secret}},
+        "repo": {"repo": secret},
+    }[field]
+    entry = {
+        "kind": "lesson",
+        "scope": "project",
+        "namespace": "JOOservices",
+        "project": "JAVM",
+        "title": "Safe title",
+        "body": "Safe body",
+        **metadata,
+    }
+
+    with pytest.raises(guard.Rejected) as caught:
+        guard.check_entry(entry)
+
+    assert secret not in str(caught.value)

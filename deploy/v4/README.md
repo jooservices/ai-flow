@@ -114,6 +114,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Developer run steps](../../docs/v4/dev-run-steps.md): prepare, brief, run, collect and publish with setup shared by developer and verification workers
 - [Role health](../../docs/v4/role-health.md): only real failures count; role capacity preserves two enabled accounts and limits switches to half the pool, with shared-cause incidents and immediate recovery when a tool or run history is fixed
 - [Verification retry after a missing verdict](../../docs/v4/verification-retry.md): retry an eligible account after a missing verdict and count its failure toward role health from the second consecutive result
+- [Untried verifier priority](../../docs/v4/verify-retry-peer-priority.md): keep eligible accounts without a no-verdict result ahead of prior no-verdict accounts
 - [Bar a verifier after two missing verdicts](../../docs/v4/verify-account-bar.md): two consecutive no-verdict results bar that account from the ticket until a new development round resets the count
 - [Code quality gate](../../docs/v4/code-quality.md): tool-independent lint, complexity, function-size and layer checks with a shrink-only baseline
 - [Duplicate block check](../../docs/v4/duplicate-blocks.md): find repeated blocks of eight or more normalized Python lines and keep their baseline shrink-only

@@ -11,9 +11,6 @@ from ...features.tickets import ticket_repository_of
 from .eligibility_scope import Scope
 from .repository import WorkRepository
 
-VERIFY_NO_VERDICT_RETRY_WAIT = timedelta(minutes=15)
-
-
 def verify_candidates(scope: Scope) -> list[dict]:
     """Collect verification tickets whose completed development run belongs to another account."""
     if "verify" not in scope.roles:
@@ -29,10 +26,12 @@ def verify_candidates(scope: Scope) -> list[dict]:
         candidate = _verify_candidate(scope, ticket, verify_cooling, ticket_history, peer_eligibility_cache)
         if not candidate:
             continue
-        if scope.verify_retry_guard and not _verify_retry_fallback_due(scope, ticket_history):
+        if scope.verify_retry_guard:
             # Keep the first reviewer when eligible; peer probes skip this preference to avoid mutual eligibility.
             first = first_review_account(scope, ticket["key"])
-            if first and first != scope.account.id and preferred_review_available(scope, first, ticket):
+            first_is_untried = first and not any(ticket_history.by_account.get(first, []))
+            if (first and first != scope.account.id and first_is_untried
+                    and preferred_review_available(scope, first, ticket)):
                 continue
         out.append(candidate)
     return out
@@ -75,21 +74,12 @@ def _verify_account_barred(attempts: list[bool]) -> bool:
     return len(attempts) >= 2 and bool(attempts[0] and attempts[1])
 
 
-def _verify_retry_fallback_due(scope: Scope, history: VerifyTicketHistory) -> bool:
-    """Allow a prior no-verdict verifier back after peers had time to claim the retry."""
-    attempts = history.by_account.get(scope.account.id, [])
-    ended_at = history.last_no_verdict_ended_at
-    return bool(any(attempts) and ended_at and scope.now() - ended_at >= VERIFY_NO_VERDICT_RETRY_WAIT)
-
-
 def _verify_retry_blocked(scope: Scope, ticket: dict, dev_account: str, history: VerifyTicketHistory,
                           peer_eligibility_cache: dict[tuple[str, str], set[str]] | None = None) -> bool:
     attempts = history.by_account.get(scope.account.id, [])
     if _verify_account_barred(attempts):
         return True
     if not any(attempts):
-        return False
-    if _verify_retry_fallback_due(scope, history):
         return False
     return _untried_verify_peer(scope, ticket, dev_account, history, peer_eligibility_cache)
 

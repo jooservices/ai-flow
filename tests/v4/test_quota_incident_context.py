@@ -98,12 +98,23 @@ def test_invalid_and_boundary_incident_references_are_withheld_without_cast_erro
     monkeypatch.setattr(knowledge, "_embedding", lambda _text: None)
     quota_id = _incident(db, "quota_high")
     nonquota_id = _incident(db, "node_down")
-    max_id = _incident(db, "quota_prediction", 9223372036854775807)
+    short_zero_id = _incident(db, "node_down")
+    long_zero_id = _incident(db, "node_down")
+    max_id = _incident(db, "node_down", 9223372036854775807)
     eligible = _item(db, title="Reference resolution validation control",
                      content="Reference resolution validation lesson.",
                      source_type="incident", source_ref=str(nonquota_id))
+    short_zero = _item(db, title="Reference resolution validation short zero reference",
+                       content="Reference resolution validation short zero lesson.",
+                       source_type="incident", source_ref=f"000{short_zero_id}")
+    long_zero = _item(db, title="Reference resolution validation long zero reference",
+                      content="Reference resolution validation long zero lesson.",
+                      source_type="incident", source_ref=f"{'0' * 300}{long_zero_id}")
+    eligible_max = _item(db, title="Reference resolution validation bigint maximum",
+                         content="Reference resolution validation maximum lesson.",
+                         source_type="incident", source_ref=str(max_id))
     values = ["", "nondigit", f"+{quota_id}", f" {quota_id}", f"{quota_id} ", "9876543210",
-              str(max_id), "9223372036854775808", "9" * 400, "0" * 300 + str(quota_id), "0" * 400]
+              "9223372036854775808", "9" * 400, "0" * 300 + str(quota_id), "0" * 400]
     excluded = [_item(db, title=f"Reference resolution validation {index}",
                       content="Reference resolution validation quota lesson.", source_type="incident", source_ref=value)
                for index, value in enumerate(values)]
@@ -114,13 +125,65 @@ def test_invalid_and_boundary_incident_references_are_withheld_without_cast_erro
                                   exclude_quota_incidents=True)
 
     filtered_ids = {item["id"] for item in filtered}
-    assert eligible["id"] in filtered_ids
+    eligible_ids = {eligible["id"], short_zero["id"], long_zero["id"], eligible_max["id"]}
+    assert eligible_ids <= filtered_ids
     assert not {item["id"] for item in excluded} & filtered_ids
-    assert eligible["id"] in {item["id"] for item in pack["items"]}
+    assert eligible_ids <= {item["id"] for item in pack["items"]}
     assert not {item["id"] for item in excluded} & {item["id"] for item in pack["items"]}
     default_hits = knowledge.search_items(db, project="ALPHA", q="reference resolution validation", limit=100,
                                           approved_only=True, kinds=("study_case",))
     assert {item["id"] for item in excluded} <= {item["id"] for item in default_hits}
+
+
+def test_knowledge_failure_during_claim_keeps_registered_run_and_lease_fence(client, ctx, monkeypatch):
+    from aiflow.v4.control.features.work import claim as claim_module
+    from aiflow.v4.control.features.work import claim_steps
+    from aiflow.v4.control.features.work_routes.bodies import ClaimBody
+
+    ticket = {"key": f"TESTWP-QUOTA-{uuid.uuid4().hex[:8]}", "project": "TESTWP", "step": "dev",
+              "summary": "Claim survives unavailable knowledge", "description": "Acceptance criteria",
+              "labels": ["aiflow-ready"], "priority": "Medium", "type": "Task", "probation": False}
+    deps = SimpleNamespace(eligible=lambda *_args, **_kwargs: [ticket], master_candidate=lambda *_args: ticket,
+                           releases=lambda: None, ticket_epic=lambda _ticket: "", capacity_history=lambda: [],
+                           related_hits=lambda _ticket: [], bot_identity=lambda: ("AI Flow", "aiflow[bot]"))
+    body = ClaimBody(ticket=ticket["key"], account="claude-01", step="dev")
+
+    monkeypatch.setattr(claim_steps.load_policy_api, "work_claim_capacity",
+                        lambda *_args: ({"max_node_runs": 10, "hostname": "", "max_host_runs": None}, None))
+    monkeypatch.setattr(claim_steps.licensing, "enforce_work_entitlement", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(claim_steps.licensing, "enforce_project_entitlement", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(claim_steps.rollout, "node_compatible", lambda *_args: {"compatible": True, "reason": ""})
+    monkeypatch.setattr(claim_steps.triage_claim_service, "development_eligible", lambda *_args: True)
+    monkeypatch.setattr(claim_steps.triage_claim_service, "authorize_development", lambda *_args: (True, None))
+    monkeypatch.setattr(claim_steps.hotfiles, "predict", lambda *_args, **_kwargs: {"hot": []})
+    monkeypatch.setattr(claim_steps.hotfiles, "reserve", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(claim_steps.capacity, "estimate", lambda *_args: {
+        "tokens": {"low": 10, "high": 20}, "time_minutes": {"low": 1, "high": 2}, "size": "S"})
+    monkeypatch.setattr(claim_steps.capacity, "with_active_quota_reservations", lambda _db, values: values)
+    monkeypatch.setattr(claim_steps.capacity, "account_fit", lambda *_args: {
+        "known": False, "fits": False, "left_tokens": None, "reason": "unknown"})
+    monkeypatch.setattr(claim_extras.tooling, "resolve_ticket", lambda *_args: None)
+    monkeypatch.setattr(claim_extras.tooling, "machine_tools", lambda _row: [])
+
+    def fail_search(*_args, **_kwargs):
+        raise RuntimeError("local search unavailable")
+
+    monkeypatch.setattr(knowledge, "context_pack", fail_search)
+    monkeypatch.setattr(claim_extras.claim_project, "payload", lambda *_args: {"repo": "test"})
+    monkeypatch.setattr(claim_steps, "publish_for", lambda *_args: None)
+    monkeypatch.setattr(ctx.provider_eligibility, "record_assignment", lambda *_args: None)
+
+    response = claim_module.claim(ctx, deps, body, "cc")
+
+    assert response["claimed"] is True
+    assert response["context_pack"] == {"project": "TESTWP", "ticket": ticket["key"], "items": []}
+    run = ctx.db.one("SELECT id,ticket_key,step,fence,status FROM runs WHERE id=%s", (response["run_id"],))
+    assert run and str(run["id"]) == response["run_id"]
+    assert run["ticket_key"] == ticket["key"] and run["step"] == "dev" and run["status"] == "running"
+    assert run["fence"] == response["fence"]
+    assert ctx.leases.valid(ticket["key"], response["run_id"], response["fence"])
+    assert ctx.leases.holder(ticket["key"]) == f"{response['run_id']}:{response['fence']}"
+    assert _delivery_ids(ctx.db, response["run_id"]) == set()
 
 
 @pytest.mark.parametrize("vector_search", [False, True], ids=["lexical", "vector"])

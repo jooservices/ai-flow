@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import get_type_hints
 
 import pytest
@@ -102,28 +103,53 @@ def test_application_context_preserves_legacy_positional_constructor(ctx):
 
 def test_eligibility_service_uses_its_database_account_repository(ctx):
     rows = (
-        ("jaif301-charlie", "codex", "working", '{"quota":1}', True),
-        ("jaif301-alpha", "claude", "idle", '{"quota":2}', False),
-        ("jaif301-bravo", "codex", "paused", '{"quota":3}', False),
-        ("jaif301-delta", "grok", "probing", '{"quota":4}', False),
-        ("jaif301-echo", "grok", "signed_out", '{"quota":5}', False),
+        ("jaif301-charlie", "codex", "working", '{"windows":{"five_hour":{"utilization":0.91}}}', True),
+        ("jaif301-alpha", "claude", "idle", '{"windows":{"five_hour":{"utilization":0.2}}}', False),
+        ("jaif301-bravo", "codex", "paused", '{"windows":{"five_hour":{"utilization":0.3}}}', False),
+        ("jaif301-delta", "grok", "probing", '{"windows":{"five_hour":{"utilization":0.4}}}', False),
+        ("jaif301-echo", "grok", "signed_out", '{"windows":{"five_hour":{"utilization":0.5}}}', False),
     )
     for account_id, provider, status, quota, at_risk in rows:
         ctx.db.run("INSERT INTO accounts (id,provider,status,quota,quota_at_risk)"
                    " VALUES (%s,%s,%s,%s::jsonb,%s)",
                    (account_id, provider, status, quota, at_risk))
 
+    configured_accounts = [
+        SimpleNamespace(id=account_id, provider=provider, paused=False, machines=[])
+        for account_id, provider, _status, _quota, _at_risk in rows
+    ]
+    ctx.repo = lambda: SimpleNamespace(accounts=configured_accounts)
+
     service = ProviderRoutingEligibilityService(ctx, None, lambda *args, **kwargs: [], lambda account: False,
                                                 lambda account, roles: [])
     assert isinstance(service.account_repository, AccountRepository)
     assert service.account_repository.db is ctx.db
     assert service.account_repository.quota_routing_rows(["grok", "codex", "grok"]) == [
-        {"id": "jaif301-bravo", "provider": "codex", "quota": {"quota": 3}, "quota_at_risk": False},
-        {"id": "jaif301-charlie", "provider": "codex", "quota": {"quota": 1}, "quota_at_risk": True},
-        {"id": "jaif301-delta", "provider": "grok", "quota": {"quota": 4}, "quota_at_risk": False},
-        {"id": "jaif301-echo", "provider": "grok", "quota": {"quota": 5}, "quota_at_risk": False},
+        {"id": "jaif301-bravo", "provider": "codex",
+         "quota": {"windows": {"five_hour": {"utilization": 0.3}}}, "quota_at_risk": False},
+        {"id": "jaif301-charlie", "provider": "codex",
+         "quota": {"windows": {"five_hour": {"utilization": 0.91}}}, "quota_at_risk": True},
+        {"id": "jaif301-delta", "provider": "grok",
+         "quota": {"windows": {"five_hour": {"utilization": 0.4}}}, "quota_at_risk": False},
+        {"id": "jaif301-echo", "provider": "grok",
+         "quota": {"windows": {"five_hour": {"utilization": 0.5}}}, "quota_at_risk": False},
     ]
     assert service.account_repository.ready_ids() == {"jaif301-charlie", "jaif301-alpha", "jaif301-delta"}
+
+    state = service.state(persist=False)
+    codex = state["providers"]["codex"]
+    assert codex["windows"] == [
+        {"name": "five_hour", "account": "jaif301-bravo", "used_pct": 30.0,
+         "reset_at": None, "reset": False},
+        {"name": "five_hour", "account": "jaif301-charlie", "used_pct": 91.0,
+         "reset_at": None, "reset": False},
+    ]
+    assert codex["at_risk_share"] == 0.5
+    assert codex["headroom_pct"] == 9.0
+
+    snapshot = service._snapshot()
+    assert snapshot["ready"] == {"jaif301-charlie", "jaif301-alpha", "jaif301-delta"}
+    assert snapshot["state"]["providers"]["codex"] == codex
 
 
 def test_application_context_requires_its_core_dependencies(ctx):

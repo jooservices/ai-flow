@@ -50,3 +50,24 @@ def test_fake_account_repository_copies_input_and_returned_quota_values():
         {"id": "account-a", "provider": "codex", "quota": {"windows": ["original"]}, "quota_at_risk": None}
     ]
     assert repository.ready_ids() == {"account-a"}
+
+
+def test_fake_account_repository_matches_database_read_with_nullable_risk(db):
+    rows = [
+        {"id": "account-null-risk", "provider": "codex", "status": "idle", "quota": None,
+         "quota_at_risk": None},
+        {"id": "account-safe", "provider": "codex", "status": "paused",
+         "quota": {"windows": {"five_hour": {"utilization": 0.4}}}, "quota_at_risk": False},
+    ]
+    database_repository = AccountRepository(db)
+    fake_repository = FakeAccountRepository(rows)
+
+    # The production column is NOT NULL; shadow it only inside this transaction to cover a nullable read result.
+    with db.transaction():
+        db.run("CREATE TEMP TABLE accounts (id text, provider text, status text, quota jsonb, quota_at_risk boolean)")
+        for row in rows:
+            db.run("INSERT INTO accounts (id,provider,status,quota,quota_at_risk) VALUES (%s,%s,%s,%s,%s)",
+                   (row["id"], row["provider"], row["status"], J(row["quota"]), row["quota_at_risk"]))
+
+        assert fake_repository.quota_routing_rows(["codex"]) == database_repository.quota_routing_rows(["codex"])
+        assert fake_repository.ready_ids() == database_repository.ready_ids()

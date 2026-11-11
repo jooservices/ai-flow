@@ -106,11 +106,12 @@ def test_real_eligibility_service_uses_context_repository_and_paused_overlay(ctx
     class RecordingAccountRepository(FakeAccountRepository):
         def __init__(self):
             super().__init__([
-                {"id": "jaif301-paused", "provider": "claude", "status": "idle", "quota": {},
-                 "quota_at_risk": False},
-                {"id": "jaif301-active", "provider": "codex", "status": "working", "quota": {},
-                 "quota_at_risk": False},
-                {"id": "jaif301-unconfigured", "provider": "grok", "status": "probing", "quota": {},
+                {"id": "jaif301-paused", "provider": "claude", "status": "idle",
+                 "quota": {"windows": {"five_hour": {"utilization": 0.97}}}, "quota_at_risk": False},
+                {"id": "jaif301-active", "provider": "codex", "status": "working",
+                 "quota": {"windows": {"five_hour": {"utilization": 0.3}}}, "quota_at_risk": True},
+                {"id": "jaif301-unconfigured", "provider": "grok", "status": "probing",
+                 "quota": {"windows": {"five_hour": {"utilization": 0.5}}},
                  "quota_at_risk": False},
             ])
             self.providers: list[list[str]] = []
@@ -134,9 +135,16 @@ def test_real_eligibility_service_uses_context_repository_and_paused_overlay(ctx
 
     assert service.account_repository is repository
     assert set(state["providers"]) == {"claude", "codex"}
+    assert state["providers"]["codex"]["windows"] == [
+        {"name": "five_hour", "account": "jaif301-active", "used_pct": 30.0,
+         "reset_at": None, "reset": False},
+    ]
+    assert state["providers"]["codex"]["at_risk_share"] == 1.0
+    assert state["providers"]["codex"]["score"] == 55.0
     assert repository.providers == [["claude", "codex"], ["claude", "codex"]]
     assert repository.ready_reads == 1
     assert snapshot["ready"] == {"jaif301-active"}
+    assert snapshot["state"]["providers"]["codex"] == state["providers"]["codex"]
 
 
 def test_failed_repository_snapshot_read_releases_lock_and_retry_succeeds(ctx):

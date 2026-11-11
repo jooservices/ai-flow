@@ -1,8 +1,11 @@
 """GET /v1/accounts/{account_id}/spec answers only nodes the account runs on."""
 from __future__ import annotations
 
+import pytest
+
 from conftest import join_node
 from aiflow.v4.control.api import create_app
+from aiflow.v4.control.features.fleet import service
 from aiflow.v4.control.route_registry import concrete_routes
 
 
@@ -10,6 +13,42 @@ def node_headers(client, name):
     joined = join_node(client, name)
     assert joined.status_code == 200, joined.text
     return {"Authorization": f"Bearer {joined.json()['node_token']}"}
+
+
+def test_account_specification_service_checks_assignment_before_model_selection():
+    class Account:
+        id = "claude-01"
+        provider = "anthropic"
+        tier = "pro"
+
+        def runs_on(self, node):
+            return node == "cc"
+
+    class Repo:
+        def __init__(self, account):
+            self.account_row = account
+            self.model_calls = []
+
+        def account(self, account_id):
+            assert account_id == "claude-01"
+            return self.account_row
+
+        def model_for(self, provider, tier):
+            self.model_calls.append((provider, tier))
+            return "claude-opus", "high"
+
+    repo = Repo(Account())
+    assert service.account_specification(repo, "claude-01", "cc") == {
+        "account": "claude-01", "provider": "anthropic", "tier": "pro",
+        "model": "claude-opus", "effort": "high",
+    }
+    assert repo.model_calls == [("anthropic", "pro")]
+
+    for account, node in ((None, "cc"), (Account(), "node1")):
+        repo = Repo(account)
+        with pytest.raises(service.AccountSpecRefused, match="account claude-01 does not run on"):
+            service.account_specification(repo, "claude-01", node)
+        assert repo.model_calls == []
 
 
 def test_the_account_spec_is_given_to_the_node_that_runs_the_account(client, ctx):

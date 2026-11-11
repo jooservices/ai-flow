@@ -44,3 +44,20 @@ def check_status_report(db, account_id: str, node: str, request_id: str, status:
     if status == "waiting" and same_link and row["sign_in_expires_at"] is not None \
             and link_expired(row["sign_in_expires_at"], row["sign_in_url"]):
         raise SignInRefused(409, "provider sign-in link has expired; start a new sign-in")
+
+
+class AccountSpecRefused(Exception):
+    """A node requested an account specification that is not assigned to it."""
+
+    def __init__(self, account_id: str, node: str):
+        super().__init__(f"account {account_id} does not run on {node}")
+
+
+def account_specification(repo, account_id: str, node: str) -> dict:
+    """Return the account's model spec to an assigned node."""
+    account = repo.account(account_id)
+    if not account or not account.runs_on(node):
+        raise AccountSpecRefused(account_id, node)
+    model, effort = repo.model_for(account.provider, account.tier)
+    return {"account": account.id, "provider": account.provider, "tier": account.tier,
+            "model": model, "effort": effort}

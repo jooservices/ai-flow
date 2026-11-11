@@ -1,7 +1,14 @@
 # Runs routes
 
-The worker run heartbeat, result and release routes and the master AI routes. They live in `aiflow/v4/control/features/runs/routes.py` (request bodies in `bodies.py`), moved out of
-`control/api.py` by JAIF-479 with their behaviour unchanged. Routes registered by `features/runs/routes.py`:
+The worker run heartbeat is served by the discovered router in `aiflow/v4/control/routes/run_heartbeat.py`. The result,
+release and master AI routes remain in `aiflow/v4/control/features/runs/routes.py` (request bodies in `bodies.py`),
+moved out of `control/api.py` by JAIF-479 with their behaviour unchanged.
+
+## Routes
+
+- `POST /v1/runs/{run_id}/heartbeat` renews the run lease, stores progress and delivers pending inbox messages.
+
+The remaining runs feature routes are registered by `features/runs/routes.py`:
 
 - `GET /v1/master/autonomy`
 - `GET /v1/master/context`

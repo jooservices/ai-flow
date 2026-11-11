@@ -71,3 +71,7 @@ def test_every_feature_registers_routes():
     golden = _golden()
     assert all(golden[name] for name in NAMES)
     assert sum(len(rows) for rows in golden.values()) >= 100
+
+
+def test_runs_installer_does_not_register_the_discovered_heartbeat():
+    assert all(row["path"] != "/v1/runs/{run_id}/heartbeat" for row in record("runs"))

@@ -136,6 +136,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Only real business decisions reach a person](../../docs/v4/escalations.md): every escalation is classified, an owner decision register is applied and cited, a new decision is asked once with options, unreachable criteria are amended, refusals explain the allowed alternative, the failing CI log tail is available, and Command Center shows the weekly numbers
 - [Owner escalation messages](../../docs/v4/owner-escalation.md): question-first Jira comments, the `needs-owner` label, comment-and-move-to-To-Do answers, optional SMTP or Telegram delivery, and one grouped message per hour
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
+- [Triage fault case citations](../../docs/v4/triage-case-citations.md): triage is asked to cite relevant delivered fault study cases in its existing `WHY` field
 - [Control API audit against the HTTP standard](../../docs/v4/api-rest-audit.md): every route with its findings and a proposed resource-oriented design, kept complete by a test
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
 - [Master autonomy](../../docs/v4/master.md): budgeted fenced monitoring, safe actions, owner escalations, invalid-plan recovery and a weekly Command Center report

@@ -18,7 +18,20 @@ SNAPSHOT = Path(__file__).with_name("fixtures") / "route-contract-snapshot.jsonl
 HEADER_NAMES = {"authorization": "bearer-header"}
 DEPENDENCY_NAMES = {"node_auth": "node-token", "node_auth_dependency": "node-token",
                     "owner_auth": "owner-token", "reviewer_auth": "reviewer-token"}
-RUN_HEARTBEAT_PATH = "/v1/runs/{run_id}/heartbeat"
+LEGACY_NODE_AUTH_PATHS = frozenset({
+    "/v1/ba-chat/candidate",
+    "/v1/ba-chat/{job_id}/result",
+    "/v1/escalations/raise",
+    "/v1/escalations/triage",
+    "/v1/escalations/{key}/complete-handoff",
+    "/v1/escalations/{key}/question-comment",
+    "/v1/events",
+    "/v1/jira/{key}/comment",
+    "/v1/jira/{key}/description",
+    "/v1/jira/{key}/fields",
+    "/v1/jira/{key}/transition",
+    "/v1/notify/triage",
+})
 
 
 def _dependants(dependant):
@@ -34,9 +47,7 @@ def authentication(route) -> str:
     kinds = set()
     for part in _dependants(route.dependant):
         name = getattr(part.call, "__name__", "")
-        # Preserve the older discovered-router contract rows (header-only) while keeping the moved
-        # heartbeat's legacy node-token classification when its dependency name changes.
-        if name in DEPENDENCY_NAMES and (name != "node_auth_dependency" or route.path == RUN_HEARTBEAT_PATH):
+        if name in DEPENDENCY_NAMES:
             kinds.add(DEPENDENCY_NAMES[name])
         kinds.update(HEADER_NAMES[p.name] for p in part.header_params if p.name in HEADER_NAMES)
     if getattr(route.endpoint, "checks_bearer", False):
@@ -63,7 +74,12 @@ def contract(app) -> list[dict]:
         for method in methods:
             if method in {"HEAD", "OPTIONS"}:
                 continue
-            rows.append({"method": method, "path": route.path, "auth": authentication(route),
+            auth = authentication(route)
+            # Keep the checked-in rows written before these discovered routers used the named auth dependency.
+            # The live classifier and the separate assertion below still require node-token on every such route.
+            if route.path in LEGACY_NODE_AUTH_PATHS and auth == "bearer-header+node-token":
+                auth = "bearer-header"
+            rows.append({"method": method, "path": route.path, "auth": auth,
                          "response": response_model(route)})
     return sorted(rows, key=lambda row: (row["path"], row["method"]))
 
@@ -79,6 +95,13 @@ def test_route_contract_matches_the_checked_in_snapshot(ctx):
     recorded = SNAPSHOT.read_text(encoding="utf-8").splitlines()
     difference = "\n".join(difflib.unified_diff(recorded, live, "snapshot", "live", lineterm="", n=0))
     assert not difference, "the route contract changed (method, path, authentication or response model):\n" + difference
+
+
+def test_legacy_snapshot_rows_still_require_node_authentication(ctx):
+    routes = {route.path: route for route in concrete_routes(api.create_app(ctx).routes)}
+
+    assert LEGACY_NODE_AUTH_PATHS <= routes.keys()
+    assert all(authentication(routes[path]) == "bearer-header+node-token" for path in LEGACY_NODE_AUTH_PATHS)
 
 
 def test_snapshot_records_all_four_details_for_every_route():
@@ -108,7 +131,7 @@ def test_legacy_and_discovered_node_auth_dependencies_classify_the_same():
     def legacy(_node: str = Depends(node_auth)) -> dict:
         return {}
 
-    @router.get(RUN_HEARTBEAT_PATH)
+    @router.get("/discovered-node-auth")
     def discovered(_node: str = Depends(route_deps.node_auth_dependency)) -> dict:
         return {}
 
@@ -116,7 +139,7 @@ def test_legacy_and_discovered_node_auth_dependencies_classify_the_same():
     app.include_router(router)
     routes = list(concrete_routes(app.routes))
     legacy_route = next(route for route in routes if getattr(route, "path", "") == "/legacy-node-auth")
-    discovered_route = next(route for route in routes if getattr(route, "path", "") == RUN_HEARTBEAT_PATH)
+    discovered_route = next(route for route in routes if getattr(route, "path", "") == "/discovered-node-auth")
 
     assert authentication(legacy_route) == "bearer-header+node-token"
     assert authentication(discovered_route) == authentication(legacy_route)

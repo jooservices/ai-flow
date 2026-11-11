@@ -12,6 +12,7 @@ from ..core.settings import Settings
 from .db import DB
 from .events import Events
 from .features.fleet.repository import FakeNodeRepository, NodeRepository
+from .features.projects.repository import ProjectListingDataSource, ProjectListingRepository
 from .features.tickets.repository import FakeTicketRepository, TicketRepository
 from .github import GitHubApp
 from .jira import Jira
@@ -70,6 +71,7 @@ class ApplicationContext:
     ticket_repository: TicketRepository | FakeTicketRepository | None = None
     account_repository: AccountRepository | FakeAccountRepository | None = None
     node_repository: NodeRepository | FakeNodeRepository | None = None
+    project_listing_repository: ProjectListingDataSource | None = None
 
     def __post_init__(self) -> None:
         if not callable(self.repo):
@@ -84,6 +86,11 @@ class ApplicationContext:
             self.account_repository = AccountRepository(self.db)
         if self.node_repository is None:
             self.node_repository = NodeRepository(self.db)
+        if self.project_listing_repository is None or (
+            isinstance(self.project_listing_repository, ProjectListingRepository)
+            and self.project_listing_repository.db is not self.db
+        ):
+            self.project_listing_repository = ProjectListingRepository(self.db)
 
     @property
     def database(self) -> DB:

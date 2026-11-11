@@ -167,18 +167,6 @@ def _register_restart_account_sign_in(app, ctx, deps, support=None):
         return {"account": account_id, "status": "queued", "sign_in_url": "", "code": ""}
     return restart_account_sign_in
 
-def _register_account_spec(app, ctx, deps, support=None):
-    node_auth = deps.node_auth
-    @app.get("/v1/accounts/{account_id}/spec")
-    def account_spec(account_id: str, node: str = Depends(node_auth)) -> dict:
-        repo = ctx.repo()
-        acc = repo.account(account_id)
-        if not acc or not acc.runs_on(node):
-            raise HTTPException(403, f"account {account_id} does not run on {node}")
-        model, effort = repo.model_for(acc.provider, acc.tier)
-        return {"account": acc.id, "provider": acc.provider, "tier": acc.tier, "model": model, "effort": effort}
-    return account_spec
-
 def _register_account_sign_in_details(app, ctx, deps, support=None):
     console_user = deps.console_user
     @app.get("/v1/accounts/{account_id}/sign-in")
@@ -280,7 +268,6 @@ def install_managed_account_routes(app, ctx, deps, helpers):
     add = _register_add_managed_account(app, ctx, deps, support)
     update = _register_update_managed_account(app, ctx, deps, support)
     restart = _register_restart_account_sign_in(app, ctx, deps, support)
-    spec = _register_account_spec(app, ctx, deps, support)
     details = _register_account_sign_in_details(app, ctx, deps, support)
     report = _register_report_account_sign_in_status(app, ctx, deps, support)
     complete = _register_complete_account_sign_in(app, ctx, deps, support)
@@ -289,6 +276,6 @@ def install_managed_account_routes(app, ctx, deps, helpers):
     return SimpleNamespace(JOB_ROLES=support.JOB_ROLES, account_jobs=support.account_jobs,
                            lock_machine_capacity=support.lock_machine_capacity, machine_capacity=support.machine_capacity,
                            save_managed_account=support.save_managed_account, add_managed_account=add,
-                           update_managed_account=update, restart_account_sign_in=restart, account_spec=spec,
+                           update_managed_account=update, restart_account_sign_in=restart,
                            account_sign_in_details=details, report_account_sign_in_status=report,
                            complete_account_sign_in=complete, remove_managed_account=remove)

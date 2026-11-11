@@ -45,17 +45,17 @@ def test_legacy_scanner_rejects_each_existing_pattern_without_echoing_sample(nam
 
 
 def test_legacy_scanner_uses_pattern_order_for_multiple_matches():
-    first = "-----BEGIN RSA " + "PRIVATE KEY-----"
-    second = "AKIA" + "Q" * 16
+    lower_priority = "AKIA" + "Q" * 16
+    higher_priority = "-----BEGIN RSA " + "PRIVATE KEY-----"
 
     with pytest.raises(guard.Rejected) as caught:
-        guard.scan_secrets(first + " " + second)
+        guard.scan_secrets(lower_priority + " " + higher_priority)
 
     assert str(caught.value) == MESSAGE.format(name="private key")
-    assert first not in str(caught.value) and second not in str(caught.value)
+    assert lower_priority not in str(caught.value) and higher_priority not in str(caught.value)
 
     with pytest.raises(secret_scan.Rejected) as core_caught:
-        secret_scan.scan_secrets(first + " " + second)
+        secret_scan.scan_secrets(lower_priority + " " + higher_priority)
 
     assert str(core_caught.value) == str(caught.value)
 
@@ -94,3 +94,24 @@ def test_legacy_entry_rejects_secret_metadata_without_echoing_value(field):
         guard.check_entry(entry)
 
     assert secret not in str(caught.value)
+
+
+def test_secret_notification_question_is_withheld_without_queue_or_send(ctx, monkeypatch):
+    from aiflow.v4.control import owner_notifications
+
+    sent = []
+
+    class CaptureSender:
+        def send(self, message):
+            sent.append(message)
+
+    monkeypatch.setattr(owner_notifications, "sender_for", lambda _settings: CaptureSender())
+    secret_question = "Which database should we use? password=" + "hunter2hunter2"
+    before = ctx.db.one("SELECT count(*) AS n FROM owner_escalation_notices")["n"]
+
+    result = owner_notifications.enqueue(ctx, 1, "TESTWP-1", secret_question)
+
+    after = ctx.db.one("SELECT count(*) AS n FROM owner_escalation_notices")["n"]
+    assert result == {"status": "withheld", "sent": False}
+    assert after == before
+    assert sent == []

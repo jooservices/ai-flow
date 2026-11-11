@@ -24,10 +24,14 @@ rules that matched, and `run_master_cycle` calls the model only when that list i
 
 ## Dashboard request
 
-**Review now** in the Command Center master autonomy panel calls `POST /v1/master/review-requests` (console writers only).
-The request sets `master_settings.review_requested_at`. The next snapshot read clears it and reports
+**Review now** in the Command Center master autonomy panel queues a request for the next Master snapshot. The request
+sets `master_settings.review_requested_at`. The next snapshot read clears it and reports
 `review_requested: true`, so one request starts one review. A request that arrives while a snapshot is being built waits
 for the cycle after it.
+
+## Routes
+
+- `POST /v1/master/review-requests` Queues a console writer's request for the next Master snapshot.
 
 ## Cycle metrics
 

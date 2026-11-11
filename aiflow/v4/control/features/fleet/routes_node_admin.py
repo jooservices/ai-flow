@@ -16,8 +16,7 @@ def _register_set_node_work_acceptance(app, ctx, deps, support=None):
         if not accepting_work and not body.confirm:
             fleet_routes.audit_refused_write(audit, "node", action, name, user.subject, "confirmation required")
             raise HTTPException(400, "confirm stopping new work on this machine")
-        row = ctx.db.one("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,))
-        if not row:
+        if not ctx.node_repository.active_node_exists(name):
             raise HTTPException(404, "machine is not registered")
         with ctx.db.transaction():
             ctx.db.run("UPDATE nodes SET accepting_work=%s,status=CASE WHEN last_heartbeat > now()-interval '75 seconds'"
@@ -40,8 +39,7 @@ def _register_remove_managed_node(app, ctx, deps, support=None):
         if not body.confirm:
             fleet_routes.audit_refused_write(audit, "node", "remove", name, user.subject, "confirmation required")
             raise HTTPException(400, "confirm machine removal")
-        node = ctx.db.one("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,))
-        if not node:
+        if not ctx.node_repository.active_node_exists(name):
             raise HTTPException(404, "machine is not registered")
         active = ctx.db.one("SELECT count(*) AS n FROM runs WHERE node=%s AND status='running'", (name,))
         if active and active["n"]:

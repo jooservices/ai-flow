@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 SIGN_IN_LINK_LIFETIME = timedelta(minutes=15)
 
@@ -162,3 +162,29 @@ def finish_signin(db: Any, account_id: str) -> None:
 
 def node_names(db: Any) -> list[dict]:
     return db.all("SELECT name FROM nodes")
+
+
+class NodeRepository:
+    """Named database queries for registered fleet nodes."""
+
+    def __init__(self, db: Any) -> None:
+        """Bind this repository to the control database."""
+        self.db = db
+
+    def active_node_exists(self, name: str) -> bool:
+        """Return whether this exact name identifies a node that has not been removed."""
+        return bool(self.db.one("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,)))
+
+
+class FakeNodeRepository:
+    """In-memory active-name lookup for contexts whose callers supply registered node names."""
+
+    def __init__(self, active_names: Iterable[str] = ()) -> None:
+        """Capture the node names this fake considers active."""
+        self._active_names = frozenset(active_names)
+        self.calls: list[str] = []
+
+    def active_node_exists(self, name: str) -> bool:
+        """Return whether this exact name was supplied as active."""
+        self.calls.append(name)
+        return name in self._active_names

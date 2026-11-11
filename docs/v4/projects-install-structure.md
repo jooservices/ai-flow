@@ -3,7 +3,9 @@
 `aiflow/v4/control/features/projects/routes.py:install` builds the frozen route runtime and calls the route groups in
 registration order. Each group in `routes_*.py` names its route installers explicitly; each route installer keeps
 the FastAPI decorator beside its handler. Shared behavior lives in module-level helpers in `routes.py` with the
-runtime passed explicitly. To add a route, place its decorated handler in the matching group, call its installer in
+runtime passed explicitly. The managed project listing is discovered from
+`control/routes/project_listing.py`; this installer registers the catalog route only. To add an installer route,
+place its decorated handler in the matching group, call its installer in
 the group’s existing order, and add the method and path below.
 
 ## Routes
@@ -27,7 +29,6 @@ the group’s existing order, and add the method and path below.
 
 ### `install_project_listing_routes`
 
-- GET `/v1/projects`
 - GET `/v1/projects/catalog`
 
 ### `install_project_repository_routes`

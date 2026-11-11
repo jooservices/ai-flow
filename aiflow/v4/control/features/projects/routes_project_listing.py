@@ -4,25 +4,6 @@ Route decorators stay with their handlers to preserve the published route contra
 """
 from types import SimpleNamespace
 from . import routes as compat
-from . import service as project_service
-
-
-def _install_managed_projects_route(app, ctx, deps, runtime, support):
-    console_user = runtime.console_user
-    optional_console_user = runtime.optional_console_user
-    @app.get("/v1/projects")
-    def managed_projects(request: compat.Request) -> dict:
-        user = (console_user(request, "projects.manage") if ctx.settings.console_login
-                else optional_console_user(request))
-        repo = ctx.repo()
-        projects = project_service.managed_project_list(ctx, repo)
-        if user and user.project_keys is not None:
-            projects = [project for project in projects if project["key"] in user.project_keys]
-        invalid_projects = [{"file": f"{name}.yaml", "reason": reason}
-                            for name, reason in sorted(repo.invalid_projects.items())
-                            if not user or user.project_keys is None or name in user.project_keys]
-        return {"projects": projects, "invalid_projects": invalid_projects}
-    return managed_projects
 
 def _install_project_catalog_route(app, ctx, deps, runtime, support):
     console_user = runtime.console_user
@@ -44,9 +25,5 @@ def _install_project_catalog_route(app, ctx, deps, runtime, support):
 
 
 def install_project_listing_routes(app, ctx, deps, runtime, support) -> SimpleNamespace:
-    managed_projects = _install_managed_projects_route(app, ctx, deps, runtime, support)
     project_catalog = _install_project_catalog_route(app, ctx, deps, runtime, support)
-    return SimpleNamespace(
-        managed_projects=managed_projects,
-        project_catalog=project_catalog,
-    )
+    return SimpleNamespace(project_catalog=project_catalog)

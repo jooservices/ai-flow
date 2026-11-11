@@ -72,6 +72,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Route contract snapshot](../../docs/v4/route-contract-snapshot.md): a checked-in record of every route's method, path, authentication and response model, compared by a test
 - [Project repository save structure](../../docs/v4/project_repositories-structure.md): ordered validation and commit steps for `PUT /v1/projects/{key}/repositories`
 - [Projects route install structure](../../docs/v4/projects-install-structure.md): project and GitHub routes register in explicit groups that preserve their original order
+- [Managed project listing discovery](../../docs/v4/project-listing-discovery.md): the Projects listing route is owned by the feature and mounted by route discovery
 - [Release routes structure](../../docs/v4/release-install-structure.md): the release routes split into files on disk, downloads and node reports
 - [Route install registrations](../../docs/v4/route-install-registrations.md): a recorded list of what every feature's install function registers, kept identical when an install is split
 - [Console route install structure](../../docs/v4/console-install-structure.md): the console feature's session, people, view-as, layout, notification and licensing route groups

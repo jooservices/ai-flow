@@ -1,16 +1,20 @@
 # Knowledge routes
 
-The memory, learned-knowledge and Knowledge screen resource routes. They live in `aiflow/v4/control/features/knowledge/routes.py` (request bodies in `bodies.py`), moved out of
-`control/api.py` by JAIF-497 with their behaviour unchanged. Routes registered by `features/knowledge/routes.py`:
+The memory, learned-knowledge and Knowledge screen resource routes. Item handlers live in
+`aiflow/v4/control/features/knowledge/routes_items.py` and are exposed to route discovery by
+`control/routes/knowledge_items.py`. Resource and proposal handlers remain installed by
+`features/knowledge/routes.py`.
 
-- `GET /v1/knowledge/items`
-- `GET /v1/knowledge/resources`
-- `GET /v1/knowledge/resources/{kind}/{resource_id}/history`
-- `POST /v1/knowledge/items`
-- `POST /v1/knowledge/items/{item_id}/{action}`
-- `POST /v1/knowledge/proposals/{proposal_id}/approve`
-- `POST /v1/knowledge/resources`
-- `POST /v1/knowledge/resources/{kind}/{resource_id}/restore`
+## Routes
+
+- `GET /v1/knowledge/items` returns the authorized knowledge dashboard and item search for a project and query.
+- `GET /v1/knowledge/resources` lists managed knowledge resources and pending proposals.
+- `GET /v1/knowledge/resources/{kind}/{resource_id}/history` returns a resource's saved version history.
+- `POST /v1/knowledge/items` saves a learned-knowledge item for the authenticated console user.
+- `POST /v1/knowledge/items/{item_id}/{action}` applies a moderation action to a learned-knowledge item.
+- `POST /v1/knowledge/proposals/{proposal_id}/approve` approves a pending policy proposal.
+- `POST /v1/knowledge/resources` saves a versioned knowledge resource or proposes a policy change.
+- `POST /v1/knowledge/resources/{kind}/{resource_id}/restore` restores a prior resource version.
 
 Audit
 

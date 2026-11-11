@@ -51,6 +51,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Run result structure](../../docs/v4/run_result-structure.md): named result handling steps behind `POST /v1/runs/{run_id}/result`
 - [Idle incident explanations](../../docs/v4/incidents-idle-structure.md): ordered node, ticket, project and account reasons for idle work
 - [Control API router registry](../../docs/v4/router-registry.md): feature routers discovered and mounted by priority without a central registration list
+- [Account specification route](../../docs/v4/account-spec-route.md): the node-facing account spec is served by a discovered router
 - [Master AI rescue](../../docs/v4/master-rescue.md): Claude takes a long Blocked or over-time ticket once, with its own budget; owner-only work and an unavailable Claude go to the owner, a failed rescue returns to development
 - [Master review triggers](../../docs/v4/master-review-triggers.md): a master cycle calls the AI only when a rule finds an item to decide; the Dashboard shows cycles, AI calls, actions and the no-action target
 - [Shared worker fairness](../../docs/v4/shared-worker-fairness.md): round-robin ready tickets across projects while preserving rework preference and each project's priority and age order

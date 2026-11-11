@@ -93,6 +93,41 @@ def _assert_operation_error_reports_backup(monkeypatch: pytest.MonkeyPatch,
     assert all(detail in reported_error for detail in details)
 
 
+def test_backup_preservation_error_compacts_latest_details_for_long_path():
+    backup_path = Path("/" + "b" * 195)
+    error = operations._InstallerBackupPreservationError(
+        backup_path,
+        [("moving the backup to the preferred path", OSError()),
+         ("moving the backup to a unique path", OSError()),
+         ("copying the backup to a unique path", shutil.Error())],
+        replacement_error=OSError(),
+        restore_error=PermissionError(),
+    )
+
+    message = str(error)
+
+    assert len(message) <= 300
+    assert str(backup_path) in message
+    assert "replacement=OSError" in message
+    assert "rollback=PermissionError" in message
+    assert "unique move=OSError" in message
+    assert "copy=Error" in message
+
+
+def test_rollback_error_compacts_cleanup_details_for_long_path():
+    backup_path = Path("/" + "b" * 195)
+    error = operations._InstallerRollbackError(backup_path, OSError(), PermissionError())
+    error.note_cleanup_failure(PermissionError())
+
+    message = str(error)
+
+    assert len(message) <= 300
+    assert str(backup_path) in message
+    assert "replacement=OSError" in message
+    assert "rollback=PermissionError" in message
+    assert "staging cleanup=PermissionError" in message
+
+
 def test_restore_failure_keeps_the_backup_and_reports_both_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     install_dir, source_dir, staging = _prepare_old_and_new_installers(tmp_path)
     _patch_replace(monkeypatch, {

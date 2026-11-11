@@ -7,7 +7,6 @@
 ["post","/v1/machines/{name}/accounts","add_managed_account","(name: str, body: ManagedAccountCreateBody, request: Request) -> dict",{}]
 ["patch","/v1/accounts/{account_id}","update_managed_account","(account_id: str, body: ManagedAccountUpdateBody, request: Request) -> dict",{}]
 ["post","/v1/accounts/{account_id}/sign-in","restart_account_sign_in","(account_id: str, request: Request) -> dict",{}]
-["get","/v1/accounts/{account_id}/spec","account_spec","(account_id: str, node: str = Depends(node_auth)) -> dict",{}]
 ["get","/v1/accounts/{account_id}/sign-in","account_sign_in_details","(account_id: str, request: Request) -> dict",{}]
 ["post","/v1/accounts/{account_id}/sign-in/status","report_account_sign_in_status","(account_id: str, body: ManagedAccountSignInStatusBody, node: str = Depends(node_auth)) -> dict",{}]
 ["post","/v1/accounts/{account_id}/sign-in/complete","complete_account_sign_in","(account_id: str, request: Request) -> dict",{}]

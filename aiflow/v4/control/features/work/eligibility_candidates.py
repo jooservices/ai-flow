@@ -31,7 +31,7 @@ def verify_candidates(scope: Scope) -> list[dict]:
             first = first_review_account(scope, ticket["key"])
             first_is_untried = first and not any(ticket_history.by_account.get(first, []))
             if (first and first != scope.account.id and first_is_untried
-                    and preferred_review_available(scope, first, ticket)):
+                    and preferred_review_available(scope, first, ticket, ticket_history, peer_eligibility_cache)):
                 continue
         out.append(candidate)
     return out
@@ -142,15 +142,14 @@ def first_review_account(scope: Scope, ticket_key: str) -> str:
     return WorkRepository(scope.ctx.db).first_review_account(ticket_key)
 
 
-def preferred_review_available(scope: Scope, account_id: str, ticket: dict) -> bool:
-    """Check the preferred review account through the normal eligibility rules on its machines."""
+def preferred_review_available(scope: Scope, account_id: str, ticket: dict, history: VerifyTicketHistory,
+                               peer_eligibility_cache: dict[tuple[str, str], set[str]]) -> bool:
+    """Check first-reviewer preference using the same eligibility probe as no-verdict retries."""
     account = scope.repo.account(account_id)
-    if not account:
+    if not account or account_id == scope.account.id or any(history.by_account.get(account_id, [])):
         return False
     for node in account.machines:
-        candidates = scope.deps.eligible(account_id, node, routing=False, capacity_routing=False,
-                                         ticket_key=ticket["key"], step_filter="verify")
-        if any(item.get("key") == ticket["key"] and item.get("step") == "verify" for item in candidates):
+        if ticket["key"] in _peer_verify_tickets(scope, account_id, node, peer_eligibility_cache):
             return True
     return False
 

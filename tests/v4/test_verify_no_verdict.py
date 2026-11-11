@@ -276,6 +276,71 @@ def test_one_no_verdict_can_be_claimed_immediately_when_no_peer_is_eligible(clie
     assert claimed.status_code == 200 and claimed.json()["claimed"]
 
 
+@pytest.mark.parametrize("peer_rejection", ["load", "version"])
+def test_untried_first_reviewer_rejected_by_peer_probe_does_not_hide_offer_or_claim(
+        client, ctx, monkeypatch, peer_rejection):
+    cc, node1 = _join(client, "cc"), _join(client, "node1")
+    _in_verify(ctx)
+    _insert_run(ctx, "TESTWP-50", "verify", "claude-01", "done", details={"verdict": "PASS"}, minutes_ago=30)
+    _no_verdict(ctx, "TESTWP-50", "codex-01", 5)
+
+    if peer_rejection == "load":
+        original_claim_limits = load_policy.claim_limits
+
+        def claim_limits(_ctx, node):
+            limits = original_claim_limits(_ctx, node)
+            return {**limits, "allowed": False} if node == "cc" else limits
+
+        monkeypatch.setattr(load_policy, "claim_limits", claim_limits)
+    else:
+        monkeypatch.setattr(rollout, "node_compatible", lambda _ctx, node, _releases:
+                            {"compatible": node != "cc", "reason": "test"})
+
+    assert ("TESTWP-50", "verify") in _offered(client, node1, "codex-01")
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-50", "account": "codex-01", "step": "verify"},
+                          headers=node1)
+
+    assert claimed.status_code == 200 and claimed.json()["claimed"]
+
+
+@pytest.mark.parametrize("unrelated_result", ["no_verdict", "ordinary_failure"])
+def test_scoped_claim_uses_real_peer_probe_and_keeps_other_ticket_history_independent(
+        client, ctx, monkeypatch, unrelated_result):
+    cc, node1 = _join(client, "cc"), _join(client, "node1")
+    _in_verify(ctx, "TESTWP-50")
+    _in_verify(ctx, "TESTWP-51")
+    _no_verdict(ctx, "TESTWP-50", "codex-01", 5)
+    if unrelated_result == "no_verdict":
+        _no_verdict(ctx, "TESTWP-51", "claude-01", 3)
+    else:
+        _insert_run(ctx, "TESTWP-51", "verify", "claude-01", "failed", details={"verdict": "FAIL"},
+                    minutes_ago=3)
+
+    from aiflow.v4.control.features.work_routes import routes
+
+    real_eligible = routes.eligible_tickets
+    peer_calls = []
+
+    def tracked_eligible(*args, **options):
+        result = real_eligible(*args, **options)
+        if args[2] == "claude-01" and options.get("verify_retry_guard") is False:
+            peer_calls.append((options, {(item["key"], item["step"]) for item in result}))
+        return result
+
+    monkeypatch.setattr(routes, "eligible_tickets", tracked_eligible)
+    refused = client.post("/v1/work/claim", json={"ticket": "TESTWP-50", "account": "codex-01", "step": "verify"},
+                          headers=node1)
+
+    assert refused.status_code == 409 and refused.json() == {"claimed": False, "reason": "not eligible"}
+    assert peer_calls == [({"routing": False, "capacity_routing": False, "ticket_key": "TESTWP-50",
+                            "step_filter": "verify", "verify_retry_guard": False},
+                           {("TESTWP-50", "verify")})]
+    assert ("TESTWP-50", "verify") in _offered(client, cc, "claude-01")
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-50", "account": "claude-01", "step": "verify"},
+                          headers=cc)
+    assert claimed.status_code == 200 and claimed.json()["claimed"]
+
+
 def test_two_no_verdict_claim_bar_resets_after_a_successful_development_round(client, ctx):
     _cc, node1 = _join(client, "cc"), _join(client, "node1")
     _in_verify(ctx)

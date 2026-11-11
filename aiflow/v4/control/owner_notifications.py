@@ -15,7 +15,7 @@ from email.message import EmailMessage
 from typing import Protocol
 from urllib.request import Request, urlopen
 
-from aiflow.memory.guard import Rejected, scan_secrets
+from aiflow.v4.core.secret_scan import Rejected, scan_secrets
 
 from .repositories import owner_notifications as notification_repository
 

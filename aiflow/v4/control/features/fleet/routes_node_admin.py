@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from .bodies import ConfirmBody
 from .events import NodeRemoved, NodeWorkAcceptanceChanged
 from fastapi import HTTPException, Request
-from ... import flow_doctor_api
 
 def _register_set_node_work_acceptance(app, ctx, deps, support=None):
     audit = deps.audit
@@ -63,5 +62,4 @@ def _register_remove_managed_node(app, ctx, deps, support=None):
 def install_node_admin_routes(app, ctx, deps):
     acceptance = _register_set_node_work_acceptance(app, ctx, deps)
     remove = _register_remove_managed_node(app, ctx, deps)
-    flow_doctor_api.mount_node_routes(app, ctx, deps.node_auth)
     return SimpleNamespace(set_node_work_acceptance=acceptance, remove_managed_node=remove)

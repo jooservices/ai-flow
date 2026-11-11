@@ -124,15 +124,12 @@ def test_eligibility_service_uses_its_database_account_repository(ctx):
                                                 lambda account, roles: [])
     assert isinstance(service.account_repository, AccountRepository)
     assert service.account_repository.db is ctx.db
-    assert service.account_repository.quota_routing_rows(["grok", "codex", "grok"]) == [
-        {"id": "jaif301-bravo", "provider": "codex",
-         "quota": {"windows": {"five_hour": {"utilization": 0.3}}}, "quota_at_risk": False},
-        {"id": "jaif301-charlie", "provider": "codex",
-         "quota": {"windows": {"five_hour": {"utilization": 0.91}}}, "quota_at_risk": True},
-        {"id": "jaif301-delta", "provider": "grok",
-         "quota": {"windows": {"five_hour": {"utilization": 0.4}}}, "quota_at_risk": False},
-        {"id": "jaif301-echo", "provider": "grok",
-         "quota": {"windows": {"five_hour": {"utilization": 0.5}}}, "quota_at_risk": False},
+    assert [(row.id, row.provider, row.quota, row.quota_at_risk)
+            for row in service.account_repository.quota_routing_rows(["grok", "codex", "grok"])] == [
+        ("jaif301-bravo", "codex", {"windows": {"five_hour": {"utilization": 0.3}}}, False),
+        ("jaif301-charlie", "codex", {"windows": {"five_hour": {"utilization": 0.91}}}, True),
+        ("jaif301-delta", "grok", {"windows": {"five_hour": {"utilization": 0.4}}}, False),
+        ("jaif301-echo", "grok", {"windows": {"five_hour": {"utilization": 0.5}}}, False),
     ]
     assert service.account_repository.ready_ids() == {"jaif301-charlie", "jaif301-alpha", "jaif301-delta"}
 

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
+import pytest
+
 from aiflow.v4.control.db import J
 from aiflow.v4.control.repositories.accounts import AccountRepository, FakeAccountRepository
+from aiflow.v4.control.repositories.models import CapacityRoutingRow, QuotaRoutingRow
 
 
 def test_fake_account_repository_matches_database_reads_for_large_account_set(db):
     database_repository = AccountRepository(db)
     fake_repository = FakeAccountRepository()
     assert fake_repository.quota_routing_rows([]) == database_repository.quota_routing_rows([]) == []
+    assert fake_repository.capacity_routing_rows() == database_repository.capacity_routing_rows() == []
     assert fake_repository.ready_ids() == database_repository.ready_ids() == set()
 
     providers = ("claude", "codex", "grok")
@@ -29,12 +35,14 @@ def test_fake_account_repository_matches_database_reads_for_large_account_set(db
         fake_rows = fake_repository.quota_routing_rows(selected_providers)
         database_rows = database_repository.quota_routing_rows(selected_providers)
         assert fake_rows == database_rows
-        assert all(set(row) == {"id", "provider", "quota", "quota_at_risk"} for row in fake_rows)
-        assert [row["id"] for row in fake_rows] == sorted(row["id"] for row in fake_rows)
+        assert all(isinstance(row, QuotaRoutingRow) for row in fake_rows)
+        assert [row.id for row in fake_rows] == sorted(row.id for row in fake_rows)
     assert fake_repository.ready_ids() == database_repository.ready_ids()
     assert fake_repository.ready_ids() == {
         row["id"] for row in rows if row["status"] in {"idle", "working", "probing"}
     }
+    assert fake_repository.capacity_routing_rows() == database_repository.capacity_routing_rows()
+    assert all(isinstance(row, CapacityRoutingRow) for row in fake_repository.capacity_routing_rows())
 
 
 def test_fake_account_repository_copies_input_and_returned_quota_values():
@@ -45,10 +53,12 @@ def test_fake_account_repository_copies_input_and_returned_quota_values():
     source[0]["status"] = "signed_out"
 
     first_read = repository.quota_routing_rows(["codex"])
-    first_read[0]["quota"]["windows"].append("output mutation")
+    first_read[0].quota["windows"].append("output mutation")
     assert repository.quota_routing_rows(["codex"]) == [
-        {"id": "account-a", "provider": "codex", "quota": {"windows": ["original"]}, "quota_at_risk": None}
+        QuotaRoutingRow("account-a", "codex", {"windows": ["original"]}, None)
     ]
+    with pytest.raises(FrozenInstanceError):
+        first_read[0].provider = "grok"
     assert repository.ready_ids() == {"account-a"}
 
 
@@ -69,5 +79,10 @@ def test_fake_account_repository_matches_database_read_with_nullable_risk(db):
             db.run("INSERT INTO accounts (id,provider,status,quota,quota_at_risk) VALUES (%s,%s,%s,%s,%s)",
                    (row["id"], row["provider"], row["status"], J(row["quota"]), row["quota_at_risk"]))
 
-        assert fake_repository.quota_routing_rows(["codex"]) == database_repository.quota_routing_rows(["codex"])
+        fake_rows = fake_repository.quota_routing_rows(["codex"])
+        database_rows = database_repository.quota_routing_rows(["codex"])
+        assert fake_rows == database_rows == [
+            QuotaRoutingRow("account-null-risk", "codex", None, None),
+            QuotaRoutingRow("account-safe", "codex", rows[1]["quota"], False),
+        ]
         assert fake_repository.ready_ids() == database_repository.ready_ids()

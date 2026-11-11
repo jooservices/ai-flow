@@ -6,6 +6,7 @@ from typing import Any
 
 from ..core.quota import as_utc
 from .repositories.accounts import AccountRepository
+from .repositories.models import QuotaRoutingRow
 from .repositories.provider_routing import ProviderRoutingRepository
 
 DEFAULT_ORDER = ("codex", "grok", "claude", "opencode")
@@ -87,23 +88,23 @@ def resolve_order(saved: list[str], providers: list[str]) -> list[str]:
     return out
 
 
-def _account_window(account: dict, name: str, window: Any, now: datetime) -> dict | None:
+def _account_window(account_id: str, name: str, window: Any, now: datetime) -> dict | None:
     used = _used_pct(window)
     if used is None:
         return None
     reset = as_utc(window.get("resets_at") or window.get("reset_at"))
     expired = bool(reset and reset <= now)
-    return {"name": str(name), "account": str(account.get("id") or ""),
+    return {"name": str(name), "account": str(account_id),
             "used_pct": 0.0 if expired else used,
             "reset_at": reset.isoformat() if reset else None, "reset": expired}
 
 
-def provider_windows(accounts: list[dict], now: datetime) -> list[dict]:
+def provider_windows(accounts: list[QuotaRoutingRow], now: datetime) -> list[dict]:
     """Return each account's live window separately so one account cannot mask another's quota use."""
     out = []
     for account in accounts:
-        for name, window in (account.get("quota") or {}).get("windows", {}).items():
-            item = _account_window(account, name, window, now)
+        for name, window in (account.quota or {}).get("windows", {}).items():
+            item = _account_window(account.id, name, window, now)
             if item:
                 out.append(item)
     return sorted(out, key=lambda window: (window["name"], window["account"], window["reset_at"] or ""))
@@ -160,7 +161,7 @@ def _persist_hold_state(repository: ProviderRoutingRepository, provider: str, he
         repository.release_provider(provider)
 
 
-def _provider_state(repository: ProviderRoutingRepository, provider: str, mine: list[dict],
+def _provider_state(repository: ProviderRoutingRepository, provider: str, mine: list[QuotaRoutingRow],
                     settings: dict[str, Any], held_row: dict | None, now: datetime,
                     persist: bool) -> tuple[dict, float]:
     windows = provider_windows(mine, now)
@@ -169,7 +170,7 @@ def _provider_state(repository: ProviderRoutingRepository, provider: str, mine: 
     held, reason, trigger = _hold_status(ceiling, windows, held_row, now)
     if persist:
         _persist_hold_state(repository, provider, held, trigger, held_row)
-    at_risk = sum(1 for row in mine if row["quota_at_risk"]) / len(mine) if mine else 0.0
+    at_risk = sum(1 for row in mine if row.quota_at_risk) / len(mine) if mine else 0.0
     score = _preference_score(headroom, [window for window in windows if not window["reset"]], at_risk, now)
     return ({"provider": provider, "accounts": len(mine), "ceiling_pct": ceiling, "windows": windows,
              "headroom_pct": round(headroom, 1), "unknown": not windows, "held_back": held,
@@ -191,7 +192,7 @@ def _apply_preferences(states: dict[str, dict], ranking: list[str]) -> None:
                          if state["unknown"] else "")
 
 
-def evaluate(repository: ProviderRoutingRepository, providers: list[str], account_rows: list[dict[str, Any]],
+def evaluate(repository: ProviderRoutingRepository, providers: list[str], account_rows: list[QuotaRoutingRow],
              now: datetime | None = None, persist: bool = True) -> dict[str, Any]:
     """The routing state of every provider in `providers`, updating the hold-back state when `persist`."""
     now = as_utc(now) or datetime.now(timezone.utc)
@@ -201,7 +202,7 @@ def evaluate(repository: ProviderRoutingRepository, providers: list[str], accoun
     states: dict[str, dict] = {}
     scores: dict[str, float] = {}
     for provider in providers:
-        mine = [row for row in account_rows if row["provider"] == provider]
+        mine = [row for row in account_rows if row.provider == provider]
         states[provider], scores[provider] = _provider_state(
             repository, provider, mine, settings, held_rows.get(provider), now, persist)
     ranking = sorted(providers, key=lambda p: (states[p]["held_back"], -scores[p], order.index(p)))

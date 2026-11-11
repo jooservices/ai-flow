@@ -4,6 +4,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .models import CapacityRoutingRow, QuotaRoutingRow
+
 
 def _all(queryable, sql: str, params: tuple = ()) -> list[dict]:
     if hasattr(queryable, "all"):
@@ -46,12 +48,14 @@ class AccountRepository:
     def __init__(self, db):
         self.db = db
 
-    def quota_routing_rows(self, providers: list[str]) -> list[dict[str, Any]]:
-        return self.db.all("SELECT id, provider, quota, quota_at_risk FROM accounts WHERE provider=ANY(%s)"
+    def quota_routing_rows(self, providers: list[str]) -> list[QuotaRoutingRow]:
+        rows = self.db.all("SELECT id, provider, quota, quota_at_risk FROM accounts WHERE provider=ANY(%s)"
                            " ORDER BY id", (providers,))
+        return [QuotaRoutingRow(**row) for row in rows]
 
-    def capacity_routing_rows(self) -> list[dict[str, Any]]:
-        return self.db.all("SELECT id, provider, tier, quota_forecast FROM accounts ORDER BY id")
+    def capacity_routing_rows(self) -> list[CapacityRoutingRow]:
+        rows = self.db.all("SELECT id, provider, tier, quota_forecast FROM accounts ORDER BY id")
+        return [CapacityRoutingRow(**row) for row in rows]
 
     def ready_ids(self) -> set[str]:
         return {row["id"] for row in self.db.all(
@@ -66,11 +70,18 @@ class FakeAccountRepository:
     def __init__(self, rows: list[dict[str, Any]] | None = None):
         self._rows = deepcopy(rows if rows is not None else [])
 
-    def quota_routing_rows(self, providers: list[str]) -> list[dict[str, Any]]:
+    def quota_routing_rows(self, providers: list[str]) -> list[QuotaRoutingRow]:
         provider_set = set(providers)
         rows = sorted((row for row in self._rows if row["provider"] in provider_set), key=lambda row: row["id"])
-        return [{"id": row["id"], "provider": row["provider"], "quota": deepcopy(row["quota"]),
-                 "quota_at_risk": row["quota_at_risk"]} for row in rows]
+        return [QuotaRoutingRow(id=str(row["id"]), provider=str(row["provider"]), quota=deepcopy(row["quota"]),
+                                quota_at_risk=row["quota_at_risk"]) for row in rows]
+
+    def capacity_routing_rows(self) -> list[CapacityRoutingRow]:
+        """Return the fake's capacity inputs in account-id order, copying JSON values at the boundary."""
+        rows = sorted(self._rows, key=lambda row: row["id"])
+        return [CapacityRoutingRow(id=str(row["id"]), provider=str(row["provider"]),
+                                   tier=row.get("tier", "middle"),
+                                   quota_forecast=deepcopy(row.get("quota_forecast", {}))) for row in rows]
 
     def ready_ids(self) -> set[str]:
         return {row["id"] for row in self._rows if row["status"] in self._ready_statuses}

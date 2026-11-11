@@ -426,7 +426,9 @@ def test_capacity_routing_keeps_headroom_provider_when_held_back_peer_has_more_t
 
     ticket = ctx.db.one("SELECT * FROM tickets WHERE key='TESTWP-24'")
     estimate = capacity.estimate(ticket, capacity.history(ctx.db))
-    rows = {row["id"]: row for row in AccountRepository(ctx.db).capacity_routing_rows()}
+    rows = {row.id: {"id": row.id, "provider": row.provider, "tier": row.tier,
+                     "quota_forecast": row.quota_forecast}
+            for row in AccountRepository(ctx.db).capacity_routing_rows()}
     candidates = [rows["codex-01"], rows["claude-01"]]
     raw_choice, fits = capacity.choose_account(
         candidates, ticket, estimate, {account["id"]: account["quota_forecast"] for account in candidates})

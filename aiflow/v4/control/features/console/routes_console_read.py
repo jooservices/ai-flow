@@ -3,27 +3,11 @@ from types import SimpleNamespace
 
 from fastapi import HTTPException, Request
 
-from ...console_auth import CANONICAL_ROLES, ROLE_LABELS, ROLE_PERMISSIONS, landing_page
+from ...console_auth import CANONICAL_ROLES, ROLE_LABELS, ROLE_PERMISSIONS
 
 
 def install_console_read_routes(app, ctx, deps) -> SimpleNamespace:
     console_user = deps.console_user
-    optional_console_user = deps.optional_console_user
-
-    @app.get("/v1/console/session")
-    def console_session(request: Request) -> dict:
-        user = (console_user(request, None) if ctx.settings.console_login else optional_console_user(request))
-        if user is None:
-            return {"authenticated": False}
-        effective = user.view_as or user.role
-        return {"authenticated": True, "user": user.subject, "role": effective,
-                "role_label": ROLE_LABELS[effective], "roles": list(user.assigned_roles),
-                "role_labels": [ROLE_LABELS[role] for role in user.assigned_roles],
-                "permissions": sorted(user.permissions), "landing_page": landing_page((effective,)),
-                "can_view_as": user.is_administrator, "viewing_as": user.view_as,
-                "role_options": [{"id": role, "label": ROLE_LABELS[role],
-                                  "permissions": sorted(ROLE_PERMISSIONS[role]),
-                                  "landing_page": landing_page((role,))} for role in CANONICAL_ROLES]}
 
     def validate_project_keys(project_keys: list[str] | None) -> list[str] | None:
         if project_keys is None:
@@ -46,5 +30,4 @@ def install_console_read_routes(app, ctx, deps) -> SimpleNamespace:
                 "role_options": [{"id": role, "label": ROLE_LABELS[role],
                                   "permissions": sorted(ROLE_PERMISSIONS[role])} for role in CANONICAL_ROLES]}
 
-    return SimpleNamespace(console_session=console_session, validate_project_keys=validate_project_keys,
-                           console_users=console_users)
+    return SimpleNamespace(validate_project_keys=validate_project_keys, console_users=console_users)

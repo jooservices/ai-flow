@@ -7,10 +7,11 @@ import time
 from types import SimpleNamespace
 
 from aiflow.v4.control import eligibility
+from aiflow.v4.control.repositories.accounts import FakeAccountRepository
 
 
 def service() -> eligibility.ProviderRoutingEligibilityService:
-    ctx = SimpleNamespace(db=None)
+    ctx = SimpleNamespace(db=None, account_repository=FakeAccountRepository())
     return eligibility.ProviderRoutingEligibilityService(ctx, None, lambda *a, **k: [], lambda account: False,
                                                          lambda account, roles: [])
 
@@ -93,3 +94,80 @@ def test_reset_cache_forgets_the_previous_answers():
     svc._peer_offers[("codex-1", "mac")] = (time.monotonic(), ["x"])
     svc.reset_cache()
     assert svc._last_takeable == {} and svc._peer_offers == {} and svc._snapshot_cache is None
+
+
+def test_real_eligibility_service_uses_context_repository_and_paused_overlay(ctx):
+    configured_accounts = [
+        SimpleNamespace(id="jaif301-paused", provider="claude", paused=True, machines=[]),
+        SimpleNamespace(id="jaif301-active", provider="codex", paused=False, machines=[]),
+    ]
+    ctx.repo = lambda: SimpleNamespace(accounts=configured_accounts)
+
+    class RecordingAccountRepository(FakeAccountRepository):
+        def __init__(self):
+            super().__init__([
+                {"id": "jaif301-paused", "provider": "claude", "status": "idle", "quota": {},
+                 "quota_at_risk": False},
+                {"id": "jaif301-active", "provider": "codex", "status": "working", "quota": {},
+                 "quota_at_risk": False},
+                {"id": "jaif301-unconfigured", "provider": "grok", "status": "probing", "quota": {},
+                 "quota_at_risk": False},
+            ])
+            self.providers: list[list[str]] = []
+            self.ready_reads = 0
+
+        def quota_routing_rows(self, providers):
+            self.providers.append(list(providers))
+            return super().quota_routing_rows(providers)
+
+        def ready_ids(self):
+            self.ready_reads += 1
+            return super().ready_ids()
+
+    repository = RecordingAccountRepository()
+    ctx.account_repository = repository
+    service = eligibility.ProviderRoutingEligibilityService(ctx, None, lambda *a, **k: [], lambda account: False,
+                                                              lambda account, roles: [])
+
+    state = service.state(persist=False)
+    snapshot = service._snapshot()
+
+    assert service.account_repository is repository
+    assert set(state["providers"]) == {"claude", "codex"}
+    assert repository.providers == [["claude", "codex"], ["claude", "codex"]]
+    assert repository.ready_reads == 1
+    assert snapshot["ready"] == {"jaif301-active"}
+
+
+def test_failed_repository_snapshot_read_releases_lock_and_retry_succeeds(ctx):
+    ctx.repo = lambda: SimpleNamespace(accounts=[])
+
+    class FailsOnceRepository(FakeAccountRepository):
+        def __init__(self):
+            super().__init__()
+            self.failure = RuntimeError("account repository unavailable")
+            self.ready_reads = 0
+
+        def ready_ids(self):
+            self.ready_reads += 1
+            if self.ready_reads == 1:
+                raise self.failure
+            return super().ready_ids()
+
+    repository = FailsOnceRepository()
+    ctx.account_repository = repository
+    service = eligibility.ProviderRoutingEligibilityService(ctx, None, lambda *a, **k: [], lambda account: False,
+                                                              lambda account, roles: [])
+
+    try:
+        service._snapshot()
+    except RuntimeError as error:
+        assert error is repository.failure
+    else:
+        raise AssertionError("the repository failure should propagate")
+
+    assert service._snapshot_cache is None
+    assert service._snapshot_build.acquire(blocking=False)
+    service._snapshot_build.release()
+    assert service._snapshot()["ready"] == set()
+    assert repository.ready_reads == 2

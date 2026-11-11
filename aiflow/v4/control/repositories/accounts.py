@@ -1,6 +1,7 @@
 """AI accounts: `managed_ai_accounts`, `accounts`, `shared_accounts` and `account_machines` queries."""
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 
@@ -55,3 +56,21 @@ class AccountRepository:
     def ready_ids(self) -> set[str]:
         return {row["id"] for row in self.db.all(
             "SELECT id FROM accounts WHERE status IN ('idle','working','probing')")}
+
+
+class FakeAccountRepository:
+    """In-memory account routing reads with the same projection and filters as ``AccountRepository``."""
+
+    _ready_statuses = frozenset({"idle", "working", "probing"})
+
+    def __init__(self, rows: list[dict[str, Any]] | None = None):
+        self._rows = deepcopy(rows if rows is not None else [])
+
+    def quota_routing_rows(self, providers: list[str]) -> list[dict[str, Any]]:
+        provider_set = set(providers)
+        rows = sorted((row for row in self._rows if row["provider"] in provider_set), key=lambda row: row["id"])
+        return [{"id": row["id"], "provider": row["provider"], "quota": deepcopy(row["quota"]),
+                 "quota_at_risk": row["quota_at_risk"]} for row in rows]
+
+    def ready_ids(self) -> set[str]:
+        return {row["id"] for row in self._rows if row["status"] in self._ready_statuses}

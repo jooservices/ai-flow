@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from aiflow.v4.control.features.knowledge import routes_resources
+from aiflow.v4.control.features.knowledge import routes_items, routes_resources
 from aiflow.v4.control.features.knowledge.routes import install
 
 
@@ -32,6 +32,16 @@ def signature_text(handler):
         for parameter in signature.parameters.values()
     ]
     return str(signature.replace(parameters=parameters))
+
+
+def router_registrations(router):
+    return [{
+        "method": method,
+        "path": route.path,
+        "handler": route.endpoint.__name__,
+        "signature": signature_text(route.endpoint),
+        "kwargs": {},
+    } for route in router.routes for method in sorted(route.methods)]
 
 
 class RecordingApp:
@@ -60,13 +70,14 @@ def test_knowledge_route_registration_matches_the_checked_in_golden():
 
     installed = install(app, SimpleNamespace(), SimpleNamespace(console_user=lambda *_args, **_kwargs: None,
                                                                  owner_auth=owner_auth))
-    live = [json.dumps(row, separators=(",", ":"), sort_keys=True) for row in app.registrations]
+    assert routes_items.router is not None
+    live = router_registrations(routes_items.router) + app.registrations
+    live = [json.dumps(row, separators=(",", ":"), sort_keys=True) for row in live]
 
     assert live == FIXTURE.read_text(encoding="utf-8").splitlines()
     assert tuple(vars(installed)) == (
-        "knowledge_items", "knowledge_item_save", "knowledge_item_action", "load_managed_resources",
-        "submit_resource_change", "knowledge_resources", "knowledge_history", "knowledge_save",
-        "knowledge_restore", "knowledge_approve",
+        "load_managed_resources", "submit_resource_change", "knowledge_resources", "knowledge_history",
+        "knowledge_save", "knowledge_restore", "knowledge_approve",
     )
     assert str(inspect.signature(installed.load_managed_resources)) == "() -> None"
     assert str(inspect.signature(installed.submit_resource_change)) == (

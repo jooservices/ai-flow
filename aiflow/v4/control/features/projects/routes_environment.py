@@ -6,19 +6,6 @@ from types import SimpleNamespace
 from . import routes as compat
 
 
-def _install_environment_missing_items_route(app, ctx, deps, runtime, support):
-    console_user = runtime.console_user
-    optional_console_user = runtime.optional_console_user
-    @app.get("/v1/environment/missing")
-    def environment_missing_items(request: compat.Request) -> dict:
-        user = (console_user(request, "projects.manage") if ctx.settings.console_login
-                else optional_console_user(request))
-        rows = compat.environment_reports.reports(ctx)
-        if user and user.project_keys is not None:
-            rows = [r for r in rows if r["project"] in user.project_keys]
-        return {"missing": rows}
-    return environment_missing_items
-
 def _install_environment_scan_report_route(app, ctx, deps, runtime, support):
     console_user = runtime.console_user
     @app.get("/v1/environment/scan")
@@ -59,12 +46,10 @@ def _install_environment_removals_route(app, ctx, deps, runtime, support):
 
 
 def install_environment_routes(app, ctx, deps, runtime, support) -> SimpleNamespace:
-    environment_missing_items = _install_environment_missing_items_route(app, ctx, deps, runtime, support)
     environment_scan_report = _install_environment_scan_report_route(app, ctx, deps, runtime, support)
     environment_scan_run = _install_environment_scan_run_route(app, ctx, deps, runtime, support)
     environment_removals = _install_environment_removals_route(app, ctx, deps, runtime, support)
     return SimpleNamespace(
-        environment_missing_items=environment_missing_items,
         environment_scan_report=environment_scan_report,
         environment_scan_run=environment_scan_run,
         environment_removals=environment_removals,

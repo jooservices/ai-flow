@@ -27,8 +27,7 @@ class CapacityRoutingService:
         account_rows = self.account_repository.capacity_routing_rows()
         if not account_rows:
             return offered
-        accounts = {row.id: {"id": row.id, "provider": row.provider, "tier": row.tier,
-                             "quota_forecast": row.quota_forecast} for row in account_rows}
+        accounts = {str(row["id"]): row for row in account_rows}
         candidates = self._eligible_by_ticket(account_id, node, offered, accounts)
         if not candidates:
             return offered

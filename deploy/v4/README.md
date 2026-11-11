@@ -65,7 +65,8 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 - [Human review queue structure](../../docs/v4/human_reviews-structure.md): named queue, ticket, action, preview and thread builders behind `GET /v1/reviews`
 - [Human review mount structure](../../docs/v4/human_review_mount-structure.md): named installers and response-building steps for `GET /v1/reviews`
 - [UI mount structure](../../docs/v4/ui_mount-structure.md): named parts that register console pages, scripts, help and the ticket and service routes in order
-- [Jira connection route structure](../../docs/v4/jira_connect_mount-structure.md): named installers register the Jira status, OAuth, API-token and disconnect routes in order
+- [Jira connection route structure](../../docs/v4/jira_connect_mount-structure.md): the discovered status router and named OAuth, API-token and disconnect installers
+- [Jira status route discovery](../../docs/v4/jira-integration-status-discovery.md): owner-authorized status reads registered through the control route registry
 - [Security installation structure](../../docs/v4/security-structure.md): the security middleware and routes split into guard, middleware, settings, people and two-factor parts
 - [GitHub Git proxy structure](../../docs/v4/git_proxy-structure.md): named steps for credential scope, purpose authorization, push target and relay in the Git smart HTTP route
 - [Worker loop cycle structure](../../docs/v4/worker_loop_cycle-structure.md): explicit version release, BA chat and work phases for one worker poll
@@ -181,6 +182,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with token-authorized fenced approve and rework actions
 - [Support routes](../../docs/v4/route-module-support.md): the support routes are served from their own router module
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
+- [Jira integration status route](../../docs/v4/jira-integration-status-discovery.md): the owner-protected status read is registered through the discovered feature router
 - [Install script routes](../../docs/v4/route-module-install_script.md): the install script routes are served from their own router module
 - [Node operator intervention route](../../docs/v4/node-intervention-route.md): authenticated node reports are recorded as Flow Doctor intervention evidence through the discovered route registry
 - [Join a node](../../docs/v4/node-join.md): Command Center issues a five-minute one-use token and the pinned server-installer CLI bootstraps a node

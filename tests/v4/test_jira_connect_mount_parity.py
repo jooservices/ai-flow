@@ -12,6 +12,8 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request, Response
 
 from aiflow.v4.control import jira_connect
+from aiflow.v4.control.route_registry import concrete_routes
+from aiflow.v4.control.routes import jira_integration_status
 
 FIXTURE = Path(__file__).parent / "fixtures" / "jira_connect_mount_parity.jsonl"
 OWNER = {"Authorization": "Bearer owner-key"}
@@ -125,9 +127,12 @@ def _key(value):
 
 def _route_inventory():
     app = FastAPI()
-    jira_connect.mount(app, object())
-    routes = [[route.path, sorted(route.methods), route.name] for route in app.routes
+    app.state.ctx = object()
+    jira_connect.mount(app, app.state.ctx)
+    app.include_router(jira_integration_status.router)
+    routes = [[route.path, sorted(route.methods), route.name] for route in concrete_routes(app.routes)
               if route.path.startswith("/v1/integrations/jira")]
+    routes.sort(key=lambda route: (route[0], route[1], route[2]))
     return {"name": "route_inventory", "routes": routes}
 
 
@@ -156,7 +161,7 @@ def _context_for_case(spec, calls, monkeypatch):
     return ctx, redis
 
 
-def _request_for_case(spec):
+def _request_for_case(spec, app):
     headers = dict(spec.get("headers", {}))
     if spec.get("cookie"):
         headers["Cookie"] = f"{jira_connect.STATE_COOKIE}={spec['cookie']}"
@@ -166,7 +171,7 @@ def _request_for_case(spec):
              "scheme": "https", "path": parsed.path, "raw_path": parsed.path.encode(),
              "query_string": parsed.query.encode(), "root_path": "", "headers": [(k.lower().encode(), v.encode())
                                                                                   for k, v in headers.items()],
-             "client": ("testclient", 50000), "server": ("control.example.test", 443)}
+             "client": ("testclient", 50000), "server": ("control.example.test", 443), "app": app}
 
     async def receive(): return {"type": "http.request", "body": body, "more_body": False}
 
@@ -174,7 +179,8 @@ def _request_for_case(spec):
 
 
 def _route_arguments(app, method, parsed, request):
-    route = next(route for route in app.routes if route.path == parsed.path and method in route.methods)
+    route = next(route for route in concrete_routes(app.routes)
+                 if route.path == parsed.path and method in route.methods)
     query = {key: values[-1] for key, values in parse_qs(parsed.query, keep_blank_values=True).items()}
     arguments = {name: request if name == "request" else query.get(name, "")
                  for name in inspect.signature(route.endpoint).parameters}
@@ -224,10 +230,12 @@ def observe_case(spec, monkeypatch):
     ctx, redis = _context_for_case(spec, calls, monkeypatch)
 
     app = FastAPI()
+    app.state.ctx = ctx
     jira_connect.mount(app, ctx)
+    app.include_router(jira_integration_status.router)
     if spec.get("pending") is not None:
         redis.values[jira_connect._state_key(ctx, "state-a")] = json.dumps({"at": 1, **spec["pending"]})
-    method, parsed, request = _request_for_case(spec)
+    method, parsed, request = _request_for_case(spec, app)
     route, arguments = _route_arguments(app, method, parsed, request)
     return {"name": spec["name"], "response": _invoke_route(route, arguments), "calls": calls}
 
@@ -240,4 +248,8 @@ def _license(calls, error):
 
 @pytest.mark.parametrize("row", TABLE, ids=lambda row: row["case"]["name"])
 def test_mount_matches_recorded_behavior(row, monkeypatch):
-    assert observe_case(_expand_case(row["case"]), monkeypatch) == row["expected"]
+    expected = row["expected"]
+    if row["case"]["name"] == "route_inventory":
+        expected = {**expected, "routes": sorted(expected["routes"], key=lambda route:
+                                                   (route[0], route[1], route[2]))}
+    assert observe_case(_expand_case(row["case"]), monkeypatch) == expected

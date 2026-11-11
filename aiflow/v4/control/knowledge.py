@@ -32,6 +32,23 @@ _PRIVATE_KEY = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY---
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 _SENSITIVE_DECLARATION = re.compile(r"(?i)\b(?:personal data|personally identifiable|social security number|ssn)\s*[:=]")
 _log = logging.getLogger("aiflow4.knowledge")
+_QUOTA_INCIDENT_FILTER = """NOT (
+    k.kind='study_case' AND k.source_type='incident' AND NOT EXISTS (
+        SELECT 1 FROM incidents i
+        WHERE i.id=CASE
+            WHEN k.source_ref ~ '^[0-9]+$' THEN CASE
+                WHEN ltrim(k.source_ref,'0')='' THEN 0::bigint
+                WHEN length(ltrim(k.source_ref,'0'))<19 THEN ltrim(k.source_ref,'0')::bigint
+                WHEN length(ltrim(k.source_ref,'0'))=19
+                     AND ltrim(k.source_ref,'0') COLLATE "C" <= '9223372036854775807' COLLATE "C"
+                    THEN ltrim(k.source_ref,'0')::bigint
+                ELSE NULL::bigint
+            END
+            ELSE NULL::bigint
+        END
+        AND i.kind NOT IN ('account_quota','quota_high','quota_prediction')
+    )
+)"""
 
 
 def sensitive_content(title: str, content: str) -> bool:
@@ -307,20 +324,27 @@ def flag_stale(db) -> int:
                   "AND updated_at < now() - interval '180 days'")
 
 
-def context_pack(db, *, project: str, ticket: str, epic: str = "", query: str = "", run_id: str = "") -> dict:
+def context_pack(db, *, project: str, ticket: str, epic: str = "", query: str = "", run_id: str = "",
+                 exclude_completed_tickets: bool = False, exclude_quota_incidents: bool = False) -> dict:
     """Build an isolated pack from approved stored knowledge and track exactly what a run received."""
     flag_stale(db)
     project = project.strip().upper()
     epic = epic.strip().upper()
-    rows = db.all("SELECT * FROM knowledge_items WHERE " + _visible_sql() +
-                  " AND approved=true AND status IN ('active','stale') ORDER BY created_at DESC,id DESC LIMIT 500",
+    filters = [_visible_sql(), "approved=true", "status IN ('active','stale')"]
+    if exclude_completed_tickets:
+        filters.append("NOT (kind='study_case' AND source_type='ticket')")
+    if exclude_quota_incidents:
+        filters.append(_QUOTA_INCIDENT_FILTER)
+    rows = db.all("SELECT k.* FROM knowledge_items k WHERE " + " AND ".join(filters) +
+                  " ORDER BY created_at DESC,id DESC LIMIT 500",
                   (project, epic))
     if not query.strip():
         query = ticket
     allowed = {int(r["id"]): r for r in rows}
     # Search adds semantic study cases; scope is enforced again when candidates are selected.
     cases = (search_items(db, project=project, q=query, limit=8, include_retired=False, approved_only=True,
-                          epic=epic, kinds=("study_case",))
+                          epic=epic, kinds=("study_case",), exclude_completed_tickets=exclude_completed_tickets,
+                          exclude_quota_incidents=exclude_quota_incidents)
              if any(r["kind"] == "study_case" for r in rows) else [])
     selected: list[dict] = []
 
@@ -352,25 +376,30 @@ def context_pack(db, *, project: str, ticket: str, epic: str = "", query: str = 
 
 
 def search_items(db, *, project: str = "", q: str = "", limit: int = 20, include_retired: bool = False,
-                 approved_only: bool = False, epic: str = "", kinds: tuple[str, ...] = ()) -> list[dict]:
+                 approved_only: bool = False, epic: str = "", kinds: tuple[str, ...] = (),
+                 exclude_completed_tickets: bool = False, exclude_quota_incidents: bool = False) -> list[dict]:
     """Hybrid full-text and local-vector search restricted to the selected project and shared general items."""
     limit = max(1, min(int(limit), 100))
     project, epic = project.strip().upper(), epic.strip().upper()
-    base = "scope='general'" if not project else "(scope='general' OR (scope='project' AND project=%s AND (epic='' OR epic=%s)))"
+    base = "k.scope='general'" if not project else "(k.scope='general' OR (k.scope='project' AND k.project=%s AND (k.epic='' OR k.epic=%s)))"
     params: list[Any] = []
     if project:
         params.extend((project, epic))
     filters = [base]
     if not include_retired:
-        filters.append("status<>'retired'")
+        filters.append("k.status<>'retired'")
     if approved_only:
-        filters.append("approved=true")
+        filters.append("k.approved=true")
+    if exclude_completed_tickets:
+        filters.append("NOT (k.kind='study_case' AND k.source_type='ticket')")
+    if exclude_quota_incidents:
+        filters.append(_QUOTA_INCIDENT_FILTER)
     if kinds:
-        filters.append("kind=ANY(%s)")
+        filters.append("k.kind=ANY(%s)")
         params.append(list(kinds))
     where = " AND ".join(filters)
     if not q.strip():
-        return db.all("SELECT * FROM knowledge_items WHERE " + where + " ORDER BY created_at DESC,id DESC LIMIT %s",
+        return db.all("SELECT k.* FROM knowledge_items k WHERE " + where + " ORDER BY k.created_at DESC,k.id DESC LIMIT %s",
                       (*params, limit))
     vector = _embedding(q)
     if vector:
@@ -382,8 +411,8 @@ def search_items(db, *, project: str = "", q: str = "", limit: int = 20, include
                "SELECT * FROM scored ORDER BY score DESC,created_at DESC,id DESC LIMIT %s")
         # Both window ranks include rows outside the matching FTS/vector set; score still fuses each available signal.
         return db.all(sql, (q, vector, *params, limit))
-    return db.all("SELECT *,ts_rank(tsv,websearch_to_tsquery('english',%s)) AS score FROM knowledge_items WHERE " +
-                  where + " AND tsv @@ websearch_to_tsquery('english',%s) ORDER BY score DESC,created_at DESC,id DESC LIMIT %s",
+    return db.all("SELECT k.*,ts_rank(k.tsv,websearch_to_tsquery('english',%s)) AS score FROM knowledge_items k WHERE " +
+                  where + " AND k.tsv @@ websearch_to_tsquery('english',%s) ORDER BY score DESC,k.created_at DESC,k.id DESC LIMIT %s",
                   (q, *params, q, limit))
 
 

@@ -11,7 +11,7 @@ PATHS = {("GET", "/v1/dashboard/waiting"), ("GET", "/v1/dashboard/disagreements"
          ("GET", "/v1/dashboard/quota"), ("GET", "/v1/dashboard/review-rounds"),
          ("GET", "/v1/dashboard/flow-failures"), ("GET", "/v1/dashboard/yield"),
          ("GET", "/v1/dashboard/pipeline-failures"),
-         ("GET", "/v1/dashboard/assumptions")}
+         ("GET", "/v1/dashboard/assumptions"), ("GET", "/v1/dashboard/timeouts")}
 
 
 def test_the_module_defines_exactly_its_dashboard_routes():

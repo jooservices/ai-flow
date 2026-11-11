@@ -1,4 +1,4 @@
-"""Dashboard read models: waiting reviews, Jira/PR disagreements and the quota summary (moved out of api.py, JAIF-401)."""
+"""Dashboard read models and metrics served by the discovered dashboard router."""
 from __future__ import annotations
 
 from typing import Any
@@ -201,3 +201,13 @@ def dashboard_yield(request: Request, days: int = Query(14, ge=1, le=90)) -> dic
             else route_deps.optional_console_user(ctx, request))
     projects = list(user.project_keys) if user and user.project_keys is not None else None
     return run_analytics.yield_metrics(ctx.db, days, projects)
+
+
+@router.get("/v1/dashboard/timeouts")
+def dashboard_timeouts(request: Request, days: int = Query(30, ge=1, le=90)) -> dict:
+    """Return developer-run timeout metrics for projects in the caller's Dashboard scope."""
+    ctx = route_deps.context(request)
+    user = (route_deps.console_user_for(request, "view.dashboard") if ctx.settings.console_login
+            else route_deps.optional_console_user(ctx, request))
+    projects = user.project_keys if user and user.project_keys is not None else None
+    return run_analytics.timeouts(ctx.db, days, projects)

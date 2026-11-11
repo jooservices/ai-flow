@@ -3,6 +3,7 @@ traffic, the performance budgets and their enforcement, the release proof gate a
 Machines and sessions are simulated; no AI provider is called."""
 import json
 import os
+import tempfile
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -20,6 +21,28 @@ from aiflow.v4.control.ui import console_template
 ROOT = Path(__file__).resolve().parents[2]
 FULL = Scenario()
 OWNER = {"Authorization": "Bearer owner-secret"}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def scale_proof_migrations():
+    """Avoid a same-name scratch index shadowing the public table in migration 018's search path."""
+    from aiflow.v4.control import db as control_db
+
+    migration_parent = ROOT / ".tmp"
+    migration_parent.mkdir(exist_ok=True)
+    original_migrations = control_db.MIGRATIONS
+    fixture = Path(__file__).resolve().parent / "fixtures" / "scale_scratch_index.sql"
+    with tempfile.TemporaryDirectory(prefix="scale-migrations-", dir=migration_parent) as temporary:
+        migrations = Path(temporary)
+        for migration in original_migrations.glob("*.sql"):
+            (migrations / migration.name).symlink_to(migration)
+        (migrations / "002_scale_scratch_index.sql").write_text(fixture.read_text(encoding="utf-8"),
+                                                                  encoding="utf-8")
+        try:
+            control_db.MIGRATIONS = migrations
+            yield
+        finally:
+            control_db.MIGRATIONS = original_migrations
 
 
 def require_close_services():
@@ -46,6 +69,10 @@ def test_scratch_schema_keeps_pgvector_in_public_for_following_tests():
         extension = db.one("SELECT n.nspname AS schema FROM pg_extension e "
                            "JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='vector'")
         assert extension == {"schema": "public"}
+        target = db.one("SELECT n.nspname AS schema FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid=c.relnamespace "
+                        "WHERE c.oid=to_regclass('memory_project')")
+        assert target["schema"] == "public"
 
 
 def test_scenario_drives_100_projects_50_machines_and_200_sessions(proof):

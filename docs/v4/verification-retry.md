@@ -18,10 +18,14 @@ The retry path has three named steps:
    ticket's verifier history, including when the latest no-verdict run ended. No-verdict rows bypass the ordinary
    verify delay.
 3. `verify_candidates` applies `_verify_retry_blocked` and `_untried_verify_peer`: an eligible account that has not
-   ended this ticket without a verdict gets the next attempt. Peer eligibility is loaded once per account and node
-   during a poll and reused for each ticket. If an eligible peer does not claim the ticket, the prior verifier can
-   retry 15 minutes after its no-verdict run ends. Two consecutive no-verdict results bar that account from the ticket.
-   Role health excludes the first no-verdict result and scores the second and later consecutive ones.
+   ended this ticket without a verdict gets priority over every account with a prior no-verdict in this development
+   round. This priority has no time limit. Peer eligibility is loaded once per account and node during a poll and
+   reused for each ticket. If no untried eligible peer exists, a verifier with only one consecutive no-verdict may
+   retry immediately. Two consecutive no-verdict results bar that account from the ticket. Role health excludes the
+   first no-verdict result and scores the second and later consecutive ones.
+
+The first reviewer remains preferred among eligible verifiers with no no-verdict history. That preference cannot
+delay an untried verifier in favor of a reviewer who has already returned no verdict. See [untried verifier priority](verify-retry-peer-priority.md).
 
 To change this policy, update the repository queries and candidate rule together, then keep the account-ordering,
 streak, and ordinary-failure tests in `tests/v4/test_verify_no_verdict.py` aligned. The retry history is scoped to the

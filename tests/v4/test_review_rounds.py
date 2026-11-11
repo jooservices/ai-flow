@@ -5,6 +5,7 @@ import uuid
 from types import SimpleNamespace
 
 from conftest import add_ticket
+from aiflow.v4.control import load_policy, rollout
 from aiflow.v4.control.db import J
 from aiflow.v4.control.features.review_rounds import models as review_round_models
 from aiflow.v4.control.features.review_rounds import repository as review_round_repository
@@ -18,6 +19,7 @@ from aiflow.v4.control.features.work.eligibility_candidates import (
     preferred_review_available,
     verify_candidates,
 )
+from aiflow.v4.control.repositories.runs import VerifyTicketHistory
 from aiflow.v4.worker.verify import findings_of
 from aiflow.v4.worker import intake, verify
 
@@ -119,25 +121,31 @@ def test_first_review_account_is_read_from_completed_review_history():
     assert calls[0][1] == ("TESTWP-1",) and "details->>'verdict'" in calls[0][0]
 
 
-def test_preferred_reviewer_availability_uses_normal_ticket_eligibility():
-    account = SimpleNamespace(machines=["node-a", "node-b"])
+def test_preferred_reviewer_availability_uses_the_peer_probe(monkeypatch):
+    account = SimpleNamespace(id="codex-01", paused=False, roles=["verify"], machines=["node-a", "node-b"])
     calls = []
     scope = SimpleNamespace(
         repo=SimpleNamespace(account=lambda key: account if key == "codex-01" else None),
+        ctx=SimpleNamespace(db=SimpleNamespace(one=lambda *_args: {"account_id": "developer"})),
+        account=SimpleNamespace(id="opencode-01"), ticket_key="TESTWP-1",
         deps=SimpleNamespace(eligible=lambda *args, **kwargs:
                              calls.append((args, kwargs)) or ([{"key": "TESTWP-1", "step": "verify"}]
-                                                              if args[1] == "node-b" else [])))
+                                                              if args[1] == "node-b" else []),
+                       releases=lambda: None))
+    monkeypatch.setattr(load_policy, "claim_limits", lambda *_args: {"allowed": True})
+    monkeypatch.setattr(rollout, "node_compatible", lambda *_args: {"compatible": True})
 
-    assert preferred_review_available(scope, "codex-01", {"key": "TESTWP-1"})
+    assert preferred_review_available(scope, "codex-01", {"key": "TESTWP-1"}, VerifyTicketHistory(), {})
     assert [item[0][1] for item in calls] == ["node-a", "node-b"]
     assert calls[0][1] == {"routing": False, "capacity_routing": False,
-                           "ticket_key": "TESTWP-1", "step_filter": "verify"}
-    assert not preferred_review_available(scope, "missing", {"key": "TESTWP-1"})
+                           "step_filter": "verify", "verify_retry_guard": False,
+                           "ticket_key": "TESTWP-1"}
+    assert not preferred_review_available(scope, "missing", {"key": "TESTWP-1"}, VerifyTicketHistory(), {})
 
 
 def _verify_scope(current_account, preferred_ready):
     ticket = {"key": "TESTWP-1", "project": "TESTWP", "labels": [], "jira_created": None}
-    account = SimpleNamespace(machines=["node-a"])
+    account = SimpleNamespace(id="reviewer-one", paused=False, roles=["verify"], machines=["node-a"])
     dev = {"status": "finished", "outcome": "done", "account_id": "developer",
            "pr_url": "https://github.test/pr/1", "details": {"local_gate": {"status": "green"}}}
 
@@ -151,7 +159,8 @@ def _verify_scope(current_account, preferred_ready):
         deps=SimpleNamespace(
             last_dev=lambda *_args, **_kwargs: {"account_id": "developer", "pr_url": "https://github.test/pr/1"},
             eligible=lambda *_args, **_kwargs: ([{"key": ticket["key"], "step": "verify"}]
-                                               if preferred_ready else [])),
+                                               if preferred_ready else []),
+            releases=lambda: None),
         account=SimpleNamespace(id=current_account),
         repo=SimpleNamespace(account=lambda _key: account),
         scoped_key="", scoped_ticket=(), projects=["TESTWP"], ticket_key=None, verify_retry_guard=True,
@@ -162,7 +171,9 @@ def _verify_scope(current_account, preferred_ready):
     return scope
 
 
-def test_verification_prefers_first_reviewer_only_while_that_account_is_eligible():
+def test_verification_prefers_first_reviewer_only_while_that_account_is_eligible(monkeypatch):
+    monkeypatch.setattr(load_policy, "claim_limits", lambda *_args: {"allowed": True})
+    monkeypatch.setattr(rollout, "node_compatible", lambda *_args: {"compatible": True})
     assert verify_candidates(_verify_scope("reviewer-two", True)) == []
     assert [row["key"] for row in verify_candidates(_verify_scope("reviewer-two", False))] == ["TESTWP-1"]
     assert [row["key"] for row in verify_candidates(_verify_scope("reviewer-one", True))] == ["TESTWP-1"]

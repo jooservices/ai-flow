@@ -11,9 +11,6 @@ from ...features.tickets import ticket_repository_of
 from .eligibility_scope import Scope
 from .repository import WorkRepository
 
-VERIFY_NO_VERDICT_RETRY_WAIT = timedelta(minutes=15)
-
-
 def verify_candidates(scope: Scope) -> list[dict]:
     """Collect verification tickets whose completed development run belongs to another account."""
     if "verify" not in scope.roles:
@@ -29,10 +26,12 @@ def verify_candidates(scope: Scope) -> list[dict]:
         candidate = _verify_candidate(scope, ticket, verify_cooling, ticket_history, peer_eligibility_cache)
         if not candidate:
             continue
-        if scope.verify_retry_guard and not _verify_retry_fallback_due(scope, ticket_history):
+        if scope.verify_retry_guard:
             # Keep the first reviewer when eligible; peer probes skip this preference to avoid mutual eligibility.
             first = first_review_account(scope, ticket["key"])
-            if first and first != scope.account.id and preferred_review_available(scope, first, ticket):
+            first_is_untried = first and not any(ticket_history.by_account.get(first, []))
+            if (first and first != scope.account.id and first_is_untried
+                    and preferred_review_available(scope, first, ticket, ticket_history, peer_eligibility_cache)):
                 continue
         out.append(candidate)
     return out
@@ -75,21 +74,12 @@ def _verify_account_barred(attempts: list[bool]) -> bool:
     return len(attempts) >= 2 and bool(attempts[0] and attempts[1])
 
 
-def _verify_retry_fallback_due(scope: Scope, history: VerifyTicketHistory) -> bool:
-    """Allow a prior no-verdict verifier back after peers had time to claim the retry."""
-    attempts = history.by_account.get(scope.account.id, [])
-    ended_at = history.last_no_verdict_ended_at
-    return bool(any(attempts) and ended_at and scope.now() - ended_at >= VERIFY_NO_VERDICT_RETRY_WAIT)
-
-
 def _verify_retry_blocked(scope: Scope, ticket: dict, dev_account: str, history: VerifyTicketHistory,
                           peer_eligibility_cache: dict[tuple[str, str], set[str]] | None = None) -> bool:
     attempts = history.by_account.get(scope.account.id, [])
     if _verify_account_barred(attempts):
         return True
     if not any(attempts):
-        return False
-    if _verify_retry_fallback_due(scope, history):
         return False
     return _untried_verify_peer(scope, ticket, dev_account, history, peer_eligibility_cache)
 
@@ -152,15 +142,14 @@ def first_review_account(scope: Scope, ticket_key: str) -> str:
     return WorkRepository(scope.ctx.db).first_review_account(ticket_key)
 
 
-def preferred_review_available(scope: Scope, account_id: str, ticket: dict) -> bool:
-    """Check the preferred review account through the normal eligibility rules on its machines."""
+def preferred_review_available(scope: Scope, account_id: str, ticket: dict, history: VerifyTicketHistory,
+                               peer_eligibility_cache: dict[tuple[str, str], set[str]]) -> bool:
+    """Check first-reviewer preference using the same eligibility probe as no-verdict retries."""
     account = scope.repo.account(account_id)
-    if not account:
+    if not account or account_id == scope.account.id or any(history.by_account.get(account_id, [])):
         return False
     for node in account.machines:
-        candidates = scope.deps.eligible(account_id, node, routing=False, capacity_routing=False,
-                                         ticket_key=ticket["key"], step_filter="verify")
-        if any(item.get("key") == ticket["key"] and item.get("step") == "verify" for item in candidates):
+        if ticket["key"] in _peer_verify_tickets(scope, account_id, node, peer_eligibility_cache):
             return True
     return False
 

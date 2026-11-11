@@ -5,6 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from aiflow.v4.control.features.fleet import routes
+from aiflow.v4.control.api import create_app
+from aiflow.v4.control.route_registry import concrete_routes
+from tests.v4.conftest import join_node
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fleet-install-routes.jsonl"
@@ -132,3 +135,55 @@ def test_operation_plan_component_selection_keeps_repair_and_install_rules():
         "codex", "packages",
     ]
     assert routes._operation_components(install, ["codex"], {"codex"}, []) == ["codex"]
+
+
+def test_operator_intervention_route_is_registered_once_on_assembled_app(ctx):
+    matches = [route for route in concrete_routes(create_app(ctx).routes)
+               if route.path == "/v1/nodes/{name}/operator-interventions" and "POST" in route.methods]
+
+    assert len(matches) == 1
+    assert matches[0].endpoint.__name__ == "report_operator_intervention"
+
+
+def test_operator_intervention_route_records_valid_and_duplicate_requests(client, ctx):
+    joined = join_node(client, "cc")
+    headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+    body = {"source_key": "test:1", "source": "shell", "actor": "owner", "action": "execute",
+            "details": {"node": "body-node", "extra": "retained"}}
+
+    response = client.post("/v1/nodes/cc/operator-interventions", headers=headers, json=body)
+
+    assert response.status_code == 202
+    assert response.json()["recorded"] is True
+    intervention_id = response.json()["id"]
+    row = ctx.db.one("SELECT id,source_key,details FROM operator_interventions WHERE id=%s", (intervention_id,))
+    assert row == {"id": intervention_id, "source_key": "host:cc:test:1",
+                   "details": {"node": "body-node", "extra": "retained"}}
+
+    duplicate = client.post("/v1/nodes/cc/operator-interventions", headers=headers,
+                            json={**body, "actor": "duplicate"})
+
+    assert duplicate.status_code == 202
+    assert duplicate.json() == {"recorded": True, "id": intervention_id}
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions WHERE source_key='host:cc:test:1'") == {
+        "n": 1,
+    }
+
+
+def test_operator_intervention_route_keeps_auth_and_body_errors(client, ctx):
+    own = join_node(client, "cc")
+    other = join_node(client, "other")
+    own_headers = {"Authorization": f"Bearer {own.json()['node_token']}"}
+    other_headers = {"Authorization": f"Bearer {other.json()['node_token']}"}
+    path = "/v1/nodes/cc/operator-interventions"
+    valid_body = {"source_key": "test:auth", "source": "shell", "actor": "owner", "action": "execute"}
+
+    assert client.post(path, json=valid_body).status_code == 401
+    assert client.post(path, headers={"Authorization": "Bearer invalid"}, json=valid_body).status_code == 401
+    wrong_node = client.post(path, headers=other_headers, json=valid_body)
+    assert wrong_node.status_code == 403
+    assert wrong_node.json()["detail"] == "token belongs to another node"
+    invalid_body = client.post(path, headers=own_headers, json={"source": "shell", "actor": "owner",
+                                                               "action": "execute"})
+    assert invalid_body.status_code == 422
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions") == {"n": 0}

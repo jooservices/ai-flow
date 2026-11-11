@@ -15,7 +15,6 @@
 ["put","/v1/machines/{name}/load-limits","set_machine_load_limits","(name: str, body: MachineLoadLimitsBody, request: Request) -> dict",{}]
 ["put","/v1/nodes/{name}/work-acceptance","set_node_work_acceptance","(name: str, body: ConfirmBody, accepting_work: bool, request: Request) -> dict",{}]
 ["delete","/v1/nodes/{name}","remove_managed_node","(name: str, body: ConfirmBody, request: Request) -> dict",{}]
-["post","/v1/nodes/{name}/operator-interventions","report_operator_intervention","(name: str, body: OperatorInterventionBody, node: str = Depends(node_auth)) -> dict",{"status_code":202}]
 ["post","/v1/nodes/{name}/operations","create_node_operation","(name: str, body: NodeOperationBody, request: Request) -> dict",{"status_code":202}]
 ["get","/v1/nodes/{name}/operations","node_operations","(name: str, request: Request) -> dict",{}]
 ["post","/v1/nodes/{name}/check-probes/token","check_probe_token","(name: str, body: CheckProbeTokenBody, node: str = Depends(node_auth)) -> dict",{}]

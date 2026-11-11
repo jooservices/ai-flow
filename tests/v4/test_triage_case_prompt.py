@@ -21,9 +21,10 @@ def _claim(context_pack):
 
 
 def test_build_prompt_asks_to_review_and_cite_relevant_fault_case():
-    prompt = build_prompt(_claim({"items": [CASE]}))
+    delivered_case = {**CASE, "id": 4321}
+    prompt = build_prompt(_claim({"items": [delivered_case]}))
 
-    assert "ID 17" in prompt and "Study case" in prompt and CASE["content"] in prompt
+    assert f"[ID {delivered_case['id']}; Study case; ALPHA] {CASE['title']}: {CASE['content']}" in prompt
     assert "Before deciding, review" in prompt and "relevant `study_case` items about triage or AI Flow faults" in prompt
     assert "If a delivered case informs your decision" in prompt
     assert "numeric knowledge item ID" in prompt and "explain why it is relevant in the existing `WHY:` field" in prompt

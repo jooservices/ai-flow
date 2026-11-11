@@ -30,8 +30,6 @@ var PROG_TEXT = {
         tag: 'Tag', link: 'GitHub Release', run: 'run', node: 'node', noSteps: 'Chưa có lần release nào',
         steps: { check: 'Kiểm tra', changelog: 'Changelog', pr: 'PR', merge: 'Merge', tag: 'Tag', release: 'GitHub Release' } }
 };
-function safeUrl(u) { return /^https?:\/\//.test(u || '') ? u : ''; }
-function safeHref(u) { u = String(u == null ? '' : u); return /^https?:\/\//i.test(u) || /^\/(?![\/\\])/.test(u) ? u : ''; }
 function releaseState(v) {
   var s = v.release && v.release.status;
   return v.released ? 'released' : s === 'checking' ? 'running' : s === 'failed' ? 'failed' : v.ready ? 'ready' : 'notReady';

@@ -7,6 +7,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 ## Topics
 
+- [Completed-ticket notes in claim context](../../docs/v4/completed-ticket-context.md): Knowledge keeps completed-ticket notes visible while `dev`, `verify`, and `qa` packs omit them
 - [Shared secret scanner](../../docs/v4/secret-scanner-ownership.md): v4 core owns ordered secret screening while legacy memory imports remain compatible
 - [Run repository helpers](../../docs/v4/run-repository-helpers.md): resolve saved run settings and match a requested repository through shared helpers
 - [JAIF-513 canary decision characterization](../../docs/v4/jaif-513-canary-decision.md): incident run counts under explicit example thresholds produce rollback or wait decisions

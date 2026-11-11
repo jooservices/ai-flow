@@ -1,13 +1,22 @@
 # Console routes
 
-The console session, user, view-as, layout, preference, notification and licensing routes. They live in `aiflow/v4/control/features/console/routes.py` (request bodies in `bodies.py`), moved out of
-`control/api.py` by JAIF-495 with their behaviour unchanged. Routes registered by `features/console/routes.py`:
+The console session, user, view-as, layout, preference, notification and licensing routes. The session route is
+discovered from `aiflow/v4/control/routes/console_session.py`; the user, view-as, layout, preference, notification and
+licensing routes are registered by `aiflow/v4/control/features/console/routes.py` (request bodies in `bodies.py`),
+moved out of `control/api.py` by JAIF-495 with their behaviour unchanged.
+
+## Routes
+
+- `GET /v1/console/session` returns the current console identity and role options, or reports an unauthenticated session in open-console mode.
+
+## Console installer registrations
+
+Routes registered by `features/console/routes.py`:
 
 - `DELETE /v1/console/layouts/{page}`
 - `DELETE /v1/notifications/channels/{channel_id}`
 - `GET /v1/console/layouts`
 - `GET /v1/console/preferences`
-- `GET /v1/console/session`
 - `GET /v1/console/users`
 - `GET /v1/licensing`
 - `GET /v1/licensing/status`

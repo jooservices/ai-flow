@@ -7,6 +7,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 ## Topics
 
+- [Run repository helpers](../../docs/v4/run-repository-helpers.md): resolve saved run settings and match a requested repository through shared helpers
 - [JAIF-513 canary decision characterization](../../docs/v4/jaif-513-canary-decision.md): incident run counts under explicit example thresholds produce rollback or wait decisions
 - [Run repository selection](../../docs/v4/run-repository-selection.md): routers resolve saved or project-configured repositories through the application context
 - [Post-merge verification](../../docs/v4/post-merge-workflow.md): a workflow re-runs the unit tests and the v4 shards after every push to develop and master and opens a bug ticket on failure

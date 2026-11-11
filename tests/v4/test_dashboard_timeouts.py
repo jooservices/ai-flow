@@ -71,6 +71,27 @@ def test_dashboard_timeouts_include_daily_ticket_and_developer_share_metrics(cli
     assert client.get("/v1/dashboard/timeouts", params={"days": 91}).status_code == 422
 
 
+def test_dashboard_timeouts_default_window_and_query_validation(client):
+    response = client.get("/v1/dashboard/timeouts")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "days": 30,
+        "developer_runs": 0,
+        "timeouts": 0,
+        "timeout_share_pct": 0.0,
+        "target_share_pct": 10.0,
+        "daily": [],
+        "tickets": [],
+    }
+    for days in (1, 90):
+        accepted = client.get("/v1/dashboard/timeouts", params={"days": days})
+        assert accepted.status_code == 200
+        assert accepted.json()["days"] == days
+    for days in (0, 91, "not-an-integer", str(10**100)):
+        assert client.get("/v1/dashboard/timeouts", params={"days": days}).status_code == 422
+
+
 def test_dashboard_timeout_analytics_respect_project_permissions(client, ctx):
     add_dev_run(ctx.db, ticket="TESTWP-710", outcome="timeout")
     add_dev_run(ctx.db, ticket="OTHER-710", project="OTHER", outcome="timeout")
@@ -87,6 +108,16 @@ def test_dashboard_timeout_analytics_respect_project_permissions(client, ctx):
     data = client.get("/v1/dashboard/timeouts").json()
     assert {row["project"] for row in data["tickets"]} == {"TESTWP"}
     assert data["timeouts"] == 1 and data["developer_runs"] == 1
+
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s",
+               ([], "timeouts-limited@example.test"))
+    empty_scope = client.get("/v1/dashboard/timeouts").json()
+    assert empty_scope["developer_runs"] == 0 and empty_scope["tickets"] == []
+
+    ctx.db.run("UPDATE console_users SET project_keys=NULL WHERE email=%s", ("timeouts-limited@example.test",))
+    unrestricted = client.get("/v1/dashboard/timeouts").json()
+    assert {row["project"] for row in unrestricted["tickets"]} == {"TESTWP", "OTHER"}
+    assert unrestricted["timeouts"] == 2 and unrestricted["developer_runs"] == 2
 
 
 def test_dashboard_timeout_panel_is_injected_and_fetches_the_timeouts_route():

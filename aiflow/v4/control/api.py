@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from .. import VERSION
 from ..core.controlrepo import ControlRepo
-from . import (dashboard_silent_routes, dashboard_timeout_routes, eligibility, jira_connect, licensing, runtime_settings, setup_wizard,
+from . import (dashboard_silent_routes, eligibility, jira_connect, licensing, runtime_settings, setup_wizard,
                shared_accounts, support_bundle, system_check_api)
 from . import capacity
 from . import inventory
@@ -269,7 +269,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     from .login import install_login
     install_login(app, ctx)
     eligibility.install(ctx, RELEASES, lambda *a, **k: work_routes.eligible(*a, **k), quota_forecast_at_risk, quota_peer_accounts)
-    dashboard_silent_routes.install(app, ctx, console_user, optional_console_user); dashboard_timeout_routes.install(app, ctx, console_user, optional_console_user)
+    dashboard_silent_routes.install(app, ctx, console_user, optional_console_user)
     release_routes = release_module.install(app, ctx, SimpleNamespace(node_auth=node_auth, release_reader=release_reader))
     fleet_routes = fleet_module.install(app, ctx, SimpleNamespace(audit=audit, audit_in=audit_in, console_user=console_user, create_join_grant=create_join_grant, current_release=release_routes.current_release, fleet_release=release_routes.fleet_release, node_auth=node_auth, optional_console_user=optional_console_user, release_assets=release_routes.release_assets, require_capacity=require_capacity))
     projects_routes = projects_module.install(app, ctx, SimpleNamespace(audit=audit, console_user=console_user, fenced=fenced, node_auth=node_auth, optional_console_user=optional_console_user, require_capacity=require_capacity))

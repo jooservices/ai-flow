@@ -185,6 +185,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Node operator intervention route](../../docs/v4/node-intervention-route.md): authenticated node reports are recorded as Flow Doctor intervention evidence through the discovered route registry
 - [Join a node](../../docs/v4/node-join.md): Command Center issues a five-minute one-use token and the pinned server-installer CLI bootstraps a node
 - [Dashboard read routes](../../docs/v4/route-module-dashboard.md): the Dashboard read models are served from their own router module
+- [Dashboard timeout route](../../docs/v4/dashboard-timeouts-route.md): timeout metrics are served by the discovered dashboard router
 - [Fleet installation](../../docs/v4/fleet-install.md): cloud-init samples and Ansible roles prepare hosts and enroll a node fleet
 - [Escalation routes](../../docs/v4/route-module-escalations.md): the escalation routes are served from their own router module
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring errors in the maintenance project as prioritized Bug tickets

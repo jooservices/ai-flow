@@ -84,23 +84,57 @@ def test_fake_account_repository_matches_database_read_with_nullable_risk(db):
         assert fake_repository.ready_ids() == database_repository.ready_ids()
 
 
-def test_fake_account_repository_uses_database_collation_for_mixed_case_ids(db):
+def test_fake_account_repository_uses_c_collation_for_mixed_case_and_punctuation(db):
     rows = [
-        {"id": "z", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
-        {"id": "A", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "a2", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
         {"id": "Z", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "a-2", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "A", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "a1", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "z", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "a-1", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
         {"id": "a", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
     ]
     database_repository = AccountRepository(db)
     fake_repository = FakeAccountRepository(rows)
 
     with db.transaction():
-        db.run("CREATE TEMP TABLE accounts (id text, provider text, status text, quota jsonb, quota_at_risk boolean)")
+        db.run('CREATE TEMP TABLE accounts (id text COLLATE "C", provider text, status text, '
+               "tier text DEFAULT 'middle', quota jsonb, quota_at_risk boolean, "
+               "quota_forecast jsonb DEFAULT '{}'::jsonb)")
         for row in rows:
             db.run("INSERT INTO accounts (id,provider,status,quota,quota_at_risk) VALUES (%s,%s,%s,%s,%s)",
                    (row["id"], row["provider"], row["status"], J(row["quota"]), row["quota_at_risk"]))
 
         database_rows = database_repository.quota_routing_rows(["codex"])
         fake_rows = fake_repository.quota_routing_rows(["codex"])
-        assert [row["id"] for row in database_rows] == ["a", "A", "z", "Z"]
+        assert [row["id"] for row in database_rows] == ["A", "Z", "a", "a-1", "a-2", "a1", "a2", "z"]
         assert fake_rows == database_rows
+        assert fake_repository.capacity_routing_rows() == database_repository.capacity_routing_rows()
+
+
+def test_fake_account_repository_accepts_database_default_collation_order(db):
+    rows = [
+        {"id": "a2", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "Z", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "a-2", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "A", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "a1", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "z", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "a-1", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+        {"id": "a", "provider": "codex", "status": "idle", "quota": None, "quota_at_risk": False},
+    ]
+    database_repository = AccountRepository(db)
+
+    with db.transaction():
+        db.run("CREATE TEMP TABLE accounts (id text, provider text, status text, tier text DEFAULT 'middle', "
+               "quota jsonb, quota_at_risk boolean, quota_forecast jsonb DEFAULT '{}'::jsonb)")
+        for row in rows:
+            db.run("INSERT INTO accounts (id,provider,status,quota,quota_at_risk) VALUES (%s,%s,%s,%s,%s)",
+                   (row["id"], row["provider"], row["status"], J(row["quota"]), row["quota_at_risk"]))
+
+        database_rows = database_repository.quota_routing_rows(["codex"])
+        db_order = {row["id"]: index for index, row in enumerate(database_rows)}
+        fake_repository = FakeAccountRepository(rows, id_order=db_order.__getitem__)
+        assert fake_repository.quota_routing_rows(["codex"]) == database_rows
+        assert fake_repository.capacity_routing_rows() == database_repository.capacity_routing_rows()

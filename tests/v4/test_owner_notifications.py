@@ -342,7 +342,10 @@ def test_a_question_that_holds_a_credential_is_withheld_from_both_channels(ctx, 
 
     monkeypatch.setattr(owner_notifications, "sender_for", lambda settings: Channel())
     secret_question = "Which database should we use? password=" + "hunter2hunter2"
+    before = ctx.db.one("SELECT count(*) AS n FROM owner_escalation_notices")["n"]
     result = owner_notifications.enqueue(ctx, 1, "TESTWP-1", secret_question)
     assert result == {"status": "withheld", "sent": False} and sent == []
+    after = ctx.db.one("SELECT count(*) AS n FROM owner_escalation_notices")["n"]
+    assert after == before
     ctx.settings.escalation_telegram_bot_token, ctx.settings.escalation_telegram_chat_id = "t", "1"
     assert owner_notifications.enqueue(ctx, 1, "TESTWP-1", secret_question)["status"] == "withheld" and sent == []

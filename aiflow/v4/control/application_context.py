@@ -14,6 +14,7 @@ from .events import Events
 from .features.tickets.repository import FakeTicketRepository, TicketRepository
 from .github import GitHubApp
 from .jira import Jira
+from .repositories.accounts import AccountRepository, FakeAccountRepository
 
 
 RepositoryProvider = Callable[[], ControlRepo]
@@ -66,6 +67,7 @@ class ApplicationContext:
     github_registry: object | None = None  # GitHubConnections
     github_connection_for_repository: Callable[[str], object] | None = None
     ticket_repository: TicketRepository | FakeTicketRepository | None = None
+    account_repository: AccountRepository | FakeAccountRepository | None = None
 
     def __post_init__(self) -> None:
         if not callable(self.repo):
@@ -76,6 +78,8 @@ class ApplicationContext:
             self.repo_configuration = self.settings.control_repo
         if self.ticket_repository is None:
             self.ticket_repository = TicketRepository(self.db)
+        if self.account_repository is None:
+            self.account_repository = AccountRepository(self.db)
 
     @property
     def database(self) -> DB:

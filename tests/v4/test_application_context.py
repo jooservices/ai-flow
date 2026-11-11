@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import get_type_hints
 
 import pytest
@@ -11,7 +12,9 @@ import pytest
 from aiflow.v4.control import api, jira_connect, login, runtime_settings, setup_wizard, shared_accounts
 from aiflow.v4.control.application_context import ApplicationContext, Clock, Ctx, SystemClock
 from aiflow.v4.control.db import DB
+from aiflow.v4.control.eligibility import ProviderRoutingEligibilityService
 from aiflow.v4.control.events import Events
+from aiflow.v4.control.repositories.accounts import AccountRepository, FakeAccountRepository
 from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.fencing import Leases
 from aiflow.v4.core.settings import Settings
@@ -34,6 +37,8 @@ def test_application_context_exposes_typed_dependencies(ctx):
     assert ctx.repositories is ctx.repo
     assert isinstance(ctx.repo(), ControlRepo)
     assert ctx.repo_configuration == ctx.settings.control_repo
+    assert isinstance(ctx.account_repository, AccountRepository)
+    assert ctx.account_repository.db is ctx.db
     assert isinstance(ctx.clock, SystemClock)
     assert get_type_hints(ApplicationContext)["clock"] is Clock
     assert get_type_hints(ApplicationContext)["repo_configuration"] is str
@@ -61,6 +66,21 @@ def test_application_context_accepts_repository_and_clock_replacements(ctx):
                             repo=ctx.repo, clock=object())
 
 
+def test_application_context_retains_falsey_account_repository_and_defaults_only_on_none(ctx):
+    class FalseyAccountRepository(FakeAccountRepository):
+        def __bool__(self):
+            return False
+
+    fake = FalseyAccountRepository()
+    assert not fake
+    context = replace(ctx, account_repository=fake)
+    assert context.account_repository is fake
+
+    defaulted = replace(context, account_repository=None)
+    assert isinstance(defaulted.account_repository, AccountRepository)
+    assert defaulted.account_repository.db is defaulted.db
+
+
 def test_application_context_preserves_legacy_positional_constructor(ctx):
     context = Ctx(ctx.settings, ctx.db, ctx.leases, ctx.events, ctx.repo, ctx.jira)
 
@@ -79,6 +99,54 @@ def test_application_context_preserves_legacy_positional_constructor(ctx):
     assert legacy_context.jira_auth is jira_auth
     assert legacy_context.repo_configuration == ctx.settings.control_repo
     assert isinstance(legacy_context.clock, SystemClock)
+
+
+def test_eligibility_service_uses_its_database_account_repository(ctx):
+    rows = (
+        ("jaif301-charlie", "codex", "working", '{"windows":{"five_hour":{"utilization":0.91}}}', True),
+        ("jaif301-alpha", "claude", "idle", '{"windows":{"five_hour":{"utilization":0.2}}}', False),
+        ("jaif301-bravo", "codex", "paused", '{"windows":{"five_hour":{"utilization":0.3}}}', False),
+        ("jaif301-delta", "grok", "probing", '{"windows":{"five_hour":{"utilization":0.4}}}', False),
+        ("jaif301-echo", "grok", "signed_out", '{"windows":{"five_hour":{"utilization":0.5}}}', False),
+    )
+    for account_id, provider, status, quota, at_risk in rows:
+        ctx.db.run("INSERT INTO accounts (id,provider,status,quota,quota_at_risk)"
+                   " VALUES (%s,%s,%s,%s::jsonb,%s)",
+                   (account_id, provider, status, quota, at_risk))
+
+    configured_accounts = [
+        SimpleNamespace(id=account_id, provider=provider, paused=False, machines=[])
+        for account_id, provider, _status, _quota, _at_risk in rows
+    ]
+    ctx.repo = lambda: SimpleNamespace(accounts=configured_accounts)
+
+    service = ProviderRoutingEligibilityService(ctx, None, lambda *args, **kwargs: [], lambda account: False,
+                                                lambda account, roles: [])
+    assert isinstance(service.account_repository, AccountRepository)
+    assert service.account_repository.db is ctx.db
+    assert [(row["id"], row["provider"], row["quota"], row["quota_at_risk"])
+            for row in service.account_repository.quota_routing_rows(["grok", "codex", "grok"])] == [
+        ("jaif301-bravo", "codex", {"windows": {"five_hour": {"utilization": 0.3}}}, False),
+        ("jaif301-charlie", "codex", {"windows": {"five_hour": {"utilization": 0.91}}}, True),
+        ("jaif301-delta", "grok", {"windows": {"five_hour": {"utilization": 0.4}}}, False),
+        ("jaif301-echo", "grok", {"windows": {"five_hour": {"utilization": 0.5}}}, False),
+    ]
+    assert service.account_repository.ready_ids() == {"jaif301-charlie", "jaif301-alpha", "jaif301-delta"}
+
+    state = service.state(persist=False)
+    codex = state["providers"]["codex"]
+    assert codex["windows"] == [
+        {"name": "five_hour", "account": "jaif301-bravo", "used_pct": 30.0,
+         "reset_at": None, "reset": False},
+        {"name": "five_hour", "account": "jaif301-charlie", "used_pct": 91.0,
+         "reset_at": None, "reset": False},
+    ]
+    assert codex["at_risk_share"] == 0.5
+    assert codex["headroom_pct"] == 9.0
+
+    snapshot = service._snapshot()
+    assert snapshot["ready"] == {"jaif301-charlie", "jaif301-alpha", "jaif301-delta"}
+    assert snapshot["state"]["providers"]["codex"] == codex
 
 
 def test_application_context_requires_its_core_dependencies(ctx):

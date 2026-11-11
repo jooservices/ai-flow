@@ -1,6 +1,8 @@
 """AI accounts: `managed_ai_accounts`, `accounts`, `shared_accounts` and `account_machines` queries."""
 from __future__ import annotations
 
+from collections.abc import Callable
+from copy import deepcopy
 from typing import Any
 
 
@@ -55,3 +57,39 @@ class AccountRepository:
     def ready_ids(self) -> set[str]:
         return {row["id"] for row in self.db.all(
             "SELECT id FROM accounts WHERE status IN ('idle','working','probing')")}
+
+
+class FakeAccountRepository:
+    """In-memory account reads with the projections and filters of ``AccountRepository``.
+
+    ``id_order`` can supply a key matching the database's text collation. The default
+    uses PostgreSQL's portable ``C`` ordering, which compares UTF-8 bytes.
+    """
+
+    _ready_statuses = frozenset({"idle", "working", "probing"})
+
+    def __init__(self, rows: list[dict[str, Any]] | None = None, *,
+                 id_order: Callable[[str], Any] | None = None):
+        self._rows = deepcopy(rows if rows is not None else [])
+        self._id_order = _c_collation_key if id_order is None else id_order
+
+    def quota_routing_rows(self, providers: list[str]) -> list[dict[str, Any]]:
+        provider_set = set(providers)
+        rows = sorted((row for row in self._rows if row["provider"] in provider_set),
+                      key=lambda row: self._id_order(row["id"]))
+        return [{"id": row["id"], "provider": row["provider"], "quota": deepcopy(row["quota"]),
+                 "quota_at_risk": row["quota_at_risk"]} for row in rows]
+
+    def capacity_routing_rows(self) -> list[dict[str, Any]]:
+        """Return copied capacity inputs in account-id order with the database projection."""
+        rows = sorted(self._rows, key=lambda row: self._id_order(row["id"]))
+        return [{"id": row["id"], "provider": row["provider"], "tier": row.get("tier", "middle"),
+                 "quota_forecast": deepcopy(row.get("quota_forecast", {}))} for row in rows]
+
+    def ready_ids(self) -> set[str]:
+        return {row["id"] for row in self._rows if row["status"] in self._ready_statuses}
+
+
+def _c_collation_key(value: str) -> bytes:
+    """Return PostgreSQL ``C`` collation order for UTF-8 text identifiers."""
+    return value.encode("utf-8")

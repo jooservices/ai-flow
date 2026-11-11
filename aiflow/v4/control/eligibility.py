@@ -8,7 +8,6 @@ import time
 from typing import Any, Callable
 
 from . import licensing, load_policy, provider_routing, rollout, shared_accounts
-from .repositories.accounts import AccountRepository
 from .repositories.provider_routing import ProviderRoutingRepository
 
 log = logging.getLogger("aiflow4.eligibility")
@@ -131,7 +130,7 @@ class ProviderRoutingEligibilityService:
         self.ctx = ctx
         self.releases = releases
         self.repository = ProviderRoutingRepository(ctx.db)
-        self.account_repository = AccountRepository(ctx.db)
+        self.account_repository = ctx.account_repository
         self.eligible = eligible_tickets  # the control app's eligible(); peers are probed through peer_candidates
         self.quota_forecast_at_risk = quota_forecast_at_risk
         self.quota_peer_accounts = quota_peer_accounts

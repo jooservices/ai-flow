@@ -18,10 +18,16 @@ ADMIN = "owner@example.test"
 MASTER_SCOPE = "master:global"
 
 
-def owner_console(ctx, app) -> TestClient:
-    login.seed_user(ctx.db, ADMIN, "super_admin", "Owner")
+def console_app(ctx):
     ctx.settings.console_login = True
     ctx.settings.console_session_secret = SESSION_SECRET
+    app = create_app(ctx)
+    app.state.sync_accounts()
+    return app
+
+
+def owner_console(ctx, app) -> TestClient:
+    login.seed_user(ctx.db, ADMIN, "super_admin", "Owner")
     app.state.sync_accounts()
     client = TestClient(app)
     client.cookies.set("aiflow4_session", issue_session(ADMIN, "super_admin", 2_000_000_000, SESSION_SECRET))
@@ -30,8 +36,6 @@ def owner_console(ctx, app) -> TestClient:
 
 def role_console(ctx, app, email: str, role: str) -> TestClient:
     login.seed_user(ctx.db, email, role, role.title())
-    ctx.settings.console_login = True
-    ctx.settings.console_session_secret = SESSION_SECRET
     app.state.sync_accounts()
     client = TestClient(app)
     client.cookies.set("aiflow4_session", issue_session(email, role, 2_000_000_000, SESSION_SECRET))
@@ -73,8 +77,7 @@ def insert_master_run(db, started_interval: str, details: dict) -> None:
 
 
 def test_a_dashboard_request_reaches_exactly_one_snapshot(ctx):
-    app = create_app(ctx)
-    app.state.sync_accounts()
+    app = console_app(ctx)
     client = TestClient(app)
     cc = ready(client, "cc", "claude-01")
     ready(client, "node1", "codex-01")
@@ -90,21 +93,24 @@ def test_a_dashboard_request_reaches_exactly_one_snapshot(ctx):
 
 
 def test_only_a_console_writer_can_request_a_review(ctx):
-    ctx.settings.console_login = True
-    ctx.settings.console_session_secret = SESSION_SECRET
-    client = TestClient(create_app(ctx))
+    app = console_app(ctx)
+    client = TestClient(app)
+    audits_before = ctx.db.one("SELECT count(*) AS n FROM write_audit")["n"]
     assert client.post("/v1/master/review-requests").status_code == 401
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit")["n"] == audits_before
     assert ctx.db.one("SELECT review_requested_at FROM master_settings WHERE singleton=true")[
         "review_requested_at"] is None
 
 
 def test_a_console_role_without_write_permission_is_refused_and_audited(ctx):
-    app = create_app(ctx)
+    app = console_app(ctx)
     stakeholder = role_console(ctx, app, "stakeholder@example.test", "stakeholder")
+    audits_before = ctx.db.one("SELECT count(*) AS n FROM write_audit")["n"]
 
     response = stakeholder.post("/v1/master/review-requests")
 
     assert response.status_code == 403 and response.json() == {"detail": "not available for your role"}
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit")["n"] == audits_before + 1
     assert ctx.db.one("SELECT accepted,result,target,action FROM write_audit ORDER BY id DESC LIMIT 1") == {
         "accepted": False, "result": "not available for your role", "target": "master", "action": "review-request"}
     assert ctx.db.one("SELECT review_requested_at FROM master_settings WHERE singleton=true")[
@@ -112,7 +118,7 @@ def test_a_console_role_without_write_permission_is_refused_and_audited(ctx):
 
 
 def test_a_non_writable_license_prevents_a_review_request(ctx, monkeypatch):
-    app = create_app(ctx)
+    app = console_app(ctx)
     owner = owner_console(ctx, app)
     before = ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE target='master' AND action='review-request'")["n"]
 
@@ -130,8 +136,10 @@ def test_a_non_writable_license_prevents_a_review_request(ctx, monkeypatch):
 
 
 def test_a_database_failure_does_not_report_a_review_request(ctx, monkeypatch):
-    app = create_app(ctx)
+    app = console_app(ctx)
     owner = owner_console(ctx, app)
+    session = owner.cookies.get("aiflow4_session")
+    audits_before = ctx.db.one("SELECT count(*) AS n FROM write_audit")["n"]
     original_run = ctx.db.run
 
     def fail_review_update(sql, *params):
@@ -143,6 +151,11 @@ def test_a_database_failure_does_not_report_a_review_request(ctx, monkeypatch):
     with pytest.raises(RuntimeError, match="review request database failure"):
         owner.post("/v1/master/review-requests")
 
+    error_client = TestClient(app, raise_server_exceptions=False)
+    error_client.cookies.set("aiflow4_session", session)
+    response = error_client.post("/v1/master/review-requests")
+    assert response.status_code == 500
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit")["n"] == audits_before
     assert ctx.db.one("SELECT review_requested_at FROM master_settings WHERE singleton=true")[
         "review_requested_at"] is None
 
@@ -153,7 +166,7 @@ def test_cycle_metrics_count_idle_ai_and_action_cycles_per_utc_day(ctx):
     insert_master_run(ctx.db, "0 seconds", {"completed": 2, "model_time_s": 9})
     insert_master_run(ctx.db, "1 day", {"no_watch": True, "model_time_s": 0})
 
-    app = create_app(ctx)
+    app = console_app(ctx)
     cycles = owner_console(ctx, app).get("/v1/master/autonomy").json()["cycles"]
 
     assert cycles["target_no_action_percent"] == 5

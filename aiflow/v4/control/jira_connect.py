@@ -586,14 +586,6 @@ def _jira_callback_redirect(result: str) -> RedirectResponse:
     return response
 
 
-def _mount_jira_status_route(app: FastAPI, ctx: ApplicationContext) -> None:
-    @app.get("/v1/integrations/jira")
-    @checks_bearer
-    def jira_status(request: Request) -> dict:
-        _require_jira_owner(ctx, request)
-        return _jira_auth(ctx).status()
-
-
 def _mount_jira_oauth_start_route(app: FastAPI, ctx: ApplicationContext) -> None:
     @app.post("/v1/integrations/jira/oauth/start")
     @checks_bearer
@@ -700,7 +692,6 @@ def _mount_jira_disconnect_route(app: FastAPI, ctx: ApplicationContext) -> None:
 
 
 def mount(app: FastAPI, ctx: ApplicationContext) -> None:
-    _mount_jira_status_route(app, ctx)
     _mount_jira_oauth_routes(app, ctx)
     _mount_jira_api_token_route(app, ctx)
     _mount_jira_disconnect_route(app, ctx)

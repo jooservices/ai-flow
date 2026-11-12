@@ -169,6 +169,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Log sources routes](../../docs/v4/route-module-log_sources.md): the log sources routes are served from their own router module
 - [SA system health](../../docs/v4/sa-health.md): node and account health, capacity recommendations, credential expiry, blocked AI and network diagnostics
 - [Shared route helpers](../../docs/v4/route-dependencies.md): audit, console and node authentication and fencing as functions of the application context, usable by any router
+- [Master run route helper](../../docs/v4/master-run-route-helper.md): the fenced master-run, step and exact node checks are reusable through the application context
 - [Team Lead requirement coverage and progress reports](../../docs/v4/team-lead-report.md): inspect epic AC coverage and export Markdown, CSV or printable HTML progress reports
 - [Automatic epic lifecycle](../../docs/v4/epic-lifecycle.md): start and finish epics from child status, reopen on child work, and suggest project closure in the report
 - [Team Lead tickets](../../docs/v4/team-lead-tickets.md): every split child carries files, a skeleton and test cases for the developer

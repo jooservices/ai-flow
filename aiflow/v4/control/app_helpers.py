@@ -384,12 +384,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         return route_deps.fenced(ctx, run_id, fence, target, action, payload)
 
     def master_run(run_id: str, fence: int, node: str, action: str, payload: dict | None = None) -> dict:
-        run = fenced(run_id, fence, "master", action, payload)
-        if run["step"] != "master":
-            raise HTTPException(403, "only a master run can use this endpoint")
-        if run["node"] != node:
-            raise HTTPException(403, "master run belongs to another node")
-        return run
+        return route_deps.master_run(ctx, run_id, fence, node, action, payload)
 
     def reviewer_run(key: str, statuses: tuple[str, ...] = ("Human review",),
                      allowed_kinds: tuple[str, ...] | None = None) -> tuple[dict, str, int, int]:

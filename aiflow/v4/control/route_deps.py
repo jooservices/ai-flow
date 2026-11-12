@@ -132,6 +132,15 @@ def fenced(ctx, run_id: str, fence: int, target: str, action: str, payload: dict
     return run
 
 
+def master_run(ctx, run_id: str, fence: int, node: str, action: str, payload: dict | None = None) -> dict:
+    run = fenced(ctx, run_id, fence, "master", action, payload)
+    if run["step"] != "master":
+        raise HTTPException(403, "only a master run can use this endpoint")
+    if run["node"] != node:
+        raise HTTPException(403, "master run belongs to another node")
+    return run
+
+
 # FastAPI dependencies for routers outside api.py: the context comes from the app, never from a closure.
 def node_auth_dependency(request: Request, authorization: str = Header(default="")) -> str:
     return node_auth(context(request), authorization)

@@ -25,7 +25,7 @@ OWNER = {"Authorization": "Bearer owner-secret"}
 
 @pytest.fixture(scope="module", autouse=True)
 def scale_proof_migrations():
-    """Avoid a same-name scratch index shadowing the public table in migration 018's search path."""
+    """Force the scratch schema to own its same-named index before renaming it for the public-schema check."""
     from aiflow.v4.control import db as control_db
 
     migration_parent = ROOT / ".tmp"
@@ -36,8 +36,15 @@ def scale_proof_migrations():
         migrations = Path(temporary)
         for migration in original_migrations.glob("*.sql"):
             (migrations / migration.name).symlink_to(migration)
-        (migrations / "002_scale_scratch_index.sql").write_text(fixture.read_text(encoding="utf-8"),
-                                                                  encoding="utf-8")
+        memory_migration = original_migrations / "002_memory.sql"
+        memory_sql = memory_migration.read_text(encoding="utf-8")
+        create_index = "CREATE INDEX IF NOT EXISTS memory_project ON memory"
+        assert create_index in memory_sql
+        memory_sql = memory_sql.replace(create_index, "CREATE INDEX memory_project ON memory", 1)
+        patched_memory_migration = migrations / memory_migration.name
+        patched_memory_migration.unlink()
+        patched_memory_migration.write_text(
+            memory_sql + "\n" + fixture.read_text(encoding="utf-8"), encoding="utf-8")
         try:
             control_db.MIGRATIONS = migrations
             yield

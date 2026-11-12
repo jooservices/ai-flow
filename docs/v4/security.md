@@ -1,10 +1,13 @@
 # Security hardening (JAIF-231)
 
+**Console screens:** Security (`security`)
+
 **Assumes:** you are signed in to the installed v4 release. Settings and the user list need the Administrator role;
 everyone can manage their own two-factor sign-in.
 
 AI Flow holds code access and AI credentials. This page lists what protects them, where to set it, and how it is tested
 (`tests/v4/test_security.py`, `tests/v4/test_security_report.py`, `tests/v4/test_console_escaping.py`).
+The Security screen uses the shared HTML escaping and URL safety helpers described in `docs/v4/console-escaping-source.md`.
 The coordinated disclosure policy is published in [`.github/SECURITY.md`](https://github.com/jooservices/ai-flow/blob/master/.github/SECURITY.md).
 
 ## Where people manage it: the Security screen

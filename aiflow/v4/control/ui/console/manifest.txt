@@ -2,6 +2,7 @@
 005-style.html
 010-body.html
 015-script-open.html
+018-escaping.js
 020-state.js
 025-fetch-session-and-theme.js
 030-fetch-project-environment.js

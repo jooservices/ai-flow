@@ -318,6 +318,7 @@ SCREEN_SHARED_UI_PATTERNS = (
     re.compile(r"^\s+\['machines', 'users'|// Visibility reads the effective"),
     re.compile(r"ROLE_VIEW_LABELS|^\s+'view\.[a-z_]+': '"),
 )
+SCREEN_SHARED_UI_PATTERNS += (re.compile(r"^function (?:esc|safeUrl|safeHref)\("),)
 
 # View-specific navigation, state and event branches live outside the section/render functions. Infer their
 # documentation target from the view name instead of treating them as unmapped shared UI.

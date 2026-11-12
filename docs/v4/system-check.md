@@ -2,6 +2,8 @@
 
 **Console screens:** `system-check`, `projects`
 
+The System check screen uses the shared HTML escaping and URL safety helpers described in `docs/v4/console-escaping-source.md`.
+
 The Console has a **System check** screen at `/system-check`. It shows machine-wide conditions and each configured
 project's conditions on every machine assigned to that project. The same readiness snapshot is available from
 `GET /v1/system-check` and is included in the reviewed archive created by `POST /v1/support/bundles` and downloaded

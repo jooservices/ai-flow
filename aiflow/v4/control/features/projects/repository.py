@@ -1,6 +1,8 @@
 """Database reads shared by the Projects screen listing."""
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
+
+from ...db import DB
 
 
 @dataclass(frozen=True)
@@ -8,6 +10,12 @@ class ProjectListingData:
     ticket_counts: dict[str, int]
     node_rows: list[dict[str, Any]]
     probe_rows: list[dict[str, Any]]
+
+
+class ProjectListingDataSource(Protocol):
+    """Named listing-data operation supplied by the application context."""
+
+    def listing_data(self) -> ProjectListingData: ...
 
 
 def listing_data(db) -> ProjectListingData:
@@ -22,6 +30,17 @@ def listing_data(db) -> ProjectListingData:
         "'[]'::jsonb) FROM project_check_probes) AS probe_rows")
     return ProjectListingData(ticket_counts=row["ticket_counts"], node_rows=row["node_rows"],
                               probe_rows=row["probe_rows"])
+
+
+@dataclass(frozen=True)
+class ProjectListingRepository:
+    """Provide the batched data read used by the managed project listing."""
+
+    db: DB
+
+    def listing_data(self) -> ProjectListingData:
+        """Read ticket counts, node readiness and probes from this repository's database."""
+        return listing_data(self.db)
 
 
 def report_by_lifecycle_key(connection, lifecycle_key: str) -> dict[str, Any] | None:

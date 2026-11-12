@@ -1,12 +1,11 @@
 """Read the project listing for the Projects screen."""
 from ....core import pipeline_checks
 from ... import system_check_api, tooling
-from . import repository
 
 
 def managed_project_list(ctx, repo) -> list[dict]:
     """Build the existing project rows from one batched registry read and the live repository snapshot."""
-    data = repository.listing_data(ctx.db)
+    data = ctx.project_listing_repository.listing_data()
     readiness_by_project = system_check_api.projects_readiness(ctx, repo, data.node_rows)
     probes = tooling.probe_report(ctx, repo=repo, probe_rows=data.probe_rows)
     projects = []

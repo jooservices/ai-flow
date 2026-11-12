@@ -259,11 +259,11 @@ def read_quota(provider: str, account_home: str, run_as: list[str] | None = None
     argv = [*(run_as or []), "codex" if provider == "codex" else "claude"]
     env = _cli_env(provider, account_home)
     pid, master = pty.fork()
-    if pid == 0:  # pragma: no cover - exercised through fake CLI integration tests
+    if pid == 0:
         try:
             os.chdir(account_home)
             os.execvpe(argv[0], argv, env)
-        except (OSError, TypeError, ValueError):
+        except Exception:  # noqa: BLE001 - every startup failure must exit so the forked child cannot resume its caller
             os._exit(127)
     try:
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 140, 0, 0))

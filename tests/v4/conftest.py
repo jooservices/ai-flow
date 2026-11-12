@@ -155,20 +155,23 @@ def migrated_template(test_database_url):
     It starts from AIFLOW4_TEST_DATABASE_TEMPLATE (a database that already carries pgvector) when that is set."""
     name = testdb.new_template_name()
     lease = testdb.protect_template(test_database_url, name)
+    created = False
+    template = None
     try:
         testdb.create_from_template(test_database_url, os.environ.get("AIFLOW4_TEST_DATABASE_TEMPLATE") or None,
                                     name=name)
+        created = True
         template = DB(testdb.url_for(test_database_url, name), min_size=1, max_size=1)
-        try:
-            template.migrate()
-        finally:
-            template.close()
+        migration_errors = _migrate_and_close(template)
+        template = None
+        _raise_fixture_errors(None, migration_errors, "template migration and close failed")
         yield name
-    finally:
-        try:
-            testdb.drop(test_database_url, name)
-        finally:
-            lease.close()
+    except BaseException as primary:
+        _raise_fixture_errors(primary, _cleanup_template(test_database_url, name, created, lease),
+                              "template setup and cleanup failed")
+    else:
+        _raise_fixture_errors(None, _cleanup_template(test_database_url, name, created, lease),
+                              "template cleanup failed")
 
 
 @pytest.fixture(scope="session")
@@ -183,12 +186,63 @@ def database_dropper(test_database_url):
 def db(test_database_url, migrated_template, database_dropper):
     """A migrated database of this test alone; it is dropped in the background after the test."""
     name = testdb.create_from_template(test_database_url, migrated_template)
-    d = DB(testdb.url_for(test_database_url, name))
+    d = None
     try:
+        d = DB(testdb.url_for(test_database_url, name))
         yield d
-    finally:
-        d.close()
-        database_dropper.submit(name)
+    except BaseException as primary:
+        _raise_fixture_errors(primary, _cleanup_clone(d, database_dropper, name), "clone use and cleanup failed")
+    else:
+        _raise_fixture_errors(None, _cleanup_clone(d, database_dropper, name), "clone cleanup failed")
+
+
+def _raise_fixture_errors(primary, errors, message):
+    failures = ([primary] if primary is not None else []) + errors
+    if len(failures) == 1:
+        raise failures[0].with_traceback(failures[0].__traceback__)
+    if failures:
+        raise BaseExceptionGroup(message, failures)
+
+
+def _cleanup_clone(database, dropper, name):
+    errors = []
+    if database is not None:
+        try:
+            database.close()
+        except BaseException as error:
+            errors.append(error)
+    try:
+        dropper.submit(name)
+    except BaseException as error:
+        errors.append(error)
+    return errors
+
+
+def _cleanup_template(database_url, name, created, lease):
+    errors = []
+    if created:
+        try:
+            testdb.drop(database_url, name)
+        except BaseException as error:
+            errors.append(error)
+    try:
+        lease.close()
+    except BaseException as error:
+        errors.append(error)
+    return errors
+
+
+def _migrate_and_close(database):
+    errors = []
+    try:
+        database.migrate()
+    except BaseException as error:
+        errors.append(error)
+    try:
+        database.close()
+    except BaseException as error:
+        errors.append(error)
+    return errors
 
 
 @pytest.fixture

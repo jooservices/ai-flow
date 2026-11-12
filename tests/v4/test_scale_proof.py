@@ -3,6 +3,7 @@ traffic, the performance budgets and their enforcement, the release proof gate a
 Machines and sessions are simulated; no AI provider is called."""
 import json
 import os
+import tempfile
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -20,6 +21,35 @@ from aiflow.v4.control.ui import console_template
 ROOT = Path(__file__).resolve().parents[2]
 FULL = Scenario()
 OWNER = {"Authorization": "Bearer owner-secret"}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def scale_proof_migrations():
+    """Force the scratch schema to own its same-named index before renaming it for the public-schema check."""
+    from aiflow.v4.control import db as control_db
+
+    migration_parent = ROOT / ".tmp"
+    migration_parent.mkdir(exist_ok=True)
+    original_migrations = control_db.MIGRATIONS
+    fixture = Path(__file__).resolve().parent / "fixtures" / "scale_scratch_index.sql"
+    with tempfile.TemporaryDirectory(prefix="scale-migrations-", dir=migration_parent) as temporary:
+        migrations = Path(temporary)
+        for migration in original_migrations.glob("*.sql"):
+            (migrations / migration.name).symlink_to(migration)
+        memory_migration = original_migrations / "002_memory.sql"
+        memory_sql = memory_migration.read_text(encoding="utf-8")
+        create_index = "CREATE INDEX IF NOT EXISTS memory_project ON memory"
+        assert create_index in memory_sql
+        memory_sql = memory_sql.replace(create_index, "CREATE INDEX memory_project ON memory", 1)
+        patched_memory_migration = migrations / memory_migration.name
+        patched_memory_migration.unlink()
+        patched_memory_migration.write_text(
+            memory_sql + "\n" + fixture.read_text(encoding="utf-8"), encoding="utf-8")
+        try:
+            control_db.MIGRATIONS = migrations
+            yield
+        finally:
+            control_db.MIGRATIONS = original_migrations
 
 
 def require_close_services():
@@ -42,10 +72,21 @@ def proof(tmp_path_factory):
 
 # --- AC1: the scenario ---------------------------------------------------------------------------------------
 def test_scratch_schema_keeps_pgvector_in_public_for_following_tests():
+    from aiflow.v4.control.db import connect_once
+
+    with connect_once(DATABASE_URL) as original_db:
+        original_index_oid = original_db.execute(
+            "SELECT to_regclass('public.memory_project')::oid AS oid").fetchone()["oid"]
     with scale_harness.scratch(DATABASE_URL, REDIS_URL) as (db, _leases):
         extension = db.one("SELECT n.nspname AS schema FROM pg_extension e "
                            "JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='vector'")
         assert extension == {"schema": "public"}
+        target = db.one("SELECT c.oid, n.nspname AS schema FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid=c.relnamespace "
+                        "WHERE c.oid=to_regclass('public.memory_project')")
+        assert (target["oid"] if target else None) == original_index_oid
+        if target:
+            assert target["schema"] == "public"
 
 
 def test_scenario_drives_100_projects_50_machines_and_200_sessions(proof):

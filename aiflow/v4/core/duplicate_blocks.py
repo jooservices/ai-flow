@@ -21,10 +21,6 @@ BASELINE = "docs/v4/duplicate-blocks-baseline.json"
 MIN_BLOCK_LINES = 8
 _WINDOW_BASE = 1_000_003
 _MASK = (1 << 64) - 1
-_IGNORED_DIRS = frozenset({
-    "generated", "vendor", "vendored", "fixture", "fixtures", "test-fixture", "test-fixtures", "test_fixtures",
-    "testfixtures",
-})
 
 LineRecord = tuple[str, int]
 SourceLocation = tuple[str, int]
@@ -144,14 +140,11 @@ def find_duplicates(sources: Mapping[str, str]) -> tuple[Finding, ...]:
 
 
 def scan_tree(root: Path) -> tuple[Finding, ...]:
-    """Scan Python files under aiflow/v4, skipping generated, vendored and fixture directories."""
+    """Scan all Python files under aiflow/v4."""
     root = Path(root).resolve()
     source_root = root / SOURCE
     sources = {}
     for path in sorted(source_root.rglob("*.py")):
-        relative = path.relative_to(source_root)
-        if _IGNORED_DIRS.intersection(relative.parts[:-1]):
-            continue
         sources[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8")
     return find_duplicates(sources)
 

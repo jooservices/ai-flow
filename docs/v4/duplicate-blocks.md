@@ -1,8 +1,8 @@
 # Duplicate block check
 
-The `duplicate-blocks` step scans Python files under `aiflow/v4/`. It trims each line and ignores blank and
-comment-only lines, then reports maximal blocks of at least eight identical normalized lines with each file and
-starting line. Generated, vendored and fixture directories are skipped.
+The `duplicate-blocks` step scans every Python file under `aiflow/v4/`, including files in generated, vendored and
+fixture directories. It trims each line and ignores blank and comment-only lines, then reports maximal blocks of at
+least eight identical normalized lines with each file and starting line.
 
 The JSON baseline records a fingerprint and occurrence count for each existing block. The check fails on a new
 fingerprint, a higher occurrence count, or a baseline that adds entries compared with its base revision. It reports

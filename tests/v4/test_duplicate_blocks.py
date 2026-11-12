@@ -6,6 +6,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from aiflow.v4.core import duplicate_blocks as guard
 from aiflow.v4.core.local_gate import steps
 
@@ -41,18 +43,26 @@ def test_finds_a_duplicate_of_eight_lines_and_reports_starting_lines():
     assert found[0].occurrences == (("aiflow/v4/a.py", 2), ("aiflow/v4/b.py", 1))
 
 
-def test_seven_identical_lines_are_not_a_finding():
+def test_seven_identical_lines_in_formerly_excluded_directories_are_not_a_finding(tmp_path):
     shared = block(7)
-    assert guard.find_duplicates({"a.py": shared, "b.py": shared}) == ()
+    for name in ("first.py", "second.py"):
+        path = tmp_path / "aiflow/v4/vendor" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(shared, encoding="utf-8")
+    assert guard.scan_tree(tmp_path) == ()
 
 
-def test_blank_comment_and_outer_whitespace_lines_do_not_break_or_count():
+def test_blank_comment_and_outer_whitespace_lines_do_not_break_or_count_in_fixture_directory(tmp_path):
     shared = block()
     first = "\n# lead\n" + "\n  # note\n".join(f"  {line}  " for line in shared.splitlines())
     second = "\n".join(f"\t{line}\t\n\n# ignored" for line in shared.splitlines())
-    finding, = guard.find_duplicates({"first.py": first, "second.py": second})
+    for name, source in (("first.py", first), ("second.py", second)):
+        path = tmp_path / "aiflow/v4/fixtures" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    finding, = guard.scan_tree(tmp_path)
     assert len(finding.occurrences) == 2
-    assert finding.occurrences == (("first.py", 3), ("second.py", 1))
+    assert finding.occurrences == (("aiflow/v4/fixtures/first.py", 3), ("aiflow/v4/fixtures/second.py", 1))
 
 
 def test_overlapping_windows_merge_to_one_maximal_block():
@@ -90,16 +100,117 @@ def test_baseline_growth_rejects_added_entries_and_counts():
     ]
 
 
-def test_scan_tree_ignores_generated_vendored_and_fixture_directories(tmp_path):
+def test_scan_tree_finds_new_duplicate_across_ordinary_and_formerly_excluded_paths(tmp_path, capsys):
     shared = block()
-    for relative in ("aiflow/v4/core/a.py", "aiflow/v4/core/b.py", "aiflow/v4/generated/c.py",
-                     "aiflow/v4/vendor/d.py", "aiflow/v4/fixtures/e.py", "aiflow/v3/f.py"):
+    baseline = tmp_path / guard.BASELINE
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("{}", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "develop"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", guard.BASELINE], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "chore: Seed empty duplicate baseline"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/develop", "HEAD"], cwd=tmp_path, check=True)
+
+    paths = {
+        "aiflow/v4/core/ordinary.py": f"lead = 1\n{shared}",
+        "aiflow/v4/vendor/nested/vendored.py": f"\n# heading\n{shared}",
+    }
+    for relative, source in paths.items():
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+
+    finding, = guard.scan_tree(tmp_path)
+    expected = hashlib.sha256(shared.encode()).hexdigest()[:16]
+    assert finding.fingerprint == expected
+    assert finding.occurrences == (("aiflow/v4/core/ordinary.py", 2), ("aiflow/v4/vendor/nested/vendored.py", 3))
+    assert guard.main(["--base", "origin/develop", "--root", str(tmp_path)]) == 1
+    output = capsys.readouterr().out
+    assert expected in output
+    assert "aiflow/v4/core/ordinary.py:2" in output
+    assert "aiflow/v4/vendor/nested/vendored.py:3" in output
+    assert "new fingerprint" in output
+
+
+def test_scan_tree_includes_every_formerly_excluded_directory_name_and_only_v4_python(tmp_path):
+    shared = block()
+    ignored_names = (
+        "generated", "vendor", "vendored", "fixture", "fixtures", "test-fixture", "test-fixtures",
+        "test_fixtures", "testfixtures",
+    )
+    expected_paths = []
+    for name in ignored_names:
+        directory = tmp_path / "aiflow/v4/nested" / name
+        for relative in ("first.py", "deeper/second.py"):
+            path = directory / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(shared, encoding="utf-8")
+            expected_paths.append((path.relative_to(tmp_path).as_posix(), 1))
+
+    non_python = tmp_path / "aiflow/v4/vendor/ignored.txt"
+    non_python.parent.mkdir(parents=True, exist_ok=True)
+    non_python.write_text(shared, encoding="utf-8")
+    outside_v4 = tmp_path / "aiflow/v3/generated/ignored.py"
+    outside_v4.parent.mkdir(parents=True, exist_ok=True)
+    outside_v4.write_text(shared, encoding="utf-8")
+
+    finding, = guard.scan_tree(tmp_path)
+    assert finding.occurrences == tuple(sorted(expected_paths))
+
+
+def test_scan_tree_returns_no_findings_for_missing_or_empty_source_tree(tmp_path):
+    assert guard.scan_tree(tmp_path) == ()
+    (tmp_path / "aiflow/v4").mkdir(parents=True)
+    assert guard.scan_tree(tmp_path) == ()
+
+
+def test_scan_tree_does_not_silently_skip_unreadable_python_source(tmp_path, monkeypatch):
+    source = tmp_path / "aiflow/v4/nested/source.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("value = 1\n", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == source:
+            raise PermissionError("denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    with pytest.raises(PermissionError, match="denied"):
+        guard.scan_tree(tmp_path)
+
+
+def test_scan_tree_does_not_silently_skip_undecodable_python_source(tmp_path):
+    source = tmp_path / "aiflow/v4/nested/source.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"\xff")
+    with pytest.raises(UnicodeDecodeError):
+        guard.scan_tree(tmp_path)
+
+
+def test_scan_tree_included_paths_keep_baseline_occurrence_policy(tmp_path):
+    shared = block()
+    paths = [tmp_path / f"aiflow/v4/fixtures/nested/{name}.py" for name in ("first", "second")]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(shared, encoding="utf-8")
-    findings = guard.scan_tree(tmp_path)
-    assert len(findings) == 1
-    assert findings[0].occurrences == (("aiflow/v4/core/a.py", 1), ("aiflow/v4/core/b.py", 1))
+    finding, = guard.scan_tree(tmp_path)
+    baseline = {finding.fingerprint: 2}
+    assert guard.evaluate((finding,), baseline) == ([], [])
+
+    third = tmp_path / "aiflow/v4/fixtures/third.py"
+    third.write_text(shared, encoding="utf-8")
+    finding, = guard.scan_tree(tmp_path)
+    assert guard.evaluate((finding,), baseline) == (
+        [f"{finding.fingerprint}: occurrences rose from 2 to 3"], [],
+    )
+
+    third.unlink()
+    paths[1].unlink()
+    assert guard.evaluate(guard.scan_tree(tmp_path), baseline) == (
+        [], [f"{finding.fingerprint}: removed (was 2)"],
+    )
 
 
 def test_main_reports_locations_and_exits_on_policy_failures(monkeypatch, capsys):

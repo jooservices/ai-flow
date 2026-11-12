@@ -150,6 +150,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Triage fault case citations](../../docs/v4/triage-case-citations.md): triage is asked to cite relevant delivered fault study cases in its existing `WHY` field
 - [Control API audit against the HTTP standard](../../docs/v4/api-rest-audit.md): every route with its findings and a proposed resource-oriented design, kept complete by a test
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
+- [Review queue run reads](../../docs/v4/review-queue-run-reads.md): three feature-owned batched run-history projections preserve the current review queue rows
 - [Master autonomy](../../docs/v4/master.md): budgeted fenced monitoring, safe actions, owner escalations, invalid-plan recovery and a weekly Command Center report
 - [Master action steps](../../docs/v4/master-action-steps.md): named policy, denial, escalation and action steps preserve the fenced master route behavior
 - [Ticket timeline routes](../../docs/v4/route-module-tickets.md): the ticket timeline routes are served from their own router module

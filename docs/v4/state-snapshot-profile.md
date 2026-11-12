@@ -4,19 +4,25 @@ This page records the JAIF-436 profile of `GET /v1/state` on the default scale-p
 
 ## Reproduction and measurement method
 
-The scenario is `scale_harness.Scenario()` and `scale_harness.run()`: 100 projects, 50 machines, 100 accounts, 200 simulated sessions, 2,000 history tickets, and traffic waves of 200, 80 and 80 tickets. It uses an isolated PostgreSQL scratch schema and Redis prefix through `scale_harness.scratch()`, with the existing test-service wrapper. No AI provider or external integration is called.
+The scenario is `scale_harness.Scenario()` and `scale_harness.run()`: 100 projects, 50 machines, 100 accounts, 200 simulated sessions, 2,000 history tickets, and traffic waves of 200, 80 and 80 tickets. It uses an isolated PostgreSQL scratch schema and Redis prefix through `scale_harness.scratch()`. No AI provider or external integration is called.
 
-The one-off profiler wrapped `features.business.state_view.cached_snapshot`, `control.state.snapshot`, the existing harness request counter, and the database `all`/`one`/`run` helpers. It measured full `/v1/state` request wall time, cache-call wall time, build wall and thread CPU time, lock acquire wait, statements and rows returned. It recorded only numeric counts and function names; it did not retain SQL text or parameters, row values, response bodies, or identifiers. The cache's `include_signin` value was counted as a separate visibility class. Coalesced returns were classified by whether `state.snapshot` ran for that request. The temporary lock proxy delegates to the original lock and is restored with all other patches in `finally`.
+The checked-in helper `tests/v4/state_snapshot_profile.py` wraps `features.business.state_view.cached_snapshot`, `control.state.snapshot`, the existing harness request counter, and the database `all`/`one`/`run` helpers. It measures full `/v1/state` request wall time, cache-call wall time, build wall and thread CPU time, lock acquire wait, statements and rows returned. It records only numeric counts and function names; it does not retain SQL text or parameters, row values, response bodies, or identifiers. The cache's `include_signin` value is counted as a separate visibility class. Coalesced returns are classified by whether `state.snapshot` ran for that request. State-request and build overlap are recorded only when a worker claim request is active during the measured interval. The temporary lock proxy delegates to the original lock and is restored with all other patches in `finally`.
 
-At most 20 state-request samples and three function profiles per category were retained. Function contributors below are self thread-CPU time aggregated from three burst builds, so nested function time is not double-counted. Idle reads were three sequential `/v1/state` calls after traffic settled, using the same application database and seeded scenario. The uninstrumented comparison was a separate run with the same scenario seed and default budgets. Separate runs can vary with host and database cache state.
+At most 20 state-request samples and three function profiles per category were retained. The helper aggregates a bounded set of up to 1,000 function names from each build before ranking contributors; it does not truncate each build to a top-eight list first. Function contributors below are self thread-CPU time summed across overlapping burst builds, so nested function time is not double-counted. Idle reads were three sequential `/v1/state` calls after traffic settled, using the same application database and seeded scenario. The uninstrumented comparison was a separate run with the same scenario seed and default budgets. Separate runs can vary with host and database cache state.
 
-To rerun the proof through the approved local test environment:
+Both commands require `AIFLOW4_TEST_DATABASE_URL` and `AIFLOW4_TEST_REDIS_URL` to point at isolated PostgreSQL (with pgvector available) and Redis test services. The database must be a dedicated test/worktree database and Redis must use an isolated non-live database and key prefix, as enforced by `tests/v4/conftest.py`. The proof creates and drops its scratch schema and uses a unique Redis prefix. The launcher used for the recorded run is task-environment tooling outside this repository; it starts/uses the throw-away PostgreSQL and Redis services, exports their URLs, then runs the requested command. It is not distributed with the repository or needed when those variables are already configured.
 
 ```sh
-/home/joos/Workspaces/.tmp/test-env/run.sh uv run --frozen pytest tests/v4/test_scale_proof.py -q -p no:cacheprovider
+uv run --frozen pytest tests/v4/test_scale_proof.py -q -p no:cacheprovider
 ```
 
-The profiling driver used for this report is temporary (`.tmp/profile_state_snapshot.py`) and is not part of the application. Re-run it only through `/home/joos/Workspaces/.tmp/test-env/run.sh`; its JSON output is sanitized and written under `.tmp/`.
+To reproduce the profiling measurements and write sanitized JSON to `.tmp/state-snapshot-profile.json` (with scratch workdirs under `.tmp/`):
+
+```sh
+uv run --frozen python tests/v4/state_snapshot_profile.py
+```
+
+The helper applies the same scratch-index migration fixture as `test_scale_proof.py`, runs one uninstrumented and one profiled proof, then measures three settled idle reads. It makes no provider calls and preserves and re-raises the original exception if proof or scratch setup fails. Its focused unit tests are in `tests/v4/test_state_snapshot_profile.py`.
 
 ## Host and proof results
 
@@ -37,13 +43,13 @@ The profiling driver used for this report is temporary (`.tmp/profile_state_snap
 
 The console seconds measurement is diagnostic in the existing scale proof. The proof failures above are reported as observed; no budget or fixture was changed. The profiled run passed its correctness checks, including overlap and active-run thresholds. It failed `ticket_pickup` at 63.445 s against its effective 31.8 s limit. Each proof seeded the same data: 2,360 tickets and 1,814 run rows remained after traffic, with zero running runs. At the first wave's measured snapshot, the ticket list contained 2,200 tickets; later waves added the remaining 160.
 
-The harness route timing is `/v1/state` p95 per view, three calls per view, so each per-view p95 is its maximum. In the final profiled run, the request sample cap retained 20 burst calls from 40 observed while worker claim sessions were active; their wall times ranged from 1,789 to 3,504 ms. The profiled proof took 194.0 s; the uninstrumented proof took 183.4 s. These separate runs suggest overhead, but do not isolate it from host and cache variation. An earlier profiler pass also ran the proof and failed `ticket_pickup` at 106.727 s; its function timings were excluded because they did not reconcile with measured thread CPU. A later corrected profile-only run failed the same budget at 55.509 s. This run-to-run spread limits overhead conclusions.
+The harness route timing is `/v1/state` p95 per view, three calls per view, so each per-view p95 is its maximum. The original profiled run retained 20 burst calls from 40 observed while worker claim sessions were active; its recorded timings and proof outcomes are preserved above. The corrected rerun below records overlap against actual worker HTTP request intervals and uses category-specific contributor aggregates. These separate runs suggest overhead, but do not isolate it from host and cache variation. An earlier profiler pass also ran the proof and failed `ticket_pickup` at 106.727 s; its function timings were excluded because they did not reconcile with measured thread CPU. A later corrected profile-only run failed the same budget at 55.509 s. This run-to-run spread limits overhead conclusions.
 
 ## Snapshot request and build measurements
 
 | Category | Requests observed | Builds / coalesced hits | Retained samples | Request wall | Cache call wall | Build wall | Build thread CPU | Lock wait | SQL statements / returned rows |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Claim-overlap burst | 40 | 20 / 20 | 20 | 1,789–3,504 ms (median 2,427 ms) | 1,668–3,426 ms | 1,952–3,424 ms | 159–942 ms | 0.001–2,949 ms (median 834 ms) | build samples: 53 / 4,340–4,636; hit samples: 1 / 1 |
+| Initial profiler category (overlap not tied to retained samples) | 40 | 20 / 20 | 20 | 1,789–3,504 ms (median 2,427 ms) | 1,668–3,426 ms | 1,952–3,424 ms | 159–942 ms | 0.001–2,949 ms (median 834 ms) | build samples: 53 / 4,340–4,636; hit samples: 1 / 1 |
 | Settled idle | 3 | 3 / 0 | 3 | 1,055–1,194 ms (median 1,192 ms) | 1,040–1,177 ms | 1,037–1,174 ms | 917–1,044 ms | about 0.001 ms | 63–64 / 5,396–5,397 |
 
 All measured requests used `include_signin=true`, matching the harness's administrator session. The visibility class remains separate in the instrumentation and its fake-based tests cover both true and false classes. A coalesced hit shares the cache result only when the existing cache permits it; later idle reads rebuilt each time, preserving fresh reads. Per-request statement and returned-row counts include the route's own authorization lookup. Build samples during the burst showed the snapshot data growing from 2,200 tickets and 0–96 active runs as the claim wave progressed; the scale harness independently observed a peak of 171–172 active runs.
@@ -52,19 +58,26 @@ The `SELECT 1` service probe measured database latency at 1.327–1.874 ms (five
 
 ### Largest measured snapshot contributors
 
-| Function | Module | Self thread CPU across three burst builds |
+| Function | Module | Self thread CPU across three corrected burst builds |
 |---|---|---:|
-| `loads` | JSON `__init__.py` | 405.502 ms |
-| `decode` | JSON `decoder.py` | 378.987 ms |
-| `machines` | `controlrepo.py` | 347.161 ms |
-| `detect_encoding` | JSON `__init__.py` | 323.493 ms |
-| `classify` | `role_health.py` | 301.490 ms |
-| `epic_for_ticket` | `controlrepo.py` | 208.811 ms |
-| `dict_row_` | psycopg `rows.py` | 199.161 ms |
-| `_exec_command` | psycopg `_connection_base.py` | 182.982 ms |
-| `runs_on` | `controlrepo.py` | 145.038 ms |
-| `_maybe_prepare_gen` | psycopg `_cursor_base.py` | 87.416 ms |
-| `_epic_key` | `controlrepo.py` | 65.401 ms |
+| `machines` | `controlrepo.py` | 217.662 ms |
+| `_exec_command` | psycopg `_connection_base.py` | 136.938 ms |
+| `pipeline_execute_command` | Redis `client.py` | 119.373 ms |
+| `decode` | JSON `decoder.py` | 114.218 ms |
+| `detect_encoding` | JSON `__init__.py` | 98.210 ms |
+| `loads` | JSON `__init__.py` | 95.460 ms |
+| `classify` | `role_health.py` | 89.734 ms |
+| `dict_row_` | psycopg `rows.py` | 84.644 ms |
+| `_maybe_prepare_gen` | psycopg `_cursor_base.py` | 82.409 ms |
+| `epic_for_ticket` | `controlrepo.py` | 78.797 ms |
+| `runs_on` | `controlrepo.py` | 78.792 ms |
+| `_epic_key` | `controlrepo.py` | 76.040 ms |
+
+### Corrected overlap rerun
+
+The checked-in helper's corrected rerun observed 44 state requests overlapping worker API requests (22 builds and 22 coalesced hits); all 20 retained burst samples had actual worker-request overlap. Of those samples, 10 were builds and 10 were coalesced hits. The 22 builds overlapped worker requests. The 10 sampled builds took 2.101–3.451 s wall time and 168–992 ms thread CPU. Across 20 retained burst samples, request wall time was 1.783–3.549 s (median 2.844 s), cache-call wall time was 1.642–3.453 s, and lock wait was 0.001–3.170 s (median 821 ms). Build samples used 53 statements and returned 4,340–4,623 rows; coalesced-hit samples used one statement and returned one row, including the route authorization lookup.
+
+This rerun's uninstrumented proof took 179.754 s and failed only `ticket_pickup` at 57.392 s against 30 s; the profiled proof took 186.867 s and failed only `ticket_pickup` at 62.855 s against 30 s. The other budgets and correctness checks passed. The runs observed 100 projects, 50 machines, 100 accounts, 200 sessions, 2,000 history tickets, 360 traffic tickets, 344 pickups, 16 held tickets, 3 blocked tickets, 1,814 final runs, no running runs, and a peak of 32 in-flight requests. Their peak active-run counts were 169 uninstrumented and 170 profiled. Three settled idle reads returned HTTP 200 and saw 2,360 tickets and 1,814 runs; idle timing values in the table above are from the earlier separately recorded idle samples.
 
 ## Interpretation and limitations
 
@@ -72,4 +85,4 @@ The measurements show lock queueing: some requests spent up to 2.95 s acquiring 
 
 The profile does not time each SQL statement separately, and the five `SELECT 1` probes do not represent the snapshot's multi-query workload. It therefore cannot distinguish database execution or I/O wait from process scheduling and CPU contention within the slower build wall time. The role-health summary ran inside the snapshot profile; its cost is represented in function-level results when it ranks among the largest contributors. The profile also runs in-process on one local host and is not CI hardware, so it cannot establish the console p95 target.
 
-The profiler leaves production code unchanged. Its unit tests exercised both sign-in visibility classes, build and shared-hit accounting, a database exception, lock timeout, restoration, and a later successful read. The existing parity/freshness and full v4 tests are run separately; see the PR body for their exact outcomes. No schema or fixture changes were made, and no TTL cache was added.
+The profiler leaves production code unchanged. Its focused unit tests exercise both sign-in visibility classes, build and shared-hit accounting, actual worker-request overlap and non-overlap, bounded category aggregation, lock timeout, instrumentation restoration, and driver-level exception propagation followed by retry. The existing parity/freshness and full v4 tests are run separately; see the PR body for their exact outcomes. No schema or fixture changes were made, and no TTL cache was added.

@@ -87,12 +87,15 @@ The master daily budget update, completed master actions and accepted GitHub CI-
 OpenObserve (queue, thread, capped backoff, delivery incident) is `openobserve_shipper.OpenObserveShipper`, reached as
 `events.shipper`. Telemetry stays a log and is not a domain event, so there is no listener for it (JAIF-476).
 
-Incidents: `open_incident` inserts the row and, when the incident is new, publishes `IncidentOpened`; the telemetry row
-(in transaction), the study case and the alert are three listeners in `features/incidents/listeners.py` (they were one function).
-The alert and the study case run through `deliver_now`, so callers see the same behaviour, and a failing alert is retried by the
-dispatcher instead of failing the caller. The routes that open incidents behave as before: `GET /v1/ba-chat/candidate`,
-`GET /v1/master/candidate`, `GET /v1/version-releases/candidates`, `GET /v1/work/candidates`, `POST /v1/master/plan-outcome`,
-`POST /v1/nodes/{name}/release-failures`, `POST /v1/version-releases/claim` and `PUT /v1/role-health/settings`.
+Incidents: `open_incident` calls `features/incidents/repository.py::insert_open_incident` for the parameterized insert and,
+when the incident is new, publishes `IncidentOpened`; the event construction and `deliver_now` call stay with the caller.
+The telemetry row (in transaction), the study case and the alert are three listeners in `features/incidents/listeners.py`
+(they were one function). The alert and the study case run through `deliver_now`, so callers see the same behaviour, and a
+failing alert is retried by the dispatcher instead of failing the caller. The routes that can open incidents behave as
+before: `GET /v1/ba-chat/candidate`, `GET /v1/master/candidate`, `GET /v1/version-releases/candidates`,
+`GET /v1/work/candidates`, `POST /v1/master/plan-outcome`, `POST /v1/nodes/{name}/release-failures`,
+`POST /v1/runs/{run_id}/result`, `POST /v1/version-releases/claim`, `POST /v1/work/claim` and
+`PUT /v1/role-health/settings`.
 
 Work (JAIF-481): the 298-line `eligible` function that was nested in `create_app` is `features/work/eligible.py` (moved
 unchanged); the app keeps a three-line wrapper and hands it the few helpers it needs (`work_deps`: pause and quota checks, the

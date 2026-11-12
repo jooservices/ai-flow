@@ -100,6 +100,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Parallel CI](../../docs/v4/parallel-ci.md): the v4 suite on parallel shards, the required `Test (v4)` check and the scale proof job.
 - [Coverage gate, Codecov and README badges](../../docs/v4/coverage-gate.md): parallel Coverage job with 85% diff-cover, Codecov upload and status badges
 - [Epics and verification without a verdict](../../docs/v4/verify-no-verdict.md): an epic is never offered as work; the status, retry and Dashboard parts of JAIF-271 follow in slices
+- [Verification exhaustion after every eligible account tries](../../docs/v4/verify-exhaustion-first-attempt.md): report one missing verdict from every eligible verifier in the current development round while keeping the two-result offer bar
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
 - [Merge-held decision structure](../../docs/v4/merge-held-structure.md): ordered named checks preserve each hold reason and its message while the merge lease is held
 - [Commit and pull request title rules](../../docs/v4/commit-rules.md): one rules module and a normalizer so a title or commit message is valid before the push

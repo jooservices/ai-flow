@@ -1,4 +1,4 @@
-"""Watchdog check: every eligible verify account barred opens one verify_no_verdict incident."""
+"""Watchdog check: every eligible verifier misses a verdict before one incident opens."""
 from __future__ import annotations
 
 from ..application_context import ApplicationContext

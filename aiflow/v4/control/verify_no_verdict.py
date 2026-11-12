@@ -1,9 +1,9 @@
-"""One `verify_no_verdict` incident when every eligible account is barred from a ticket (JAIF-443 / JAIF-271 AC6).
+"""One `verify_no_verdict` incident when every eligible account has missed a verdict this round (JAIF-618).
 
-When every account the verify candidate path would offer a ticket has two consecutive no-verdict results on that
-ticket, the watchdog opens one warning that names the ticket and the reason. Repeated checks do not open a second
-incident. Temporary capacity loss keeps an open incident; it closes when the ticket leaves verification or an
-unbarred eligible account can receive it. Barring follows the current development round (JAIF-442): a new submission resets it.
+When every account the verify candidate path would offer a ticket has at least one current-round no-verdict result,
+the watchdog opens one warning that names the ticket and the reason. Repeated checks do not open a second incident.
+Temporary capacity loss keeps an open incident; it closes when the ticket leaves verification or an eligible account
+has no current-round no-verdict result. The separate two-result offer bar is unchanged.
 """
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ from .repositories.verify_exhaustion import last_dev_account, open_subjects, tic
 
 KIND = "verify_no_verdict"  # also named in repositories/verify_exhaustion.py, which cannot import this module
 CONSECUTIVE = 2
-TITLE = "{key} cannot be verified: every eligible account ended without a verdict"
+TITLE = "{key} has a missing verdict from every eligible account"
 DETAIL = (
-    "Reason: every eligible account ended verification of {key} without a VERDICT line"
-    " twice in a row. None of them is offered the ticket again. Fix the"
-    " cause or verify the ticket by hand."
+    "Reason: every eligible account has at least one completed verification of {key} without a VERDICT line"
+    " in the current development round. This warning reports those attempts; the separate two-result offer bar"
+    " remains unchanged."
 )
 CLOSE_NOTE = "the ticket can be verified again or left verification"
 
@@ -100,35 +100,34 @@ def _offered(offers: Callable, account_id: str, node: str, key: str) -> bool:
 
 def exhaustion_state(ctx, ticket: dict, offers: Callable
                      ) -> tuple[list[str], list[str], dict[str, list[bool]]]:
-    """Eligible accounts, barred eligible accounts, and per-account no-verdict history."""
+    """Eligible accounts, exhausted eligible accounts, and per-account no-verdict history."""
     history = verify_ticket_history(ctx.db, [ticket["key"]]).get(ticket["key"])
     runs = history.by_account if history else {}
     accounts = pool(ctx, ticket, last_dev_account(ctx.db, ticket["key"]), offers)
-    failed = sorted(accounts) if accounts and all(barred(runs.get(account, [])) for account in accounts) else []
-    return accounts, failed, runs
+    exhausted_accounts = sorted(accounts) if accounts and all(any(runs.get(account, [])) for account in accounts) else []
+    return accounts, exhausted_accounts, runs
 
 
 def exhausted(ctx, ticket: dict, offers: Callable | None = None, releases=None) -> list[str]:
-    """Accounts that failed the ticket when every eligible account is barred, else an empty list."""
+    """Eligible accounts with a missing verdict when every eligible account has tried without one."""
     from . import api as control_api
     offers = offers or ensure_offers(ctx, releases if releases is not None else control_api.RELEASES)
-    _accounts, failed, _runs = exhaustion_state(ctx, ticket, offers)
-    return failed
+    _accounts, exhausted_accounts, _runs = exhaustion_state(ctx, ticket, offers)
+    return exhausted_accounts
 
 
 def check_incidents(ctx, releases=None) -> None:
-    """Watchdog: one incident per ticket whose eligible accounts all ended verification without a verdict."""
+    """Watchdog: one incident per ticket after every eligible account misses a verdict this round."""
     from . import api as control_api
     offers = ensure_offers(ctx, releases if releases is not None else control_api.RELEASES)
     already_open = open_subjects(ctx.db)
     open_now: set[str] = set()
     for ticket in tickets_in_verify(ctx.db):
-        accounts, failed, runs = exhaustion_state(ctx, ticket, offers)
-        if not failed:
-            if ticket["key"] in already_open and not any(not barred(runs.get(account, []))
-                                                         for account in accounts):
+        accounts, exhausted_accounts, _runs = exhaustion_state(ctx, ticket, offers)
+        if not exhausted_accounts:
+            if ticket["key"] in already_open and not accounts:
                 # No eligible capacity is temporary, not a recovery. Keep the existing incident until the ticket
-                # leaves verification or an unbarred account can actually receive it.
+                # leaves verification or an eligible account has no current-round no-verdict result.
                 open_now.add(ticket["key"])
             continue
         open_now.add(ticket["key"])

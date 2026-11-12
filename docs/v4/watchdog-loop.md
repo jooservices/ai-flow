@@ -19,7 +19,7 @@
 `run_flow_and_quota_checks` then calls these checks, in order:
 
 1. `stuck_tickets` opens a warning after three dev or verify failures in a row, and leaves tool-wait warnings to the tool-wait pass.
-2. `verify_no_verdict` opens one warning when every eligible account is barred from verifying a ticket after consecutive missing verdicts.
+2. `verify_no_verdict` opens one warning when every eligible account has at least one current-round verification without a verdict; the two-result offer bar remains separate.
 3. `retry_and_deadline_passes` applies retry holds, answers overdue owner questions, then checks stack pins and an idle flow.
 4. `lost_leases_and_run_clocks` records a run whose lease is gone and opens the warn and hard-limit incidents for a run that is still owned.
 5. `account_cooldowns` returns an account to idle when its cooldown has ended, and keeps a warning open while an account is cooling down, signed out or failing its check.

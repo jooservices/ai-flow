@@ -13,6 +13,7 @@ from . import review_metrics
 from .repositories.owner_decisions import business_decision_ticket_keys
 from .features.tickets.repository import TicketRepository
 from aiflow.v4.control.features.tickets import ticket_repository_of
+from aiflow.v4.control.features.review_queue.repository import ReviewQueueRepository
 
 
 def _human_review_thread_filters(project: str, scope: tuple[str, ...] | None
@@ -88,15 +89,10 @@ def _load_human_review_tickets(ctx: Any, selected_keys: list[str]) -> tuple[list
 
 def _load_human_review_runs(ctx: Any, selected_keys: list[str], needs_owner_keys: list[str]) -> tuple[dict, ...]:
     if selected_keys:
-        dev_runs = {str(row["ticket_key"]): row for row in ctx.db.all(
-            "SELECT DISTINCT ON (ticket_key) ticket_key,pr_url,summary,details FROM runs"
-            " WHERE ticket_key=ANY(%s) AND pr_url<>'' ORDER BY ticket_key,started_at DESC", (selected_keys,))}
-        latest_runs = {str(row["ticket_key"]): row for row in ctx.db.all(
-            "SELECT DISTINCT ON (ticket_key) ticket_key,step,outcome,summary,details,started_at FROM runs"
-            " WHERE ticket_key=ANY(%s) ORDER BY ticket_key,started_at DESC", (selected_keys,))}
-        verify_runs = {str(row["ticket_key"]): row for row in ctx.db.all(
-            "SELECT DISTINCT ON (ticket_key) ticket_key,outcome,summary,details,started_at FROM runs"
-            " WHERE ticket_key=ANY(%s) AND step='verify' ORDER BY ticket_key,started_at DESC", (selected_keys,))}
+        repository = ReviewQueueRepository(ctx.db)
+        dev_runs = {str(row.ticket_key): row.to_row() for row in repository.latest_pr_runs(selected_keys)}
+        latest_runs = {str(row.ticket_key): row.to_row() for row in repository.latest_runs(selected_keys)}
+        verify_runs = {str(row.ticket_key): row.to_row() for row in repository.latest_verify_runs(selected_keys)}
         if needs_owner_keys:
             asked_by_key = {str(row["ticket"]): row for row in ctx.db.all(
                 "SELECT DISTINCT ON (ticket) ticket,ts FROM events WHERE ticket=ANY(%s)"

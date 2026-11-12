@@ -29,6 +29,15 @@ def context(request: Request):
     return request.app.state.ctx
 
 
+def require_capacity(ctx, resource: str, count: int | None = None, *, connection=None) -> dict:
+    """Enforce a licence limit using the application context supplied by the caller."""
+    try:
+        return licensing.require_capacity(ctx, resource, count, public_key=ctx.settings.license_public_key,
+                                          connection=connection)
+    except licensing.LicenseError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
 def node_auth(ctx, authorization: str = "") -> str:
     token = authorization.removeprefix("Bearer ").strip()
     row = ctx.db.one("SELECT name FROM nodes WHERE token_hash = %s AND token_hash <> '' AND removed_at IS NULL",

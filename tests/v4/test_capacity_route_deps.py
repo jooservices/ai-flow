@@ -8,7 +8,8 @@ import pytest
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
-from aiflow.v4.control import app_helpers, route_deps
+from aiflow.v4.control import app_helpers, licensing, route_deps
+from aiflow.v4.control.db import J
 
 
 def context(public_key: str) -> SimpleNamespace:
@@ -54,6 +55,35 @@ def test_require_capacity_translates_only_license_errors(monkeypatch, detail):
     assert caught.value.status_code == 409
     assert caught.value.detail == detail
     assert caught.value.__cause__ is None and caught.value.__suppress_context__
+
+
+def test_real_license_refusal_preserves_the_callers_active_transaction(ctx):
+    licensing.initialize(ctx.db)
+    ctx.settings.license_public_key = "test-public-key"
+    limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
+    limits["free"]["projects"] = 1
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
+
+    attempted_resource_write = False
+    with ctx.db.pool.connection() as connection:
+        with pytest.raises(HTTPException) as caught:
+            with connection.transaction():
+                # A write already owned by the caller must roll back with its transaction.
+                connection.execute("INSERT INTO nodes (name) VALUES (%s)", ("capacity-check-transaction-marker",))
+                try:
+                    route_deps.require_capacity(ctx, "projects", 1, connection=connection)
+                except HTTPException:
+                    assert connection.info.transaction_status.name == "INTRANS"
+                    raise
+                attempted_resource_write = True
+                connection.execute("INSERT INTO nodes (name) VALUES (%s)", ("capacity-check-resource",))
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail.startswith("Projects limit of 1 reached")
+    assert not attempted_resource_write
+    assert connection.info.transaction_status.name == "IDLE"
+    assert ctx.db.one("SELECT name FROM nodes WHERE name IN (%s,%s)",
+                      ("capacity-check-transaction-marker", "capacity-check-resource")) is None
 
 
 def test_external_router_uses_each_apps_current_context_and_translates_refusal(monkeypatch):

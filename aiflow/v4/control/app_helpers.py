@@ -375,11 +375,7 @@ def install(app, ctx, deps) -> SimpleNamespace:
         return route_deps.optional_console_user(ctx, request)
 
     def require_capacity(resource: str, count: int | None = None, *, connection=None) -> dict:
-        try:
-            return licensing.require_capacity(ctx, resource, count, public_key=ctx.settings.license_public_key,
-                                              connection=connection)
-        except licensing.LicenseError as exc:
-            raise HTTPException(409, str(exc)) from None
+        return route_deps.require_capacity(ctx, resource, count, connection=connection)
 
     def run_row(run_id: str) -> dict:
         return route_deps.run_row(ctx, run_id)

@@ -8,6 +8,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 ## Topics
 
 - [Console escaping source](../../docs/v4/console-escaping-source.md): the console manifest loads shared HTML and URL safety helpers inside its existing script
+- [Capacity checks in routes](../../docs/v4/capacity-route-dependency.md): share the context-based licence capacity adapter with independently defined routers
 - [Completed-ticket notes in claim context](../../docs/v4/completed-ticket-context.md): Knowledge keeps completed-ticket notes visible while `dev`, `verify`, and `qa` packs omit them
 - [Missing environment route discovery](../../docs/v4/environment-missing-discovery.md): the projects feature serves missing environment reports through the discovered route registry
 - [Shared secret scanner](../../docs/v4/secret-scanner-ownership.md): v4 core owns ordered secret screening while legacy memory imports remain compatible

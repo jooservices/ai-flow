@@ -1,11 +1,15 @@
 """Characterize the selected-run reads before extracting them to a repository."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from dataclasses import FrozenInstanceError
+from threading import Barrier
+from uuid import uuid4
 
 import pytest
 
+from aiflow.v4.control.db import DB, J
 from aiflow.v4.control.features.review_queue.repository import ReviewQueueRepository
 from aiflow.v4.control.review_queue_api import _load_human_review_runs
 
@@ -119,3 +123,95 @@ def test_database_errors_propagate_at_the_same_run_read_without_retry(failed_cal
         _load_human_review_runs(type("Context", (), {"db": db})(), ["A"], ["OWNER"])
 
     assert len(db.calls) == failed_call
+
+
+def _insert_run(db, ticket_key, step, started_at, *, pr_url="", outcome="done", summary="", details=None):
+    db.run(
+        "INSERT INTO runs (id,ticket_key,project,step,account_id,node,fence,started_at,pr_url,outcome,summary,details)"
+        " VALUES (%s,%s,'TESTWP',%s,'test-account','test-node',1,%s,%s,%s,%s,%s)",
+        (uuid4(), ticket_key, step, started_at, pr_url, outcome, summary, J(details or {})),
+    )
+
+
+def test_real_postgres_run_selection_matches_legacy_queries_for_competing_histories_and_large_duplicate_batch(db):
+    t1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    t2 = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    t3 = datetime(2026, 1, 3, tzinfo=timezone.utc)
+    t4 = datetime(2026, 1, 4, tzinfo=timezone.utc)
+    t5 = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    _insert_run(db, "A", "dev", t1, pr_url="https://git/pull/old", summary="old PR")
+    _insert_run(db, "A", "verify", t2, outcome="rework", summary="first verify")
+    _insert_run(db, "A", "dev", t3, summary="later run without PR")
+    _insert_run(db, "A", "verify", t4, outcome="done", summary="latest verify")
+    _insert_run(db, "A", "qa", t5, outcome="done", summary="latest overall")
+
+    # Equal timestamps deliberately leave PostgreSQL's legacy DISTINCT ON choice unspecified.
+    _insert_run(db, "B", "dev", t3, pr_url="https://git/pull/one", summary="tied dev one")
+    _insert_run(db, "B", "dev", t3, pr_url="https://git/pull/two", summary="tied dev two")
+    _insert_run(db, "B", "verify", t2, outcome="failed", summary="verify history")
+
+    selected = ["A", "B", "A", *[f"ABSENT-{index}" for index in range(1200)], "B"]
+    repository = ReviewQueueRepository(db)
+    dev = {row.ticket_key: row.to_row() for row in repository.latest_pr_runs(selected)}
+    latest = {row.ticket_key: row.to_row() for row in repository.latest_runs(selected)}
+    verify = {row.ticket_key: row.to_row() for row in repository.latest_verify_runs(selected)}
+
+    # Compare the extracted repository with the pre-extraction SQL against PostgreSQL itself.
+    assert dev == {row["ticket_key"]: row for row in db.all(DEV_SQL, (selected,))}
+    assert latest == {row["ticket_key"]: row for row in db.all(LATEST_SQL, (selected,))}
+    assert verify == {row["ticket_key"]: row for row in db.all(VERIFY_SQL, (selected,))}
+    assert dev["A"]["summary"] == "old PR"  # the later run without a PR is excluded
+    assert latest["A"]["summary"] == "latest overall"
+    assert verify["A"]["summary"] == "latest verify"
+    assert dev["B"]["summary"] in {"tied dev one", "tied dev two"}
+    assert latest["B"]["summary"] in {"tied dev one", "tied dev two"}
+    assert verify["B"]["summary"] == "verify history"
+    assert set(dev) == set(latest) == set(verify) == {"A", "B"}
+
+
+def test_real_postgres_repositories_keep_concurrent_database_contexts_separate(db):
+    left_time = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    right_time = datetime(2026, 5, 2, tzinfo=timezone.utc)
+    _insert_run(db, "LEFT", "dev", left_time, outcome="left-context")
+    _insert_run(db, "RIGHT", "verify", right_time, outcome="right-context")
+    left_db, right_db = DB(db.url, min_size=1, max_size=1), DB(db.url, min_size=1, max_size=1)
+    barrier = Barrier(2)
+
+    def read(database, key):
+        barrier.wait()
+        return ReviewQueueRepository(database).latest_runs([key])[0]
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            left_future = executor.submit(read, left_db, "LEFT")
+            right_future = executor.submit(read, right_db, "RIGHT")
+            left, right = left_future.result(timeout=10), right_future.result(timeout=10)
+    finally:
+        left_db.close()
+        right_db.close()
+
+    assert (left.ticket_key, left.outcome) == ("LEFT", "left-context")
+    assert (right.ticket_key, right.outcome) == ("RIGHT", "right-context")
+
+
+def test_real_postgres_repository_can_succeed_after_a_failed_read(db):
+    timestamp = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    _insert_run(db, "RETRY", "verify", timestamp, outcome="done", summary="available after retry")
+
+    class FailsOnce:
+        def __init__(self, database):
+            self.database = database
+            self.fail = True
+
+        def all(self, sql, params=()):
+            if self.fail:
+                self.fail = False
+                raise RuntimeError("temporary database outage")
+            return self.database.all(sql, params)
+
+    repository = ReviewQueueRepository(FailsOnce(db))
+    with pytest.raises(RuntimeError, match="temporary database outage"):
+        repository.latest_runs(["RETRY"])
+
+    rows = repository.latest_runs(["RETRY"])
+    assert [(row.ticket_key, row.summary) for row in rows] == [("RETRY", "available after retry")]

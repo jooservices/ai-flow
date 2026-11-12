@@ -72,14 +72,21 @@ def proof(tmp_path_factory):
 
 # --- AC1: the scenario ---------------------------------------------------------------------------------------
 def test_scratch_schema_keeps_pgvector_in_public_for_following_tests():
+    from aiflow.v4.control.db import connect_once
+
+    with connect_once(DATABASE_URL) as original_db:
+        original_index_oid = original_db.execute(
+            "SELECT to_regclass('public.memory_project')::oid AS oid").fetchone()["oid"]
     with scale_harness.scratch(DATABASE_URL, REDIS_URL) as (db, _leases):
         extension = db.one("SELECT n.nspname AS schema FROM pg_extension e "
                            "JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='vector'")
         assert extension == {"schema": "public"}
-        target = db.one("SELECT n.nspname AS schema FROM pg_class c "
+        target = db.one("SELECT c.oid, n.nspname AS schema FROM pg_class c "
                         "JOIN pg_namespace n ON n.oid=c.relnamespace "
-                        "WHERE c.oid=to_regclass('memory_project')")
-        assert target["schema"] == "public"
+                        "WHERE c.oid=to_regclass('public.memory_project')")
+        assert (target["oid"] if target else None) == original_index_oid
+        if target:
+            assert target["schema"] == "public"
 
 
 def test_scenario_drives_100_projects_50_machines_and_200_sessions(proof):
